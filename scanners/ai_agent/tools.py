@@ -44,6 +44,37 @@ def _error_dict(msg: str) -> dict:
     return {"error": msg}
 
 
+def _mutate_json_field(original_body: str | None, field_path: str, payload: str) -> str:
+    """Mutate a single field in a JSON body, supporting nested dot-notation paths."""
+    if not original_body:
+        return json.dumps({field_path: payload})
+    try:
+        data = json.loads(original_body)
+    except (json.JSONDecodeError, TypeError):
+        return json.dumps({field_path: payload})
+    parts = field_path.split(".")
+    current = data
+    for part in parts[:-1]:
+        if isinstance(current, dict) and part in current:
+            current = current[part]
+        elif isinstance(current, list):
+            try:
+                current = current[int(part)]
+            except (ValueError, IndexError):
+                return json.dumps(data)
+        else:
+            return json.dumps(data)
+    final_key = parts[-1]
+    if isinstance(current, dict):
+        current[final_key] = payload
+    elif isinstance(current, list):
+        try:
+            current[int(final_key)] = payload
+        except (ValueError, IndexError):
+            pass
+    return json.dumps(data)
+
+
 class ScanTools:
     def __init__(
         self,
@@ -69,11 +100,15 @@ class ScanTools:
         """Return True if URL belongs to one of the allowed target domains."""
         if not self._allowed_domains or not url:
             return True
+        if url.startswith("/"):
+            return True
         try:
             from urllib.parse import urlparse
             host = (urlparse(url).hostname or "").lower()
         except Exception:
             return False
+        if not host:
+            return True
         for d in self._allowed_domains:
             if host == d or host.endswith("." + d):
                 return True
@@ -119,6 +154,7 @@ class ScanTools:
             "get_api_endpoints": self.get_api_endpoints,
             "test_auth_bypass": self.test_auth_bypass,
             "test_method_override": self.test_method_override,
+            "test_token_security": self.test_token_security,
         }
 
         handler = handlers.get(function_name)
@@ -582,11 +618,14 @@ class ScanTools:
         payloads: list[str],
         param_location: str = "query",
         baseline_status: int = 200,
+        original_body: str | None = None,
+        headers: dict | None = None,
     ) -> dict:
         if not self._url_in_scope(endpoint):
             return {"error": f"URL out of scope (not in target domain): {endpoint}", "skipped": True}
         results = []
         error_indicators = ["error", "exception", "sql", "syntax", "undefined", "stack trace"]
+        hdrs = dict(headers) if headers else {}
         for payload in payloads:
             try:
                 if param_location == "query":
@@ -595,22 +634,32 @@ class ScanTools:
                     qs[param_name] = [payload]
                     new_query = urlencode(qs, doseq=True)
                     url = urlunparse((parsed.scheme, parsed.netloc, parsed.path, parsed.params, new_query, parsed.fragment))
-                    resp = await self._http_client.request(method.upper(), url)
+                    resp = await self._http_client.request(method.upper(), url, headers=hdrs or None)
+                elif param_location == "header":
+                    fuzz_hdrs = dict(hdrs)
+                    fuzz_hdrs[param_name] = payload
+                    resp = await self._http_client.request(method.upper(), endpoint, headers=fuzz_hdrs)
+                elif param_location == "path":
+                    fuzzed_url = endpoint.replace(f"{{{param_name}}}", payload)
+                    resp = await self._http_client.request(method.upper(), fuzzed_url, headers=hdrs or None)
                 else:
+                    mutated = _mutate_json_field(original_body, param_name, payload)
+                    content_hdrs = dict(hdrs)
+                    content_hdrs.setdefault("Content-Type", "application/json")
                     resp = await self._http_client.request(
-                        method.upper(),
-                        endpoint,
-                        json={param_name: payload},
+                        method.upper(), endpoint, headers=content_hdrs, content=mutated,
                     )
                 body = resp.text
                 status_diff = resp.status_code != baseline_status
                 has_errors = any(ind in body.lower() for ind in error_indicators)
-                anomaly = status_diff or has_errors
+                reflected = payload in body
+                anomaly = status_diff or has_errors or reflected
                 results.append({
                     "payload": payload,
                     "status": resp.status_code,
                     "body_snippet": _truncate(body),
                     "anomaly": anomaly,
+                    "reflected": reflected,
                 })
             except Exception as e:
                 results.append({
@@ -618,8 +667,9 @@ class ScanTools:
                     "status": None,
                     "body_snippet": str(e),
                     "anomaly": True,
+                    "reflected": False,
                 })
-        return {"results": results}
+        return {"endpoint": endpoint, "param": param_name, "location": param_location, "results": results}
 
     async def replay_with_modification(self, request: dict, modifications: dict) -> dict:
         try:
@@ -699,6 +749,90 @@ class ScanTools:
             except Exception as e:
                 results.append({"method": method, "status": None, "error": str(e)})
         return {"results": results}
+
+    async def test_token_security(
+        self, endpoint: str, token: str, method: str = "GET",
+        body: str | None = None, headers: dict | None = None,
+    ) -> dict:
+        """Test bearer token / JWT security."""
+        if not self._url_in_scope(endpoint):
+            return {"error": f"URL out of scope: {endpoint}", "skipped": True}
+        results: dict[str, Any] = {"token_analysis": {}, "tests": []}
+        hdrs = dict(headers) if headers else {}
+        token_parts = token.split(".")
+        is_jwt = len(token_parts) == 3
+        decoded_header = decoded_payload = None
+        if is_jwt:
+            try:
+                def _b64d(s):
+                    return base64.urlsafe_b64decode(s + "=" * (4 - len(s) % 4))
+                decoded_header = json.loads(_b64d(token_parts[0]))
+                decoded_payload = json.loads(_b64d(token_parts[1]))
+                results["token_analysis"] = {
+                    "type": "JWT", "algorithm": decoded_header.get("alg", "unknown"),
+                    "payload_keys": list(decoded_payload.keys()),
+                    "payload_preview": {k: str(v)[:50] for k, v in list(decoded_payload.items())[:10]},
+                }
+            except Exception as e:
+                results["token_analysis"] = {"type": "JWT", "decode_error": str(e)}
+        else:
+            results["token_analysis"] = {"type": "opaque", "length": len(token)}
+
+        async def _test(name, auth_val):
+            h = dict(hdrs)
+            if auth_val is not None:
+                h["Authorization"] = auth_val
+            try:
+                resp = await self._http_client.request(method.upper(), endpoint, headers=h, content=body)
+                return {"test": name, "status": resp.status_code, "body_snippet": _truncate(resp.text, 200)}
+            except Exception as e:
+                return {"test": name, "error": str(e)}
+
+        baseline = await _test("valid_token", f"Bearer {token}")
+        results["tests"].append(baseline)
+        baseline_status = baseline.get("status", 999)
+
+        for name, auth in [
+            ("no_token", None),
+            ("empty_bearer", "Bearer "),
+            ("tampered_token", f"Bearer {token[:-1] + ('A' if token[-1] != 'A' else 'B')}"),
+        ]:
+            r = await _test(name, auth)
+            bypassed = r.get("status", 999) < 400
+            r["bypassed"] = bypassed
+            if bypassed and name != "valid_token":
+                r["finding"] = f"AUTH_BYPASS: {name} accepted (status {r.get('status')})"
+            results["tests"].append(r)
+
+        if is_jwt and decoded_header and decoded_payload:
+            none_hdr = base64.urlsafe_b64encode(json.dumps({"alg": "none", "typ": "JWT"}).encode()).rstrip(b"=").decode()
+            for name, tok in [
+                ("jwt_alg_none", f"{none_hdr}.{token_parts[1]}."),
+                ("jwt_stripped_sig", f"{token_parts[0]}.{token_parts[1]}."),
+            ]:
+                r = await _test(name, f"Bearer {tok}")
+                accepted = r.get("status", 999) < 400
+                r["accepted"] = accepted
+                if accepted:
+                    r["finding"] = f"CRITICAL: {name} bypass accepted"
+                results["tests"].append(r)
+
+            id_fields = [k for k in decoded_payload if k.lower() in ("sub", "user_id", "uid", "user", "email", "id")]
+            if id_fields:
+                tampered = dict(decoded_payload)
+                for f in id_fields:
+                    v = tampered[f]
+                    tampered[f] = (v + "_tampered") if isinstance(v, str) else (v + 1 if isinstance(v, int) else v)
+                tp = base64.urlsafe_b64encode(json.dumps(tampered).encode()).rstrip(b"=").decode()
+                r = await _test("jwt_idor_tamper", f"Bearer {token_parts[0]}.{tp}.{token_parts[2]}")
+                accepted = r.get("status", 999) < 400
+                r.update(accepted=accepted, modified_fields=id_fields)
+                if accepted:
+                    r["finding"] = f"IDOR: tampered JWT accepted ({id_fields})"
+                results["tests"].append(r)
+
+        results["summary"] = f"{sum(1 for t in results['tests'] if t.get('finding'))} issues in {len(results['tests'])} tests"
+        return results
 
 
 TOOL_DEFINITIONS = [
@@ -965,16 +1099,19 @@ TOOL_DEFINITIONS = [
         "type": "function",
         "function": {
             "name": "fuzz_parameter",
-            "description": "Fuzz a parameter with payload list. Returns results with payload, status, body_snippet, anomaly.",
+            "description": "Fuzz a single parameter with payload list. Supports query, body (JSON), header, and path. "
+                           "For body: set param_location='body', provide original_body JSON, use dot notation for nested fields.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "endpoint": {"type": "string"},
-                    "method": {"type": "string"},
-                    "param_name": {"type": "string"},
+                    "endpoint": {"type": "string", "description": "Target URL"},
+                    "method": {"type": "string", "description": "HTTP method"},
+                    "param_name": {"type": "string", "description": "Param name (dot notation for nested JSON: user.email)"},
                     "payloads": {"type": "array", "items": {"type": "string"}},
-                    "param_location": {"type": "string", "default": "query"},
+                    "param_location": {"type": "string", "enum": ["query", "body", "header", "path"]},
                     "baseline_status": {"type": "integer", "default": 200},
+                    "original_body": {"type": "string", "description": "Full original JSON body (required for body fuzzing)"},
+                    "headers": {"type": "object", "description": "Request headers"},
                 },
                 "required": ["endpoint", "method", "param_name", "payloads"],
             },
@@ -1027,6 +1164,24 @@ TOOL_DEFINITIONS = [
                 "type": "object",
                 "properties": {"endpoint": {"type": "string"}},
                 "required": ["endpoint"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "test_token_security",
+            "description": "Test bearer token/JWT security: decode, alg=none, strip signature, tamper identity (IDOR), empty/no token.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "endpoint": {"type": "string", "description": "API endpoint to test"},
+                    "token": {"type": "string", "description": "Bearer token or JWT"},
+                    "method": {"type": "string", "description": "HTTP method (default GET)"},
+                    "body": {"type": "string", "description": "Request body for POST/PUT"},
+                    "headers": {"type": "object", "description": "Additional headers"},
+                },
+                "required": ["endpoint", "token"],
             },
         },
     },

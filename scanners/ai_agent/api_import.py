@@ -32,6 +32,8 @@ class APIEndpoint:
     tags: list[str]
     variables: dict[str, str]
     original_name: str
+    test_script: str = ""
+    pre_request_script: str = ""
 
 
 def _resolve_vars(text: str, variables: dict[str, str]) -> str:
@@ -337,6 +339,19 @@ def _traverse_postman_items(
             if it.get("name"):
                 tags.append(it["name"])
 
+            test_script = ""
+            pre_request_script = ""
+            for ev in it.get("event", []) or []:
+                if isinstance(ev, dict):
+                    listen = ev.get("listen", "")
+                    script = ev.get("script", {})
+                    exec_lines = script.get("exec", []) if isinstance(script, dict) else []
+                    code = "\n".join(exec_lines) if isinstance(exec_lines, list) else str(exec_lines)
+                    if listen == "test":
+                        test_script = code
+                    elif listen == "prerequest":
+                        pre_request_script = code
+
             ep = APIEndpoint(
                 method=(req.get("method") or "GET").upper(),
                 url=full_url,
@@ -350,6 +365,8 @@ def _traverse_postman_items(
                 tags=tags,
                 variables=vars_here,
                 original_name=it.get("name") or f"{req.get('method', 'GET')} {path}",
+                test_script=test_script,
+                pre_request_script=pre_request_script,
             )
             endpoints.append(ep)
         else:

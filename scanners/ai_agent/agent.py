@@ -298,15 +298,116 @@ async def run_scan(
         app_info = await detect_app_type(page)
         print(f"  [DETECT] SPA: {app_info.get('is_spa')}, Framework: {app_info.get('framework')}, WebSockets: {app_info.get('has_websockets')}")
         _cb("detect", {"is_spa": app_info.get("is_spa"), "framework": app_info.get("framework")})
+
+        # ── Baseline Execution (happy path, no LLM) ──
+        baseline_context = ""
+        api_endpoints = registry.get_all()
+        if api_endpoints:
+            from .baseline_executor import run_baseline, format_baseline_for_llm
+            print(f"  [BASELINE] Running happy path for {len(api_endpoints)} API endpoints...")
+            _cb("phase_start", {"phase": 0, "total": 0, "name": "API Baseline (Happy Path)", "id": "baseline"})
+
+            def _baseline_progress(event, data):
+                if event == "baseline_request":
+                    _cb("tool_call", {
+                        "phase": "API Baseline (Happy Path)",
+                        "tool": "baseline_request",
+                        "request": {"method": data["method"], "url": data["url"], "step": f"{data['step']}/{data['total']}"},
+                        "response": {},
+                    })
+                elif event == "baseline_result":
+                    _cb("tool_call", {
+                        "phase": "API Baseline (Happy Path)",
+                        "tool": "baseline_response",
+                        "request": {"name": data["name"]},
+                        "response": {"status": str(data["status"]), "success": str(data["success"]),
+                                     "timing_ms": str(data["timing_ms"]),
+                                     "variables": ", ".join(data["variables"]) if data["variables"] else "-"},
+                    })
+
+            collection_vars = {}
+            for ep in api_endpoints:
+                collection_vars.update(ep.variables)
+
+            baseline_results = await run_baseline(
+                api_endpoints,
+                variables=collection_vars,
+                on_progress=_baseline_progress,
+            )
+            baseline_context = format_baseline_for_llm(baseline_results)
+            successful = sum(1 for r in baseline_results if r.success)
+            print(f"  [BASELINE] Done: {successful}/{len(baseline_results)} succeeded")
+            _cb("phase_end", {
+                "phase": 0, "name": "API Baseline (Happy Path)",
+                "tool_calls": len(baseline_results) * 2,
+                "findings": 0,
+            })
+            metrics["total_tool_calls"] += len(baseline_results) * 2
+            for r in baseline_results:
+                if r.url and r.url not in metrics["pages_list"]:
+                    metrics["pages_list"].append(r.url)
+                    metrics["pages_crawled"] += 1
+                    _cb("crawl", {"url": r.url, "type": "api", "tool": "baseline", "count": metrics["pages_crawled"]})
+
+        # ── Hybrid Body Fuzzing (LLM plans, engine executes) ──
+        body_fuzz_context = ""
+        if baseline_context and baseline_results:
+            from .body_fuzzer import fuzz_body, format_fuzz_results_for_llm as fmt_fuzz
+            post_endpoints = [r for r in baseline_results if r.success and r.request_body and r.method in ("POST", "PUT", "PATCH")]
+            if post_endpoints:
+                fuzz_mode = "hybrid (LLM-planned)" if router else "static"
+                print(f"  [BODY-FUZZ] Fuzzing {len(post_endpoints)} endpoint(s) — {fuzz_mode} mode...")
+                _cb("phase_start", {"phase": 0, "total": 0, "name": f"Body Fuzzing ({fuzz_mode})", "id": "body_fuzz"})
+                all_fuzz_results = []
+                for br in post_endpoints:
+                    def _fuzz_progress(event, data):
+                        if event == "fuzz_request":
+                            _cb("tool_call", {
+                                "phase": f"Body Fuzzing ({fuzz_mode})",
+                                "tool": "body_fuzz",
+                                "request": {"field": data["field"], "payload": data["payload"],
+                                            "step": f"{data['request_num']}/{data['total']}"},
+                                "response": {},
+                            })
+                        elif event == "llm_planning":
+                            _cb("tool_call", {
+                                "phase": f"Body Fuzzing ({fuzz_mode})",
+                                "tool": "llm_payload_planning",
+                                "request": {"fields": data["fields_count"], "mode": data["mode"]},
+                                "response": {},
+                            })
+                    fuzz_results = await fuzz_body(
+                        http_client, br.method, br.url, br.request_body,
+                        headers=br.request_headers, on_progress=_fuzz_progress,
+                        llm_router=router, llm_model=model,
+                    )
+                    all_fuzz_results.extend(fuzz_results)
+                body_fuzz_context = fmt_fuzz(all_fuzz_results)
+                anomalies = sum(1 for r in all_fuzz_results if r.anomaly)
+                print(f"  [BODY-FUZZ] Done: {len(all_fuzz_results)} tests, {anomalies} anomalies")
+                _cb("phase_end", {
+                    "phase": 0, "name": f"Body Fuzzing ({fuzz_mode})",
+                    "tool_calls": len(all_fuzz_results), "findings": anomalies,
+                })
+                metrics["total_tool_calls"] += len(all_fuzz_results)
+
         phases = get_phases(target.scan_mode, app_info)
         system_prompt = build_system_prompt(target, registry, app_info, extra_domains=extra_domains)
+        if baseline_context:
+            system_prompt += "\n\n" + baseline_context
+        if body_fuzz_context:
+            system_prompt += "\n\n" + body_fuzz_context
         messages: list[dict] = [{"role": "system", "content": system_prompt}]
 
-        total_phases = len(phases) + 1  # +1 for Runtime Verification
+        has_baseline = bool(baseline_context)
+        has_body_fuzz = bool(body_fuzz_context)
+        extra_phases = (1 if has_baseline else 0) + (1 if has_body_fuzz else 0)
+        total_phases = len(phases) + 1 + extra_phases  # +1 verification
         print(f"  [SCAN] Starting {len(phases)} scan phases + verification...")
         _cb("scan_start", {"total_phases": total_phases})
+        phase_offset = extra_phases
         for phase_idx, phase in enumerate(phases):
-            phase_num = phase_idx + 1
+            phase_num = phase_idx + 1 + phase_offset
             phase_tool_calls = 0
             phase_findings_before = len(findings)
             print(f"  [{phase_num}/{total_phases}] Phase: {phase.name} ({phase.id})...", end="", flush=True)

@@ -1,4 +1,4 @@
-# AI Agentic DAST Scanner
+# AI Agentic Web Scanner
 
 LLM-powered Dynamic Application Security Testing scanner that works against **any website, API, or SPA**.
 
@@ -35,7 +35,7 @@ docker run -d --name dast-scanner --network host \
 
 All models run through **AWS Bedrock** — no external API keys needed. Uses IAM role or AWS credentials.
 
-| Model | Bedrock ID | Cost (in/out per 1M) | Tool Calling | DAST Quality | Recommendation |
+| Model | Bedrock ID | Cost (in/out per 1M) | Tool Calling | Scan Quality | Recommendation |
 |-------|-----------|---------------------|-------------|-------------|----------------|
 | **Ministral 8B** | `bedrock/mistral.ministral-3-8b-instruct` | $0.15 / $0.15 | Good (agentic) | Fair | Cheapest model with tool calling — good for dev/testing |
 | **Ministral 14B** | `bedrock/mistral.ministral-3-14b-instruct` | $0.20 / $0.20 | **Strong** (agentic) | Good | **Best value** — designed for agentic use, very cheap |
@@ -48,7 +48,7 @@ All models run through **AWS Bedrock** — no external API keys needed. Uses IAM
 > - **Gemini**: Requires a separate Google API key (not available via Bedrock).
 > - **Mistral Small**: Responds with hypothetical findings instead of using tools to test.
 >
-> Ministral 14B or Claude Haiku 4.5 is the minimum for meaningful DAST results.
+> Ministral 14B or Claude Haiku 4.5 is the minimum for meaningful scan results.
 
 ### Bedrock Setup
 
@@ -163,7 +163,7 @@ The scanner exposes a full REST API — the same one the Web UI uses. Any CI/CD 
 ### Base URL & Auth
 
 ```bash
-export DAST_URL="http://18.117.143.222:8080"
+export DAST_URL="http://YOUR-EC2-HOST:8080"
 export DAST_USER="dast-admin"
 export DAST_PASS="YourPassword"
 ```
@@ -306,7 +306,7 @@ curl -s "$DAST_URL/health" | jq .
 ```python
 import requests, time
 
-BASE = "http://18.117.143.222:8080"
+BASE = "http://YOUR-EC2-HOST:8080"
 AUTH = ("dast-admin", "YourPassword")
 
 # Start scan
@@ -351,8 +351,10 @@ scanners/ai_agent/
   auth.py                   # Authentication (form/SSO/OAuth/MFA)
   llm_config.py             # LLM routing (Bedrock/LiteLLM) + cost tracking
   prompts.py                # System + phase prompts (15 website + 10 API phases)
-  tools.py                  # 27 tools (browser, API, WebSocket, fuzzing)
+  tools.py                  # 28 tools (browser, API, WebSocket, token, fuzzing)
   api_import.py             # Postman/Burp/OpenAPI parsers
+  baseline_executor.py      # API happy-path executor + variable auto-chaining
+  body_fuzzer.py            # Hybrid body fuzzer (LLM-planned, deterministic execution)
 scripts/
   run_scan.py               # CLI entry point
   report_generator.py       # PDF report generator with full evidence
@@ -378,6 +380,49 @@ Dockerfile                  # Production container image
 - **Authentication**: Form login, SSO (SAML), OAuth 2.0/OIDC, MFA (TOTP), session refresh, or unauthenticated scanning
 - **Payloads**: 100% LLM-generated per context — no static payload lists
 - **Business Logic**: IDOR, nonce reuse, race conditions, payment flow abuse, privilege escalation
+
+## API Scanning Pipeline
+
+When a Postman/Burp/OpenAPI file is imported, the scanner runs a multi-phase pipeline before the LLM even starts:
+
+### Phase 0a: Baseline Execution (Happy Path)
+
+Runs each imported API endpoint in order with the original request data. Handles:
+- **Variable chaining**: Parses Postman test scripts (`pm.collectionVariables.set(...)`) to extract response values and substitute them into subsequent requests
+- **Auto-chaining**: Detects UUID/token values in responses and automatically substitutes them into subsequent URLs (works without any Postman scripts)
+- **Auth header forwarding**: Preserves Bearer tokens and API keys across the chain
+
+This gives the LLM a "known good" baseline to compare against during fuzzing.
+
+### Phase 0b: Hybrid Body Fuzzing (LLM-planned, deterministically executed)
+
+For every POST/PUT/PATCH endpoint that returned a JSON body:
+
+1. **Field classification**: Extracts all JSON body fields and classifies them by security risk (auth, PII, financial, contact, enum, numeric, freetext)
+2. **LLM planning** (one cheap call per endpoint, ~$0.001): Sends the field list + API context to the LLM and asks "which fields should I fuzz and with what payloads?" The LLM considers business context and field relationships
+3. **Deterministic execution** (zero LLM cost): The engine mutates each field individually (preserving the rest of the JSON structure), sends requests, and detects anomalies (status changes, error strings, timing, reflection)
+4. **Anomaly feed**: Only anomalous results are passed to the LLM for deeper investigation in later phases
+
+**Cost comparison:**
+
+| Approach | LLM Calls | Cost/endpoint | Intelligence |
+|----------|-----------|---------------|-------------|
+| Pure static | 0 | $0 | Low — regex name matching |
+| **Hybrid (default)** | **1** | **~$0.001** | **High — LLM understands business context** |
+| Pure LLM | 50-200 | $0.10-$1.00 | Highest — but 100x more expensive |
+
+The hybrid approach is the default when an LLM router is available. Falls back to static if the LLM call fails.
+
+### Phase 1+: LLM-Driven Deep Scan
+
+The LLM agent runs its standard OWASP Top 10 phases, enriched with baseline context and fuzzing anomalies. Tools available include:
+- `fuzz_parameter` — supports query, body (JSON with dot-notation for nested fields), header, and path fuzzing
+- `test_token_security` — JWT decode, alg=none bypass, signature stripping, IDOR tampering
+- All 27 standard browser + API + WebSocket tools
+
+## Domain Scoping
+
+The scanner restricts activity to the target domain and its subdomains. Gen Digital owned domains are auto-scoped (norton.com, avg.com, avast.com, avira.com, ccleaner.com, gendigital.com, lifelock.com, nortonlifelock.com, reputation.com). Third-party domains are excluded and listed in the UI. Additional domains can be explicitly included via the "Additional Domains" field in the scan form.
 
 ## Triage Engine
 

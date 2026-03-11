@@ -1,4 +1,4 @@
-"""Per-model DAST reports with CVE/CVSS, logical severity, and exploit evidence.
+"""Per-model security reports with CVE/CVSS, logical severity, and exploit evidence.
 
 Auto-discovers scan results from results/raw/ -- works for any target.
 CVE/CVSS data sourced dynamically from NVD API + OSV.dev (cached locally).
@@ -144,7 +144,7 @@ class Report(FPDF):
     def header(self):
         self.set_font("Helvetica", "B", 9)
         self.set_text_color(80, 80, 80)
-        label = f"DAST Report - {self._model}"
+        label = f"Security Report - {self._model}"
         if self._target:
             label += f" | {self._target}"
         self.cell(0, 7, label, align="C", new_x="LMARGIN", new_y="NEXT")
@@ -611,7 +611,7 @@ def gen_report(model_key, classified, raw):
              align="C", new_x="LMARGIN", new_y="NEXT")
     pdf.cell(0, 7,
              f"Date: {datetime.now().strftime('%B %d, %Y')} | "
-             "Methodology: AI-Powered DAST + Evidence Verification",
+             "Methodology: AI-Powered Scan + Evidence Verification",
              align="C", new_x="LMARGIN", new_y="NEXT")
     pdf.ln(6)
 
@@ -774,7 +774,7 @@ def gen_report(model_key, classified, raw):
                      new_x="LMARGIN", new_y="NEXT")
 
     os.makedirs(OUT_DIR, exist_ok=True)
-    out = os.path.join(OUT_DIR, f"DAST_{slug}.pdf")
+    out = os.path.join(OUT_DIR, f"scan_{slug}.pdf")
     pdf.output(out)
     return out, total, len(tp), len(fp), len(nv), len(na)
 
@@ -786,7 +786,7 @@ def gen_report(model_key, classified, raw):
 def main():
     global OUT_DIR
 
-    parser = argparse.ArgumentParser(description="Generate DAST triage reports from scan results.")
+    parser = argparse.ArgumentParser(description="Generate security triage reports from scan results.")
     parser.add_argument("--file", help="Process a single result JSON file")
     parser.add_argument("--raw-dir", default=RAW_DIR, help="Directory with raw scan results")
     parser.add_argument("--out-dir", default=None, help="Output directory for PDF reports")
@@ -796,7 +796,7 @@ def main():
         OUT_DIR = args.out_dir
 
     print("=" * 70)
-    print("DAST Report Generator - CVE/CVSS, Evidence-Based, Strict Classification")
+    print("Security Report Generator - CVE/CVSS, Evidence-Based, Strict Classification")
     print("=" * 70)
 
     if args.file:

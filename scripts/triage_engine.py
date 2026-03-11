@@ -1,4 +1,4 @@
-"""Universal DAST Triage Engine - works for ANY target (website, API, SPA).
+"""Universal Triage Engine - works for ANY target (website, API, SPA).
 
 Three-layer classification:
   Layer 1: Evidence-based auto-classification (deterministic rules)
@@ -351,7 +351,7 @@ def _compute_confidence(finding, tests, statuses, bodies, evidence):
 # ══════════════════════════════════════════════════════════════════════
 
 def classify(finding, test_log):
-    """Universal triage: classify any DAST finding from any target.
+    """Universal triage: classify any scanner finding from any target.
     Returns dict with verdict, severity, CVE/CWE, evidence, steps, etc."""
 
     title = (finding.get("title", "") or "").lower()

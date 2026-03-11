@@ -1,6 +1,6 @@
 ---
 name: ai-agentic-scanner
-description: Builds and runs an LLM-powered DAST security scanner using LiteLLM and Playwright. The LLM autonomously reasons about the target, generates its own context-aware payloads, and tests websites and APIs. Parses Postman collections and Burp proxy exports to discover API endpoints. Use when the user mentions AI agent scanner, agentic scanner, LiteLLM scanner, AI security scan, API scan, Postman import, or Burp import.
+description: Builds and runs an LLM-powered agentic web security scanner using LiteLLM and Playwright. The LLM autonomously reasons about the target, generates its own context-aware payloads, and tests websites and APIs. Parses Postman collections and Burp proxy exports to discover API endpoints. Use when the user mentions AI agent scanner, agentic scanner, LiteLLM scanner, AI security scan, API scan, Postman import, or Burp import.
 ---
 
 # AI Agentic Security Scanner
@@ -17,8 +17,10 @@ description: Builds and runs an LLM-powered DAST security scanner using LiteLLM 
 │   ├── auth.py                   # Authentication (form/SSO/OAuth/MFA)
 │   ├── llm_config.py             # LiteLLM routing + cost tracking
 │   ├── prompts.py                # System + phase prompts
-│   ├── tools.py                  # 27 tools (browser, API, WebSocket)
-│   └── api_import.py             # Postman/Burp/OpenAPI parsers
+│   ├── tools.py                  # 28 tools (browser, API, WebSocket, token)
+│   ├── api_import.py             # Postman/Burp/OpenAPI parsers
+│   ├── baseline_executor.py      # API happy-path executor + auto-chaining
+│   └── body_fuzzer.py            # Hybrid body fuzzer (LLM-planned + deterministic)
 ├── scripts/
 │   ├── run_scan.py               # CLI entry point for scanning
 │   ├── report_generator.py        # PDF report generator (auto-discovers results)
@@ -45,9 +47,9 @@ Build all code first. Present the plan. Wait for explicit user approval before e
 
 | Decision | Choice | Rationale |
 |----------|--------|-----------|
-| Payload generation | **Pure LLM** — agent generates ALL payloads from scratch based on application context | No static payload lists; the LLM's value is reasoning about what to test, not spraying generic payloads |
+| Payload generation | **Hybrid** — LLM plans payloads (1 call/endpoint), deterministic engine executes | Smart like pure LLM (~$0.001/endpoint), fast like static (zero LLM cost for HTTP requests) |
 | API endpoint import | Postman/Burp/OpenAPI parsed into a unified endpoint registry | Enables testing APIs that aren't discoverable via crawling |
-| Static payload catalog | **None** — no `payloads.py`, no hardcoded payload files | The agent must never fall back to fixed lists |
+| Static payload catalog | **Fallback only** — body_fuzzer.py has regex-classified payloads as fallback when LLM planning fails | Primary path is always LLM-planned |
 | Triage | **Offline, evidence-based** — no LLM used for triage | Deterministic rules + confidence scoring, zero cost, reproducible |
 | Cost tracking | **Per-call accumulation** via `litellm.completion_cost()` | Accurate token + dollar tracking per model |
 
@@ -100,7 +102,7 @@ The scanner's `LLMRouter` (in `llm_config.py`) auto-selects the routing path per
 
 Supported Bedrock models (cheapest to most expensive):
 
-| Model | Bedrock ID | Tool Calling | DAST Quality |
+| Model | Bedrock ID | Tool Calling | Scan Quality |
 |-------|-----------|-------------|-------------|
 | Ministral 8B | `bedrock/mistral.ministral-3-8b-instruct` | Good (agentic) | Fair — cheapest with tool calling |
 | **Ministral 14B** | `bedrock/mistral.ministral-3-14b-instruct` | **Strong** (agentic) | Good — best value |
@@ -132,8 +134,10 @@ python scripts/run_scan.py --dry-run
 AI Agentic Scanner Components:
 - [x] Step 1: LLM connectivity (LiteLLM proxy / Bedrock / direct)
 - [x] Step 2: llm_config.py (hybrid model routing + cost tracking)
-- [x] Step 3: tools.py (27 tools — browser + SPA + WebSocket + API)
+- [x] Step 3: tools.py (28 tools — browser + SPA + WebSocket + API + token security)
 - [x] Step 3b: api_import.py (Postman / Burp / OpenAPI parsers)
+- [x] Step 3c: baseline_executor.py (API happy-path execution + variable auto-chaining)
+- [x] Step 3d: body_fuzzer.py (hybrid LLM-planned body fuzzing + deterministic execution)
 - [x] Step 4: prompts.py (system + scan prompts per OWASP category)
 - [x] Step 5: agent.py (agent loop with SPA detection + dynamic endpoint discovery)
 - [x] Step 6: auth.py (SSO / OAuth / SAML / MFA / form / token auth + session monitor)
@@ -252,13 +256,14 @@ Location: `scanners/ai_agent/tools.py`
 |----------|---------|---------|
 | `api_request(method, url, headers, body, auth)` | Send HTTP request with full control | status, headers, body snippet, timing |
 | `api_request_raw(raw_request)` | Send from raw HTTP request string | same as above |
-| `fuzz_parameter(endpoint, param, payloads)` | Batch-fuzz a single param with payload list | list of {payload, status, body_snippet, anomaly} |
+| `fuzz_parameter(endpoint, param, payloads, param_location, original_body)` | Fuzz query/body/header/path param. Body: dot-notation for nested JSON | list of {payload, status, body_snippet, anomaly, reflected} |
+| `test_token_security(endpoint, token)` | JWT/bearer security: alg=none, stripped sig, IDOR, empty/no token | token_analysis + test results with bypass detection |
 | `replay_with_modification(request, modifications)` | Replay a captured request with changes | response diff vs original |
 | `get_api_endpoints()` | List all discovered endpoints from import | endpoint registry contents |
 | `test_auth_bypass(endpoint, methods)` | Try endpoint without auth / with tampered tokens | list of {method, status, accessible} |
 | `test_method_override(endpoint)` | Try PUT/DELETE/PATCH on GET-only endpoints | list of {method, status, response_snippet} |
 
-**Total: 27 tools.** All return structured dicts, truncated to stay within token limits. Tool definitions use OpenAI function calling format. The `fuzz_parameter` tool accepts a `payloads` array — the LLM generates these dynamically, never from static lists.
+**Total: 28 tools.** All return structured dicts, truncated to stay within token limits. Tool definitions use OpenAI function calling format. The `fuzz_parameter` tool supports query, body (JSON with dot-notation), header, and path fuzzing. The `test_token_security` tool performs comprehensive JWT/bearer token analysis.
 
 ## Step 3b: Build api_import.py
 

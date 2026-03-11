@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Agentic DAST - AI Security Scanner</title>
+<title>Agentic Web Scanner - AI Security Scanner</title>
 <style>
 :root {
   --bg: #0f1117; --surface: #1a1d27; --surface2: #242836; --border: #2d3148;
@@ -182,23 +182,45 @@ tr:hover td { background: rgba(99,102,241,0.05); }
 
 <header>
   <div>
-    <h1><span class="logo-icon">&#9889;</span><span class="highlight">Agentic DAST</span> Scanner</h1>
-    <div class="subtitle">AI-Powered Dynamic Security Testing &mdash; Websites &bull; APIs &bull; SPAs</div>
+    <h1><span class="logo-icon">&#9889;</span><span class="highlight">Agentic Web</span> Scanner</h1>
+    <div class="subtitle">AI-Powered Security Testing &mdash; Websites &bull; APIs &bull; SPAs</div>
   </div>
-  <div style="text-align:right;">
-    <div style="color:var(--text2); font-size:11px; text-transform:uppercase; letter-spacing:1px;">Status</div>
-    <div id="connectivity-status" style="color:var(--green); font-size:13px; font-weight:600;">Checking...</div>
+  <div style="display:flex;align-items:center;gap:20px;">
+    <div style="text-align:right;">
+      <div style="color:var(--text2); font-size:11px; text-transform:uppercase; letter-spacing:1px;">Status</div>
+      <div id="connectivity-status" style="color:var(--green); font-size:13px; font-weight:600;">Checking...</div>
+    </div>
+    <button onclick="doLogout()" style="background:rgba(239,68,68,0.12);border:1px solid rgba(239,68,68,0.3);color:#f87171;padding:8px 16px;border-radius:8px;cursor:pointer;font-size:12px;font-weight:600;letter-spacing:0.5px;transition:all 0.2s;" onmouseover="this.style.background='rgba(239,68,68,0.25)'" onmouseout="this.style.background='rgba(239,68,68,0.12)'">Logout</button>
   </div>
 </header>
 
 <div class="container">
 
-  <div style="background:linear-gradient(90deg,rgba(234,179,8,0.12),rgba(234,179,8,0.04));border:1px solid rgba(234,179,8,0.35);border-radius:10px;padding:14px 20px;margin-bottom:20px;display:flex;align-items:flex-start;gap:12px;">
-    <span style="font-size:20px;line-height:1;">&#9888;</span>
-    <div style="font-size:13px;color:var(--text);line-height:1.6;">
-      <strong style="color:var(--yellow);">Important &mdash; Read Before Scanning</strong><br>
-      Only scan endpoints you are <strong>explicitly authorized</strong> to test. Unauthorized scanning is prohibited.<br>
-      Notify the SOC team via Slack <strong style="color:var(--accent2);">#t-gts-cybersecurity-deconfliction</strong> before running any scan.
+  <div style="background:linear-gradient(135deg,rgba(180,30,30,0.10) 0%,rgba(120,20,20,0.06) 100%);border:1px solid rgba(180,40,40,0.25);border-left:4px solid #b91c1c;border-radius:10px;padding:16px 20px;margin-bottom:24px;display:flex;align-items:flex-start;gap:16px;">
+    <div style="flex-shrink:0;display:flex;flex-direction:column;align-items:center;gap:6px;">
+      <div style="width:44px;height:44px;border-radius:50%;border:2px solid #991b1b;background:rgba(153,27,27,0.15);display:flex;align-items:center;justify-content:center;">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#dc2626" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 9v4m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/></svg>
+      </div>
+    </div>
+    <div style="flex:1;">
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px;">
+        <span style="display:inline-block;background:#991b1b;color:#fecaca;font-size:10px;font-weight:800;letter-spacing:2.5px;text-transform:uppercase;padding:3px 10px;border-radius:4px;">Red Team</span>
+        <span style="font-size:13px;font-weight:600;color:#fca5a5;letter-spacing:0.3px;">Authorized Offensive Security Testing</span>
+      </div>
+      <div style="font-size:12px;color:#d4d4d8;line-height:1.8;font-family:'Segoe UI',system-ui,-apple-system,sans-serif;">
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:2px;">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#dc2626" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+          <span>This tool is restricted to <strong style="color:#fca5a5;">authorized penetration testers</strong> with explicit written approval.</span>
+        </div>
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:2px;">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#f59e0b" stroke-width="2"><path d="M22 16.92v3a2 2 0 01-2.18 2 19.79 19.79 0 01-8.63-3.07 19.5 19.5 0 01-6-6A19.79 19.79 0 012.12 4.18 2 2 0 014.11 2h3a2 2 0 012 1.72c.127.96.362 1.903.7 2.81a2 2 0 01-.45 2.11L8.09 9.91a16 16 0 006 6l1.27-1.27a2 2 0 012.11-.45c.907.338 1.85.573 2.81.7A2 2 0 0122 16.92z"/></svg>
+          <span>Notify SOC via <strong style="color:#818cf8;">#t-gts-cybersecurity-deconfliction</strong> before initiating any engagement.</span>
+        </div>
+        <div style="display:flex;align-items:center;gap:8px;">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#6b7280" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+          <span style="color:#9ca3af;">All scan activity is monitored and logged for compliance.</span>
+        </div>
+      </div>
     </div>
   </div>
 
@@ -446,6 +468,18 @@ async function init() {
   loadScans();
 }
 
+function doLogout() {
+  const logoutUrl = window.location.origin + '/logout';
+  const xhr = new XMLHttpRequest();
+  xhr.open('GET', logoutUrl, true, 'logout', 'logout');
+  xhr.onreadystatechange = function() {
+    if (xhr.readyState === 4) {
+      window.location.replace(window.location.origin);
+    }
+  };
+  xhr.send();
+}
+
 async function testConnectivity() {
   document.getElementById('connectivity-status').textContent = 'Testing...';
   try {
@@ -495,9 +529,67 @@ async function uploadFile(inputId) {
   }
 }
 
+function _extractBaseUrl(text, type) {
+  try {
+    if (type === 'openapi-yaml') return null;
+    const data = JSON.parse(text);
+    let urls = [];
+    if (type === 'postman') {
+      const vars = data.variable || [];
+      const baseVar = vars.find(v => v.key === 'base_url' || v.key === 'baseUrl' || v.key === 'BASE_URL');
+      if (baseVar && baseVar.value) urls.push(baseVar.value);
+      (data.item || []).forEach(function walk(item) {
+        if (item.request) {
+          const raw = item.request.url;
+          const u = typeof raw === 'string' ? raw : (raw && raw.raw ? raw.raw : '');
+          if (u) urls.push(u.replace(/\{\{.*?\}\}/g, '').replace(/\/+$/, ''));
+        }
+        (item.item || []).forEach(walk);
+      });
+    } else if (type === 'openapi') {
+      if (data.servers) data.servers.forEach(s => { if (s.url) urls.push(s.url); });
+      if (data.host) urls.push((data.schemes ? data.schemes[0] : 'https') + '://' + data.host + (data.basePath || ''));
+    } else if (type === 'burp') {
+      return null;
+    }
+    for (const u of urls) {
+      try { const p = new URL(u.startsWith('http') ? u : 'https://' + u); return p.origin; } catch(e) {}
+    }
+  } catch(e) {}
+  return null;
+}
+
+(function _initAutoFill() {
+  var ids = ['file-postman', 'file-openapi', 'file-burp'];
+  for (var i = 0; i < ids.length; i++) {
+    (function(inputId) {
+      var type = inputId.replace('file-', '');
+      var input = document.getElementById(inputId);
+      if (!input) return;
+      input.onchange = function() {
+        if (!input.files || !input.files.length) return;
+        var reader = new FileReader();
+        reader.onload = function(e) {
+          var base = _extractBaseUrl(e.target.result, type);
+          var urlField = document.getElementById('target-url');
+          if (base && urlField && !urlField.value.trim()) {
+            urlField.value = base;
+            urlField.style.borderColor = 'var(--green)';
+            urlField.style.boxShadow = '0 0 6px rgba(16,185,129,0.4)';
+            setTimeout(function() { urlField.style.borderColor = ''; urlField.style.boxShadow = ''; }, 3000);
+          }
+          var modeField = document.getElementById('scan-mode');
+          if (base && modeField && modeField.value === 'website') modeField.value = 'both';
+        };
+        reader.readAsText(input.files[0]);
+      };
+    })(ids[i]);
+  }
+})();
+
 async function startScan() {
   const url = document.getElementById('target-url').value.trim();
-  if (!url) { alert('Enter a target URL'); return; }
+  if (!url) { alert('Enter a target URL or upload a Postman/OpenAPI/Burp file'); return; }
   const btn = document.getElementById('start-scan-btn');
   btn.disabled = true;
   btn.textContent = 'Uploading files...';

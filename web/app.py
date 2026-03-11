@@ -1,4 +1,4 @@
-"""FastAPI web UI for the AI Agentic DAST Scanner."""
+"""FastAPI web UI for the AI Agentic Web Scanner."""
 from __future__ import annotations
 
 import asyncio
@@ -16,7 +16,7 @@ from datetime import datetime
 from pathlib import Path
 
 from fastapi import FastAPI, BackgroundTasks, Depends, HTTPException, Request, UploadFile, File, Form, status
-from fastapi.responses import HTMLResponse, FileResponse, JSONResponse
+from fastapi.responses import HTMLResponse, FileResponse, JSONResponse, Response
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.staticfiles import StaticFiles
 
@@ -28,7 +28,7 @@ from scanners.ai_agent.llm_config import LLMRouter, check_connectivity
 from scripts.triage_engine import classify as triage_classify
 
 app = FastAPI(
-    title="AI Agentic DAST Scanner",
+    title="AI Agentic Web Scanner",
     description="LLM-powered Dynamic Application Security Testing API. "
     "Start scans, poll status, download results and PDF reports programmatically.",
     version="1.0.0",
@@ -112,6 +112,17 @@ async def health_check():
     return {"status": "ok", "scans_running": running, "total_scans": len(SCANS)}
 
 
+@app.get("/logout", include_in_schema=False)
+async def logout():
+    """Return 401 to force browser to clear Basic Auth credentials."""
+    return Response(
+        content="Logged out. <a href='/'>Login again</a>",
+        status_code=401,
+        headers={"WWW-Authenticate": 'Basic realm="Logged out"'},
+        media_type="text/html",
+    )
+
+
 @app.get("/", response_class=HTMLResponse, include_in_schema=False)
 async def index(creds=Depends(_verify)):
     return FileResponse(Path(__file__).parent / "static" / "index.html")
@@ -136,9 +147,10 @@ async def list_scans(creds=Depends(_verify)):
             "cost": info.get("cost"),
             "findings_count": info.get("findings_count"),
         })
+    existing_ids = {s["id"] for s in scans}
     for f in sorted(RAW_DIR.glob("aiagent_*.json"), key=os.path.getmtime, reverse=True):
         fid = f.stem
-        if any(s["id"] == fid for s in scans):
+        if fid in existing_ids or any(eid in fid for eid in existing_ids):
             continue
         try:
             data = json.loads(f.read_text(encoding="utf-8"))
