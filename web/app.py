@@ -9,6 +9,7 @@ import json
 import os
 import secrets
 import sys
+import threading
 import time
 import uuid
 from datetime import datetime
@@ -126,7 +127,7 @@ async def upload_api_spec(
 
 
 @app.post("/api/scan")
-async def start_scan(request: Request, background_tasks: BackgroundTasks, creds=Depends(_verify)):
+async def start_scan(request: Request, creds=Depends(_verify)):
     body = await request.json()
     target_url = body.get("target_url", "").strip()
     username = body.get("username", "").strip()
@@ -151,10 +152,25 @@ async def start_scan(request: Request, background_tasks: BackgroundTasks, creds=
         "progress": [],
     }
 
-    background_tasks.add_task(
-        _run_scan_task, scan_id, target_url, username, password, model, scan_mode, auth_type, api_imports
+    thread = threading.Thread(
+        target=_run_scan_in_thread,
+        args=(scan_id, target_url, username, password, model, scan_mode, auth_type, api_imports),
+        daemon=True,
     )
+    thread.start()
     return {"scan_id": scan_id, "status": "started"}
+
+
+def _run_scan_in_thread(scan_id, target_url, username, password, model, scan_mode, auth_type, api_imports=None):
+    """Run scan in a separate thread with its own event loop so the main UI stays responsive."""
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        loop.run_until_complete(
+            _run_scan_task(scan_id, target_url, username, password, model, scan_mode, auth_type, api_imports)
+        )
+    finally:
+        loop.close()
 
 
 async def _run_scan_task(scan_id, target_url, username, password, model, scan_mode, auth_type, api_imports=None):
