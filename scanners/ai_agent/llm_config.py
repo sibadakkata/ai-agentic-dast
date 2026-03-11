@@ -14,6 +14,11 @@ logger = logging.getLogger(__name__)
 class ContextWindowExceeded(Exception):
     pass
 
+
+class ContentFiltered(Exception):
+    """Raised when the model's guardrails block the request (e.g. Amazon Nova)."""
+    pass
+
 MODELS = [
     "gemini/gemini-2.5-flash-lite",
 ]
@@ -73,6 +78,11 @@ class LLMRouter:
                 err_msg = str(e).lower()
                 if "contextwindowexceedederror" in err_msg or "prompt is too long" in err_msg or "input is too long" in err_msg:
                     raise ContextWindowExceeded(str(e)) from e
+                if "content_filtered" in err_msg or "content filtered" in err_msg:
+                    raise ContentFiltered(
+                        f"Model {model} blocked the request (content guardrails). "
+                        "Try a model without content filtering (e.g. Claude Haiku/Sonnet)."
+                    ) from e
                 is_rate_limit = (
                     "rate limit" in err_msg
                     or "429" in err_msg

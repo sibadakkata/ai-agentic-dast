@@ -55,11 +55,14 @@ REPORTS_DIR.mkdir(parents=True, exist_ok=True)
 SCANS: dict[str, dict] = {}
 
 MODELS = [
-    {"id": "bedrock/us.amazon.nova-micro-v1:0", "name": "Amazon Nova Micro (cheapest)", "cost": "~$0.035/$0.14 per 1M tokens"},
-    {"id": "bedrock/us.amazon.nova-lite-v1:0", "name": "Amazon Nova Lite", "cost": "~$0.06/$0.24 per 1M tokens"},
-    {"id": "bedrock/us.amazon.nova-pro-v1:0", "name": "Amazon Nova Pro", "cost": "~$0.80/$3.20 per 1M tokens"},
-    {"id": "bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0", "name": "Claude Haiku 4.5", "cost": "~$0.80/$4 per 1M tokens"},
-    {"id": "bedrock/us.anthropic.claude-sonnet-4-6", "name": "Claude Sonnet 4.6", "cost": "~$3/$15 per 1M tokens"},
+    # --- Gemini (direct API, needs GOOGLE_API_KEY) ---
+    {"id": "gemini/gemini-2.5-flash-lite", "name": "Gemini 2.5 Flash Lite (cheapest)", "cost": "~$0.075/$0.30 per 1M tokens", "provider": "Google AI"},
+    {"id": "gemini/gemini-2.5-flash", "name": "Gemini 2.5 Flash", "cost": "~$0.15/$0.60 per 1M tokens", "provider": "Google AI"},
+    # --- Bedrock: Mistral ---
+    {"id": "bedrock/mistral.mistral-small-2402-v1:0", "name": "Mistral Small (Bedrock)", "cost": "~$0.10/$0.30 per 1M tokens", "provider": "Bedrock"},
+    # --- Bedrock: Claude (proven for DAST) ---
+    {"id": "bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0", "name": "Claude Haiku 4.5 (recommended)", "cost": "~$0.80/$4 per 1M tokens", "provider": "Bedrock"},
+    {"id": "bedrock/us.anthropic.claude-sonnet-4-6", "name": "Claude Sonnet 4.6 (best quality)", "cost": "~$3/$15 per 1M tokens", "provider": "Bedrock"},
 ]
 
 
@@ -219,6 +222,46 @@ async def get_scan_status(scan_id: str, creds=Depends(_verify)):
     return JSONResponse({"error": "Scan not found"}, status_code=404)
 
 
+@app.delete("/api/scan/{scan_id}")
+async def delete_scan(scan_id: str, creds=Depends(_verify)):
+    """Delete a scan and its result/report files."""
+    deleted = []
+    if scan_id in SCANS:
+        result_file = SCANS[scan_id].get("result_file")
+        del SCANS[scan_id]
+        deleted.append("scan_record")
+        if result_file:
+            fpath = RAW_DIR / result_file
+            if fpath.exists():
+                fpath.unlink()
+                deleted.append(str(result_file))
+    for f in RAW_DIR.glob("*.json"):
+        if scan_id in f.stem:
+            f.unlink()
+            deleted.append(f.name)
+    for f in REPORTS_DIR.glob("*.pdf"):
+        if scan_id in f.stem or any(scan_id in part for part in f.stem.split("_")):
+            f.unlink()
+            deleted.append(f.name)
+    if not deleted:
+        return JSONResponse({"error": "Scan not found"}, status_code=404)
+    return {"deleted": deleted}
+
+
+@app.delete("/api/scans")
+async def delete_all_scans(creds=Depends(_verify)):
+    """Delete all scan records and result files."""
+    count = 0
+    SCANS.clear()
+    for f in RAW_DIR.glob("*.json"):
+        f.unlink()
+        count += 1
+    for f in REPORTS_DIR.glob("*.pdf"):
+        f.unlink()
+        count += 1
+    return {"deleted_files": count, "status": "cleared"}
+
+
 @app.get("/api/results/{scan_id}")
 async def get_results(scan_id: str, creds=Depends(_verify)):
     fname = _find_result_file(scan_id)
@@ -296,27 +339,28 @@ async def generate_report(scan_id: str, creds=Depends(_verify)):
     if not fname:
         return JSONResponse({"error": "Not found"}, status_code=404)
 
-    data = json.loads(Path(fname).read_text(encoding="utf-8"))
-    findings = data.get("findings", [])
-    test_log = data.get("summary", {}).get("test_log", [])
+    try:
+        data = json.loads(Path(fname).read_text(encoding="utf-8"))
+        findings = data.get("findings", [])
+        test_log = data.get("summary", {}).get("test_log", [])
 
-    from scripts.report_generator import gen_report, _model_display, _model_slug
-    classified = [triage_classify(f, test_log) for f in findings]
-    model_key = data.get("model", "") or data.get("metadata", {}).get("model", "unknown")
+        import scripts.report_generator as rg
+        classified = [triage_classify(f, test_log) for f in findings]
+        model_key = data.get("model", "") or data.get("metadata", {}).get("model", "unknown")
 
-    global _report_out_dir
-    _report_out_dir = str(REPORTS_DIR)
+        orig_out = rg.OUT_DIR
+        rg.OUT_DIR = str(REPORTS_DIR)
+        result = rg.gen_report(model_key, classified, data)
+        rg.OUT_DIR = orig_out
 
-    import scripts.report_generator as rg
-    orig_out = rg.OUT_DIR
-    rg.OUT_DIR = str(REPORTS_DIR)
-    result = gen_report(model_key, classified, data)
-    rg.OUT_DIR = orig_out
-
-    if result:
-        pdf_path = result[0]
-        return {"pdf": f"/api/reports/{os.path.basename(pdf_path)}"}
-    return JSONResponse({"error": "Report generation failed"}, status_code=500)
+        if result:
+            pdf_path = result[0]
+            return {"pdf": f"/api/reports/{os.path.basename(pdf_path)}"}
+        return JSONResponse({"error": "No findings to report"}, status_code=400)
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return JSONResponse({"error": f"Report generation failed: {str(e)}"}, status_code=500)
 
 
 @app.get("/api/reports/{filename}")

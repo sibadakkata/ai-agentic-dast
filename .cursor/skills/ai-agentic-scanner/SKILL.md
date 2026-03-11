@@ -96,7 +96,7 @@ The scanner's `LLMRouter` (in `llm_config.py`) auto-selects the routing path per
 | Provider | Setup | Model name example |
 |----------|-------|--------------------|
 | **LiteLLM Proxy** | Set `LITELLM_BASE_URL` + `LITELLM_API_KEY` in `targets.env` | `claude-haiku-4-5-20251001` |
-| **AWS Bedrock** | Set `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_DEFAULT_REGION` | `bedrock/anthropic.claude-3-5-haiku-20241022-v1:0` |
+| **AWS Bedrock** | Set `AWS_DEFAULT_REGION` (IAM role) or `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY` | `bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0` |
 | **Direct API** | Set `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, or `GOOGLE_API_KEY` | `claude-haiku-4-5-20251001`, `gemini/gemini-2.5-flash` |
 | **Hybrid** | Set both LiteLLM + AWS creds. `bedrock/` models go direct; others go through proxy | Mix of any above |
 
@@ -107,7 +107,7 @@ The scanner's `LLMRouter` (in `llm_config.py`) auto-selects the routing path per
 python scripts/run_scan.py
 
 # Override model for this run
-python scripts/run_scan.py --model "bedrock/anthropic.claude-sonnet-4-20250514-v1:0"
+python scripts/run_scan.py --model "bedrock/us.anthropic.claude-sonnet-4-6"
 
 # Generate PDF reports
 python scripts/report_generator.py
@@ -184,7 +184,7 @@ Check in this order:
 ```python
 import litellm
 
-for model in ["claude-haiku-4-5-20251001", "bedrock/anthropic.claude-3-5-haiku-20241022-v1:0", "gemini/gemini-2.5-flash"]:
+for model in ["claude-haiku-4-5-20251001", "bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0", "gemini/gemini-2.5-flash"]:
     try:
         resp = litellm.completion(model=model, messages=[{"role": "user", "content": "ping"}], max_tokens=5)
         print(f"{model}: OK")
@@ -522,7 +522,7 @@ One model per run (default: Haiku). Override with `--model`:
 
 ```bash
 python scripts/run_scan.py                                    # default Haiku
-python scripts/run_scan.py --model "bedrock/anthropic.claude-sonnet-4-20250514-v1:0"
+python scripts/run_scan.py --model "bedrock/us.anthropic.claude-sonnet-4-6"
 ```
 
 The scanner authenticates, crawls, tests all phases, and saves results to `results/raw/aiagent_{model_slug}_{target_id}.json`. Run `python scripts/report_generator.py` afterwards to generate PDF reports with triage.

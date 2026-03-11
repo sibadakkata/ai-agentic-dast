@@ -195,7 +195,9 @@ tr:hover td { background: rgba(99,102,241,0.05); }
 
   <!-- SCAN LIST -->
   <div class="card" id="scans-card">
-    <h2><span class="icon">📋</span> Scan History</h2>
+    <h2 style="justify-content:space-between;"><span style="display:flex;align-items:center;gap:8px;"><span class="icon">📋</span> Scan History</span>
+      <button class="btn btn-outline btn-sm" onclick="clearAllScans()" style="font-size:11px;color:var(--red);border-color:var(--red);">Clear All</button>
+    </h2>
     <div id="scans-list"><div class="empty">No scans yet. Configure a target above and click Start Scan.</div></div>
   </div>
 
@@ -237,7 +239,9 @@ async function init() {
   models.forEach(m => {
     const opt = document.createElement('option');
     opt.value = m.id;
-    opt.textContent = `${m.name}`;
+    const provider = m.provider ? ` [${m.provider}]` : '';
+    const cost = m.cost ? ` — ${m.cost}` : '';
+    opt.textContent = `${m.name}${provider}${cost}`;
     sel.appendChild(opt);
   });
   loadScans();
@@ -259,13 +263,16 @@ async function loadScans() {
   const el = document.getElementById('scans-list');
   if (!scans.length) { el.innerHTML = '<div class="empty">No scans yet.</div>'; return; }
   el.innerHTML = '<div class="scan-list">' + scans.map(s => `
-    <div class="scan-item" onclick="viewResults('${s.id}')">
-      <div class="target">${esc(s.target)}</div>
+    <div class="scan-item">
+      <div class="target" style="cursor:pointer" onclick="viewResults('${s.id}')">${esc(s.target)}</div>
       <div class="model">${esc(s.model)}</div>
       <div><span class="badge badge-${s.status}">${s.status}</span></div>
       <div>${s.duration ? Math.round(s.duration) + 's' : '-'}</div>
       <div>${s.cost != null ? '$' + s.cost.toFixed(4) : '-'}</div>
-      <div>${s.findings_count != null ? s.findings_count + ' findings' : '-'}</div>
+      <div style="display:flex;align-items:center;gap:8px;">
+        <span style="cursor:pointer" onclick="viewResults('${s.id}')">${s.findings_count != null ? s.findings_count + ' findings' : '-'}</span>
+        <button class="btn btn-outline btn-sm" onclick="event.stopPropagation();deleteScan('${s.id}')" style="padding:3px 8px;font-size:10px;color:var(--red);border-color:rgba(239,68,68,0.3);" title="Delete scan">✕</button>
+      </div>
     </div>`).join('') + '</div>';
 }
 
@@ -489,6 +496,18 @@ async function generateReport() {
 function downloadJSON() {
   if (!currentScanId) return;
   window.open(`/api/results/${currentScanId}/download`, '_blank');
+}
+
+async function deleteScan(scanId) {
+  if (!confirm('Delete this scan and its results?')) return;
+  await fetch(`/api/scan/${scanId}`, { method: 'DELETE' });
+  loadScans();
+}
+
+async function clearAllScans() {
+  if (!confirm('Delete ALL scan history and results? This cannot be undone.')) return;
+  await fetch('/api/scans', { method: 'DELETE' });
+  loadScans();
 }
 
 function esc(s) { if (!s) return ''; const d = document.createElement('div'); d.textContent = String(s); return d.innerHTML; }

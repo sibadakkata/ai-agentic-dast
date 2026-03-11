@@ -15,6 +15,10 @@ import os
 import re
 import sys
 from datetime import datetime
+
+sys.stdout.reconfigure(encoding="utf-8")
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
 from fpdf import FPDF
 from cve_lookup import (
     enrich_library_finding, extract_libraries, lookup_cve, get_cwe_info
@@ -22,8 +26,6 @@ from cve_lookup import (
 from triage_engine import classify as universal_classify
 from triage_engine import find_tests as universal_find_tests
 from triage_engine import _build_curl as universal_build_curl
-
-sys.stdout.reconfigure(encoding="utf-8")
 
 BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 RAW_DIR = os.path.join(BASE, "results", "raw")
@@ -350,12 +352,38 @@ def render(pdf, idx, f, link_id=None):
         bd = (100, 150, 200) if v == "TRUE_POSITIVE" else (190, 190, 190)
         pdf.box("SCANNER EVIDENCE:", f["scanner_evidence"], bg=eb, border=bd)
 
-    # HTTP request
-    if f.get("curl") and v not in ("NOT_A_FINDING", "FALSE_POSITIVE"):
+    # HTTP requests (all tested payloads)
+    all_curls = f.get("all_curls", [])
+    if all_curls and v not in ("NOT_A_FINDING",):
+        for ci, curl in enumerate(all_curls[:3], 1):
+            label = f"TEST PAYLOAD #{ci}:" if len(all_curls) > 1 else "HTTP REQUEST (actual payload tested):"
+            pdf.box(label, curl, bg=(245, 248, 255), border=(100, 120, 180))
+    elif f.get("curl") and v not in ("NOT_A_FINDING",):
         pdf.box("HTTP REQUEST:", f["curl"], bg=(245, 248, 255), border=(100, 120, 180))
 
-    # Response
-    if f.get("response_status") and v not in ("NOT_A_FINDING", "FALSE_POSITIVE"):
+    # Responses (actual app responses)
+    all_responses = f.get("all_responses", [])
+    if all_responses and v not in ("NOT_A_FINDING",):
+        resp_lines = []
+        for ri, resp in enumerate(all_responses[:5], 1):
+            parts = []
+            if resp.get("status"):
+                parts.append(f"Status: {resp['status']}")
+            if resp.get("reflected"):
+                parts.append(f"Reflected: {resp['reflected']}")
+            if resp.get("anomaly"):
+                parts.append("** ANOMALY DETECTED **")
+            if resp.get("accessible") is not None:
+                parts.append(f"Accessible: {resp['accessible']}")
+            if resp.get("error"):
+                parts.append(f"Error: {resp['error']}")
+            if resp.get("body"):
+                body_preview = str(resp["body"])[:200]
+                parts.append(f"Body: {body_preview}")
+            resp_lines.append(f"Response #{ri}: " + " | ".join(parts))
+        pdf.box("APPLICATION RESPONSES:", "\n".join(resp_lines),
+                bg=(255, 252, 245), border=(180, 160, 100))
+    elif f.get("response_status") and v not in ("NOT_A_FINDING",):
         pdf.box("HTTP RESPONSE:", f"Status codes: {f['response_status']}",
                 bg=(255, 252, 245), border=(180, 160, 100))
 
@@ -424,9 +452,60 @@ def _render_summary_table(pdf, all_findings, link_ids):
         pdf.ln(row_h)
 
 
+def _enrich_with_all_tests(classified, test_log):
+    """Attach full test evidence (all matching payloads + responses) to each finding."""
+    for f in classified:
+        tests = universal_find_tests(f, test_log, limit=5)
+        curls = []
+        responses = []
+        for t in tests:
+            curl = universal_build_curl(t)
+            if curl:
+                curls.append(curl)
+            resp = t.get("response_summary", {})
+            if isinstance(resp, dict):
+                entry = {}
+                if resp.get("status"):
+                    entry["status"] = resp["status"]
+                if resp.get("body_snippet"):
+                    entry["body"] = str(resp["body_snippet"])[:300]
+                if resp.get("reflected"):
+                    entry["reflected"] = resp["reflected"]
+                if resp.get("anomaly"):
+                    entry["anomaly"] = resp["anomaly"]
+                if resp.get("error"):
+                    entry["error"] = str(resp["error"])[:200]
+                if resp.get("accessible") is not None:
+                    entry["accessible"] = resp["accessible"]
+                for r in resp.get("results", []):
+                    if isinstance(r, dict):
+                        sub = {}
+                        if r.get("status"):
+                            sub["status"] = r["status"]
+                        if r.get("body_snippet"):
+                            sub["body"] = str(r["body_snippet"])[:200]
+                        if r.get("reflected"):
+                            sub["reflected"] = r["reflected"]
+                        if r.get("anomaly"):
+                            sub["anomaly"] = r["anomaly"]
+                        if sub:
+                            responses.append(sub)
+                if entry:
+                    responses.append(entry)
+        if curls:
+            f["all_curls"] = curls
+        if responses:
+            f["all_responses"] = responses
+    return classified
+
+
 def gen_report(model_key, classified, raw):
     display = _model_display(model_key)
     slug = _model_slug(model_key)
+
+    test_log = raw.get("summary", {}).get("test_log", []) if raw else []
+    classified = _enrich_with_all_tests(classified, test_log)
+
     tp = [f for f in classified if f["verdict"] == "TRUE_POSITIVE"]
     fp = [f for f in classified if f["verdict"] == "FALSE_POSITIVE"]
     nv = [f for f in classified if f["verdict"] == "NEEDS_VERIFICATION"]
@@ -630,14 +709,16 @@ def gen_report(model_key, classified, raw):
 # ==========================================================================
 
 def main():
+    global OUT_DIR
+
     parser = argparse.ArgumentParser(description="Generate DAST triage reports from scan results.")
     parser.add_argument("--file", help="Process a single result JSON file")
     parser.add_argument("--raw-dir", default=RAW_DIR, help="Directory with raw scan results")
-    parser.add_argument("--out-dir", default=OUT_DIR, help="Output directory for PDF reports")
+    parser.add_argument("--out-dir", default=None, help="Output directory for PDF reports")
     args = parser.parse_args()
 
-    global OUT_DIR
-    OUT_DIR = args.out_dir
+    if args.out_dir:
+        OUT_DIR = args.out_dir
 
     print("=" * 70)
     print("DAST Report Generator - CVE/CVSS, Evidence-Based, Strict Classification")

@@ -31,26 +31,46 @@ docker run -d --name dast --network host \
 
 ## Supported Models
 
+### Model Compatibility for DAST Scanning
+
+Not all models work well for agentic DAST. The scanner requires strong **tool/function calling** to navigate, inject payloads, and analyze responses. Models that lack this capability will generate text-only findings without actually testing the target.
+
+| Model | ID | Cost (in/out per 1M) | Provider | Tool Calling | DAST Quality | Notes |
+|-------|-----|---------------------|----------|-------------|-------------|-------|
+| Gemini 2.5 Flash Lite | `gemini/gemini-2.5-flash-lite` | $0.075 / $0.30 | Google AI | Yes | Fair | Cheapest option, basic scanning |
+| Gemini 2.5 Flash | `gemini/gemini-2.5-flash` | $0.15 / $0.60 | Google AI | Yes | Good | Good balance of cost and quality |
+| Mistral Small | `bedrock/mistral.mistral-small-2402-v1:0` | $0.10 / $0.30 | Bedrock | Basic | Poor | Does not use tools properly — text-only findings |
+| **Claude Haiku 4.5** | `bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0` | $0.80 / $4 | Bedrock | **Strong** | **Good** | **Recommended** — actually probes targets |
+| **Claude Sonnet 4.6** | `bedrock/us.anthropic.claude-sonnet-4-6` | $3 / $15 | Bedrock | **Strong** | **Best** | Deepest analysis, most findings |
+
+> **Amazon Nova models** (Micro, Lite, Pro) are **not supported** — their content guardrails block security-testing prompts.
+
 ### AWS Bedrock (Recommended for deployment)
 
-No API keys needed — uses IAM role or AWS credentials. All models below are tested and working.
+No API keys needed — uses IAM role or AWS credentials.
 
-| Model | Bedrock ID | Cost (per 1M tokens) | Use For |
-|-------|-----------|---------------------|---------|
-| Amazon Nova Micro | `bedrock/us.amazon.nova-micro-v1:0` | $0.035 / $0.14 | Quick test runs, cheapest |
-| Amazon Nova Lite | `bedrock/us.amazon.nova-lite-v1:0` | $0.06 / $0.24 | Cheap testing with better quality |
-| Amazon Nova Pro | `bedrock/us.amazon.nova-pro-v1:0` | $0.80 / $3.20 | Good quality scans |
-| Claude Haiku 4.5 | `bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0` | $0.80 / $4 | **Production scans** — best value |
-| Claude Sonnet 4.6 | `bedrock/us.anthropic.claude-sonnet-4-6` | $3 / $15 | Deepest analysis, most findings |
+**Setup:** Attach an IAM role to your EC2 instance with these permissions:
+- `bedrock:InvokeModel`, `bedrock:InvokeModelWithResponseStream` on `arn:aws:bedrock:*:*:inference-profile/*`
+- `aws-marketplace:ViewSubscriptions`, `aws-marketplace:Subscribe`
 
-**Setup:** Attach an IAM role to your EC2 instance with `bedrock:InvokeModel` and `aws-marketplace:ViewSubscriptions` permissions, then set `AWS_DEFAULT_REGION=us-east-1`.
+Then set:
+```bash
+export AWS_DEFAULT_REGION=us-east-1
+```
+
+### Google AI (Gemini)
+
+For Gemini models, set the API key directly:
+
+```bash
+export GOOGLE_API_KEY=your-api-key
+```
 
 ### LiteLLM Proxy
 
 Routes requests through a central LiteLLM proxy. Best for teams with an existing proxy deployment.
 
 ```bash
-# Set environment variables
 export LITELLM_BASE_URL=https://litellm.your-company.com/
 export LITELLM_API_KEY=sk-xxxx
 ```
@@ -71,26 +91,22 @@ Call LLM providers directly without any proxy. Set the provider's API key as an 
 | Google | `GOOGLE_API_KEY` | `gemini/gemini-2.5-flash` |
 | OpenAI | `OPENAI_API_KEY` | `gpt-4o` |
 
-```bash
-export ANTHROPIC_API_KEY=sk-ant-xxxx
-python scripts/run_scan.py --model "claude-haiku-4-5-20251001"
-```
-
 ### Hybrid Routing
 
 You can configure both Bedrock and LiteLLM at the same time. The router picks the right path automatically:
-- Models with `bedrock/` prefix → AWS Bedrock (direct)
+- Models with `bedrock/`, `vertex_ai/`, `sagemaker/`, `ollama/` prefix → direct (via LiteLLM library)
 - All other models → LiteLLM proxy (if configured) or direct API
 
 ## Web UI Features
 
-- **New Scan** — enter target URL, credentials, pick model, start scan
+- **New Scan** — enter target URL, credentials, pick model and scan mode
 - **API Imports** — upload Postman Collection, Burp Export, or Swagger/OpenAPI spec
-- **AI vs Triage** — side-by-side comparison of AI severity vs triage verdict
+- **AI vs Triage** — side-by-side comparison of AI severity vs evidence-based triage verdict
 - **Crawled Endpoints** — full list of discovered links and API endpoints
 - **Payloads by Endpoint** — expandable view of every payload tested per endpoint
-- **PDF Report** — generate and download from the results page
-- **Raw JSON** — download full scan data
+- **PDF Report** — generate with full evidence: curl commands, response data, CVE/CVSS scores
+- **Raw JSON** — download full scan data for integration
+- **Delete Scans** — delete individual scans or clear all history
 - **Basic Auth** — password-protected (configurable via `DAST_AUTH_USER` / `DAST_AUTH_PASS` env vars)
 
 ## Docker Deployment (EC2)
@@ -139,11 +155,11 @@ docker run -d --name dast --network host \
 ## CLI Usage
 
 ```bash
-# Default scan using config model
+# Default scan using config model (Haiku)
 python scripts/run_scan.py
 
 # Override model
-python scripts/run_scan.py --model "bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0"
+python scripts/run_scan.py --model "bedrock/us.anthropic.claude-sonnet-4-6"
 
 # Scan specific target
 python scripts/run_scan.py --target T1
@@ -151,7 +167,7 @@ python scripts/run_scan.py --target T1
 # Dry run (test connectivity)
 python scripts/run_scan.py --dry-run
 
-# Generate PDF reports
+# Generate PDF reports from existing results
 python scripts/report_generator.py
 python scripts/report_generator.py --file results/raw/scan_result.json
 ```
@@ -171,7 +187,7 @@ scanners/ai_agent/
   api_import.py             # Postman/Burp/OpenAPI parsers
 scripts/
   run_scan.py               # CLI entry point
-  report_generator.py       # PDF report generator
+  report_generator.py       # PDF report generator with full evidence
   triage_engine.py          # 3-layer universal triage engine
   cve_lookup.py             # NVD + OSV.dev dynamic CVE/CVSS lookup
 web/
@@ -200,3 +216,12 @@ Offline, zero-cost classification of findings:
 1. **Layer 1 — Deterministic Rules**: Auto-classify obvious FPs and confirmed TPs based on HTTP evidence
 2. **Layer 2 — Confidence Scoring**: Score ambiguous findings (0-100) using response analysis
 3. **Layer 3 — Human Queue**: Flag low-confidence findings for manual verification
+
+## PDF Reports
+
+Generated reports include:
+- Executive summary with severity breakdown and scan metadata (duration, cost, tokens)
+- Clickable summary table linking to detailed findings
+- Per-finding details: CVE/CWE, CVSS score, triage verdict with reasoning
+- Full test evidence: actual `curl` commands sent, application responses (status codes, body snippets)
+- Steps to reproduce and developer remediation actions

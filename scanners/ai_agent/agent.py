@@ -18,7 +18,7 @@ from .api_import import (
     parse_postman_collection,
 )
 from .auth import ScanTarget, authenticate, detect_app_type
-from .llm_config import ContextWindowExceeded, LLMRouter
+from .llm_config import ContentFiltered, ContextWindowExceeded, LLMRouter
 from .prompts import build_system_prompt, get_phases
 from .tools import TOOL_DEFINITIONS, ScanTools
 
@@ -131,11 +131,26 @@ async def run_scan(
                         messages=messages,
                         tools=TOOL_DEFINITIONS,
                     )
+                except ContentFiltered:
+                    logger.warning(
+                        "Content filtered by %s at phase %s step %d — model guardrails blocked request",
+                        model, phase.id, step,
+                    )
+                    print(f" [BLOCKED] Model guardrails filtered content")
+                    raise ContentFiltered(
+                        f"Model {model} refuses security-testing prompts (content guardrails). "
+                        "Use a model without content filters (e.g. Claude Haiku or Sonnet)."
+                    )
                 except ContextWindowExceeded:
                     logger.warning("Context window exceeded at phase %s step %d, trimming aggressively", phase.id, step)
                     messages = trim_context(messages, max_tokens=TRIM_TARGET_TOKENS // 2)
                     try:
                         response = router.complete(model=model, messages=messages, tools=TOOL_DEFINITIONS)
+                    except ContentFiltered:
+                        raise ContentFiltered(
+                            f"Model {model} refuses security-testing prompts (content guardrails). "
+                            "Use a model without content filters (e.g. Claude Haiku or Sonnet)."
+                        )
                     except ContextWindowExceeded:
                         logger.error("Still exceeded after aggressive trim, skipping rest of phase %s", phase.id)
                         break
