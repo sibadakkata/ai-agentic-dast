@@ -50,10 +50,39 @@ app.mount("/static", StaticFiles(directory=Path(__file__).parent / "static"), na
 BASE = Path(__file__).resolve().parent.parent
 RAW_DIR = BASE / "results" / "raw"
 REPORTS_DIR = BASE / "results" / "reports"
+SCANS_META_FILE = BASE / "results" / "scans_meta.json"
 RAW_DIR.mkdir(parents=True, exist_ok=True)
 REPORTS_DIR.mkdir(parents=True, exist_ok=True)
 
 SCANS: dict[str, dict] = {}
+
+def _load_scans_from_disk():
+    """Restore scan metadata from disk on startup."""
+    if SCANS_META_FILE.exists():
+        try:
+            data = json.loads(SCANS_META_FILE.read_text(encoding="utf-8"))
+            for scan_id, info in data.items():
+                if info.get("status") == "running":
+                    info["status"] = "error"
+                    info["error"] = "Server restarted during scan"
+                SCANS[scan_id] = info
+        except Exception:
+            pass
+
+def _save_scans_to_disk():
+    """Persist scan metadata to disk (excluding transient live data)."""
+    try:
+        persist = {}
+        for scan_id, info in SCANS.items():
+            persist[scan_id] = {
+                k: v for k, v in info.items()
+                if k not in ("live_tests", "live_findings", "live_phases")
+            }
+        SCANS_META_FILE.write_text(json.dumps(persist, default=str), encoding="utf-8")
+    except Exception:
+        pass
+
+_load_scans_from_disk()
 
 MODELS = [
     {"id": "bedrock/mistral.mistral-small-2402-v1:0", "name": "Mistral Small (cheapest)", "cost": "~$0.10/$0.30 per 1M tokens", "provider": "Bedrock"},
@@ -151,6 +180,7 @@ async def start_scan(request: Request, creds=Depends(_verify)):
         "started": datetime.now().isoformat(),
         "progress": [],
     }
+    _save_scans_to_disk()
 
     thread = threading.Thread(
         target=_run_scan_in_thread,
@@ -257,12 +287,14 @@ async def _run_scan_task(scan_id, target_url, username, password, model, scan_mo
             "result_file": os.path.basename(filepath),
             "progress": SCANS[scan_id]["progress"] + ["Scan completed."],
         })
+        _save_scans_to_disk()
     except Exception as e:
         SCANS[scan_id].update({
             "status": "error",
             "error": str(e),
             "progress": SCANS[scan_id]["progress"] + [f"Error: {e}"],
         })
+        _save_scans_to_disk()
 
 
 @app.get("/api/scan/{scan_id}")
@@ -330,6 +362,7 @@ async def delete_scan(scan_id: str, creds=Depends(_verify)):
             deleted.append(f.name)
     if not deleted:
         return JSONResponse({"error": "Scan not found"}, status_code=404)
+    _save_scans_to_disk()
     return {"deleted": deleted}
 
 
@@ -344,6 +377,7 @@ async def delete_all_scans(creds=Depends(_verify)):
     for f in REPORTS_DIR.glob("*.pdf"):
         f.unlink()
         count += 1
+    _save_scans_to_disk()
     return {"deleted_files": count, "status": "cleared"}
 
 
