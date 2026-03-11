@@ -267,8 +267,45 @@ tr:hover td { background: rgba(99,102,241,0.05); }
     <div id="scans-list"><div class="empty">No scans yet. Configure a target above and click Start Scan.</div></div>
   </div>
 
-  <!-- RESULTS VIEW -->
-  <div id="results-view">
+  <!-- LIVE SCAN VIEW (shown when clicking a running scan) -->
+  <div id="live-scan-view" style="display:none;">
+    <div class="back-btn" onclick="closeLiveView()">← Back to Scan List</div>
+    <div class="card">
+      <h2 id="live-scan-title"><span class="scanning-indicator"></span>Scan In Progress</h2>
+      <div class="stats" id="live-scan-stats"></div>
+      <div class="progress-log" id="live-scan-log" style="margin-bottom:16px;"></div>
+      <div class="live-panel" style="display:block;">
+        <div class="live-header">
+          <div class="phase-name"><span class="scanning-indicator"></span><span id="lv-phase-text">Loading...</span></div>
+          <div class="counters">
+            <span>Tests: <strong id="lv-tests-count">0</strong></span>
+            <span>Findings: <strong id="lv-findings-count">0</strong></span>
+            <span>Phases: <strong id="lv-phases-count">0</strong></span>
+          </div>
+        </div>
+        <div class="live-tabs">
+          <div class="live-tab active" onclick="switchLiveTab2('tests')">Live Payloads &amp; Responses</div>
+          <div class="live-tab" onclick="switchLiveTab2('findings')">Findings Detected</div>
+          <div class="live-tab" onclick="switchLiveTab2('phases')">Phase Progress</div>
+        </div>
+        <div class="live-body" id="lv-body-tests">
+          <div style="padding:6px 10px;font-size:10px;font-weight:600;color:var(--text2);display:grid;grid-template-columns:100px 1fr 1fr;gap:1px;background:var(--surface2);">
+            <div style="padding:4px 10px;">TOOL</div><div style="padding:4px 10px;">REQUEST / PAYLOAD</div><div style="padding:4px 10px;">RESPONSE</div>
+          </div>
+          <div id="lv-tests-body"></div>
+        </div>
+        <div class="live-body" id="lv-body-findings" style="display:none;">
+          <div id="lv-findings-body"></div>
+        </div>
+        <div class="live-body" id="lv-body-phases" style="display:none;">
+          <div id="lv-phases-body"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- RESULTS VIEW (shown when clicking a completed scan) -->
+  <div id="results-view" style="display:none;">
     <div class="back-btn" onclick="showList()">← Back to Scan List</div>
     <div class="card">
       <h2 id="result-title">Scan Results</h2>
@@ -330,18 +367,21 @@ async function loadScans() {
   const scans = await (await fetch('/api/scans')).json();
   const el = document.getElementById('scans-list');
   if (!scans.length) { el.innerHTML = '<div class="empty">No scans yet.</div>'; return; }
-  el.innerHTML = '<div class="scan-list">' + scans.map(s => `
+  el.innerHTML = '<div class="scan-list">' + scans.map(s => {
+    const clickFn = s.status === 'running' ? `openLiveView('${s.id}')` : `viewResults('${s.id}')`;
+    return `
     <div class="scan-item">
-      <div class="target" style="cursor:pointer" onclick="viewResults('${s.id}')">${esc(s.target)}</div>
+      <div class="target" style="cursor:pointer" onclick="${clickFn}">${esc(s.target)}</div>
       <div class="model">${esc(s.model)}</div>
       <div><span class="badge badge-${s.status}">${s.status}</span></div>
       <div>${s.duration ? Math.round(s.duration) + 's' : '-'}</div>
       <div>${s.cost != null ? '$' + s.cost.toFixed(4) : '-'}</div>
       <div style="display:flex;align-items:center;gap:8px;">
-        <span style="cursor:pointer" onclick="viewResults('${s.id}')">${s.findings_count != null ? s.findings_count + ' findings' : '-'}</span>
+        <span style="cursor:pointer" onclick="${clickFn}">${s.findings_count != null ? s.findings_count + ' findings' : '-'}</span>
         <button class="btn btn-outline btn-sm" onclick="event.stopPropagation();deleteScan('${s.id}')" style="padding:3px 8px;font-size:10px;color:var(--red);border-color:rgba(239,68,68,0.3);" title="Delete scan">✕</button>
       </div>
-    </div>`).join('') + '</div>';
+    </div>`;
+  }).join('') + '</div>';
 }
 
 async function uploadFile(inputId) {
@@ -521,27 +561,185 @@ function renderLiveData(live) {
 }
 
 function switchLiveTab(tab) {
-  document.querySelectorAll('.live-tab').forEach(t => t.classList.remove('active'));
-  document.querySelectorAll('.live-body').forEach(b => b.style.display = 'none');
+  const panel = document.getElementById('live-panel');
+  panel.querySelectorAll('.live-tab').forEach(t => t.classList.remove('active'));
+  panel.querySelectorAll('.live-body').forEach(b => b.style.display = 'none');
   event.target.classList.add('active');
   document.getElementById('live-body-' + tab).style.display = 'block';
 }
 
+function switchLiveTab2(tab) {
+  const panel = document.getElementById('live-scan-view');
+  panel.querySelectorAll('.live-tab').forEach(t => t.classList.remove('active'));
+  panel.querySelectorAll('.live-body').forEach(b => b.style.display = 'none');
+  event.target.classList.add('active');
+  document.getElementById('lv-body-' + tab).style.display = 'block';
+}
+
+let lvTestOffset = 0;
+let lvFindingOffset = 0;
+let lvPollInterval = null;
+
+function openLiveView(scanId) {
+  currentScanId = scanId;
+  lvTestOffset = 0;
+  lvFindingOffset = 0;
+  document.getElementById('lv-tests-body').innerHTML = '';
+  document.getElementById('lv-findings-body').innerHTML = '';
+  document.getElementById('lv-phases-body').innerHTML = '';
+  document.getElementById('lv-phase-text').textContent = 'Loading...';
+  document.getElementById('lv-tests-count').textContent = '0';
+  document.getElementById('lv-findings-count').textContent = '0';
+  document.getElementById('lv-phases-count').textContent = '0';
+  document.getElementById('live-scan-log').textContent = '';
+  document.getElementById('live-scan-stats').innerHTML = '';
+
+  document.getElementById('scans-card').style.display = 'none';
+  document.getElementById('scan-form-card').style.display = 'none';
+  document.getElementById('results-view').style.display = 'none';
+  document.getElementById('live-scan-view').style.display = 'block';
+
+  pollLiveView(scanId);
+  if (lvPollInterval) clearInterval(lvPollInterval);
+  lvPollInterval = setInterval(() => pollLiveView(scanId), 2000);
+}
+
+async function pollLiveView(scanId) {
+  try {
+    const [statusResp, liveResp] = await Promise.all([
+      fetch(`/api/scan/${scanId}`),
+      fetch(`/api/scan/${scanId}/live?since_test=${lvTestOffset}&since_finding=${lvFindingOffset}`)
+    ]);
+    const data = await statusResp.json();
+    const live = await liveResp.json();
+
+    document.getElementById('live-scan-title').innerHTML =
+      data.status === 'running'
+        ? `<span class="scanning-indicator"></span>Scan In Progress — ${esc(data.model || '')}`
+        : data.status === 'completed'
+          ? `<span style="color:var(--green)">✓</span> Scan Complete — ${esc(data.model || '')}`
+          : `<span style="color:var(--red)">✕</span> Scan Error — ${esc(data.model || '')}`;
+
+    const log = document.getElementById('live-scan-log');
+    if (data.progress) log.textContent = data.progress.join('\n');
+    log.scrollTop = log.scrollHeight;
+
+    document.getElementById('live-scan-stats').innerHTML = [
+      stat(live.tests_total || 0, 'Tests Run'),
+      stat(live.findings_total || 0, 'Findings'),
+      stat((live.phases || []).length, 'Phases Done'),
+      stat(data.current_phase || '-', 'Current Phase'),
+    ].join('');
+
+    renderLiveView(live);
+
+    if (data.status === 'completed' || data.status === 'error') {
+      clearInterval(lvPollInterval);
+      lvPollInterval = null;
+    }
+  } catch(e) { /* retry */ }
+}
+
+function renderLiveView(live) {
+  if (live.current_phase) document.getElementById('lv-phase-text').textContent = live.current_phase;
+  document.getElementById('lv-tests-count').textContent = live.tests_total || 0;
+  document.getElementById('lv-findings-count').textContent = live.findings_total || 0;
+  document.getElementById('lv-phases-count').textContent = (live.phases || []).length;
+
+  const testsBody = document.getElementById('lv-tests-body');
+  if (live.tests && live.tests.length) {
+    live.tests.forEach(t => {
+      const row = document.createElement('div');
+      row.className = 'live-test-row';
+      const reqParts = [];
+      if (t.request) {
+        if (typeof t.request === 'object') {
+          Object.entries(t.request).forEach(([k,v]) => reqParts.push(`${k}: ${v}`));
+        } else { reqParts.push(String(t.request)); }
+      }
+      const respParts = [];
+      if (t.response) {
+        if (typeof t.response === 'object') {
+          Object.entries(t.response).forEach(([k,v]) => {
+            const cls = k === 'status' ? (parseInt(v) < 400 ? 'status-ok' : 'status-err') : (k === 'anomaly' && v === 'True' ? 'anomaly' : '');
+            respParts.push(`<span class="${cls}">${esc(k)}: ${esc(v)}</span>`);
+          });
+        } else { respParts.push(esc(String(t.response))); }
+      }
+      row.innerHTML = `
+        <div class="live-test-cell live-test-tool">${esc(t.tool)}</div>
+        <div class="live-test-cell live-test-req">${reqParts.map(r => esc(r)).join('<br>')}</div>
+        <div class="live-test-cell live-test-resp">${respParts.join('<br>')}</div>`;
+      testsBody.appendChild(row);
+    });
+    lvTestOffset += live.tests.length;
+    testsBody.parentElement.scrollTop = testsBody.parentElement.scrollHeight;
+  }
+
+  const findingsBody = document.getElementById('lv-findings-body');
+  if (live.findings && live.findings.length) {
+    live.findings.forEach(f => {
+      const row = document.createElement('div');
+      row.className = 'live-finding-row';
+      const sevClass = `sev-${(f.severity || 'info').toLowerCase()}`;
+      row.innerHTML = `
+        <div class="live-finding-sev"><span class="severity ${sevClass}">${esc(f.severity)}</span></div>
+        <div class="live-finding-title">${esc(f.title)}</div>
+        <div class="live-finding-url" title="${esc(f.url)}">${esc(f.url)}</div>
+        <div class="live-finding-phase">${esc(f.phase)}</div>`;
+      findingsBody.appendChild(row);
+    });
+    lvFindingOffset += live.findings.length;
+    findingsBody.parentElement.scrollTop = findingsBody.parentElement.scrollHeight;
+  }
+
+  const phasesBody = document.getElementById('lv-phases-body');
+  if (live.phases && live.phases.length) {
+    phasesBody.innerHTML = '';
+    live.phases.forEach(ph => {
+      const row = document.createElement('div');
+      row.className = 'live-phase-row';
+      row.innerHTML = `
+        <div class="live-phase-num">${ph.phase}</div>
+        <div>${esc(ph.name)}</div>
+        <div style="font-size:11px;color:var(--text2)">${ph.tool_calls} tests</div>
+        <div style="font-size:11px;color:${ph.findings > 0 ? 'var(--green)' : 'var(--text2)'}">${ph.findings} findings</div>`;
+      phasesBody.appendChild(row);
+    });
+  }
+}
+
+function closeLiveView() {
+  if (lvPollInterval) { clearInterval(lvPollInterval); lvPollInterval = null; }
+  document.getElementById('live-scan-view').style.display = 'none';
+  document.getElementById('scans-card').style.display = 'block';
+  document.getElementById('scan-form-card').style.display = 'block';
+  loadScans();
+}
+
 async function viewResults(scanId) {
   currentScanId = scanId;
+  const statusResp = await fetch(`/api/scan/${scanId}`);
+  if (statusResp.ok) {
+    const statusData = await statusResp.json();
+    if (statusData.status === 'running') { openLiveView(scanId); return; }
+  }
   const resp = await fetch(`/api/results/${scanId}`);
   if (!resp.ok) { alert('Results not available yet'); return; }
   const data = await resp.json();
   renderResults(data);
   document.getElementById('scans-card').style.display = 'none';
   document.getElementById('scan-form-card').style.display = 'none';
+  document.getElementById('live-scan-view').style.display = 'none';
   document.getElementById('results-view').style.display = 'block';
 }
 
 function showList() {
   document.getElementById('results-view').style.display = 'none';
+  document.getElementById('live-scan-view').style.display = 'none';
   document.getElementById('scans-card').style.display = 'block';
   document.getElementById('scan-form-card').style.display = 'block';
+  if (lvPollInterval) { clearInterval(lvPollInterval); lvPollInterval = null; }
   loadScans();
 }
 
