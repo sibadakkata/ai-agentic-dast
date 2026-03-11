@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "agentic-web-scanner": {
+      "command": "python",
+      "args": ["mcp_server.py"],
+      "env": {
+        "SCANNER_URL": "http://YOUR-EC2-HOST:8080",
+        "SCANNER_USER": "dast-admin",
+        "SCANNER_PASS": "YOUR_PASSWORD"
+      }
+    }
+  }
+}

@@ -340,6 +340,61 @@ with open("report.pdf", "wb") as fh:
 print("Report saved: report.pdf")
 ```
 
+## MCP Server (Model Context Protocol)
+
+The scanner includes an MCP server that exposes all capabilities as tools for AI assistants like **Cursor**, **Claude Desktop**, or any MCP-compatible client.
+
+### Setup for Cursor
+
+1. Install the MCP dependency:
+```bash
+pip install mcp
+```
+
+2. Add to your Cursor MCP settings (`.cursor/mcp.json` or global settings):
+```json
+{
+  "mcpServers": {
+    "agentic-web-scanner": {
+      "command": "python",
+      "args": ["mcp_server.py"],
+      "env": {
+        "SCANNER_URL": "http://YOUR-EC2-HOST:8080",
+        "SCANNER_USER": "dast-admin",
+        "SCANNER_PASS": "YOUR_PASSWORD"
+      }
+    }
+  }
+}
+```
+
+3. Restart Cursor. The scanner tools will be available in Agent mode.
+
+### Available MCP Tools
+
+| Tool | Description |
+|------|-------------|
+| `health_check` | Check if scanner is running |
+| `list_models` | List available LLM models |
+| `start_scan` | Start a new security scan (target URL, model, scan mode, credentials) |
+| `get_scan_status` | Poll scan progress |
+| `wait_for_scan` | Block until scan completes (with timeout) |
+| `get_scan_results` | Get full triaged findings |
+| `get_live_activity` | Real-time tool calls and findings for running scans |
+| `get_findings_summary` | Human-readable severity summary |
+| `generate_report` | Generate PDF report |
+| `download_payloads` | Export all tested payloads by phase |
+| `upload_api_spec` | Upload Postman/Burp/OpenAPI file |
+| `list_scans` | List all scan history |
+| `delete_scan` | Delete a scan |
+
+### Standalone Mode
+
+Run the MCP server directly (e.g., for the MCP Inspector):
+```bash
+SCANNER_URL=http://your-host:8080 SCANNER_PASS=secret python mcp_server.py --transport=streamable-http
+```
+
 ## Project Structure
 
 ```
@@ -370,6 +425,8 @@ results/
   reports/                  # Generated PDF reports
   cache/                    # NVD/OSV API response cache
 imports/                    # Uploaded API definitions (Postman/Burp/OpenAPI)
+mcp_server.py               # MCP server (Model Context Protocol)
+mcp_config.example.json     # Example Cursor MCP configuration
 Dockerfile                  # Production container image
 ```
 
