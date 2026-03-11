@@ -83,6 +83,45 @@ tr:hover td { background: rgba(99,102,241,0.05); }
 
 .empty { color: var(--text2); text-align: center; padding: 40px; font-size: 14px; }
 
+/* Live activity panel */
+.live-panel { margin-top: 16px; border: 1px solid var(--border); border-radius: 12px; overflow: hidden; }
+.live-header { background: var(--surface2); padding: 12px 16px; display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid var(--border); }
+.live-header .phase-name { font-weight: 600; font-size: 13px; color: var(--accent2); }
+.live-header .counters { display: flex; gap: 16px; font-size: 12px; color: var(--text2); }
+.live-header .counters span strong { color: var(--text); }
+
+.live-tabs { display: flex; border-bottom: 1px solid var(--border); background: var(--surface); }
+.live-tab { padding: 8px 16px; font-size: 12px; font-weight: 600; cursor: pointer; color: var(--text2); border-bottom: 2px solid transparent; transition: all 0.2s; }
+.live-tab:hover { color: var(--text); }
+.live-tab.active { color: var(--accent2); border-color: var(--accent2); background: rgba(99,102,241,0.05); }
+
+.live-body { max-height: 400px; overflow-y: auto; background: var(--bg); }
+
+.live-test-row { display: grid; grid-template-columns: 100px 1fr 1fr; gap: 1px; font-size: 11px; border-bottom: 1px solid rgba(45,49,72,0.5); animation: fadeIn 0.3s; }
+.live-test-row:nth-child(even) { background: rgba(26,29,39,0.5); }
+.live-test-cell { padding: 6px 10px; font-family: monospace; word-break: break-all; }
+.live-test-tool { color: var(--accent2); font-weight: 700; font-size: 10px; text-transform: uppercase; display: flex; align-items: center; }
+.live-test-req { color: var(--yellow); }
+.live-test-resp { color: var(--text2); }
+.live-test-resp .status-ok { color: var(--green); }
+.live-test-resp .status-err { color: var(--red); }
+.live-test-resp .anomaly { color: var(--red); font-weight: 700; }
+
+.live-finding-row { display: flex; align-items: center; gap: 12px; padding: 8px 14px; border-bottom: 1px solid rgba(45,49,72,0.5); animation: fadeIn 0.3s; }
+.live-finding-sev { min-width: 60px; text-align: center; }
+.live-finding-title { font-weight: 600; font-size: 12px; flex: 1; }
+.live-finding-phase { font-size: 11px; color: var(--text2); }
+.live-finding-url { font-size: 11px; color: var(--text2); max-width: 300px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.live-phase-row { display: grid; grid-template-columns: 40px 1fr 80px 80px; gap: 8px; padding: 8px 14px; border-bottom: 1px solid rgba(45,49,72,0.5); font-size: 12px; align-items: center; }
+.live-phase-num { font-weight: 700; color: var(--accent2); }
+.live-phase-bar { height: 4px; background: var(--border); border-radius: 2px; overflow: hidden; margin-top: 4px; }
+.live-phase-bar-fill { height: 100%; background: var(--accent); border-radius: 2px; transition: width 0.3s; }
+
+@keyframes fadeIn { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: translateY(0); } }
+@keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
+.scanning-indicator { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--accent); animation: pulse 1.5s ease-in-out infinite; margin-right: 6px; }
+
 .expandable { cursor: pointer; }
 .expandable::before { content: "▸ "; color: var(--text2); }
 .expandable.open::before { content: "▾ "; }
@@ -190,6 +229,33 @@ tr:hover td { background: rgba(99,102,241,0.05); }
     </div>
     <div id="progress-container" style="display:none; margin-top:16px;">
       <div class="progress-log" id="progress-log"></div>
+      <div class="live-panel" id="live-panel" style="display:none;">
+        <div class="live-header">
+          <div class="phase-name"><span class="scanning-indicator"></span><span id="live-phase-text">Initializing...</span></div>
+          <div class="counters">
+            <span>Tests: <strong id="live-tests-count">0</strong></span>
+            <span>Findings: <strong id="live-findings-count">0</strong></span>
+            <span>Phases: <strong id="live-phases-count">0</strong></span>
+          </div>
+        </div>
+        <div class="live-tabs">
+          <div class="live-tab active" onclick="switchLiveTab('tests')">Live Payloads &amp; Responses</div>
+          <div class="live-tab" onclick="switchLiveTab('findings')">Findings Detected</div>
+          <div class="live-tab" onclick="switchLiveTab('phases')">Phase Progress</div>
+        </div>
+        <div class="live-body" id="live-body-tests">
+          <div style="padding:6px 10px;font-size:10px;font-weight:600;color:var(--text2);display:grid;grid-template-columns:100px 1fr 1fr;gap:1px;background:var(--surface2);">
+            <div style="padding:4px 10px;">TOOL</div><div style="padding:4px 10px;">REQUEST / PAYLOAD</div><div style="padding:4px 10px;">RESPONSE</div>
+          </div>
+          <div id="live-tests-body"></div>
+        </div>
+        <div class="live-body" id="live-body-findings" style="display:none;">
+          <div id="live-findings-body"></div>
+        </div>
+        <div class="live-body" id="live-body-phases" style="display:none;">
+          <div id="live-phases-body"></div>
+        </div>
+      </div>
     </div>
   </div>
 
@@ -232,6 +298,8 @@ tr:hover td { background: rgba(99,102,241,0.05); }
 <script>
 let currentScanId = null;
 let pollInterval = null;
+let liveTestOffset = 0;
+let liveFindingOffset = 0;
 
 async function init() {
   const models = await (await fetch('/api/models')).json();
@@ -318,6 +386,17 @@ async function startScan() {
   btn.textContent = 'Scanning...';
   document.getElementById('progress-log').textContent = 'Starting scan...\n';
 
+  liveTestOffset = 0;
+  liveFindingOffset = 0;
+  document.getElementById('live-tests-body').innerHTML = '';
+  document.getElementById('live-findings-body').innerHTML = '';
+  document.getElementById('live-phases-body').innerHTML = '';
+  document.getElementById('live-panel').style.display = 'block';
+  document.getElementById('live-phase-text').textContent = 'Initializing...';
+  document.getElementById('live-tests-count').textContent = '0';
+  document.getElementById('live-findings-count').textContent = '0';
+  document.getElementById('live-phases-count').textContent = '0';
+
   const body = {
     target_url: url,
     username: document.getElementById('username').value,
@@ -334,17 +413,23 @@ async function startScan() {
 
   currentScanId = data.scan_id;
   loadScans();
-  pollInterval = setInterval(() => pollScanStatus(data.scan_id), 3000);
+  pollInterval = setInterval(() => pollScanStatus(data.scan_id), 2000);
 }
 
 async function pollScanStatus(scanId) {
   try {
-    const resp = await fetch(`/api/scan/${scanId}`);
-    const data = await resp.json();
+    const [statusResp, liveResp] = await Promise.all([
+      fetch(`/api/scan/${scanId}`),
+      fetch(`/api/scan/${scanId}/live?since_test=${liveTestOffset}&since_finding=${liveFindingOffset}`)
+    ]);
+    const data = await statusResp.json();
+    const live = await liveResp.json();
+
     const log = document.getElementById('progress-log');
     if (data.progress) log.textContent = data.progress.join('\n');
     log.scrollTop = log.scrollHeight;
 
+    renderLiveData(live);
     loadScans();
 
     if (data.status === 'completed' || data.status === 'error') {
@@ -355,11 +440,91 @@ async function pollScanStatus(scanId) {
       btn.textContent = 'Start Scan';
       if (data.status === 'completed') {
         document.getElementById('scan-status-msg').textContent = `Scan complete! ${data.findings_count || 0} findings, $${(data.cost || 0).toFixed(4)}`;
+        document.getElementById('live-phase-text').innerHTML = '<span style="color:var(--green)">Scan Complete</span>';
       } else {
         document.getElementById('scan-status-msg').textContent = `Error: ${data.error || 'Unknown'}`;
+        document.getElementById('live-phase-text').innerHTML = '<span style="color:var(--red)">Scan Error</span>';
       }
     }
-  } catch(e) { /* network hiccup, retry on next poll */ }
+  } catch(e) { /* retry on next poll */ }
+}
+
+function renderLiveData(live) {
+  if (live.current_phase) document.getElementById('live-phase-text').textContent = live.current_phase;
+  document.getElementById('live-tests-count').textContent = live.tests_total || 0;
+  document.getElementById('live-findings-count').textContent = live.findings_total || 0;
+  document.getElementById('live-phases-count').textContent = (live.phases || []).length;
+
+  const testsBody = document.getElementById('live-tests-body');
+  if (live.tests && live.tests.length) {
+    live.tests.forEach(t => {
+      const row = document.createElement('div');
+      row.className = 'live-test-row';
+      const reqParts = [];
+      if (t.request) {
+        if (typeof t.request === 'object') {
+          Object.entries(t.request).forEach(([k,v]) => reqParts.push(`${k}: ${v}`));
+        } else { reqParts.push(String(t.request)); }
+      }
+      const respParts = [];
+      if (t.response) {
+        if (typeof t.response === 'object') {
+          Object.entries(t.response).forEach(([k,v]) => {
+            const cls = k === 'status' ? (parseInt(v) < 400 ? 'status-ok' : 'status-err') : (k === 'anomaly' && v === 'True' ? 'anomaly' : '');
+            respParts.push(`<span class="${cls}">${esc(k)}: ${esc(v)}</span>`);
+          });
+        } else { respParts.push(esc(String(t.response))); }
+      }
+      row.innerHTML = `
+        <div class="live-test-cell live-test-tool">${esc(t.tool)}</div>
+        <div class="live-test-cell live-test-req">${reqParts.map(r => esc(r)).join('<br>')}</div>
+        <div class="live-test-cell live-test-resp">${respParts.join('<br>')}</div>`;
+      testsBody.appendChild(row);
+    });
+    liveTestOffset += live.tests.length;
+    testsBody.scrollTop = testsBody.scrollHeight;
+    testsBody.parentElement.scrollTop = testsBody.parentElement.scrollHeight;
+  }
+
+  const findingsBody = document.getElementById('live-findings-body');
+  if (live.findings && live.findings.length) {
+    live.findings.forEach(f => {
+      const row = document.createElement('div');
+      row.className = 'live-finding-row';
+      const sevClass = `sev-${(f.severity || 'info').toLowerCase()}`;
+      row.innerHTML = `
+        <div class="live-finding-sev"><span class="severity ${sevClass}">${esc(f.severity)}</span></div>
+        <div class="live-finding-title">${esc(f.title)}</div>
+        <div class="live-finding-url" title="${esc(f.url)}">${esc(f.url)}</div>
+        <div class="live-finding-phase">${esc(f.phase)}</div>`;
+      findingsBody.appendChild(row);
+    });
+    liveFindingOffset += live.findings.length;
+    findingsBody.scrollTop = findingsBody.scrollHeight;
+    findingsBody.parentElement.scrollTop = findingsBody.parentElement.scrollHeight;
+  }
+
+  const phasesBody = document.getElementById('live-phases-body');
+  if (live.phases && live.phases.length) {
+    phasesBody.innerHTML = '';
+    live.phases.forEach(ph => {
+      const row = document.createElement('div');
+      row.className = 'live-phase-row';
+      row.innerHTML = `
+        <div class="live-phase-num">${ph.phase}</div>
+        <div>${esc(ph.name)}</div>
+        <div style="font-size:11px;color:var(--text2)">${ph.tool_calls} tests</div>
+        <div style="font-size:11px;color:${ph.findings > 0 ? 'var(--green)' : 'var(--text2)'}">${ph.findings} findings</div>`;
+      phasesBody.appendChild(row);
+    });
+  }
+}
+
+function switchLiveTab(tab) {
+  document.querySelectorAll('.live-tab').forEach(t => t.classList.remove('active'));
+  document.querySelectorAll('.live-body').forEach(b => b.style.display = 'none');
+  event.target.classList.add('active');
+  document.getElementById('live-body-' + tab).style.display = 'block';
 }
 
 async function viewResults(scanId) {

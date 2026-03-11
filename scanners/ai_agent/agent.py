@@ -54,8 +54,10 @@ async def run_scan(
     model: str,
     router: LLMRouter,
     config_dir: str | None = None,
+    on_progress: callable | None = None,
 ) -> tuple[list[dict], dict]:
     config_dir = config_dir or os.getcwd()
+    _cb = on_progress or (lambda *a, **k: None)
     findings: list[dict] = []
     metrics = {
         "pages_crawled": 0,
@@ -77,9 +79,11 @@ async def run_scan(
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
         print(f"  [AUTH] Authenticating to {target.url}...")
+        _cb("auth", {"status": "authenticating", "url": target.url})
         auth_session = await authenticate(browser, target, router, model)
         page = auth_session.page
         print(f"  [AUTH] Auth type: {auth_session._auth_type}, URL after login: {page.url}")
+        _cb("auth", {"status": "done", "type": auth_session._auth_type, "url": page.url})
         if auth_session._auth_type != "bearer":
             metrics["auth_pages_detected"] += 1
 
@@ -113,15 +117,18 @@ async def run_scan(
 
         app_info = await detect_app_type(page)
         print(f"  [DETECT] SPA: {app_info.get('is_spa')}, Framework: {app_info.get('framework')}, WebSockets: {app_info.get('has_websockets')}")
+        _cb("detect", {"is_spa": app_info.get("is_spa"), "framework": app_info.get("framework")})
         phases = get_phases(target.scan_mode, app_info)
         system_prompt = build_system_prompt(target, registry, app_info)
         messages: list[dict] = [{"role": "system", "content": system_prompt}]
 
         print(f"  [SCAN] Starting {len(phases)} phases...")
+        _cb("scan_start", {"total_phases": len(phases)})
         for phase_idx, phase in enumerate(phases, 1):
             phase_tool_calls = 0
             phase_findings_before = len(findings)
             print(f"  [{phase_idx}/{len(phases)}] Phase: {phase.name} ({phase.id})...", end="", flush=True)
+            _cb("phase_start", {"phase": phase_idx, "total": len(phases), "name": phase.name, "id": phase.id})
             messages.append({"role": "user", "content": phase.prompt})
 
             for step in range(phase.max_steps):
@@ -181,6 +188,7 @@ async def run_scan(
                             if url not in metrics["pages_list"]:
                                 metrics["pages_list"].append(url)
                                 metrics["pages_crawled"] += 1
+                                _cb("crawl", {"url": url, "count": metrics["pages_crawled"]})
                         elif fn_name == "get_forms" and result.get("forms"):
                             metrics["forms_found"] += len(result["forms"])
                         elif fn_name in ("get_network_log", "intercept_requests"):
@@ -190,20 +198,30 @@ async def run_scan(
                                 args_parsed = json.loads(fn_args) if isinstance(fn_args, str) else fn_args
                             except Exception:
                                 args_parsed = {"raw": fn_args}
+                            resp_summary = {
+                                k: v for k, v in result.items()
+                                if k in ("status", "error", "reflected", "anomaly", "body_snippet", "results", "accessible")
+                            } if isinstance(result, dict) else str(result)[:200]
                             metrics["test_log"].append({
                                 "phase": phase.id,
                                 "tool": fn_name,
                                 "request": args_parsed,
-                                "response_summary": {
-                                    k: v for k, v in result.items()
-                                    if k in ("status", "error", "reflected", "anomaly", "body_snippet", "results", "accessible")
-                                } if isinstance(result, dict) else str(result)[:200],
+                                "response_summary": resp_summary,
+                            })
+                            _cb("tool_call", {
+                                "phase": phase.name,
+                                "tool": fn_name,
+                                "request": {k: str(v)[:150] for k, v in args_parsed.items()} if isinstance(args_parsed, dict) else str(args_parsed)[:200],
+                                "response": {k: str(v)[:100] for k, v in resp_summary.items()} if isinstance(resp_summary, dict) else str(resp_summary)[:200],
                             })
                     if phase_tool_calls % 5 == 0 and _estimate_tokens(messages) > TRIM_TARGET_TOKENS:
                         messages = trim_context(messages, max_tokens=TRIM_TARGET_TOKENS)
                 else:
                     content = msg_dict.get("content") or getattr(msg, "content", "") or ""
-                    findings.extend(extract_findings(str(content)))
+                    new_f = extract_findings(str(content))
+                    findings.extend(new_f)
+                    for f in new_f:
+                        _cb("finding", {"title": f.get("title", ""), "severity": f.get("severity", ""), "url": f.get("url", ""), "phase": phase.name})
                     break
 
             phase_new_findings = len(findings) - phase_findings_before
@@ -215,6 +233,7 @@ async def run_scan(
                 "findings": phase_new_findings,
             })
             print(f" {phase_tool_calls} tool calls, {phase_new_findings} findings")
+            _cb("phase_end", {"phase": phase_idx, "name": phase.name, "tool_calls": phase_tool_calls, "findings": phase_new_findings})
             messages = trim_context(messages, max_tokens=TRIM_TARGET_TOKENS)
 
         metrics["api_endpoints_found"] = len(registry.get_all())

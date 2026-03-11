@@ -175,7 +175,49 @@ def _run_scan_in_thread(scan_id, target_url, username, password, model, scan_mod
 
 async def _run_scan_task(scan_id, target_url, username, password, model, scan_mode, auth_type, api_imports=None):
     try:
-        SCANS[scan_id]["progress"].append("Initializing LLM router...")
+        scan = SCANS[scan_id]
+        scan["progress"].append("Initializing LLM router...")
+        scan["live_phases"] = []
+        scan["live_tests"] = []
+        scan["live_findings"] = []
+        scan["current_phase"] = ""
+
+        def _on_progress(event, data):
+            if event == "auth":
+                scan["progress"].append(f"Auth: {data.get('status', '')} {data.get('type', '')}")
+            elif event == "detect":
+                scan["progress"].append(f"Detected: SPA={data.get('is_spa')}, Framework={data.get('framework')}")
+            elif event == "scan_start":
+                scan["progress"].append(f"Starting {data['total_phases']} scan phases...")
+            elif event == "phase_start":
+                scan["current_phase"] = f"[{data['phase']}/{data['total']}] {data['name']}"
+                scan["progress"].append(scan["current_phase"])
+            elif event == "phase_end":
+                scan["live_phases"].append({
+                    "phase": data["phase"],
+                    "name": data["name"],
+                    "tool_calls": data["tool_calls"],
+                    "findings": data["findings"],
+                })
+            elif event == "tool_call":
+                scan["live_tests"].append({
+                    "phase": data.get("phase", ""),
+                    "tool": data.get("tool", ""),
+                    "request": data.get("request", {}),
+                    "response": data.get("response", {}),
+                })
+                if len(scan["live_tests"]) > 200:
+                    scan["live_tests"] = scan["live_tests"][-200:]
+            elif event == "finding":
+                scan["live_findings"].append({
+                    "title": data.get("title", ""),
+                    "severity": data.get("severity", ""),
+                    "url": data.get("url", ""),
+                    "phase": data.get("phase", ""),
+                })
+            elif event == "crawl":
+                scan["progress"].append(f"Crawled: {data.get('url', '')} (#{data.get('count', 0)})")
+
         router = LLMRouter(models=[model])
 
         resolved_imports = {}
@@ -195,10 +237,10 @@ async def _run_scan_task(scan_id, target_url, username, password, model, scan_mo
         }
         target = load_targets_from_dict(target_dict)
 
-        SCANS[scan_id]["progress"].append(f"Starting scan with {model}...")
+        scan["progress"].append(f"Starting scan with {model}...")
         start = time.perf_counter()
         config_dir = str(BASE / "config")
-        findings, metrics = await run_scan(target, model, router, config_dir)
+        findings, metrics = await run_scan(target, model, router, config_dir, on_progress=_on_progress)
         duration = time.perf_counter() - start
 
         model_slug = model.replace("/", "_").replace(".", "_").replace(":", "_")
@@ -226,11 +268,43 @@ async def _run_scan_task(scan_id, target_url, username, password, model, scan_mo
 @app.get("/api/scan/{scan_id}")
 async def get_scan_status(scan_id: str, creds=Depends(_verify)):
     if scan_id in SCANS:
-        return SCANS[scan_id]
+        s = SCANS[scan_id]
+        return {
+            "scan_id": scan_id,
+            "status": s.get("status"),
+            "target": s.get("target"),
+            "model": s.get("model"),
+            "started": s.get("started"),
+            "progress": s.get("progress", []),
+            "current_phase": s.get("current_phase", ""),
+            "result_file": s.get("result_file"),
+            "error": s.get("error"),
+            "duration": s.get("duration"),
+            "cost": s.get("cost"),
+        }
     fname = _find_result_file(scan_id)
     if fname:
         return {"status": "completed", "result_file": os.path.basename(fname)}
     return JSONResponse({"error": "Scan not found"}, status_code=404)
+
+
+@app.get("/api/scan/{scan_id}/live")
+async def get_scan_live(scan_id: str, since_test: int = 0, since_finding: int = 0, creds=Depends(_verify)):
+    """Return live scan activity: recent tests, findings, and phases since given offsets."""
+    if scan_id not in SCANS:
+        return JSONResponse({"error": "Scan not found"}, status_code=404)
+    s = SCANS[scan_id]
+    tests = s.get("live_tests", [])
+    findings = s.get("live_findings", [])
+    return {
+        "status": s.get("status"),
+        "current_phase": s.get("current_phase", ""),
+        "phases": s.get("live_phases", []),
+        "tests": tests[since_test:],
+        "tests_total": len(tests),
+        "findings": findings[since_finding:],
+        "findings_total": len(findings),
+    }
 
 
 @app.delete("/api/scan/{scan_id}")
