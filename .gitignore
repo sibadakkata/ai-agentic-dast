@@ -1,0 +1,46 @@
+# Credentials & keys
+config/targets.env
+*.env
+!*.env.example
+*.pem
+
+# Results (generated at runtime)
+results/raw/
+results/reports/
+results/normalized/
+results/cache/
+results/errors.log
+
+# Archive (POC-specific data)
+archive/
+
+# Build artifacts
+*.zip
+
+# Temp / test scripts
+test_*.py
+Winword.rtf
+~$*
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# IDE
+.vscode/
+.cursor/
+*.swp
+*.swo
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Imports (user-uploaded at runtime)
+imports/*.json
+imports/*.xml
+imports/*.yaml
+imports/*.yml

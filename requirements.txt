@@ -1,0 +1,15 @@
+litellm>=1.40.0
+playwright>=1.44.0
+python-dotenv>=1.0.0
+httpx>=0.27.0
+pyyaml>=6.0
+lxml>=5.0.0
+pyjwt>=2.8.0
+pyotp>=2.9.0
+websockets>=12.0
+fpdf2>=2.8.0
+requests>=2.31.0
+boto3>=1.34.0
+fastapi>=0.115.0
+python-multipart>=0.0.9
+uvicorn[standard]>=0.32.0

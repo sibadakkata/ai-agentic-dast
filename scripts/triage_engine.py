@@ -1,0 +1,900 @@
+"""Universal DAST Triage Engine - works for ANY target (website, API, SPA).
+
+Three-layer classification:
+  Layer 1: Evidence-based auto-classification (deterministic rules)
+  Layer 2: Confidence scoring from HTTP evidence patterns
+  Layer 3: NEEDS_VERIFICATION for unknowns -> human queue
+
+No target-specific logic. No LLM calls. No hardcoded URLs.
+CVE data from NVD/OSV (via cve_lookup.py).
+CWE mappings for generic weakness categories.
+"""
+
+import json
+import re
+import os
+import sys
+
+sys.stdout.reconfigure(encoding="utf-8")
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from cve_lookup import enrich_library_finding, extract_libraries
+
+# ══════════════════════════════════════════════════════════════════════
+# SEVERITY POLICY (same for every target):
+#   Critical = confirmed RCE, data exfil, or account takeover WITH proof
+#   High     = confirmed active exploit with demonstrated real impact
+#   Medium   = known CVE with documented exploit path (not exploited here)
+#   Low      = config weakness, defense-in-depth, theoretical, recon aid
+#   Info     = best practice, no security impact
+# ══════════════════════════════════════════════════════════════════════
+
+SEV_FROM_CVSS = lambda s: (
+    "Critical" if s >= 9.0 else
+    "High" if s >= 7.0 else
+    "Medium" if s >= 4.0 else
+    "Low" if s > 0 else "Info"
+)
+
+# CWE database for generic weakness types (no CVE, just category)
+CWE_PROFILES = {
+    "missing_hsts":     {"cwe": "CWE-319", "cvss": 4.3, "vec": "AV:N/AC:L/PR:N/UI:R/S:U/C:L/I:N/A:N"},
+    "missing_csp":      {"cwe": "CWE-693", "cvss": 4.7, "vec": "AV:N/AC:L/PR:N/UI:R/S:C/C:L/I:N/A:N"},
+    "missing_xframe":   {"cwe": "CWE-1021","cvss": 4.3, "vec": "AV:N/AC:L/PR:N/UI:R/S:U/C:N/I:L/A:N"},
+    "missing_xcto":     {"cwe": "CWE-16",  "cvss": 3.1, "vec": "AV:N/AC:H/PR:N/UI:R/S:U/C:L/I:N/A:N"},
+    "missing_sri":      {"cwe": "CWE-353", "cvss": 6.1, "vec": "AV:N/AC:H/PR:N/UI:R/S:C/C:H/I:N/A:N"},
+    "rate_limit":       {"cwe": "CWE-307", "cvss": 5.3, "vec": "AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N"},
+    "csrf":             {"cwe": "CWE-352", "cvss": 4.3, "vec": "AV:N/AC:L/PR:N/UI:R/S:U/C:N/I:L/A:N"},
+    "info_disclosure":  {"cwe": "CWE-200", "cvss": 3.7, "vec": "AV:N/AC:H/PR:N/UI:N/S:U/C:L/I:N/A:N"},
+    "error_info":       {"cwe": "CWE-209", "cvss": 3.7, "vec": "AV:N/AC:H/PR:N/UI:N/S:U/C:L/I:N/A:N"},
+    "error_handling":   {"cwe": "CWE-391", "cvss": 3.7, "vec": "AV:N/AC:H/PR:N/UI:N/S:U/C:L/I:N/A:N"},
+    "input_validation": {"cwe": "CWE-20",  "cvss": 3.7, "vec": "AV:N/AC:H/PR:N/UI:N/S:U/C:N/I:L/A:N"},
+    "open_redirect":    {"cwe": "CWE-601", "cvss": 4.7, "vec": "AV:N/AC:L/PR:N/UI:R/S:C/C:L/I:N/A:N"},
+    "session_mgmt":     {"cwe": "CWE-384", "cvss": 5.3, "vec": "AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N"},
+    "cors":             {"cwe": "CWE-942", "cvss": 3.7, "vec": "AV:N/AC:H/PR:N/UI:N/S:U/C:L/I:N/A:N"},
+    "logging":          {"cwe": "CWE-778", "cvss": 3.7, "vec": "AV:N/AC:H/PR:N/UI:N/S:U/C:L/I:N/A:N"},
+    "debug_staging":    {"cwe": "CWE-489", "cvss": 3.7, "vec": "AV:N/AC:H/PR:N/UI:N/S:U/C:L/I:N/A:N"},
+    "third_party":      {"cwe": "CWE-829", "cvss": 4.7, "vec": "AV:N/AC:H/PR:N/UI:R/S:C/C:L/I:L/A:N"},
+    "prototype_pollution": {"cwe": "CWE-1321", "cvss": 5.3, "vec": "AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N"},
+    "auth_bypass":      {"cwe": "CWE-287", "cvss": 7.5, "vec": "AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N"},
+    "sqli_confirmed":   {"cwe": "CWE-89",  "cvss": 9.8, "vec": "AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"},
+    "xss_confirmed":    {"cwe": "CWE-79",  "cvss": 6.1, "vec": "AV:N/AC:L/PR:N/UI:R/S:C/C:L/I:L/A:N"},
+    "ssrf_confirmed":   {"cwe": "CWE-918", "cvss": 7.5, "vec": "AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N"},
+    "xxe_confirmed":    {"cwe": "CWE-611", "cvss": 7.5, "vec": "AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N"},
+    "rce_confirmed":    {"cwe": "CWE-78",  "cvss": 9.8, "vec": "AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"},
+    "path_traversal_confirmed": {"cwe": "CWE-22", "cvss": 7.5, "vec": "AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N"},
+    "idor_confirmed":   {"cwe": "CWE-639", "cvss": 6.5, "vec": "AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:N/A:N"},
+    "deserialization":  {"cwe": "CWE-502", "cvss": 8.1, "vec": "AV:N/AC:H/PR:N/UI:N/S:U/C:H/I:H/A:H"},
+}
+
+
+def _cwe_apply(r, profile_key):
+    p = CWE_PROFILES.get(profile_key, {})
+    r["cwe"] = p.get("cwe", "")
+    r["cvss"] = p.get("cvss", 0.0)
+    r["cvss_vector"] = p.get("vec", "")
+
+
+# ══════════════════════════════════════════════════════════════════════
+# HELPER: extract evidence signals from finding + test logs
+# ══════════════════════════════════════════════════════════════════════
+
+def find_tests(finding, test_log, limit=5):
+    url = (finding.get("url", "") or "").split("?")[0]
+    param = finding.get("parameter", "") or ""
+    matched = []
+    for t in test_log:
+        req = t.get("request", {})
+        t_url = req.get("url", "") or req.get("endpoint", "")
+        score = 0
+        if url and url in t_url:
+            score += 3
+        if param and param.lower() in json.dumps(req, default=str).lower():
+            score += 2
+        if score > 0:
+            matched.append((score, t))
+    matched.sort(key=lambda x: -x[0])
+    return [m[1] for m in matched[:limit]]
+
+
+def get_statuses(tests):
+    statuses = []
+    for t in tests:
+        resp = t.get("response_summary", {})
+        if not isinstance(resp, dict):
+            continue
+        s = resp.get("status")
+        if s:
+            statuses.append(s)
+        for r in resp.get("results", []):
+            if isinstance(r, dict) and r.get("status"):
+                statuses.append(r["status"])
+    return statuses
+
+
+def get_response_bodies(tests):
+    bodies = []
+    for t in tests:
+        resp = t.get("response_summary", {})
+        if not isinstance(resp, dict):
+            continue
+        body = resp.get("body_snippet", "") or resp.get("body", "") or ""
+        if isinstance(body, dict):
+            body = json.dumps(body, default=str)
+        bodies.append(str(body).lower())
+    return bodies
+
+
+def _build_curl(t):
+    req = t.get("request", {})
+    m = req.get("method", "GET")
+    u = req.get("url", "") or req.get("endpoint", "")
+    if not u:
+        return ""
+    parts = [f"curl -X {m}"]
+    for k, v in list(req.get("headers", {}).items())[:4]:
+        parts.append(f"  -H '{k}: {str(v)[:60]}'")
+    body = req.get("body", "")
+    if body:
+        b = json.dumps(body, default=str) if isinstance(body, (dict, list)) else str(body)
+        parts.append(f"  -d '{b[:250]}'")
+    parts.append(f"  '{u[:200]}'")
+    return " \\\n".join(parts)
+
+
+# ══════════════════════════════════════════════════════════════════════
+# LAYER 2: Confidence scoring
+# ══════════════════════════════════════════════════════════════════════
+
+SQL_ERROR_KEYWORDS = [
+    "syntax error", "mysql", "postgresql", "oracle", "sql server", "sqlite",
+    "unclosed quotation", "you have an error in your sql", "odbc", "jdbc",
+    "ora-", "pg_query", "microsoft ole db", "warning: mysql", "mariadb",
+    "sqlstate", "pdo_", "pg_exec", "unterminated string",
+]
+
+XSS_REFLECTION_KEYWORDS = [
+    "<script", "onerror=", "onload=", "javascript:", "alert(", "prompt(",
+    "confirm(", "<img", "<svg", "onfocus=",
+]
+
+SSRF_SUCCESS_KEYWORDS = [
+    "ami-id", "instance-id", "iam", "security-credentials", "user-data",
+    "metadata", "169.254.169.254", "localhost", "127.0.0.1",
+    "internal", "root:", "/etc/passwd", "compute.internal",
+]
+
+XXE_SUCCESS_KEYWORDS = [
+    "root:x:0", "/etc/passwd", "win.ini", "[extensions]",
+    "<!entity", "file:///", "expect://",
+]
+
+PATH_TRAVERSAL_KEYWORDS = [
+    "root:x:0", "[boot loader]", "[extensions]", "win.ini",
+    "/etc/shadow", "web.config", "<?xml",
+]
+
+COMMAND_INJECTION_KEYWORDS = [
+    "uid=", "gid=", "root:x:", "total ", "drwxr", "-rw-r",
+    "volume serial", "directory of", "windows\\system32",
+]
+
+DESERIALIZATION_KEYWORDS = [
+    "java.lang", "runtimeexception", "classnotfound",
+    "objectinputstream", "readobject", "ysoserial",
+    "pickle", "marshal", "__reduce__",
+]
+
+
+def _compute_confidence(finding, tests, statuses, bodies, evidence):
+    """Score finding confidence from -10 to +10 based on HTTP evidence."""
+    score = 0
+    title = (finding.get("title", "") or "").lower()
+    payload = str(finding.get("payload", "") or "").lower()
+
+    # ── Negative signals (reduces confidence) ──
+    if not statuses:
+        score -= 3  # no test data at all
+
+    all_redirects = all(s in (301, 302, 303, 307, 308) for s in statuses) if statuses else False
+    if all_redirects:
+        score -= 4  # scanner wasn't authenticated
+
+    all_403 = all(s == 403 for s in statuses) if statuses else False
+    if all_403:
+        score -= 3  # access denied
+
+    all_404 = all(s == 404 for s in statuses) if statuses else False
+    if all_404:
+        score -= 3  # endpoint not found
+
+    ev = str(finding.get("evidence", "") or "")
+    if not ev and not payload and not tests:
+        score -= 5  # zero evidence
+
+    # ── Positive signals (increases confidence) ──
+
+    # Payload reflected in response body
+    if payload and any(payload[:30] in b for b in bodies):
+        score += 3
+
+    # SQL errors in response
+    if any(kw in b for b in bodies for kw in SQL_ERROR_KEYWORDS):
+        score += 4
+
+    # XSS reflected
+    if any(kw in b for b in bodies for kw in XSS_REFLECTION_KEYWORDS):
+        score += 3
+
+    # SSRF: internal content in response
+    if any(kw in b for b in bodies for kw in SSRF_SUCCESS_KEYWORDS):
+        score += 4
+
+    # XXE: file content in response
+    if any(kw in b for b in bodies for kw in XXE_SUCCESS_KEYWORDS):
+        score += 5
+
+    # Path traversal: file content
+    if any(kw in b for b in bodies for kw in PATH_TRAVERSAL_KEYWORDS):
+        score += 5
+
+    # Command injection: OS output
+    if any(kw in b for b in bodies for kw in COMMAND_INJECTION_KEYWORDS):
+        score += 5
+
+    # Deserialization markers
+    if any(kw in b for b in bodies for kw in DESERIALIZATION_KEYWORDS):
+        score += 4
+
+    # Time-based: response took significantly longer (check evidence text)
+    if any(kw in evidence.lower() for kw in ["time-based", "sleep(", "delay", "5000ms", "10 second"]):
+        if any(kw in evidence.lower() for kw in ["confirmed", "differential", "measurable"]):
+            score += 3
+
+    # HTTP 200 with large response (potential data leak)
+    if any(s == 200 for s in statuses) and not all_redirects:
+        score += 1
+
+    # HTTP 500 without specific error = weak signal
+    if any(s == 500 for s in statuses):
+        has_specific_error = any(
+            any(kw in b for kw in SQL_ERROR_KEYWORDS + COMMAND_INJECTION_KEYWORDS)
+            for b in bodies
+        )
+        if not has_specific_error:
+            score -= 1  # generic crash, not specific vuln
+
+    return max(-10, min(10, score))
+
+
+# ══════════════════════════════════════════════════════════════════════
+# LAYER 1 + 2 + 3: Main classify function
+# ══════════════════════════════════════════════════════════════════════
+
+def classify(finding, test_log):
+    """Universal triage: classify any DAST finding from any target.
+    Returns dict with verdict, severity, CVE/CWE, evidence, steps, etc."""
+
+    title = (finding.get("title", "") or "").lower()
+    ev_raw = finding.get("evidence", "") or ""
+    evidence = str(ev_raw).lower() if not isinstance(ev_raw, dict) else json.dumps(ev_raw).lower()
+    severity = finding.get("severity", "Info")
+    url = finding.get("url", "") or ""
+    payload = str(finding.get("payload", "") or "")
+
+    tests = find_tests(finding, test_log)
+    statuses = get_statuses(tests)
+    bodies = get_response_bodies(tests)
+    all_redirects = all(s in (301, 302, 303, 307, 308) for s in statuses) if statuses else False
+    confidence = _compute_confidence(finding, tests, statuses, bodies, evidence)
+
+    r = {
+        "title": finding.get("title", ""),
+        "scanner_severity": severity,
+        "owasp": finding.get("owasp_category", "") or "",
+        "url": url,
+        "parameter": finding.get("parameter", "") or "",
+        "payload": payload[:200],
+        "scanner_evidence": str(ev_raw)[:500],
+        "verdict": "NEEDS_VERIFICATION",
+        "final_severity": "Low",
+        "cve": "", "cwe": "", "cvss": 0.0, "cvss_vector": "",
+        "exploit_evidence": "",
+        "steps": "",
+        "dev_action": "",
+        "reason": "",
+        "confidence": confidence,
+        "curl": _build_curl(tests[0]) if tests else "",
+        "response_status": list(set(statuses))[:6],
+    }
+
+    # ==================================================================
+    # LAYER 1A: NOT A FINDING - positive observations
+    # ==================================================================
+    positive_kw = [
+        "not found", "properly configured", "properly restricted",
+        "properly implemented", "properly secured", "no vulnerabilit",
+        "good:", "not vulnerable", "no issues", "robust input",
+        "secure cookie config", "https enforcement properly",
+        "session management strength",
+    ]
+    if any(k in title for k in positive_kw):
+        r.update(verdict="NOT_A_FINDING", final_severity="Info",
+                 reason="Positive security observation.",
+                 dev_action="No action required.")
+        return r
+
+    # ==================================================================
+    # LAYER 1B: AUTO FALSE POSITIVE - provably wrong for ANY target
+    # ==================================================================
+
+    # Zero evidence
+    if not ev_raw and not payload and not tests:
+        r.update(verdict="FALSE_POSITIVE", final_severity="Info",
+                 reason="Zero evidence: no payload, no test data, no scanner evidence. "
+                        "Cannot validate a finding with no supporting data.",
+                 dev_action="No action - no evidence.")
+        return r
+
+    # All responses are redirects = scanner wasn't authenticated
+    if statuses and all_redirects:
+        r.update(verdict="NEEDS_VERIFICATION", final_severity="Low",
+                 reason=f"All {len(statuses)} responses were {list(set(statuses))} redirects. "
+                        "Scanner likely wasn't authenticated for this endpoint. "
+                        "Cannot validate without authenticated session.",
+                 steps="1. Authenticate with valid credentials in Burp Suite\n"
+                       "2. Replay the test against this endpoint\n"
+                       "3. Classify based on authenticated response",
+                 dev_action="Re-test with authenticated session.")
+        return r
+
+    # HPKP (deprecated by all browsers in 2018)
+    if "hpkp" in title or "public key pin" in title:
+        r.update(verdict="FALSE_POSITIVE", final_severity="Info",
+                 reason="HTTP Public Key Pinning (HPKP) was deprecated by Chrome in 2018 "
+                        "and removed from all browsers. Not a valid finding.",
+                 dev_action="No action. HPKP is deprecated.")
+        return r
+
+    # SameSite=Lax flagged as weak (it's the OWASP recommendation)
+    if "samesite" in title and "lax" in title:
+        r.update(verdict="FALSE_POSITIVE", final_severity="Info",
+                 reason="SameSite=Lax is the browser DEFAULT and OWASP-recommended setting. "
+                        "Strict breaks legitimate cross-site navigation.",
+                 dev_action="No action. SameSite=Lax is correct.")
+        return r
+
+    # performance.timing API flagged (standard browser API, not a vuln)
+    if "performance" in title and ("timing" in title or "api" in title):
+        if "navigation" in title or "resource" in title or "performance.timing" in evidence:
+            r.update(verdict="FALSE_POSITIVE", final_severity="Info",
+                     reason="performance.timing is a standard browser API on every website. "
+                            "Not a vulnerability.",
+                     dev_action="No action.")
+            return r
+
+    # Dynamic script creation (standard JS, not a vuln without XSS)
+    if "dynamic script" in title and ("creation" in title or "source" in title):
+        r.update(verdict="FALSE_POSITIVE", final_severity="Info",
+                 reason="document.createElement('script') is standard JavaScript used by "
+                        "every SPA and analytics library. Not a vulnerability without XSS.",
+                 dev_action="No action.")
+        return r
+
+    # ==================================================================
+    # LAYER 1C: INJECTION CHECKS - evidence-based for ANY target
+    # ==================================================================
+
+    # SQL Injection
+    if "sql" in title and "injection" in title:
+        has_sql_error = any(kw in evidence for kw in SQL_ERROR_KEYWORDS)
+        has_sql_body = any(kw in b for b in bodies for kw in SQL_ERROR_KEYWORDS)
+        has_data_extract = any(kw in evidence for kw in ["union select", "1=1", "table_name", "column_name"])
+
+        if has_sql_error or has_sql_body or has_data_extract:
+            _cwe_apply(r, "sqli_confirmed")
+            r.update(verdict="TRUE_POSITIVE", final_severity="High",
+                     cve=f"N/A ({r['cwe']}: SQL Injection)",
+                     reason="SQL error strings or data extraction confirmed in response. "
+                            "This is a real SQL injection.",
+                     steps=f"1. Send payload to {url}\n"
+                           f"2. Response contains SQL error: "
+                           f"{[kw for kw in SQL_ERROR_KEYWORDS if kw in evidence][:3]}\n"
+                           "3. CONFIRMED - database is directly exposed to injection",
+                     dev_action="Use parameterized queries. Never concatenate user input into SQL.")
+            return r
+        else:
+            _cwe_apply(r, "error_handling")
+            r.update(verdict="FALSE_POSITIVE", final_severity="Low",
+                     cve=f"N/A ({r['cwe']}: Improper Error Handling)",
+                     reason="HTTP 500 on special characters but NO SQL error strings, "
+                            "no data extraction, no boolean/time-based differential. "
+                            "This is improper error handling (CWE-391), not SQL injection.",
+                     steps=f"1. Payload sent to {url}\n"
+                           "2. Response: HTTP 500 with generic error\n"
+                           "3. NO SQL keywords in response body\n"
+                           "4. CONCLUSION: error handling bug, not SQLi",
+                     dev_action="Return HTTP 400 for malformed input. Add input validation.")
+            return r
+
+    # XSS (Cross-Site Scripting)
+    if "xss" in title or "cross-site scripting" in title or "cross site scripting" in title:
+        reflected = any(kw in b for b in bodies for kw in XSS_REFLECTION_KEYWORDS)
+        reflected_ev = any(kw in evidence for kw in XSS_REFLECTION_KEYWORDS)
+
+        if reflected or reflected_ev:
+            _cwe_apply(r, "xss_confirmed")
+            r.update(verdict="TRUE_POSITIVE", final_severity="Medium",
+                     cve=f"N/A ({r['cwe']}: XSS)",
+                     reason="XSS payload reflected in response body. "
+                            "Medium because exploitation requires user interaction.",
+                     steps=f"1. Inject payload into {url}\n"
+                           "2. Payload reflected in response HTML\n"
+                           "3. Browser would execute injected script\n"
+                           "4. CONFIRMED - input not sanitized on output",
+                     dev_action="HTML-encode all output. Implement CSP.")
+            return r
+        else:
+            r.update(verdict="FALSE_POSITIVE", final_severity="Info",
+                     cwe="CWE-79",
+                     reason="XSS claimed but payload NOT reflected in response body. "
+                            "Input appears to be sanitized or rejected.",
+                     dev_action="No action - input is sanitized.")
+            return r
+
+    # SSRF (Server-Side Request Forgery)
+    if "ssrf" in title or "server-side request" in title:
+        has_internal = any(kw in b for b in bodies for kw in SSRF_SUCCESS_KEYWORDS)
+        has_internal_ev = any(kw in evidence for kw in SSRF_SUCCESS_KEYWORDS)
+
+        if (has_internal or has_internal_ev) and not all_redirects:
+            _cwe_apply(r, "ssrf_confirmed")
+            r.update(verdict="TRUE_POSITIVE", final_severity="High",
+                     cve=f"N/A ({r['cwe']}: SSRF)",
+                     reason="Internal/metadata content found in response. "
+                            "Server fetched an internal resource.",
+                     steps=f"1. Send SSRF payload to {url}\n"
+                           "2. Response contains internal content\n"
+                           "3. CONFIRMED - server fetches attacker-controlled URLs",
+                     dev_action="Whitelist allowed outbound URLs. Block RFC1918 and metadata IPs.")
+            return r
+        else:
+            r.update(verdict="FALSE_POSITIVE", final_severity="Info",
+                     cwe="CWE-918",
+                     reason="SSRF payloads returned redirects or generic responses. "
+                            "No internal/metadata content in response body. "
+                            "Server did not fetch the attacker URL.",
+                     dev_action="No action - server correctly rejected SSRF attempts.")
+            return r
+
+    # XXE (XML External Entity)
+    if "xxe" in title or "xml external" in title or "xml entity" in title:
+        has_file = any(kw in b for b in bodies for kw in XXE_SUCCESS_KEYWORDS)
+        has_file_ev = any(kw in evidence for kw in XXE_SUCCESS_KEYWORDS)
+
+        if has_file or has_file_ev:
+            _cwe_apply(r, "xxe_confirmed")
+            r.update(verdict="TRUE_POSITIVE", final_severity="High",
+                     cve=f"N/A ({r['cwe']}: XXE)",
+                     reason="External entity processed - file content or network access confirmed.",
+                     steps=f"1. Send XXE payload to {url}\n"
+                           "2. Response contains file content (e.g., /etc/passwd)\n"
+                           "3. CONFIRMED - XML parser processes external entities",
+                     dev_action="Disable external entities in XML parser. Use JSON instead of XML.")
+            return r
+        else:
+            r.update(verdict="FALSE_POSITIVE", final_severity="Info",
+                     cwe="CWE-611",
+                     reason="XXE payload sent but no file content or entity expansion in response.",
+                     dev_action="No action - XML parser appears to reject external entities.")
+            return r
+
+    # Path Traversal
+    if any(k in title for k in ["path traversal", "directory traversal",
+                                 "local file inclusion", "local file read", "file inclusion"]):
+        has_file = any(kw in b for b in bodies for kw in PATH_TRAVERSAL_KEYWORDS)
+        has_file_ev = any(kw in evidence for kw in PATH_TRAVERSAL_KEYWORDS)
+
+        if has_file or has_file_ev:
+            _cwe_apply(r, "path_traversal_confirmed")
+            r.update(verdict="TRUE_POSITIVE", final_severity="High",
+                     cve=f"N/A ({r['cwe']}: Path Traversal)",
+                     reason="File content from outside web root found in response.",
+                     steps=f"1. Send traversal payload (../../etc/passwd) to {url}\n"
+                           "2. Response contains OS file content\n"
+                           "3. CONFIRMED - application reads arbitrary files",
+                     dev_action="Validate and canonicalize file paths. Use allowlists.")
+            return r
+        else:
+            r.update(verdict="FALSE_POSITIVE", final_severity="Info",
+                     cwe="CWE-22",
+                     reason="Path traversal payload sent but no file content in response. "
+                            "Server appears to reject or sanitize path input.",
+                     dev_action="No action - path sanitization appears effective.")
+            return r
+
+    # Command Injection / RCE
+    # Note: "rce" removed as standalone - matches "subresource", "enforcement", "force"
+    if any(k in title for k in ["command injection", "remote code execution", "os command",
+                                 "code execution", "shell injection", "command execution"]):
+        has_output = any(kw in b for b in bodies for kw in COMMAND_INJECTION_KEYWORDS)
+        has_output_ev = any(kw in evidence for kw in COMMAND_INJECTION_KEYWORDS)
+
+        if has_output or has_output_ev:
+            _cwe_apply(r, "rce_confirmed")
+            r.update(verdict="TRUE_POSITIVE", final_severity="Critical",
+                     cve=f"N/A ({r['cwe']}: Command Injection)",
+                     reason="OS command output found in response. Server executed injected command.",
+                     steps=f"1. Send command injection payload to {url}\n"
+                           "2. Response contains OS output (uid, dir listing, etc.)\n"
+                           "3. CRITICAL - arbitrary command execution confirmed",
+                     dev_action="NEVER pass user input to OS commands. Use safe APIs.")
+            return r
+        else:
+            _cwe_apply(r, "error_handling")
+            r.update(verdict="FALSE_POSITIVE", final_severity="Low",
+                     reason="Command injection payload sent but no OS output in response. "
+                            "Server crashed or returned generic error.",
+                     dev_action="Improve error handling for unexpected input.")
+            return r
+
+    # Deserialization
+    if "deserialization" in title or "deserializ" in title:
+        has_markers = any(kw in b for b in bodies for kw in DESERIALIZATION_KEYWORDS)
+        has_markers_ev = any(kw in evidence for kw in DESERIALIZATION_KEYWORDS)
+
+        if has_markers or has_markers_ev:
+            _cwe_apply(r, "deserialization")
+            r.update(verdict="TRUE_POSITIVE", final_severity="High",
+                     cve=f"N/A ({r['cwe']}: Insecure Deserialization)",
+                     reason="Deserialization markers found in response.",
+                     dev_action="Do not deserialize untrusted data. Use allowlists for classes.")
+            return r
+        else:
+            r.update(verdict="NEEDS_VERIFICATION", final_severity="Low",
+                     cwe="CWE-502",
+                     reason="Deserialization claimed but no execution markers in response.",
+                     dev_action="Manual verification with Burp Suite needed.")
+            return r
+
+    # IDOR (Insecure Direct Object Reference)
+    if "idor" in title or "insecure direct object" in title or "broken object" in title:
+        r.update(verdict="NEEDS_VERIFICATION", final_severity="Low",
+                 cwe="CWE-639", cvss=6.5,
+                 reason="IDOR requires manual testing with two different user accounts "
+                        "to confirm unauthorized data access. Cannot be automated reliably.",
+                 steps="1. Login as User A, note resource IDs\n"
+                       "2. Login as User B, try to access User A's resources\n"
+                       "3. If successful -> confirmed IDOR (upgrade to High)",
+                 dev_action="Implement authorization checks on every data access.")
+        return r
+
+    # Template Injection (SSTI)
+    if "template" in title and "injection" in title:
+        executed = any(kw in evidence for kw in ["49", "7*7", "executed", "rendered", "${"])
+        if executed:
+            r.update(verdict="TRUE_POSITIVE", final_severity="High",
+                     cwe="CWE-1336", cvss=8.1,
+                     cve="N/A (CWE-1336: Server-Side Template Injection)",
+                     reason="Template expression was evaluated (e.g., 7*7=49). "
+                            "Can lead to RCE depending on template engine.",
+                     dev_action="Never pass user input into template expressions. Use sandboxed templates.")
+            return r
+        else:
+            r.update(verdict="FALSE_POSITIVE", final_severity="Info",
+                     reason="Template injection payload sent but not executed. "
+                            "Input stored as text, not evaluated.",
+                     dev_action="No action - template engine does not evaluate user input.")
+            return r
+
+    # ==================================================================
+    # LAYER 1D: CONFIGURATION / HEADER CHECKS - universal
+    # ==================================================================
+
+    # Missing security headers (generic)
+    if any(k in title for k in ["missing header", "missing security header",
+                                 "missing critical security", "security header"]):
+        _cwe_apply(r, "missing_hsts")
+        r.update(verdict="TRUE_POSITIVE", final_severity="Low",
+                 cve=f"N/A ({r['cwe']}: Missing Security Headers)",
+                 reason="Security headers absent. Defense-in-depth measure. "
+                        "No exploit demonstrated - these prevent future attacks.",
+                 steps=f"1. curl -s -I {url or '<target>'}\n"
+                       "2. Check for: Strict-Transport-Security, X-Frame-Options,\n"
+                       "   Content-Security-Policy, X-Content-Type-Options\n"
+                       "3. NOTE: Missing headers = config improvement, not active exploit",
+                 dev_action="Add HSTS, CSP, X-Frame-Options, X-Content-Type-Options to all responses.")
+        return r
+
+    if "hsts" in title and ("missing" in title or "no " in title):
+        _cwe_apply(r, "missing_hsts")
+        r.update(verdict="TRUE_POSITIVE", final_severity="Low",
+                 reason="HSTS absent. Requires active MITM to exploit. No exploit demonstrated.",
+                 dev_action="Add: Strict-Transport-Security: max-age=31536000; includeSubDomains; preload")
+        return r
+
+    if "csp" in title and ("missing" in title or "no " in title or "lack" in title or "absence" in title):
+        _cwe_apply(r, "missing_csp")
+        r.update(verdict="TRUE_POSITIVE", final_severity="Low",
+                 reason="CSP absent. Defense-in-depth for XSS mitigation. Not exploitable alone.",
+                 dev_action="Implement Content-Security-Policy header.")
+        return r
+
+    if "sri" in title or "subresource integrity" in title or ("integrity" in title and "missing" in title):
+        _cwe_apply(r, "missing_sri")
+        r.update(verdict="TRUE_POSITIVE", final_severity="Low",
+                 reason="No SRI on external scripts. Requires CDN compromise to exploit. Theoretical.",
+                 dev_action="Add integrity= hash to all external <script> and <link> tags.")
+        return r
+
+    if "clickjack" in title or ("x-frame" in title and "missing" in title):
+        _cwe_apply(r, "missing_xframe")
+        r.update(verdict="TRUE_POSITIVE", final_severity="Low",
+                 reason="X-Frame-Options absent. Clickjacking requires user interaction. "
+                        "SameSite cookies mitigate most attacks.",
+                 dev_action="Add X-Frame-Options: DENY and CSP: frame-ancestors 'none'.")
+        return r
+
+    # Outdated libraries - DYNAMIC via OSV + NVD
+    if any(k in title for k in ["outdated", "version", "library", "librari",
+                                 "react", "jquery", "bootstrap", "angular", "vue",
+                                 "lodash", "moment", "express"]):
+        libs = extract_libraries(finding)
+        if libs:
+            all_cves = []
+            all_summaries = []
+            max_cvss = 0.0
+
+            for lib_name, lib_ver in libs:
+                enriched = enrich_library_finding(lib_name, lib_ver)
+                if enriched["has_cves"]:
+                    for c in enriched["cves"]:
+                        all_cves.append(c)
+                        if c["cvss"] and c["cvss"] > max_cvss:
+                            max_cvss = c["cvss"]
+                    all_summaries.append(enriched["summary"])
+                else:
+                    all_summaries.append(f"{lib_name}@{lib_ver}: 0 CVEs (OSV.dev)")
+
+            if all_cves:
+                top = sorted(all_cves, key=lambda x: x.get("cvss", 0), reverse=True)
+                cve_str = "; ".join(f"{c['cve']} (CVSS {c['cvss']:.1f})" for c in top[:5])
+                cwes = list(set(cw for c in top[:3] for cw in c.get("cwes", [])))
+                final_sev = "Medium" if max_cvss >= 4.0 else "Low"
+
+                lib_list = ", ".join(f"{n}@{v}" for n, v in libs)
+                steps = [f"1. Detected: {lib_list}"]
+                for i, c in enumerate(top[:4], 2):
+                    steps.append(f"{i}. {c['cve']}: CVSS {c['cvss']:.1f} - {c.get('description', '')[:70]}")
+                steps.append(f"{len(top[:4])+2}. Source: NVD + OSV.dev (authoritative)")
+                steps.append(f"{len(top[:4])+3}. NOT exploited in this scan -> capped at Medium max")
+
+                r.update(verdict="TRUE_POSITIVE", final_severity=final_sev,
+                         cve=cve_str, cwe=", ".join(cwes[:3]) or "CWE-1104",
+                         cvss=max_cvss, cvss_vector=top[0].get("vector", ""),
+                         reason=f"{len(all_cves)} CVEs from NVD/OSV. " + "; ".join(all_summaries[:2]),
+                         steps="\n".join(steps),
+                         dev_action=f"Upgrade {lib_list} to latest stable versions.")
+                return r
+            else:
+                r.update(verdict="TRUE_POSITIVE", final_severity="Low", cwe="CWE-1104",
+                         reason="Libraries detected but 0 CVEs per OSV.dev. "
+                                "May be EOL but not actively vulnerable. " + "; ".join(all_summaries),
+                         dev_action=f"Consider upgrading for maintenance.")
+                return r
+
+    # Rate limiting
+    if "rate limit" in title or "brute force" in title:
+        has_429 = 429 in statuses
+        all_ok = all(s in (200, 302) for s in statuses) if statuses else False
+        _cwe_apply(r, "rate_limit")
+        if statuses and all_ok and not has_429 and len(statuses) >= 5:
+            r.update(verdict="TRUE_POSITIVE", final_severity="Medium",
+                     reason=f"{len(statuses)} requests accepted without HTTP 429 or CAPTCHA. "
+                            "No actual brute-force success demonstrated. Medium until proven at scale.",
+                     steps=f"1. Sent {len(statuses)} rapid requests -> all accepted\n"
+                           f"2. Status codes: {list(set(statuses))}\n"
+                           "3. Zero 429, zero CAPTCHA, zero lockout\n"
+                           "4. NOTE: no actual account compromised -> Medium, not High",
+                     dev_action="Add rate limiting: 5 failed attempts -> 429 + CAPTCHA.")
+            return r
+        else:
+            r.update(verdict="NEEDS_VERIFICATION", final_severity="Low",
+                     reason="Rate limiting status unclear. Insufficient test data.",
+                     dev_action="Test manually with 50+ rapid requests.")
+            return r
+
+    # CSRF
+    if "csrf" in title:
+        _cwe_apply(r, "csrf")
+        r.update(verdict="NEEDS_VERIFICATION", final_severity="Low",
+                 reason="CSRF suspected but no actual forged request was executed. "
+                        "Severity depends on what endpoint is affected.",
+                 steps="1. Intercept POST request in Burp Suite\n"
+                       "2. Remove/modify CSRF token\n"
+                       "3. Check if server still accepts\n"
+                       "4. Severity = Low for read-only, Medium for state-changing, "
+                       "High for financial/account actions",
+                 dev_action="Validate CSRF tokens server-side on all state-changing endpoints.")
+        return r
+
+    # Information disclosure
+    if any(k in title for k in ["information disclosure", "server stack", "verbose error",
+                                 "framework", "server information", "infrastructure",
+                                 "error format", "version disclosure"]):
+        _cwe_apply(r, "info_disclosure")
+        r.update(verdict="TRUE_POSITIVE", final_severity="Low",
+                 reason="Server/framework version or internal details exposed. "
+                        "Aids reconnaissance but not directly exploitable.",
+                 dev_action="Remove version headers. Return generic error pages.")
+        return r
+
+    # Status/debug pages
+    if "status" in title and ("accessible" in title or "debug" in title or "public" in title):
+        _cwe_apply(r, "info_disclosure")
+        r.update(verdict="TRUE_POSITIVE", final_severity="Low",
+                 reason="Debug/status page publicly accessible. Information exposure only.",
+                 dev_action="Restrict to authenticated admin users or internal network.")
+        return r
+
+    # CORS
+    if "cors" in title:
+        _cwe_apply(r, "cors")
+        r.update(verdict="TRUE_POSITIVE", final_severity="Low",
+                 reason="CORS misconfiguration or absence. Default (no CORS headers) is actually safe. "
+                        "Only a problem if Access-Control-Allow-Origin: * with credentials.",
+                 dev_action="Configure CORS explicitly if cross-origin access needed.")
+        return r
+
+    # Open redirect
+    if "redirect" in title and "open" in title:
+        _cwe_apply(r, "open_redirect")
+        r.update(verdict="NEEDS_VERIFICATION", final_severity="Low",
+                 reason="Open redirect suspected but not confirmed. "
+                        "Need to verify if server actually redirects to external domain.",
+                 steps="1. Test: ?returnUrl=https://evil.com\n"
+                       "2. Also try: //evil.com, /\\evil.com\n"
+                       "3. If redirects to evil.com -> confirmed (Medium)\n"
+                       "4. If stays on same domain -> FP",
+                 dev_action="Whitelist allowed redirect destinations.")
+        return r
+
+    # Session management
+    if any(k in title for k in ["session fixation", "session token", "token regeneration", "weak token"]):
+        _cwe_apply(r, "session_mgmt")
+        r.update(verdict="NEEDS_VERIFICATION", final_severity="Low",
+                 reason="Session management issue suspected but not exploited. "
+                        "Requires manual testing with Burp Suite.",
+                 dev_action="Regenerate session ID on authentication.")
+        return r
+
+    # OAuth/OIDC
+    if any(k in title for k in ["oidc", "oauth", "pkce", "state parameter",
+                                 "nonce", "authorization code", "redirect_uri",
+                                 "client_id", "token endpoint"]):
+        _cwe_apply(r, "auth_bypass")
+        r.update(verdict="NEEDS_VERIFICATION", final_severity="Low",
+                 reason="OAuth/OIDC configuration weakness suspected. Not exploited. "
+                        "Manual Burp Suite testing needed.",
+                 dev_action="Enforce PKCE, validate state, whitelist redirect_uri.")
+        return r
+
+    # Prototype pollution
+    if "prototype" in title and "pollution" in title:
+        _cwe_apply(r, "prototype_pollution")
+        r.update(verdict="NEEDS_VERIFICATION", final_severity="Low",
+                 reason="Prototype pollution suspected but not confirmed in browser. "
+                        "Need to verify: ({}).polluted === true",
+                 dev_action="If confirmed, use Object.create(null) or freeze prototypes.")
+        return r
+
+    # Staging/debug references
+    if any(k in title for k in ["staging", "debug", "development"]) and \
+       any(k in title for k in ["reference", "code", "artifact", "build", "environment"]):
+        _cwe_apply(r, "debug_staging")
+        r.update(verdict="TRUE_POSITIVE", final_severity="Low",
+                 reason="Staging/debug references found in code. Low in non-prod, "
+                        "Medium if this is production.",
+                 dev_action="Remove staging references before production deployment.")
+        return r
+
+    # Third-party scripts
+    if any(k in title for k in ["third-party", "tag management", "external script"]):
+        _cwe_apply(r, "third_party")
+        r.update(verdict="TRUE_POSITIVE", final_severity="Low",
+                 reason="External scripts loaded. Theoretical supply-chain risk. "
+                        "Mitigate with SRI and CSP.",
+                 dev_action="Add SRI to external scripts. Implement CSP script-src whitelist.")
+        return r
+
+    # Logging absence
+    if "logging" in title and any(k in title for k in ["missing", "no ", "absence", "insufficient"]):
+        _cwe_apply(r, "logging")
+        r.update(verdict="TRUE_POSITIVE", final_severity="Low",
+                 reason="No security event logging detected. Hard to verify externally.",
+                 dev_action="Implement security event logging to SIEM.")
+        return r
+
+    # Input validation
+    if "input validation" in title or "insufficient" in title:
+        _cwe_apply(r, "input_validation")
+        r.update(verdict="TRUE_POSITIVE", final_severity="Low",
+                 reason="Server accepts invalid input but no exploit path demonstrated.",
+                 dev_action="Add server-side input validation.")
+        return r
+
+    # Improper error handling (500 on bad input)
+    if "error" in title and ("handling" in title or "improper" in title):
+        _cwe_apply(r, "error_handling")
+        r.update(verdict="TRUE_POSITIVE", final_severity="Low",
+                 reason="HTTP 500 on malformed input. Unhandled exception, not injection.",
+                 dev_action="Return HTTP 400 for invalid input. Catch exceptions.")
+        return r
+
+    # Cookie-related (generic)
+    if "cookie" in title and any(k in title for k in ["httponly", "secure", "flag", "attribute"]):
+        r.update(verdict="NEEDS_VERIFICATION", final_severity="Low",
+                 cwe="CWE-614", cvss=3.7,
+                 reason="Cookie attribute issue. Severity depends on whether the cookie "
+                        "contains auth data (Medium) or analytics (Info).",
+                 dev_action="Set Secure, HttpOnly, SameSite on all authentication cookies.")
+        return r
+
+    # Password in URL (generic - could be real or scanner-fabricated)
+    if "password" in title and ("url" in title or "query" in title):
+        r.update(verdict="NEEDS_VERIFICATION", final_severity="Low",
+                 cwe="CWE-598", cvss=4.3,
+                 reason="Password parameter in URL. Need to verify if the APPLICATION "
+                        "sends passwords via GET, or if the SCANNER fabricated this test. "
+                        "Check the real login form method.",
+                 steps="1. Open the login page in browser\n"
+                       "2. Check form method: POST (correct) or GET (vulnerable)\n"
+                       "3. If POST -> scanner fabricated the GET test -> FP\n"
+                       "4. If GET -> confirmed vulnerability -> upgrade to Medium",
+                 dev_action="Ensure all password fields use POST method.")
+        return r
+
+    # Access control
+    if "access control" in title or "authorization" in title or "privilege" in title:
+        r.update(verdict="NEEDS_VERIFICATION", final_severity="Low",
+                 cwe="CWE-285", cvss=5.3,
+                 reason="Access control issue suspected. Requires two different user "
+                        "accounts to verify (similar to IDOR).",
+                 dev_action="Implement proper authorization checks on all endpoints.")
+        return r
+
+    # ==================================================================
+    # LAYER 2: Confidence-based fallback for UNKNOWN finding types
+    # ==================================================================
+
+    if confidence >= 5:
+        r.update(verdict="TRUE_POSITIVE", final_severity="Medium",
+                 reason=f"High confidence ({confidence}/10) based on HTTP evidence. "
+                        "Payload reflected or specific error content found in response. "
+                        "Manual confirmation recommended.",
+                 dev_action="Investigate and fix the underlying issue.")
+        return r
+
+    if confidence >= 2:
+        r.update(verdict="NEEDS_VERIFICATION", final_severity="Low",
+                 reason=f"Moderate confidence ({confidence}/10). Some evidence present "
+                        "but not conclusive. Manual Burp Suite testing recommended.",
+                 steps="1. Reproduce the test in Burp Suite with valid auth\n"
+                       "2. Check response for actual vulnerability indicators\n"
+                       "3. Assign severity based on confirmed impact",
+                 dev_action="Manual verification required.")
+        return r
+
+    if confidence >= -2:
+        r.update(verdict="NEEDS_VERIFICATION", final_severity="Low",
+                 reason=f"Low confidence ({confidence}/10). Insufficient evidence for "
+                        "automated classification.",
+                 dev_action="Manual verification required with Burp Suite.")
+        return r
+
+    # Very low confidence
+    r.update(verdict="FALSE_POSITIVE", final_severity="Info",
+             reason=f"Very low confidence ({confidence}/10). Strong negative signals: "
+                    "all redirects, all 403/404, or zero evidence. Likely scanner noise.",
+             dev_action="No action unless manual testing reveals otherwise.")
+    return r

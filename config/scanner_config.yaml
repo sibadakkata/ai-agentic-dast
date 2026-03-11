@@ -1,0 +1,25 @@
+targets:
+  - id: T1
+    url: "${T1_URL}"
+    scan_mode: both                    # website | api | both
+    auth:
+      type: auto                       # auto | form | sso | oauth | api_key | bearer
+      username: "${T1_USERNAME}"
+      password: "${T1_PASSWORD}"
+    api_imports: {}                     # postman: imports/api.postman_collection.json
+
+model: bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0   # default model (override with --model)
+# Bedrock Sonnet:  bedrock/us.anthropic.claude-sonnet-4-6
+# LiteLLM proxy:   claude-haiku-4-5-20251001
+# Gemini:          gemini/gemini-2.5-flash
+
+scan:
+  max_steps_per_phase: 50
+  max_tokens: 80000
+  dry_run: false
+  timeout_seconds: 1800
+
+output:
+  results_dir: results/raw
+  reports_dir: results/reports
+  errors_log: results/errors.log

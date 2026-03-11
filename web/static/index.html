@@ -1,0 +1,500 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Agentic DAST - AI Security Scanner</title>
+<style>
+:root {
+  --bg: #0f1117; --surface: #1a1d27; --surface2: #242836; --border: #2d3148;
+  --text: #e4e6ed; --text2: #9ca3b4; --accent: #6366f1; --accent2: #818cf8;
+  --green: #22c55e; --red: #ef4444; --yellow: #eab308; --orange: #f97316; --blue: #3b82f6;
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: var(--bg); color: var(--text); min-height: 100vh; }
+
+header { background: linear-gradient(135deg, #0c0a1d 0%, #1e1b4b 40%, #312e81 70%, #4338ca 100%); padding: 24px 32px; border-bottom: 1px solid rgba(99,102,241,0.3); display: flex; justify-content: space-between; align-items: center; }
+header h1 { font-size: 26px; font-weight: 800; letter-spacing: -0.5px; }
+header h1 .logo-icon { display: inline-block; width: 32px; height: 32px; background: linear-gradient(135deg, #6366f1, #a78bfa); border-radius: 8px; text-align: center; line-height: 32px; font-size: 18px; margin-right: 10px; vertical-align: middle; }
+header h1 .highlight { background: linear-gradient(90deg, #818cf8, #c084fc); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+header .subtitle { color: var(--text2); font-size: 13px; margin-top: 4px; letter-spacing: 0.3px; }
+
+.container { max-width: 1280px; margin: 0 auto; padding: 24px; }
+
+.card { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 24px; margin-bottom: 20px; }
+.card h2 { font-size: 16px; font-weight: 600; margin-bottom: 16px; display: flex; align-items: center; gap: 8px; }
+.card h2 .icon { font-size: 18px; }
+
+.form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+.form-group { display: flex; flex-direction: column; gap: 6px; }
+.form-group.full { grid-column: 1 / -1; }
+label { font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; color: var(--text2); }
+input, select { background: var(--surface2); border: 1px solid var(--border); border-radius: 8px; padding: 10px 14px; color: var(--text); font-size: 14px; outline: none; transition: border-color 0.2s; }
+input:focus, select:focus { border-color: var(--accent); }
+input::placeholder { color: #555; }
+
+.btn { padding: 10px 24px; border-radius: 8px; border: none; font-size: 14px; font-weight: 600; cursor: pointer; transition: all 0.2s; }
+.btn-primary { background: var(--accent); color: white; }
+.btn-primary:hover { background: var(--accent2); }
+.btn-primary:disabled { opacity: 0.5; cursor: not-allowed; }
+.btn-sm { padding: 6px 14px; font-size: 12px; }
+.btn-outline { background: transparent; border: 1px solid var(--border); color: var(--text2); }
+.btn-outline:hover { border-color: var(--accent); color: var(--text); }
+
+.actions { display: flex; gap: 12px; margin-top: 20px; align-items: center; }
+
+.scan-list { display: flex; flex-direction: column; gap: 8px; }
+.scan-item { display: grid; grid-template-columns: 2fr 1.5fr 1fr 1fr 1fr auto; gap: 12px; align-items: center; padding: 12px 16px; background: var(--surface2); border-radius: 8px; font-size: 13px; cursor: pointer; transition: background 0.15s; }
+.scan-item:hover { background: #2a2e3e; }
+.scan-item .target { font-weight: 600; color: var(--accent2); word-break: break-all; }
+.scan-item .model { color: var(--text2); }
+
+.badge { display: inline-block; padding: 2px 10px; border-radius: 12px; font-size: 11px; font-weight: 700; text-transform: uppercase; }
+.badge-running { background: rgba(99,102,241,0.2); color: var(--accent2); }
+.badge-completed { background: rgba(34,197,94,0.2); color: var(--green); }
+.badge-error { background: rgba(239,68,68,0.2); color: var(--red); }
+
+.severity { font-weight: 700; font-size: 11px; }
+.sev-critical { color: #ff4444; } .sev-high { color: var(--orange); } .sev-medium { color: var(--yellow); }
+.sev-low { color: var(--blue); } .sev-info { color: var(--text2); }
+
+.verdict { font-weight: 600; font-size: 11px; text-transform: uppercase; }
+.v-true_positive { color: var(--green); } .v-false_positive { color: var(--red); }
+.v-needs_verification { color: var(--yellow); } .v-not_a_finding { color: var(--text2); }
+
+.tabs { display: flex; gap: 4px; margin-bottom: 20px; border-bottom: 1px solid var(--border); padding-bottom: 0; }
+.tab { padding: 10px 20px; font-size: 13px; font-weight: 600; cursor: pointer; color: var(--text2); border-bottom: 2px solid transparent; transition: all 0.2s; }
+.tab:hover { color: var(--text); }
+.tab.active { color: var(--accent2); border-color: var(--accent2); }
+.tab-content { display: none; }
+.tab-content.active { display: block; }
+
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+th { text-align: left; padding: 10px 12px; background: var(--surface2); color: var(--text2); font-weight: 600; font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; border-bottom: 1px solid var(--border); }
+td { padding: 10px 12px; border-bottom: 1px solid var(--border); vertical-align: top; }
+tr:hover td { background: rgba(99,102,241,0.05); }
+
+.stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; margin-bottom: 20px; }
+.stat { background: var(--surface2); border-radius: 8px; padding: 14px; text-align: center; }
+.stat .value { font-size: 22px; font-weight: 700; color: var(--accent2); }
+.stat .label { font-size: 11px; color: var(--text2); margin-top: 4px; text-transform: uppercase; letter-spacing: 0.5px; }
+
+.progress-log { background: var(--surface2); border-radius: 8px; padding: 12px 16px; font-family: monospace; font-size: 12px; color: var(--text2); max-height: 120px; overflow-y: auto; }
+
+.empty { color: var(--text2); text-align: center; padding: 40px; font-size: 14px; }
+
+.expandable { cursor: pointer; }
+.expandable::before { content: "▸ "; color: var(--text2); }
+.expandable.open::before { content: "▾ "; }
+.expand-content { display: none; margin-top: 8px; padding: 12px; background: var(--bg); border-radius: 8px; }
+.expand-content.open { display: block; }
+
+.payload-item { font-family: monospace; font-size: 11px; padding: 4px 8px; margin: 2px 0; background: var(--bg); border-radius: 4px; word-break: break-all; }
+
+#results-view { display: none; }
+.back-btn { color: var(--text2); cursor: pointer; font-size: 13px; margin-bottom: 16px; display: inline-block; }
+.back-btn:hover { color: var(--text); }
+
+.model-cost { font-size: 11px; color: var(--text2); font-weight: normal; margin-left: 4px; }
+</style>
+</head>
+<body>
+
+<header>
+  <div>
+    <h1><span class="logo-icon">&#9889;</span><span class="highlight">Agentic DAST</span> Scanner</h1>
+    <div class="subtitle">AI-Powered Dynamic Security Testing &mdash; Websites &bull; APIs &bull; SPAs</div>
+  </div>
+  <div style="text-align:right;">
+    <div style="color:var(--text2); font-size:11px; text-transform:uppercase; letter-spacing:1px;">Status</div>
+    <div id="connectivity-status" style="color:var(--green); font-size:13px; font-weight:600;">Checking...</div>
+  </div>
+</header>
+
+<div class="container">
+
+  <!-- NEW SCAN -->
+  <div class="card" id="scan-form-card">
+    <h2><span class="icon">🔍</span> New Scan</h2>
+    <div class="form-grid">
+      <div class="form-group full">
+        <label>Target URL</label>
+        <input type="url" id="target-url" placeholder="https://your-app.example.com">
+      </div>
+      <div class="form-group">
+        <label>Username</label>
+        <input type="text" id="username" placeholder="(optional)">
+      </div>
+      <div class="form-group">
+        <label>Password</label>
+        <input type="password" id="password" placeholder="(optional)">
+      </div>
+      <div class="form-group">
+        <label>Model</label>
+        <select id="model-select"></select>
+      </div>
+      <div class="form-group">
+        <label>Scan Mode</label>
+        <select id="scan-mode">
+          <option value="both">Website + API</option>
+          <option value="website">Website Only</option>
+          <option value="api">API Only</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label>Auth Type</label>
+        <select id="auth-type">
+          <option value="auto">Auto-detect</option>
+          <option value="form">Form Login</option>
+          <option value="sso">SSO / SAML</option>
+          <option value="oauth">OAuth 2.0</option>
+          <option value="api_key">API Key</option>
+          <option value="bearer">Bearer Token</option>
+        </select>
+      </div>
+
+      <div class="form-group full" style="margin-top:8px;">
+        <div class="expandable" onclick="toggleExpand(this)" style="font-size:13px;font-weight:600;color:var(--text2);letter-spacing:0.3px;">
+          API Imports (Optional)
+        </div>
+        <div class="expand-content" id="api-imports-section">
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
+            <div class="form-group">
+              <label>Postman Collection</label>
+              <input type="file" id="file-postman" accept=".json" style="font-size:12px;">
+              <span id="file-postman-status" style="font-size:11px;color:var(--text2);"></span>
+            </div>
+            <div class="form-group">
+              <label>Postman Environment</label>
+              <input type="file" id="file-postman-env" accept=".json" style="font-size:12px;">
+              <span id="file-postman-env-status" style="font-size:11px;color:var(--text2);"></span>
+            </div>
+            <div class="form-group">
+              <label>Burp Proxy Export</label>
+              <input type="file" id="file-burp" accept=".xml,.json" style="font-size:12px;">
+              <span id="file-burp-status" style="font-size:11px;color:var(--text2);"></span>
+            </div>
+            <div class="form-group">
+              <label>Swagger / OpenAPI Spec</label>
+              <input type="file" id="file-openapi" accept=".json,.yaml,.yml" style="font-size:12px;">
+              <span id="file-openapi-status" style="font-size:11px;color:var(--text2);"></span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="actions">
+      <button class="btn btn-primary" id="start-scan-btn" onclick="startScan()">Start Scan</button>
+      <button class="btn btn-outline btn-sm" onclick="testConnectivity()">Test Connectivity</button>
+      <span id="scan-status-msg" style="font-size:13px; color:var(--text2);"></span>
+    </div>
+    <div id="progress-container" style="display:none; margin-top:16px;">
+      <div class="progress-log" id="progress-log"></div>
+    </div>
+  </div>
+
+  <!-- SCAN LIST -->
+  <div class="card" id="scans-card">
+    <h2><span class="icon">📋</span> Scan History</h2>
+    <div id="scans-list"><div class="empty">No scans yet. Configure a target above and click Start Scan.</div></div>
+  </div>
+
+  <!-- RESULTS VIEW -->
+  <div id="results-view">
+    <div class="back-btn" onclick="showList()">← Back to Scan List</div>
+    <div class="card">
+      <h2 id="result-title">Scan Results</h2>
+      <div class="stats" id="result-stats"></div>
+
+      <div class="tabs">
+        <div class="tab active" onclick="switchTab('comparison')">AI vs Triage</div>
+        <div class="tab" onclick="switchTab('crawled')">Crawled Endpoints</div>
+        <div class="tab" onclick="switchTab('payloads')">Payloads by Endpoint</div>
+        <div class="tab" onclick="switchTab('ai-raw')">AI Raw Findings</div>
+      </div>
+
+      <div class="tab-content active" id="tab-comparison"></div>
+      <div class="tab-content" id="tab-crawled"></div>
+      <div class="tab-content" id="tab-payloads"></div>
+      <div class="tab-content" id="tab-ai-raw"></div>
+    </div>
+    <div class="actions" style="margin-bottom:40px;">
+      <button class="btn btn-primary btn-sm" id="gen-report-btn" onclick="generateReport()">Generate PDF Report</button>
+      <button class="btn btn-outline btn-sm" id="dl-json-btn" onclick="downloadJSON()">Download Raw JSON</button>
+      <span id="report-msg" style="font-size:13px; color:var(--text2);"></span>
+    </div>
+  </div>
+
+</div>
+
+<script>
+let currentScanId = null;
+let pollInterval = null;
+
+async function init() {
+  const models = await (await fetch('/api/models')).json();
+  const sel = document.getElementById('model-select');
+  models.forEach(m => {
+    const opt = document.createElement('option');
+    opt.value = m.id;
+    opt.textContent = `${m.name}`;
+    sel.appendChild(opt);
+  });
+  loadScans();
+}
+
+async function testConnectivity() {
+  document.getElementById('connectivity-status').textContent = 'Testing...';
+  try {
+    const resp = await fetch('/api/models');
+    if (resp.ok) document.getElementById('connectivity-status').textContent = 'Connected';
+    else document.getElementById('connectivity-status').textContent = 'Connection issue';
+  } catch(e) {
+    document.getElementById('connectivity-status').textContent = 'Offline';
+  }
+}
+
+async function loadScans() {
+  const scans = await (await fetch('/api/scans')).json();
+  const el = document.getElementById('scans-list');
+  if (!scans.length) { el.innerHTML = '<div class="empty">No scans yet.</div>'; return; }
+  el.innerHTML = '<div class="scan-list">' + scans.map(s => `
+    <div class="scan-item" onclick="viewResults('${s.id}')">
+      <div class="target">${esc(s.target)}</div>
+      <div class="model">${esc(s.model)}</div>
+      <div><span class="badge badge-${s.status}">${s.status}</span></div>
+      <div>${s.duration ? Math.round(s.duration) + 's' : '-'}</div>
+      <div>${s.cost != null ? '$' + s.cost.toFixed(4) : '-'}</div>
+      <div>${s.findings_count != null ? s.findings_count + ' findings' : '-'}</div>
+    </div>`).join('') + '</div>';
+}
+
+async function uploadFile(inputId) {
+  const input = document.getElementById(inputId);
+  if (!input.files.length) return '';
+  const formData = new FormData();
+  formData.append('file', input.files[0]);
+  const statusEl = document.getElementById(inputId + '-status');
+  statusEl.textContent = 'Uploading...';
+  try {
+    const resp = await fetch('/api/upload', { method: 'POST', body: formData });
+    const data = await resp.json();
+    statusEl.textContent = 'Uploaded: ' + data.filename;
+    statusEl.style.color = 'var(--green)';
+    return data.filename;
+  } catch(e) {
+    statusEl.textContent = 'Upload failed';
+    statusEl.style.color = 'var(--red)';
+    return '';
+  }
+}
+
+async function startScan() {
+  const url = document.getElementById('target-url').value.trim();
+  if (!url) { alert('Enter a target URL'); return; }
+  const btn = document.getElementById('start-scan-btn');
+  btn.disabled = true;
+  btn.textContent = 'Uploading files...';
+  document.getElementById('progress-container').style.display = 'block';
+  document.getElementById('progress-log').textContent = 'Uploading API imports...\n';
+
+  const api_imports = {};
+  const postman = await uploadFile('file-postman');
+  if (postman) api_imports.postman = postman;
+  const postmanEnv = await uploadFile('file-postman-env');
+  if (postmanEnv) api_imports.postman_env = postmanEnv;
+  const burp = await uploadFile('file-burp');
+  if (burp) api_imports.burp = burp;
+  const openapi = await uploadFile('file-openapi');
+  if (openapi) api_imports.openapi = openapi;
+
+  btn.textContent = 'Scanning...';
+  document.getElementById('progress-log').textContent = 'Starting scan...\n';
+
+  const body = {
+    target_url: url,
+    username: document.getElementById('username').value,
+    password: document.getElementById('password').value,
+    model: document.getElementById('model-select').value,
+    scan_mode: document.getElementById('scan-mode').value,
+    auth_type: document.getElementById('auth-type').value,
+    api_imports: api_imports,
+  };
+
+  const resp = await fetch('/api/scan', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) });
+  const data = await resp.json();
+  if (data.error) { alert(data.error); btn.disabled = false; btn.textContent = 'Start Scan'; return; }
+
+  currentScanId = data.scan_id;
+  pollInterval = setInterval(() => pollScanStatus(data.scan_id), 3000);
+}
+
+async function pollScanStatus(scanId) {
+  const resp = await fetch(`/api/scan/${scanId}`);
+  const data = await resp.json();
+  const log = document.getElementById('progress-log');
+  if (data.progress) log.textContent = data.progress.join('\n');
+  log.scrollTop = log.scrollHeight;
+
+  if (data.status === 'completed' || data.status === 'error') {
+    clearInterval(pollInterval);
+    const btn = document.getElementById('start-scan-btn');
+    btn.disabled = false;
+    btn.textContent = 'Start Scan';
+    if (data.status === 'completed') {
+      document.getElementById('scan-status-msg').textContent = `Scan complete! ${data.findings_count || 0} findings, $${(data.cost || 0).toFixed(4)}`;
+    } else {
+      document.getElementById('scan-status-msg').textContent = `Error: ${data.error || 'Unknown'}`;
+    }
+    loadScans();
+  }
+}
+
+async function viewResults(scanId) {
+  currentScanId = scanId;
+  const resp = await fetch(`/api/results/${scanId}`);
+  if (!resp.ok) { alert('Results not available yet'); return; }
+  const data = await resp.json();
+  renderResults(data);
+  document.getElementById('scans-card').style.display = 'none';
+  document.getElementById('scan-form-card').style.display = 'none';
+  document.getElementById('results-view').style.display = 'block';
+}
+
+function showList() {
+  document.getElementById('results-view').style.display = 'none';
+  document.getElementById('scans-card').style.display = 'block';
+  document.getElementById('scan-form-card').style.display = 'block';
+  loadScans();
+}
+
+function renderResults(data) {
+  const m = data.metadata;
+  document.getElementById('result-title').textContent = `Results: ${m.model || 'Unknown Model'}`;
+
+  const c = data.coverage;
+  document.getElementById('result-stats').innerHTML = [
+    stat(c.pages_crawled, 'Pages Crawled'),
+    stat(c.forms_found, 'Forms Found'),
+    stat(c.api_endpoints, 'API Endpoints'),
+    stat(c.total_tests, 'Tests Run'),
+    stat(data.ai_findings.length, 'AI Findings'),
+    stat(data.triaged_findings.filter(f=>f.verdict==='TRUE_POSITIVE').length, 'True Positives'),
+    stat(data.triaged_findings.filter(f=>f.verdict==='FALSE_POSITIVE').length, 'False Positives'),
+    stat(m.cost_usd != null ? '$'+m.cost_usd.toFixed(4) : '-', 'LLM Cost'),
+  ].join('');
+
+  renderComparison(data);
+  renderCrawled(data.crawled_endpoints);
+  renderPayloads(data.payloads_by_endpoint);
+  renderAIRaw(data.ai_findings);
+}
+
+function stat(val, label) {
+  return `<div class="stat"><div class="value">${val}</div><div class="label">${label}</div></div>`;
+}
+
+function renderComparison(data) {
+  const el = document.getElementById('tab-comparison');
+  if (!data.triaged_findings.length) { el.innerHTML = '<div class="empty">No findings</div>'; return; }
+  el.innerHTML = `<table><thead><tr>
+    <th>#</th><th>Finding</th><th>AI Severity</th><th>Triage Severity</th><th>Verdict</th><th>CWE</th><th>CVSS</th><th>Reason</th>
+  </tr></thead><tbody>` +
+  data.triaged_findings.map((f, i) => `<tr>
+    <td>${i+1}</td>
+    <td><strong>${esc(f.title)}</strong><br><span style="font-size:11px;color:var(--text2)">${esc(f.url||'')}</span></td>
+    <td><span class="severity sev-${f.ai_severity?.toLowerCase()}">${f.ai_severity}</span></td>
+    <td><span class="severity sev-${f.final_severity?.toLowerCase()}">${f.final_severity}</span></td>
+    <td><span class="verdict v-${f.verdict?.toLowerCase()}">${f.verdict?.replace(/_/g,' ')}</span></td>
+    <td style="font-size:11px">${esc(f.cwe||'')}</td>
+    <td>${f.cvss ? f.cvss.toFixed(1) : '-'}</td>
+    <td style="font-size:11px;max-width:200px">${esc(f.reason||'')}</td>
+  </tr>`).join('') + '</tbody></table>';
+}
+
+function renderCrawled(endpoints) {
+  const el = document.getElementById('tab-crawled');
+  if (!endpoints.length) { el.innerHTML = '<div class="empty">No endpoints crawled</div>'; return; }
+  el.innerHTML = `<p style="color:var(--text2);font-size:13px;margin-bottom:12px">${endpoints.length} unique endpoints discovered</p>
+  <table><thead><tr><th>Method</th><th>URL</th><th>Status</th></tr></thead><tbody>` +
+  endpoints.map(e => `<tr>
+    <td><span style="font-weight:700;color:var(--accent2)">${esc(e.method)}</span></td>
+    <td style="word-break:break-all;font-size:12px">${esc(e.url)}</td>
+    <td>${esc(e.status)}</td>
+  </tr>`).join('') + '</tbody></table>';
+}
+
+function renderPayloads(byEndpoint) {
+  const el = document.getElementById('tab-payloads');
+  if (!byEndpoint.length) { el.innerHTML = '<div class="empty">No payload data</div>'; return; }
+  el.innerHTML = `<p style="color:var(--text2);font-size:13px;margin-bottom:12px">${byEndpoint.length} endpoints tested with ${byEndpoint.reduce((a,e)=>a+e.payload_count,0)} total payloads</p>` +
+  byEndpoint.map((ep, idx) => `
+    <div style="margin-bottom:8px;">
+      <div class="expandable" onclick="toggleExpand(this)">
+        <strong>${esc(ep.endpoint)}</strong>
+        <span style="color:var(--text2);font-size:12px;margin-left:8px">${ep.payload_count} payloads</span>
+      </div>
+      <div class="expand-content">
+        ${ep.payloads.map(p => `<div class="payload-item">
+          <span style="color:var(--accent2)">${esc(p.method)}</span> ${esc(p.full_url||'')}
+          ${p.body ? '<br>Body: '+esc(p.body) : ''}
+          ${p.status ? '<br>→ Status: '+p.status + (p.anomaly?' <span style="color:var(--red)">ANOMALY</span>':'') : ''}
+        </div>`).join('')}
+        ${ep.payload_count > 50 ? `<div class="payload-item" style="color:var(--text2)">... and ${ep.payload_count-50} more</div>` : ''}
+      </div>
+    </div>`).join('');
+}
+
+function renderAIRaw(findings) {
+  const el = document.getElementById('tab-ai-raw');
+  if (!findings.length) { el.innerHTML = '<div class="empty">No findings</div>'; return; }
+  el.innerHTML = `<table><thead><tr>
+    <th>#</th><th>Finding</th><th>Severity</th><th>OWASP</th><th>URL</th><th>Parameter</th><th>Evidence</th>
+  </tr></thead><tbody>` +
+  findings.map((f, i) => `<tr>
+    <td>${i+1}</td>
+    <td><strong>${esc(f.title)}</strong></td>
+    <td><span class="severity sev-${f.severity?.toLowerCase()}">${f.severity}</span></td>
+    <td style="font-size:11px">${esc(f.owasp||'')}</td>
+    <td style="word-break:break-all;font-size:11px;max-width:200px">${esc(f.url||'')}</td>
+    <td style="font-size:11px">${esc(f.parameter||'')}</td>
+    <td style="font-size:11px;max-width:180px">${esc(f.evidence||'')}</td>
+  </tr>`).join('') + '</tbody></table>';
+}
+
+function switchTab(name) {
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
+  event.target.classList.add('active');
+  document.getElementById('tab-'+name).classList.add('active');
+}
+
+function toggleExpand(el) {
+  el.classList.toggle('open');
+  el.nextElementSibling.classList.toggle('open');
+}
+
+async function generateReport() {
+  if (!currentScanId) return;
+  document.getElementById('report-msg').textContent = 'Generating PDF...';
+  const resp = await fetch(`/api/results/${currentScanId}/report`, {method:'POST'});
+  const data = await resp.json();
+  if (data.pdf) {
+    document.getElementById('report-msg').innerHTML = `<a href="${data.pdf}" target="_blank" style="color:var(--green)">Download PDF Report</a>`;
+  } else {
+    document.getElementById('report-msg').textContent = 'Failed: ' + (data.error||'unknown');
+  }
+}
+
+function downloadJSON() {
+  if (!currentScanId) return;
+  window.open(`/api/results/${currentScanId}/download`, '_blank');
+}
+
+function esc(s) { if (!s) return ''; const d = document.createElement('div'); d.textContent = String(s); return d.innerHTML; }
+
+init();
+testConnectivity();
+</script>
+</body>
+</html>

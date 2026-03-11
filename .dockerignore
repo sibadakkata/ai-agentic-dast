@@ -1,0 +1,13 @@
+archive/
+results/raw/
+results/reports/
+results/cache/
+__pycache__/
+*.pyc
+.git/
+.cursor/
+.venv/
+venv/
+*.pdf
+config/targets.env
+Winword.rtf
