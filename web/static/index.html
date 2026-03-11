@@ -340,12 +340,14 @@ tr:hover td { background: rgba(99,102,241,0.05); }
         <div class="tab" onclick="switchTab('crawled')">Crawled Endpoints</div>
         <div class="tab" onclick="switchTab('payloads')">Payloads by Endpoint</div>
         <div class="tab" onclick="switchTab('ai-raw')">AI Raw Findings</div>
+        <div class="tab" onclick="switchTab('phase-log')">Phase Log</div>
       </div>
 
       <div class="tab-content active" id="tab-comparison"></div>
       <div class="tab-content" id="tab-crawled"></div>
       <div class="tab-content" id="tab-payloads"></div>
       <div class="tab-content" id="tab-ai-raw"></div>
+      <div class="tab-content" id="tab-phase-log"></div>
     </div>
     <div class="actions" style="margin-bottom:40px;">
       <button class="btn btn-primary btn-sm" id="gen-report-btn" onclick="generateReport()">Generate PDF Report</button>
@@ -814,24 +816,59 @@ function showList() {
 
 function renderResults(data) {
   const m = data.metadata;
+  const c = data.coverage;
+  const tp = data.triaged_findings.filter(f=>f.verdict==='TRUE_POSITIVE').length;
+  const fp = data.triaged_findings.filter(f=>f.verdict==='FALSE_POSITIVE').length;
+
   document.getElementById('result-title').textContent = `Results: ${m.model || 'Unknown Model'}`;
 
-  const c = data.coverage;
+  const dur = m.duration_seconds ? formatDuration(m.duration_seconds) : '-';
+  const tokens = m.total_tokens ? m.total_tokens.toLocaleString() : '-';
+  const calls = m.llm_calls || '-';
+  const cost = m.cost_usd != null ? '$' + m.cost_usd.toFixed(4) : '-';
+
   document.getElementById('result-stats').innerHTML = [
     stat(c.pages_crawled, 'Pages Crawled'),
     stat(c.forms_found, 'Forms Found'),
     stat(c.api_endpoints, 'API Endpoints'),
-    stat(c.total_tests, 'Tests Run'),
+    stat(c.total_tests, 'Payloads Tested'),
+    stat(c.phases_completed || '-', 'Phases'),
     stat(data.ai_findings.length, 'AI Findings'),
-    stat(data.triaged_findings.filter(f=>f.verdict==='TRUE_POSITIVE').length, 'True Positives'),
-    stat(data.triaged_findings.filter(f=>f.verdict==='FALSE_POSITIVE').length, 'False Positives'),
-    stat(m.cost_usd != null ? '$'+m.cost_usd.toFixed(4) : '-', 'LLM Cost'),
-  ].join('');
+    stat(tp, 'True Positives'),
+    stat(fp, 'False Positives'),
+  ].join('') +
+  `<div style="grid-column:1/-1;display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:12px;margin-top:4px;">` + [
+    stat(dur, 'Scan Duration'),
+    stat(tokens, 'Total Tokens'),
+    stat(calls, 'LLM Calls'),
+    stat(cost, 'LLM Cost'),
+  ].join('') + `</div>`;
+
+  const sev = data.severity_breakdown || {};
+  const sevKeys = ['Critical','High','Medium','Low','Info'];
+  const sevHtml = sevKeys.filter(k => sev[k]).map(k => {
+    const cls = `sev-${k.toLowerCase()}`;
+    return `<span class="severity ${cls}" style="margin-right:12px;">${k}: ${sev[k]}</span>`;
+  }).join('');
+  if (sevHtml) {
+    document.getElementById('result-stats').innerHTML += `
+      <div style="grid-column:1/-1;padding:8px 0;font-size:13px;">
+        <span style="color:var(--text2);font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:0.5px;margin-right:12px;">Severity Breakdown:</span>${sevHtml}
+      </div>`;
+  }
 
   renderComparison(data);
   renderCrawled(data.crawled_endpoints);
   renderPayloads(data.payloads_by_endpoint);
   renderAIRaw(data.ai_findings);
+  renderPhaseLog(data.phase_log || []);
+}
+
+function formatDuration(seconds) {
+  if (seconds < 60) return Math.round(seconds) + 's';
+  const m = Math.floor(seconds / 60);
+  const s = Math.round(seconds % 60);
+  return m + 'm ' + s + 's';
 }
 
 function stat(val, label) {
@@ -903,6 +940,20 @@ function renderAIRaw(findings) {
     <td style="word-break:break-all;font-size:11px;max-width:200px">${esc(f.url||'')}</td>
     <td style="font-size:11px">${esc(f.parameter||'')}</td>
     <td style="font-size:11px;max-width:180px">${esc(f.evidence||'')}</td>
+  </tr>`).join('') + '</tbody></table>';
+}
+
+function renderPhaseLog(phases) {
+  const el = document.getElementById('tab-phase-log');
+  if (!phases.length) { el.innerHTML = '<div class="empty">No phase log</div>'; return; }
+  el.innerHTML = `<table><thead><tr>
+    <th>#</th><th>Phase</th><th>Tool Calls</th><th>Findings</th>
+  </tr></thead><tbody>` +
+  phases.map((p, i) => `<tr>
+    <td>${i+1}</td>
+    <td><strong>${esc(p.name || p.phase_id || '')}</strong></td>
+    <td>${p.tool_calls || 0}</td>
+    <td style="color:${p.findings_count > 0 ? 'var(--green)' : 'var(--text2)'}">${p.findings_count || 0}</td>
   </tr>`).join('') + '</tbody></table>';
 }
 
