@@ -333,28 +333,33 @@ async function startScan() {
   if (data.error) { alert(data.error); btn.disabled = false; btn.textContent = 'Start Scan'; return; }
 
   currentScanId = data.scan_id;
+  loadScans();
   pollInterval = setInterval(() => pollScanStatus(data.scan_id), 3000);
 }
 
 async function pollScanStatus(scanId) {
-  const resp = await fetch(`/api/scan/${scanId}`);
-  const data = await resp.json();
-  const log = document.getElementById('progress-log');
-  if (data.progress) log.textContent = data.progress.join('\n');
-  log.scrollTop = log.scrollHeight;
+  try {
+    const resp = await fetch(`/api/scan/${scanId}`);
+    const data = await resp.json();
+    const log = document.getElementById('progress-log');
+    if (data.progress) log.textContent = data.progress.join('\n');
+    log.scrollTop = log.scrollHeight;
 
-  if (data.status === 'completed' || data.status === 'error') {
-    clearInterval(pollInterval);
-    const btn = document.getElementById('start-scan-btn');
-    btn.disabled = false;
-    btn.textContent = 'Start Scan';
-    if (data.status === 'completed') {
-      document.getElementById('scan-status-msg').textContent = `Scan complete! ${data.findings_count || 0} findings, $${(data.cost || 0).toFixed(4)}`;
-    } else {
-      document.getElementById('scan-status-msg').textContent = `Error: ${data.error || 'Unknown'}`;
-    }
     loadScans();
-  }
+
+    if (data.status === 'completed' || data.status === 'error') {
+      clearInterval(pollInterval);
+      pollInterval = null;
+      const btn = document.getElementById('start-scan-btn');
+      btn.disabled = false;
+      btn.textContent = 'Start Scan';
+      if (data.status === 'completed') {
+        document.getElementById('scan-status-msg').textContent = `Scan complete! ${data.findings_count || 0} findings, $${(data.cost || 0).toFixed(4)}`;
+      } else {
+        document.getElementById('scan-status-msg').textContent = `Error: ${data.error || 'Unknown'}`;
+      }
+    }
+  } catch(e) { /* network hiccup, retry on next poll */ }
 }
 
 async function viewResults(scanId) {
@@ -514,6 +519,12 @@ function esc(s) { if (!s) return ''; const d = document.createElement('div'); d.
 
 init();
 testConnectivity();
+
+setInterval(() => {
+  if (!pollInterval && document.getElementById('results-view').style.display !== 'block') {
+    loadScans();
+  }
+}, 10000);
 </script>
 </body>
 </html>
