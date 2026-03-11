@@ -282,6 +282,78 @@ def _impact_oneliner(f):
     return reason[:70] + "..." if len(reason) > 70 else reason or "See details"
 
 
+def _build_repro_steps(f):
+    """Auto-generate steps to reproduce from finding data."""
+    url = f.get("url") or ""
+    param = f.get("parameter") or ""
+    title = f.get("title") or ""
+    curls = f.get("all_curls") or []
+    curl = f.get("curl") or ""
+    evidence = f.get("scanner_evidence") or ""
+    responses = f.get("all_responses") or []
+    method = "GET"
+
+    if curls:
+        first_curl = curls[0]
+        if "-X POST" in first_curl or "-X PUT" in first_curl:
+            method = "POST" if "-X POST" in first_curl else "PUT"
+
+    steps = []
+    step = 1
+
+    if url:
+        steps.append(f"{step}. Open a browser or API client (e.g. Burp Suite, curl, Postman).")
+        step += 1
+
+    if curls:
+        steps.append(f"{step}. Send the following request to the target:")
+        steps.append(f"   {curls[0][:200]}")
+        step += 1
+    elif curl:
+        steps.append(f"{step}. Send the following request to the target:")
+        steps.append(f"   {curl[:200]}")
+        step += 1
+    elif url:
+        steps.append(f"{step}. Navigate to: {url}")
+        step += 1
+
+    if param:
+        steps.append(f"{step}. Locate the parameter/component: {param}")
+        step += 1
+
+    if responses:
+        resp = responses[0] if isinstance(responses[0], str) else str(responses[0])
+        status = ""
+        if "Status:" in resp:
+            status = resp.split("Status:")[1].split("|")[0].strip()[:10]
+        if status:
+            steps.append(f"{step}. Observe the server response (HTTP {status}).")
+        else:
+            steps.append(f"{step}. Observe the server response.")
+        step += 1
+
+    title_lower = title.lower()
+    if "header" in title_lower or "missing" in title_lower or "cookie" in title_lower:
+        steps.append(f"{step}. Inspect the response headers for the missing security control.")
+    elif "injection" in title_lower or "sqli" in title_lower or "xss" in title_lower:
+        steps.append(f"{step}. Check if the payload is reflected in the response or triggers an error/behavior change.")
+    elif "ssrf" in title_lower:
+        steps.append(f"{step}. Check if the server made an outbound request to the injected URL.")
+    elif "auth" in title_lower or "session" in title_lower or "token" in title_lower:
+        steps.append(f"{step}. Verify whether the authentication/session control is enforced.")
+    elif "exposure" in title_lower or "sensitive" in title_lower or "pii" in title_lower:
+        steps.append(f"{step}. Check the response body for sensitive data that should not be exposed.")
+    elif "log" in title_lower or "debug" in title_lower or "error" in title_lower:
+        steps.append(f"{step}. Check if debug/error information or internal state is leaked in the response.")
+    else:
+        steps.append(f"{step}. Verify the vulnerability by examining the response for anomalous behavior.")
+    step += 1
+
+    steps.append(f"{step}. Compare with a baseline (normal) request to confirm the difference.")
+
+    return "\n".join(steps)
+
+
 def _remediation_oneliner(f):
     """Generate a concise remediation from dev_action."""
     da = f.get("dev_action", "") or ""
@@ -341,9 +413,12 @@ def render(pdf, idx, f, link_id=None):
         pdf.box("NEEDS MANUAL VERIFICATION:", f["reason"] or "See steps below.",
                 bg=(255, 245, 210), border=(200, 160, 20))
 
-    # Steps to reproduce
-    if f.get("steps") and v != "NOT_A_FINDING":
-        pdf.box("STEPS TO REPRODUCE:", f["steps"],
+    # Steps to reproduce (auto-generate if not provided)
+    steps_text = f.get("steps") or ""
+    if not steps_text and v != "NOT_A_FINDING":
+        steps_text = _build_repro_steps(f)
+    if steps_text and v != "NOT_A_FINDING":
+        pdf.box("STEPS TO REPRODUCE:", steps_text,
                 bg=(255, 255, 235), border=(180, 140, 40))
 
     # Scanner evidence

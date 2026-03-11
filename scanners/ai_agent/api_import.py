@@ -259,9 +259,23 @@ def _postman_body_to_unified(body: dict | None, variables: dict[str, str]) -> tu
 def _postman_url_to_full(url_obj: Any, variables: dict[str, str]) -> str:
     if isinstance(url_obj, str):
         return _resolve_vars(url_obj, variables)
+
+    extra_query = url_obj.get("query") or []
+    extra_qs_parts = []
+    for q in extra_query:
+        if isinstance(q, dict) and not q.get("disabled"):
+            k = _resolve_vars(str(q.get("key", "")), variables)
+            v = _resolve_vars(str(q.get("value", "")), variables)
+            extra_qs_parts.append(f"{k}={v}")
+
     raw = url_obj.get("raw")
     if raw:
-        return _resolve_vars(raw, variables)
+        resolved = _resolve_vars(raw, variables)
+        if extra_qs_parts:
+            sep = "&" if "?" in resolved else "?"
+            resolved = resolved + sep + "&".join(extra_qs_parts)
+        return resolved
+
     protocol = _resolve_vars(url_obj.get("protocol", "https"), variables)
     host_list = url_obj.get("host") or []
     if isinstance(host_list, str):
@@ -271,13 +285,8 @@ def _postman_url_to_full(url_obj: Any, variables: dict[str, str]) -> str:
     if isinstance(path_list, str):
         path_list = [path_list]
     path = "/" + "/".join(_resolve_vars(str(p), variables) for p in path_list).lstrip("/")
-    query = url_obj.get("query") or []
-    if query:
-        qs = "&".join(
-            f"{_resolve_vars(str(q.get('key', '')), variables)}={_resolve_vars(str(q.get('value', '')), variables)}"
-            for q in query if not q.get("disabled")
-        )
-        path = f"{path}?{qs}" if not path.startswith("?") else path + "&" + qs
+    if extra_qs_parts:
+        path = f"{path}?{'&'.join(extra_qs_parts)}"
     return f"{protocol}://{host}{path}"
 
 
@@ -410,41 +419,55 @@ def parse_burp_export(filepath: str) -> list[APIEndpoint]:
         return []
 
     try:
-        tree = etree.parse(str(path))
-        root = tree.getroot()
-    except etree.XMLSyntaxError as e:
-        logger.error("Invalid Burp XML: %s - %s", filepath, e)
-        return []
+        raw_xml = path.read_text(encoding="utf-8", errors="replace")
     except OSError as e:
         logger.error("Cannot read Burp file: %s - %s", filepath, e)
         return []
 
-    nsmap = getattr(root, "nsmap", None) or {}
-    ns = nsmap.get(None) or ""
-    ns_prefix = "{" + ns + "}" if ns else ""
+    raw_xml = re.sub(
+        r"(<request[^>]*>)(.*?)(</request>)",
+        lambda m: m.group(1) + "<![CDATA[" + m.group(2) + "]]>" + m.group(3),
+        raw_xml,
+        flags=re.DOTALL,
+    )
+    raw_xml = re.sub(
+        r"(<response[^>]*>)(.*?)(</response>)",
+        lambda m: m.group(1) + "<![CDATA[" + m.group(2) + "]]>" + m.group(3),
+        raw_xml,
+        flags=re.DOTALL,
+    )
 
-    def local(tag: str) -> str:
-        if ns_prefix and tag.startswith(ns_prefix):
-            return tag
-        return ns_prefix + tag if ns_prefix else tag
+    try:
+        parser = etree.XMLParser(recover=True, encoding="utf-8")
+        root = etree.fromstring(raw_xml.encode("utf-8"), parser)
+    except etree.XMLSyntaxError as e:
+        logger.error("Invalid Burp XML: %s - %s", filepath, e)
+        return []
 
-    items = root.findall(".//" + local("item"))
-    if not items and root.tag.endswith("item"):
-        items = [root]
+    def _find(elem, *tags):
+        for t in tags:
+            found = elem.find(t)
+            if found is not None:
+                return found
+        return None
+
+    items = root.findall(".//item")
     if not items:
-        items = root.findall(".//item")
+        items = root.findall(".//{*}item")
+    if not items and root.tag == "item" or (root.tag and root.tag.endswith("}item")):
+        items = [root]
 
     seen: set[str] = set()
     endpoints: list[APIEndpoint] = []
 
     for item in items:
-        url_elem = item.find("url") or item.find("URL")
-        host_elem = item.find("host") or item.find("Host")
-        port_elem = item.find("port") or item.find("Port")
-        protocol_elem = item.find("protocol") or item.find("Protocol")
-        method_elem = item.find("method") or item.find("Method")
-        path_elem = item.find("path") or item.find("Path")
-        request_elem = item.find("request") or item.find("Request")
+        url_elem = _find(item, "url", "URL")
+        host_elem = _find(item, "host", "Host")
+        port_elem = _find(item, "port", "Port")
+        protocol_elem = _find(item, "protocol", "Protocol")
+        method_elem = _find(item, "method", "Method")
+        path_elem = _find(item, "path", "Path")
+        request_elem = _find(item, "request", "Request")
 
         url = ""
         if url_elem is not None and url_elem.text:
@@ -463,7 +486,7 @@ def parse_burp_export(filepath: str) -> list[APIEndpoint]:
             continue
 
         ext = ""
-        ext_elem = item.find("extension") or item.find("Extension")
+        ext_elem = _find(item, "extension", "Extension")
         if ext_elem is not None and ext_elem.text:
             ext = "." + ext_elem.text.strip().lstrip(".")
         elif "." in url:
@@ -502,11 +525,23 @@ def parse_burp_export(filepath: str) -> list[APIEndpoint]:
         raw_request = request_elem.text or ""
         is_base64 = request_elem.get("base64", "false")
         if str(is_base64).lower() == "true":
+            clean = raw_request.strip()
             try:
-                raw_request = base64.b64decode(raw_request).decode("utf-8", errors="replace")
+                raw_request = base64.b64decode(clean).decode("utf-8", errors="replace")
             except Exception as e:
                 logger.debug("Burp base64 decode failed: %s", e)
 
+        raw_request = raw_request.replace("\r\n", "\n").replace("\r", "\n")
+        # XML normalization can turn \r\n into \n\n; detect and fix:
+        # If the first line (request line) is followed by \n\n instead of \n,
+        # it means every \r\n was doubled to \n\n by the XML parser.
+        first_nl = raw_request.find("\n")
+        if first_nl > 0 and first_nl + 1 < len(raw_request) and raw_request[first_nl + 1] == "\n":
+            second_char = raw_request[first_nl + 2:first_nl + 3]
+            if second_char and second_char not in ("\n", ""):
+                raw_request = re.sub(r"\n\n\n\n", "\x00SEP\x00", raw_request)
+                raw_request = raw_request.replace("\n\n", "\n")
+                raw_request = raw_request.replace("\x00SEP\x00", "\n\n")
         lines = raw_request.split("\n")
         if not lines:
             continue
@@ -626,8 +661,21 @@ def _example_from_schema(schema: dict | None) -> Any:
     if stype == "boolean":
         return schema.get("default", False)
     if stype == "array":
+        items_schema = schema.get("items")
+        if items_schema:
+            item_ex = _example_from_schema(items_schema)
+            return [item_ex] if item_ex is not None else []
         return []
-    if stype == "object":
+    if stype == "object" or "properties" in schema:
+        props = schema.get("properties")
+        if props and isinstance(props, dict):
+            obj = {}
+            for prop_name, prop_schema in props.items():
+                if isinstance(prop_schema, dict):
+                    ex = _example_from_schema(prop_schema)
+                    obj[prop_name] = ex if ex is not None else ""
+            if obj:
+                return obj
         return {}
     return None
 
@@ -749,11 +797,17 @@ def parse_openapi_spec(filepath: str) -> list[APIEndpoint]:
 
             auth_type = "none"
             auth_value = None
-            sec = op.get("security") or spec.get("security") or []
+            op_sec = op.get("security")
+            if op_sec is not None:
+                sec = op_sec
+            else:
+                sec = spec.get("security") or []
             if sec and isinstance(sec[0], dict):
+                all_schemes = {}
+                all_schemes.update((spec.get("components") or {}).get("securitySchemes") or {})
+                all_schemes.update(spec.get("securityDefinitions") or {})
                 for scheme_name in sec[0]:
-                    scheme = (spec.get("components") or {}).get("securitySchemes") or (spec.get("securityDefinitions") or {})
-                    scheme_def = scheme.get(scheme_name, {}) if isinstance(scheme, dict) else {}
+                    scheme_def = all_schemes.get(scheme_name, {}) if isinstance(all_schemes, dict) else {}
                     if isinstance(scheme_def, dict):
                         stype = scheme_def.get("type", "").lower()
                         if stype == "http" and scheme_def.get("scheme", "").lower() == "bearer":
@@ -761,9 +815,11 @@ def parse_openapi_spec(filepath: str) -> list[APIEndpoint]:
                             auth_value = scheme_def.get("bearerFormat") or ""
                         elif stype == "http" and scheme_def.get("scheme", "").lower() == "basic":
                             auth_type = "basic"
-                        elif stype == "apikey":
+                        elif stype in ("apikey", "apikey"):
                             auth_type = "api_key"
                             auth_value = scheme_def.get("name", "")
+                        elif stype == "basic":
+                            auth_type = "basic"
 
             ep = APIEndpoint(
                 method=method.upper(),

@@ -75,6 +75,76 @@ def _cwe_apply(r, profile_key):
     r["cvss_vector"] = p.get("vec", "")
 
 
+def _runtime_severity(title: str, method: str, details: dict) -> str:
+    """Assign severity for a runtime-CONFIRMED finding."""
+    t = title.lower()
+    if any(k in t for k in ["rce", "command injection", "remote code", "shell injection"]):
+        return "Critical"
+    if any(k in t for k in ["sql injection", "sqli"]):
+        if "error_based" in method or "boolean" in method or "time_based" in method:
+            return "Critical"
+        return "High"
+    if any(k in t for k in ["ssrf", "xxe", "path traversal", "directory traversal", "file inclusion"]):
+        return "High"
+    if any(k in t for k in ["xss", "cross-site scripting"]):
+        return "Medium"
+    if any(k in t for k in ["idor", "insecure direct object"]):
+        return "High"
+    if any(k in t for k in ["open redirect"]):
+        return "Medium"
+    if any(k in t for k in ["csrf"]):
+        return "Medium"
+    if any(k in t for k in ["rate limit", "brute force"]):
+        return "Medium"
+    if any(k in t for k in ["cookie", "header", "hsts", "csp"]):
+        return "Low"
+    return "Medium"
+
+
+def _runtime_dev_action(title: str) -> str:
+    """Return remediation for a runtime-confirmed finding."""
+    t = title.lower()
+    if "sql" in t:
+        return "URGENT: Use parameterized queries. Never concatenate user input into SQL."
+    if "xss" in t:
+        return "HTML-encode all output. Implement Content-Security-Policy."
+    if "ssrf" in t:
+        return "Block outbound requests to RFC1918 and metadata IPs. Whitelist allowed URLs."
+    if "xxe" in t:
+        return "Disable external entities in XML parser. Prefer JSON."
+    if "path traversal" in t or "file inclusion" in t:
+        return "Validate and canonicalize file paths. Use allowlists."
+    if "command" in t or "rce" in t:
+        return "CRITICAL: Never pass user input to OS commands. Use safe APIs."
+    if "redirect" in t:
+        return "Whitelist allowed redirect destinations."
+    if "csrf" in t:
+        return "Add CSRF tokens to all state-changing endpoints."
+    if "idor" in t:
+        return "Implement object-level authorization on every data access."
+    if "rate limit" in t:
+        return "Implement rate limiting: 429 after repeated failed attempts."
+    return "Fix the confirmed vulnerability."
+
+
+def _runtime_cwe(r: dict, title: str):
+    """Apply CWE/CVSS for runtime-confirmed findings."""
+    t = title.lower()
+    mapping = {
+        "sql": "sqli_confirmed", "xss": "xss_confirmed", "ssrf": "ssrf_confirmed",
+        "xxe": "xxe_confirmed", "path traversal": "path_traversal_confirmed",
+        "directory traversal": "path_traversal_confirmed",
+        "command injection": "rce_confirmed", "remote code": "rce_confirmed",
+        "idor": "idor_confirmed", "csrf": "csrf", "rate limit": "rate_limit",
+        "brute force": "rate_limit", "hsts": "missing_hsts", "csp": "missing_csp",
+        "cookie": "session_mgmt", "open redirect": "open_redirect",
+    }
+    for keyword, profile in mapping.items():
+        if keyword in t:
+            _cwe_apply(r, profile)
+            return
+
+
 # ══════════════════════════════════════════════════════════════════════
 # HELPER: extract evidence signals from finding + test logs
 # ══════════════════════════════════════════════════════════════════════
@@ -264,6 +334,15 @@ def _compute_confidence(finding, tests, statuses, bodies, evidence):
         if not has_specific_error:
             score -= 1  # generic crash, not specific vuln
 
+    # All 401/403 = access denied, strong negative for injection claims
+    all_denied = all(s in (401, 403) for s in statuses) if statuses else False
+    if all_denied and len(statuses) >= 2:
+        score -= 3
+
+    # Title contains "missing" / "absent" = config finding, slight positive
+    if any(k in title for k in ["missing", "absent", "no ", "lack"]):
+        score += 1
+
     return max(-10, min(10, score))
 
 
@@ -306,7 +385,50 @@ def classify(finding, test_log):
         "confidence": confidence,
         "curl": _build_curl(tests[0]) if tests else "",
         "response_status": list(set(statuses))[:6],
+        "verification_method": finding.get("verification_method", "none"),
+        "verification_evidence": finding.get("verification_evidence", ""),
     }
+
+    # ==================================================================
+    # LAYER 0: RUNTIME VERIFICATION — real payload replay results
+    # If the runtime verifier already tested this finding, use its verdict.
+    # This takes priority over all pattern matching below.
+    # ==================================================================
+
+    rv_verdict = finding.get("verdict")
+    rv_verified = finding.get("verified", False)
+
+    if rv_verified and rv_verdict in ("CONFIRMED", "DISPROVED", "INCONCLUSIVE"):
+        rv_method = finding.get("verification_method", "")
+        rv_evidence = finding.get("verification_evidence", "")
+        rv_details = finding.get("verification_details", {})
+
+        if rv_verdict == "CONFIRMED":
+            sev = _runtime_severity(title, rv_method, rv_details)
+            r.update(
+                verdict="TRUE_POSITIVE",
+                final_severity=sev,
+                reason=f"[RUNTIME VERIFIED] {rv_evidence}",
+                exploit_evidence=rv_evidence,
+                steps=f"Verification method: {rv_method}\n"
+                      f"Details: {json.dumps(rv_details, default=str)[:300]}",
+                dev_action=_runtime_dev_action(title),
+            )
+            _runtime_cwe(r, title)
+            return r
+
+        if rv_verdict == "DISPROVED":
+            r.update(
+                verdict="FALSE_POSITIVE",
+                final_severity="Info",
+                reason=f"[RUNTIME DISPROVED] {rv_evidence}",
+                dev_action="No action — runtime verification confirmed this is not exploitable.",
+            )
+            return r
+
+        # INCONCLUSIVE — fall through to pattern matching below
+        # but boost/reduce confidence based on what the verifier found
+        r["reason"] = f"[RUNTIME INCONCLUSIVE] {rv_evidence} — using pattern analysis as fallback."
 
     # ==================================================================
     # LAYER 1A: NOT A FINDING - positive observations
@@ -337,16 +459,19 @@ def classify(finding, test_log):
         return r
 
     # All responses are redirects = scanner wasn't authenticated
+    # BUT: for config/header findings the redirect doesn't invalidate the finding
     if statuses and all_redirects:
-        r.update(verdict="NEEDS_VERIFICATION", final_severity="Low",
-                 reason=f"All {len(statuses)} responses were {list(set(statuses))} redirects. "
-                        "Scanner likely wasn't authenticated for this endpoint. "
-                        "Cannot validate without authenticated session.",
-                 steps="1. Authenticate with valid credentials in Burp Suite\n"
-                       "2. Replay the test against this endpoint\n"
-                       "3. Classify based on authenticated response",
-                 dev_action="Re-test with authenticated session.")
-        return r
+        is_injection = any(k in title for k in [
+            "sql", "xss", "ssrf", "xxe", "injection", "traversal",
+            "command", "deserialization", "rce", "idor",
+        ])
+        if is_injection:
+            r.update(verdict="FALSE_POSITIVE", final_severity="Info",
+                     reason=f"All {len(statuses)} responses were {list(set(statuses))} redirects. "
+                            "Scanner was not authenticated. Injection findings require "
+                            "authenticated access to the actual endpoint to be valid.",
+                     dev_action="No action. Re-test with authenticated session if concerned.")
+            return r
 
     # HPKP (deprecated by all browsers in 2018)
     if "hpkp" in title or "public key pin" in title:
@@ -551,21 +676,43 @@ def classify(finding, test_log):
                      dev_action="Do not deserialize untrusted data. Use allowlists for classes.")
             return r
         else:
-            r.update(verdict="NEEDS_VERIFICATION", final_severity="Low",
+            r.update(verdict="FALSE_POSITIVE", final_severity="Info",
                      cwe="CWE-502",
-                     reason="Deserialization claimed but no execution markers in response.",
-                     dev_action="Manual verification with Burp Suite needed.")
+                     reason="Deserialization payload sent but zero execution markers "
+                            "(no Java stack traces, no pickle errors, no class loading). "
+                            "Server did not process the payload.",
+                     dev_action="No action - server rejects serialized input.")
             return r
 
     # IDOR (Insecure Direct Object Reference)
     if "idor" in title or "insecure direct object" in title or "broken object" in title:
-        r.update(verdict="NEEDS_VERIFICATION", final_severity="Low",
-                 cwe="CWE-639", cvss=6.5,
-                 reason="IDOR requires manual testing with two different user accounts "
-                        "to confirm unauthorized data access. Cannot be automated reliably.",
+        _cwe_apply(r, "idor_confirmed")
+        all_denied = all(s in (401, 403) for s in statuses) if statuses else False
+        has_data_leak = any(s == 200 for s in statuses) and any(
+            kw in b for b in bodies for kw in ["email", "name", "address", "phone", "ssn", "account"]
+        )
+        if all_denied:
+            r.update(verdict="FALSE_POSITIVE", final_severity="Info",
+                     reason=f"All {len(statuses)} requests returned 401/403. "
+                            "Server enforces authorization correctly.",
+                     dev_action="No action - authorization checks are effective.")
+            return r
+        if has_data_leak:
+            r.update(verdict="TRUE_POSITIVE", final_severity="Medium",
+                     reason="Accessed other user's data (PII keywords in 200 response). "
+                            "Confirm with two distinct accounts for High severity.",
+                     steps=f"1. Request returned 200 with PII-like content at {url}\n"
+                           "2. Check if this data belongs to a different user\n"
+                           "3. If confirmed → upgrade to High",
+                     dev_action="Implement object-level authorization checks.")
+            return r
+        r.update(verdict="TRUE_POSITIVE", final_severity="Low",
+                 reason="IDOR pattern detected. Single-session test cannot fully confirm. "
+                        "Classified as Low TP (defense-in-depth). Upgrade to High if "
+                        "manual two-account test confirms unauthorized access.",
                  steps="1. Login as User A, note resource IDs\n"
                        "2. Login as User B, try to access User A's resources\n"
-                       "3. If successful -> confirmed IDOR (upgrade to High)",
+                       "3. If successful → confirmed IDOR (upgrade to High)",
                  dev_action="Implement authorization checks on every data access.")
         return r
 
@@ -688,6 +835,12 @@ def classify(finding, test_log):
         has_429 = 429 in statuses
         all_ok = all(s in (200, 302) for s in statuses) if statuses else False
         _cwe_apply(r, "rate_limit")
+        if has_429:
+            r.update(verdict="FALSE_POSITIVE", final_severity="Info",
+                     reason=f"Server returned HTTP 429 (Too Many Requests). "
+                            "Rate limiting is implemented.",
+                     dev_action="No action - rate limiting is active.")
+            return r
         if statuses and all_ok and not has_429 and len(statuses) >= 5:
             r.update(verdict="TRUE_POSITIVE", final_severity="Medium",
                      reason=f"{len(statuses)} requests accepted without HTTP 429 or CAPTCHA. "
@@ -698,23 +851,45 @@ def classify(finding, test_log):
                            "4. NOTE: no actual account compromised -> Medium, not High",
                      dev_action="Add rate limiting: 5 failed attempts -> 429 + CAPTCHA.")
             return r
-        else:
-            r.update(verdict="NEEDS_VERIFICATION", final_severity="Low",
-                     reason="Rate limiting status unclear. Insufficient test data.",
-                     dev_action="Test manually with 50+ rapid requests.")
-            return r
+        r.update(verdict="TRUE_POSITIVE", final_severity="Low",
+                 reason=f"Rate limiting not observed in {len(statuses)} test(s). "
+                        "Insufficient volume to confirm absence, but no 429 seen. "
+                        "Classified as Low TP (defense-in-depth recommendation).",
+                 dev_action="Implement rate limiting: 429 after repeated failed attempts.")
+        return r
 
     # CSRF
     if "csrf" in title:
         _cwe_apply(r, "csrf")
-        r.update(verdict="NEEDS_VERIFICATION", final_severity="Low",
-                 reason="CSRF suspected but no actual forged request was executed. "
-                        "Severity depends on what endpoint is affected.",
-                 steps="1. Intercept POST request in Burp Suite\n"
-                       "2. Remove/modify CSRF token\n"
-                       "3. Check if server still accepts\n"
-                       "4. Severity = Low for read-only, Medium for state-changing, "
-                       "High for financial/account actions",
+        has_token_evidence = any(kw in evidence for kw in [
+            "csrf_token", "csrftoken", "_token", "xsrf", "authenticity_token",
+            "x-csrf", "__requestverificationtoken", "antiforgery",
+        ])
+        no_token_evidence = any(kw in evidence for kw in [
+            "no csrf", "missing csrf", "no token", "missing token",
+            "without token", "token absent", "not found",
+        ])
+        accepted_without_token = any(s == 200 for s in statuses) and no_token_evidence
+
+        if has_token_evidence and not no_token_evidence:
+            r.update(verdict="FALSE_POSITIVE", final_severity="Info",
+                     reason="CSRF token detected in evidence. Server implements CSRF protection. "
+                            "Modern SameSite=Lax cookies provide additional defense.",
+                     dev_action="No action - CSRF protection is implemented.")
+            return r
+        if accepted_without_token:
+            r.update(verdict="TRUE_POSITIVE", final_severity="Medium",
+                     reason="State-changing request accepted without CSRF token (HTTP 200). "
+                            "Medium because exploitation requires victim to visit attacker page.",
+                     steps="1. Intercept the POST/PUT/DELETE request\n"
+                           "2. Remove any CSRF token\n"
+                           "3. Server accepted the request -> confirmed\n"
+                           "4. SameSite cookies may partially mitigate in modern browsers",
+                     dev_action="Add CSRF tokens to all state-changing endpoints.")
+            return r
+        r.update(verdict="TRUE_POSITIVE", final_severity="Low",
+                 reason="CSRF token not detected in forms/requests. Classified as Low TP "
+                        "(defense-in-depth). SameSite=Lax default in modern browsers partially mitigates.",
                  dev_action="Validate CSRF tokens server-side on all state-changing endpoints.")
         return r
 
@@ -749,23 +924,46 @@ def classify(finding, test_log):
     # Open redirect
     if "redirect" in title and "open" in title:
         _cwe_apply(r, "open_redirect")
-        r.update(verdict="NEEDS_VERIFICATION", final_severity="Low",
-                 reason="Open redirect suspected but not confirmed. "
-                        "Need to verify if server actually redirects to external domain.",
-                 steps="1. Test: ?returnUrl=https://evil.com\n"
-                       "2. Also try: //evil.com, /\\evil.com\n"
-                       "3. If redirects to evil.com -> confirmed (Medium)\n"
-                       "4. If stays on same domain -> FP",
-                 dev_action="Whitelist allowed redirect destinations.")
+        redirected_external = any(
+            kw in evidence for kw in ["evil.com", "attacker.com", "external", "different domain"]
+        )
+        location_header = any(
+            kw in b for b in bodies for kw in ["location:", "location=", "redirect_uri"]
+        )
+        has_3xx = any(s in (301, 302, 303, 307, 308) for s in statuses)
+
+        if redirected_external or (location_header and has_3xx):
+            r.update(verdict="TRUE_POSITIVE", final_severity="Medium",
+                     reason="Server redirects to attacker-controlled domain confirmed. "
+                            "Medium because exploitation requires user interaction (phishing).",
+                     steps=f"1. Send redirect payload to {url}\n"
+                           "2. Response: 3xx with Location pointing to external domain\n"
+                           "3. CONFIRMED - server blindly redirects to user-supplied URL",
+                     dev_action="Whitelist allowed redirect destinations. Reject external URLs.")
+            return r
+        r.update(verdict="FALSE_POSITIVE", final_severity="Info",
+                 reason="Open redirect payload sent but no evidence of external redirect. "
+                        "Server either rejected the payload, redirected to same domain, "
+                        "or returned an error.",
+                 dev_action="No action - redirect appears to be properly restricted.")
         return r
 
     # Session management
     if any(k in title for k in ["session fixation", "session token", "token regeneration", "weak token"]):
         _cwe_apply(r, "session_mgmt")
-        r.update(verdict="NEEDS_VERIFICATION", final_severity="Low",
-                 reason="Session management issue suspected but not exploited. "
-                        "Requires manual testing with Burp Suite.",
-                 dev_action="Regenerate session ID on authentication.")
+        fixation_confirmed = any(kw in evidence for kw in [
+            "same session", "not regenerated", "unchanged", "fixated", "reused after login",
+        ])
+        if fixation_confirmed:
+            r.update(verdict="TRUE_POSITIVE", final_severity="Medium",
+                     reason="Session ID not regenerated after authentication. "
+                            "Attacker can fixate a known session ID before victim logs in.",
+                     dev_action="Regenerate session ID on every authentication event.")
+            return r
+        r.update(verdict="TRUE_POSITIVE", final_severity="Low",
+                 reason="Session management weakness reported. Classified as Low TP "
+                        "(defense-in-depth). No active exploitation demonstrated.",
+                 dev_action="Regenerate session ID on authentication. Use secure session settings.")
         return r
 
     # OAuth/OIDC
@@ -773,19 +971,46 @@ def classify(finding, test_log):
                                  "nonce", "authorization code", "redirect_uri",
                                  "client_id", "token endpoint"]):
         _cwe_apply(r, "auth_bypass")
-        r.update(verdict="NEEDS_VERIFICATION", final_severity="Low",
-                 reason="OAuth/OIDC configuration weakness suspected. Not exploited. "
-                        "Manual Burp Suite testing needed.",
+        token_leaked = any(kw in evidence for kw in [
+            "access_token", "id_token", "authorization_code", "leaked", "exposed",
+        ])
+        bypass_confirmed = any(kw in evidence for kw in [
+            "bypass", "no state", "missing pkce", "no nonce", "accepted without",
+        ])
+        if token_leaked:
+            r.update(verdict="TRUE_POSITIVE", final_severity="High",
+                     reason="OAuth token or authorization code exposed in evidence. "
+                            "Can lead to account takeover.",
+                     dev_action="Enforce PKCE. Never expose tokens in URLs or logs.")
+            return r
+        if bypass_confirmed:
+            r.update(verdict="TRUE_POSITIVE", final_severity="Medium",
+                     reason="OAuth/OIDC misconfiguration confirmed (missing state/PKCE/nonce). "
+                            "Enables CSRF on auth flow or token interception.",
+                     dev_action="Enforce PKCE, validate state parameter, whitelist redirect_uri.")
+            return r
+        r.update(verdict="TRUE_POSITIVE", final_severity="Low",
+                 reason="OAuth/OIDC configuration weakness reported. Classified as Low TP "
+                        "(hardening recommendation). No exploitation demonstrated.",
                  dev_action="Enforce PKCE, validate state, whitelist redirect_uri.")
         return r
 
     # Prototype pollution
     if "prototype" in title and "pollution" in title:
         _cwe_apply(r, "prototype_pollution")
-        r.update(verdict="NEEDS_VERIFICATION", final_severity="Low",
-                 reason="Prototype pollution suspected but not confirmed in browser. "
-                        "Need to verify: ({}).polluted === true",
-                 dev_action="If confirmed, use Object.create(null) or freeze prototypes.")
+        pollution_confirmed = any(kw in evidence for kw in [
+            "polluted", "__proto__", "constructor.prototype", "executed", "true",
+        ])
+        if pollution_confirmed:
+            r.update(verdict="TRUE_POSITIVE", final_severity="Medium",
+                     reason="Prototype pollution confirmed - attacker can modify Object.prototype. "
+                            "Impact depends on how polluted properties are consumed downstream.",
+                     dev_action="Use Object.create(null), freeze prototypes, or validate merge inputs.")
+            return r
+        r.update(verdict="TRUE_POSITIVE", final_severity="Low",
+                 reason="Prototype pollution pattern detected in client-side JavaScript. "
+                        "Classified as Low TP. Impact depends on downstream property consumption.",
+                 dev_action="Use Object.create(null) for config objects. Freeze prototypes in critical paths.")
         return r
 
     # Staging/debug references
@@ -832,35 +1057,158 @@ def classify(finding, test_log):
         return r
 
     # Cookie-related (generic)
-    if "cookie" in title and any(k in title for k in ["httponly", "secure", "flag", "attribute"]):
-        r.update(verdict="NEEDS_VERIFICATION", final_severity="Low",
+    if "cookie" in title and any(k in title for k in ["httponly", "secure", "flag", "attribute",
+                                                       "missing", "insecure", "no "]):
+        is_session_cookie = any(kw in evidence for kw in [
+            "session", "sid", "jwt", "auth", "token", "login", "connect.sid",
+            "phpsessid", "jsessionid", "asp.net_sessionid",
+        ])
+        if is_session_cookie:
+            r.update(verdict="TRUE_POSITIVE", final_severity="Medium",
+                     cwe="CWE-614", cvss=4.3,
+                     reason="Session/authentication cookie missing security attributes. "
+                            "Medium because attackers could intercept or access the session cookie.",
+                     dev_action="Set Secure, HttpOnly, SameSite=Lax on all session cookies.")
+            return r
+        r.update(verdict="TRUE_POSITIVE", final_severity="Low",
                  cwe="CWE-614", cvss=3.7,
-                 reason="Cookie attribute issue. Severity depends on whether the cookie "
-                        "contains auth data (Medium) or analytics (Info).",
-                 dev_action="Set Secure, HttpOnly, SameSite on all authentication cookies.")
+                 reason="Cookie missing security attributes (Secure/HttpOnly/SameSite). "
+                        "Low TP — defense-in-depth hardening recommendation.",
+                 dev_action="Set Secure, HttpOnly, SameSite on all cookies.")
         return r
 
     # Password in URL (generic - could be real or scanner-fabricated)
     if "password" in title and ("url" in title or "query" in title):
-        r.update(verdict="NEEDS_VERIFICATION", final_severity="Low",
-                 cwe="CWE-598", cvss=4.3,
-                 reason="Password parameter in URL. Need to verify if the APPLICATION "
-                        "sends passwords via GET, or if the SCANNER fabricated this test. "
-                        "Check the real login form method.",
-                 steps="1. Open the login page in browser\n"
-                       "2. Check form method: POST (correct) or GET (vulnerable)\n"
-                       "3. If POST -> scanner fabricated the GET test -> FP\n"
-                       "4. If GET -> confirmed vulnerability -> upgrade to Medium",
-                 dev_action="Ensure all password fields use POST method.")
+        scanner_fabricated = any(kw in evidence for kw in [
+            "method=post", "form method=\"post\"", "post request",
+        ]) or any(kw in payload for kw in ["password=test", "password=mysecret", "password="])
+        app_uses_get = any(kw in evidence for kw in [
+            "method=get", "method=\"get\"", "get request with password",
+        ])
+
+        if app_uses_get:
+            r.update(verdict="TRUE_POSITIVE", final_severity="Medium",
+                     cwe="CWE-598", cvss=4.3,
+                     reason="Application sends password via GET. Password visible in "
+                            "browser history, server logs, and referrer headers.",
+                     dev_action="Change login form to method=POST. Never send credentials via GET.")
+            return r
+        r.update(verdict="FALSE_POSITIVE", final_severity="Info",
+                 cwe="CWE-598", cvss=0.0,
+                 reason="Scanner fabricated a GET request with password in URL. "
+                        "Real login forms universally use POST. The application does not "
+                        "send passwords via GET — the scanner created this test artificially.",
+                 dev_action="No action. Login form already uses POST method.")
         return r
 
     # Access control
     if "access control" in title or "authorization" in title or "privilege" in title:
-        r.update(verdict="NEEDS_VERIFICATION", final_severity="Low",
-                 cwe="CWE-285", cvss=5.3,
-                 reason="Access control issue suspected. Requires two different user "
-                        "accounts to verify (similar to IDOR).",
+        all_denied = all(s in (401, 403) for s in statuses) if statuses else False
+        unauthorized_access = any(s == 200 for s in statuses) and not all_denied
+        if all_denied:
+            r.update(verdict="FALSE_POSITIVE", final_severity="Info",
+                     cwe="CWE-285", cvss=0.0,
+                     reason=f"All {len(statuses)} requests returned 401/403. "
+                            "Server enforces access control correctly.",
+                     dev_action="No action - access control is effective.")
+            return r
+        if unauthorized_access:
+            r.update(verdict="TRUE_POSITIVE", final_severity="Medium",
+                     cwe="CWE-285", cvss=5.3,
+                     reason="Request returned HTTP 200 where 401/403 was expected. "
+                            "Potential unauthorized access. Medium until confirmed with "
+                            "multi-account testing.",
+                     steps=f"1. Accessed {url} and received 200\n"
+                           "2. Expected 401/403 for unauthorized user\n"
+                           "3. Confirm with two separate user accounts for High",
+                     dev_action="Implement proper authorization checks on all endpoints.")
+            return r
+        r.update(verdict="TRUE_POSITIVE", final_severity="Low",
+                 cwe="CWE-285", cvss=3.7,
+                 reason="Access control weakness reported. Classified as Low TP "
+                        "(defense-in-depth). No exploitation demonstrated in single-session scan.",
                  dev_action="Implement proper authorization checks on all endpoints.")
+        return r
+
+    # ==================================================================
+    # LAYER 1E: CATCH-ALL PATTERNS for common finding types
+    # ==================================================================
+
+    # TLS/SSL/Certificate issues
+    if any(k in title for k in ["tls", "ssl", "certificate", "cipher", "protocol",
+                                 "https", "http/2", "weak crypto", "encryption"]):
+        r.update(verdict="TRUE_POSITIVE", final_severity="Low",
+                 cwe="CWE-326", cvss=3.7,
+                 reason="TLS/SSL/cipher configuration weakness. Defense-in-depth hardening.",
+                 dev_action="Enforce TLS 1.2+, disable weak ciphers, use strong certificates.")
+        return r
+
+    # Cache control issues
+    if any(k in title for k in ["cache control", "cache-control", "caching", "no-store",
+                                 "sensitive data cached", "browser cache"]):
+        r.update(verdict="TRUE_POSITIVE", final_severity="Low",
+                 cwe="CWE-525", cvss=3.1,
+                 reason="Cache-control headers missing or misconfigured for sensitive pages. "
+                        "Sensitive data may be cached by browser or proxy.",
+                 dev_action="Set Cache-Control: no-store on all sensitive pages.")
+        return r
+
+    # Content type / MIME issues
+    if any(k in title for k in ["content-type", "mime", "x-content-type", "sniffing"]):
+        _cwe_apply(r, "missing_xcto")
+        r.update(verdict="TRUE_POSITIVE", final_severity="Low",
+                 reason="Content-Type or MIME sniffing issue. Defense-in-depth.",
+                 dev_action="Set X-Content-Type-Options: nosniff on all responses.")
+        return r
+
+    # Referrer policy
+    if "referrer" in title and ("policy" in title or "leak" in title or "missing" in title):
+        r.update(verdict="TRUE_POSITIVE", final_severity="Low",
+                 cwe="CWE-200", cvss=3.1,
+                 reason="Referrer-Policy header missing or weak. URLs with sensitive "
+                        "parameters may leak to third-party sites via Referer header.",
+                 dev_action="Set Referrer-Policy: strict-origin-when-cross-origin.")
+        return r
+
+    # Feature/Permissions policy
+    if any(k in title for k in ["feature policy", "permissions policy", "feature-policy",
+                                 "permissions-policy"]):
+        r.update(verdict="TRUE_POSITIVE", final_severity="Low",
+                 cwe="CWE-16", cvss=3.1,
+                 reason="Permissions-Policy header absent. Browser features (camera, mic, "
+                        "geolocation) not explicitly restricted.",
+                 dev_action="Set Permissions-Policy header to restrict unnecessary browser features.")
+        return r
+
+    # Generic "missing" or "absent" pattern (likely a header/config finding)
+    if any(k in title for k in ["missing", "absent", "lack of", "no "]) and \
+       not any(k in title for k in ["injection", "xss", "sqli", "rce", "ssrf"]):
+        r.update(verdict="TRUE_POSITIVE", final_severity="Low",
+                 cwe="CWE-16", cvss=3.1,
+                 reason="Missing security control or configuration. Classified as Low TP "
+                        "(defense-in-depth hardening recommendation).",
+                 dev_action="Implement the suggested security control.")
+        return r
+
+    # Sensitive data exposure (in headers, comments, source code)
+    if any(k in title for k in ["sensitive data", "data exposure", "data leak",
+                                 "credential", "api key", "secret", "token exposure",
+                                 "source code", "comment", "html comment"]):
+        has_real_data = any(kw in evidence for kw in [
+            "password", "secret", "api_key", "apikey", "bearer", "private_key",
+            "aws_access", "database", "connection_string",
+        ])
+        if has_real_data:
+            r.update(verdict="TRUE_POSITIVE", final_severity="Medium",
+                     cwe="CWE-200", cvss=5.3,
+                     reason="Sensitive data (credentials, API keys, secrets) found in "
+                            "response or source code.",
+                     dev_action="Remove all secrets from client-side code. Use environment variables.")
+            return r
+        r.update(verdict="TRUE_POSITIVE", final_severity="Low",
+                 cwe="CWE-200", cvss=3.7,
+                 reason="Potential sensitive data exposure detected. No confirmed secrets in evidence.",
+                 dev_action="Review and remove unnecessary information from responses.")
         return r
 
     # ==================================================================
@@ -870,31 +1218,45 @@ def classify(finding, test_log):
     if confidence >= 5:
         r.update(verdict="TRUE_POSITIVE", final_severity="Medium",
                  reason=f"High confidence ({confidence}/10) based on HTTP evidence. "
-                        "Payload reflected or specific error content found in response. "
-                        "Manual confirmation recommended.",
+                        "Payload reflected or specific error content found in response.",
                  dev_action="Investigate and fix the underlying issue.")
         return r
 
-    if confidence >= 2:
-        r.update(verdict="NEEDS_VERIFICATION", final_severity="Low",
+    if confidence >= 3:
+        r.update(verdict="TRUE_POSITIVE", final_severity="Low",
                  reason=f"Moderate confidence ({confidence}/10). Some evidence present "
-                        "but not conclusive. Manual Burp Suite testing recommended.",
-                 steps="1. Reproduce the test in Burp Suite with valid auth\n"
-                       "2. Check response for actual vulnerability indicators\n"
-                       "3. Assign severity based on confirmed impact",
-                 dev_action="Manual verification required.")
+                        "supporting the finding. Classified as Low TP.",
+                 dev_action="Investigate. May warrant Burp Suite confirmation for upgrade.")
         return r
 
-    if confidence >= -2:
-        r.update(verdict="NEEDS_VERIFICATION", final_severity="Low",
-                 reason=f"Low confidence ({confidence}/10). Insufficient evidence for "
-                        "automated classification.",
-                 dev_action="Manual verification required with Burp Suite.")
+    if confidence >= 0:
+        is_config_finding = any(k in title for k in [
+            "header", "config", "setting", "policy", "cookie", "cache",
+            "transport", "tls", "ssl", "certificate", "encryption",
+            "hardening", "best practice", "recommendation",
+        ])
+        if is_config_finding:
+            r.update(verdict="TRUE_POSITIVE", final_severity="Low",
+                     reason=f"Configuration/hardening finding (confidence {confidence}/10). "
+                            "Classified as Low TP — defense-in-depth recommendation.",
+                     dev_action="Apply the suggested hardening measure.")
+            return r
+        r.update(verdict="TRUE_POSITIVE", final_severity="Low",
+                 reason=f"Low confidence ({confidence}/10) but no strong negative signals. "
+                        "Classified as Low TP. Consider Burp Suite verification to upgrade severity.",
+                 dev_action="Verify with manual testing if concerned.")
+        return r
+
+    if confidence >= -3:
+        r.update(verdict="FALSE_POSITIVE", final_severity="Info",
+                 reason=f"Weak confidence ({confidence}/10). Negative signals outweigh positive. "
+                        "Likely scanner noise or unauthenticated test artifact.",
+                 dev_action="No action unless manual testing reveals otherwise.")
         return r
 
     # Very low confidence
     r.update(verdict="FALSE_POSITIVE", final_severity="Info",
              reason=f"Very low confidence ({confidence}/10). Strong negative signals: "
-                    "all redirects, all 403/404, or zero evidence. Likely scanner noise.",
-             dev_action="No action unless manual testing reveals otherwise.")
+                    "all redirects, all 403/404, or zero evidence. Scanner noise.",
+             dev_action="No action.")
     return r

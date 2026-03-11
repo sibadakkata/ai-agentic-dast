@@ -9,6 +9,7 @@ import time
 from pathlib import Path
 
 import httpx
+from urllib.parse import urlparse
 from playwright.async_api import async_playwright
 
 from .api_import import (
@@ -28,6 +29,99 @@ MAX_MSG_RESULT_CHARS = 1500
 TRIM_TARGET_TOKENS = 40000
 
 
+def _extract_base_domain(url: str) -> str:
+    """Extract the registrable domain from a URL (e.g. 'avg.com' from 'https://www.avg.com/cs-cz')."""
+    try:
+        host = urlparse(url).hostname or ""
+    except Exception:
+        return ""
+    parts = host.lower().split(".")
+    if len(parts) >= 2:
+        return ".".join(parts[-2:])
+    return host
+
+
+GEN_DIGITAL_DOMAINS = {
+    "norton.com", "nortonlifelock.com", "lifelock.com",
+    "avast.com", "avg.com", "ccleaner.com",
+    "avira.com", "reputation.com", "gendigital.com",
+}
+
+
+def _build_allowed_domains(target_url: str) -> set:
+    """Build full set of allowed domains. If target is a Gen Digital property, include all Gen domains."""
+    base = _extract_base_domain(target_url)
+    allowed = {base} if base else set()
+    if base in GEN_DIGITAL_DOMAINS:
+        allowed |= GEN_DIGITAL_DOMAINS
+    return allowed
+
+
+def _is_in_scope(url: str, allowed_domains: set) -> bool:
+    """Check if a URL belongs to one of the allowed base domains."""
+    try:
+        host = (urlparse(url).hostname or "").lower()
+    except Exception:
+        return False
+    for d in allowed_domains:
+        if host == d or host.endswith("." + d):
+            return True
+    return False
+
+_VALID_TOOL_NAME = re.compile(r"[^a-zA-Z0-9_\-]")
+
+def _sanitize_tool_name(name: str) -> str:
+    """Bedrock requires tool names matching [a-zA-Z0-9_-]+ and <= 64 chars."""
+    cleaned = _VALID_TOOL_NAME.sub("_", name) if name else "unknown"
+    return cleaned[:64]
+
+
+def _to_plain_dict(obj):
+    """Convert any object (Pydantic model, dataclass, etc.) to a plain dict."""
+    if obj is None:
+        return {}
+    if hasattr(obj, "model_dump"):
+        return obj.model_dump()
+    if isinstance(obj, dict):
+        return dict(obj)
+    if hasattr(obj, "__dict__"):
+        return dict(vars(obj))
+    return {}
+
+
+def _sanitize_message(msg: dict) -> dict:
+    """Ensure all tool_call function names in an assistant message are Bedrock-safe."""
+    tcs = msg.get("tool_calls")
+    if not tcs:
+        return msg
+    cleaned = []
+    for tc in tcs:
+        if not isinstance(tc, dict):
+            tc = _to_plain_dict(tc)
+        else:
+            tc = dict(tc)
+        fn = tc.get("function")
+        if fn is not None:
+            if not isinstance(fn, dict):
+                fn = _to_plain_dict(fn)
+            else:
+                fn = dict(fn)
+            fn["name"] = _sanitize_tool_name(fn.get("name") or "")
+            tc["function"] = fn
+        cleaned.append(tc)
+    msg = dict(msg)
+    msg["tool_calls"] = cleaned
+    return msg
+
+
+def _sanitize_all_messages(messages):
+    """Pre-send sweep: sanitize tool names in all assistant messages."""
+    for i, m in enumerate(messages):
+        if isinstance(m, dict) and m.get("tool_calls"):
+            messages[i] = _sanitize_message(m)
+    return messages
+
+
 def _cap_result(result: dict) -> str:
     """Serialize tool result and cap its size for message history."""
     raw = json.dumps(result, default=str)
@@ -38,6 +132,78 @@ def _cap_result(result: dict) -> str:
 
 def _estimate_tokens(messages: list[dict]) -> int:
     return len(json.dumps(messages, default=str)) // 4
+
+
+_API_PATH_PATTERNS = re.compile(
+    r"/(api|v\d+|graphql|rest|oauth|token|webhook|callback|ws|rpc|feed|sitemap\.xml)"
+    r"(/|$|\?)", re.IGNORECASE
+)
+_API_EXTENSIONS = re.compile(
+    r"\.(json|xml|yaml|yml|wsdl|proto|graphql)(\?|#|$)", re.IGNORECASE
+)
+_PAGE_EXTENSIONS = re.compile(
+    r"\.(html?|php|aspx?|jsp|css|js|png|jpe?g|gif|svg|ico|webp|woff2?|ttf|eot|pdf|mp[34]|webm)(\?|#|$)",
+    re.IGNORECASE,
+)
+_SECURITY_TEST_TOOLS = frozenset({
+    "inject_payload", "fuzz_parameter", "test_auth_bypass",
+    "test_method_override", "replay_with_modification",
+})
+
+def _classify_url(url: str, result: dict, tool_name: str) -> str:
+    """Classify a crawled URL as 'api', 'page', or 'test' based on URL
+    structure and response content — NOT the tool that was used."""
+    if tool_name in _SECURITY_TEST_TOOLS:
+        return "test"
+
+    from urllib.parse import urlparse
+    path = urlparse(url).path.lower().rstrip("/")
+
+    if _PAGE_EXTENSIONS.search(path):
+        return "page"
+    if _API_PATH_PATTERNS.search(path) or _API_EXTENSIONS.search(path):
+        return "api"
+
+    content_type = ""
+    body = ""
+    if isinstance(result, dict):
+        hdrs = result.get("headers") or {}
+        ct_from_headers = ""
+        for k, v in hdrs.items():
+            if k.lower() == "content-type":
+                ct_from_headers = str(v).lower()
+                break
+        content_type = (str(result.get("content_type") or "") or ct_from_headers).lower()
+        body = str(result.get("body_snippet") or result.get("body") or "")[:300].strip()
+        if not body:
+            nested = result.get("results")
+            if isinstance(nested, list) and nested:
+                first = nested[0] if isinstance(nested[0], dict) else {}
+                body = str(first.get("body_snippet") or "")[:300].strip()
+
+    if content_type:
+        if any(t in content_type for t in (
+            "application/json", "application/xml", "text/xml",
+            "application/graphql", "application/grpc",
+            "application/protobuf", "application/msgpack",
+            "application/ld+json", "application/hal+json",
+            "application/problem+json", "application/vnd.",
+        )):
+            return "api"
+        if any(t in content_type for t in ("text/html", "text/css", "image/", "font/")):
+            return "page"
+
+    if body:
+        stripped = body.lstrip()
+        if stripped.startswith(("{", "[", "<?xml")):
+            return "api"
+        if stripped.startswith(("<!DOCTYPE", "<html", "<HTML", "<head", "<HEAD")):
+            return "page"
+
+    if tool_name == "navigate":
+        return "page"
+
+    return "page"
 
 
 def _resolve_import_path(base_dir: str, path: str | None) -> str | None:
@@ -55,6 +221,7 @@ async def run_scan(
     router: LLMRouter,
     config_dir: str | None = None,
     on_progress: callable | None = None,
+    extra_domains: list[str] | None = None,
 ) -> tuple[list[dict], dict]:
     config_dir = config_dir or os.getcwd()
     _cb = on_progress or (lambda *a, **k: None)
@@ -78,8 +245,14 @@ async def run_scan(
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
-        print(f"  [AUTH] Authenticating to {target.url}...")
-        _cb("auth", {"status": "authenticating", "url": target.url})
+        has_creds = bool((target.credentials or {}).get("username") or
+                         (target.credentials or {}).get("password"))
+        if has_creds:
+            print(f"  [AUTH] Authenticating to {target.url}...")
+            _cb("auth", {"status": "authenticating", "url": target.url})
+        else:
+            print(f"  [SCAN] Opening {target.url} (unauthenticated)...")
+            _cb("auth", {"status": "unauthenticated", "url": target.url})
         auth_session = await authenticate(browser, target, router, model)
         page = auth_session.page
         print(f"  [AUTH] Auth type: {auth_session._auth_type}, URL after login: {page.url}")
@@ -108,31 +281,41 @@ async def run_scan(
             if openapi_path:
                 registry.add(parse_openapi_spec(openapi_path))
 
+        allowed_domains = _build_allowed_domains(target.url)
+        if extra_domains:
+            allowed_domains |= set(d.strip().lower() for d in extra_domains if d.strip())
+        logger.info("Scope restricted to domain(s): %s", allowed_domains)
+        _cb("scope", {"allowed_domains": sorted(allowed_domains)})
+
         tools = ScanTools(
             page=page,
             http_client=http_client,
             registry=registry,
             auth_session=auth_session,
+            allowed_domains=allowed_domains,
         )
 
         app_info = await detect_app_type(page)
         print(f"  [DETECT] SPA: {app_info.get('is_spa')}, Framework: {app_info.get('framework')}, WebSockets: {app_info.get('has_websockets')}")
         _cb("detect", {"is_spa": app_info.get("is_spa"), "framework": app_info.get("framework")})
         phases = get_phases(target.scan_mode, app_info)
-        system_prompt = build_system_prompt(target, registry, app_info)
+        system_prompt = build_system_prompt(target, registry, app_info, extra_domains=extra_domains)
         messages: list[dict] = [{"role": "system", "content": system_prompt}]
 
-        print(f"  [SCAN] Starting {len(phases)} phases...")
-        _cb("scan_start", {"total_phases": len(phases)})
-        for phase_idx, phase in enumerate(phases, 1):
+        total_phases = len(phases) + 1  # +1 for Runtime Verification
+        print(f"  [SCAN] Starting {len(phases)} scan phases + verification...")
+        _cb("scan_start", {"total_phases": total_phases})
+        for phase_idx, phase in enumerate(phases):
+            phase_num = phase_idx + 1
             phase_tool_calls = 0
             phase_findings_before = len(findings)
-            print(f"  [{phase_idx}/{len(phases)}] Phase: {phase.name} ({phase.id})...", end="", flush=True)
-            _cb("phase_start", {"phase": phase_idx, "total": len(phases), "name": phase.name, "id": phase.id})
+            print(f"  [{phase_num}/{total_phases}] Phase: {phase.name} ({phase.id})...", end="", flush=True)
+            _cb("phase_start", {"phase": phase_num, "total": total_phases, "name": phase.name, "id": phase.id})
             messages.append({"role": "user", "content": phase.prompt})
 
             for step in range(phase.max_steps):
                 try:
+                    _sanitize_all_messages(messages)
                     response = router.complete(
                         model=model,
                         messages=messages,
@@ -152,6 +335,7 @@ async def run_scan(
                     logger.warning("Context window exceeded at phase %s step %d, trimming aggressively", phase.id, step)
                     messages = trim_context(messages, max_tokens=TRIM_TARGET_TOKENS // 2)
                     try:
+                        _sanitize_all_messages(messages)
                         response = router.complete(model=model, messages=messages, tools=TOOL_DEFINITIONS)
                     except ContentFiltered:
                         raise ContentFiltered(
@@ -166,16 +350,21 @@ async def run_scan(
                     break
                 msg = response.choices[0].message
                 msg_dict = msg.model_dump() if hasattr(msg, "model_dump") else dict(msg)
+                msg_dict = _sanitize_message(msg_dict)
                 messages.append(msg_dict)
 
-                tool_calls = getattr(msg, "tool_calls", None) or msg_dict.get("tool_calls", [])
+                tool_calls = msg_dict.get("tool_calls") or getattr(msg, "tool_calls", None) or []
+                unknown_in_batch = 0
                 if tool_calls:
                     for tc in tool_calls:
                         tc_id = tc.get("id") if isinstance(tc, dict) else getattr(tc, "id", "")
                         fn = tc.get("function") if isinstance(tc, dict) else getattr(tc, "function", {})
                         fn_name = fn.get("name") if isinstance(fn, dict) else getattr(fn, "name", "")
+                        fn_name = _sanitize_tool_name(fn_name)
                         fn_args = fn.get("arguments") if isinstance(fn, dict) else getattr(fn, "arguments", "{}")
                         result = await tools.execute(fn_name, fn_args)
+                        if isinstance(result, dict) and "Unknown tool" in result.get("error", ""):
+                            unknown_in_batch += 1
                         phase_tool_calls += 1
                         metrics["total_tool_calls"] += 1
                         messages.append({
@@ -183,41 +372,81 @@ async def run_scan(
                             "tool_call_id": tc_id,
                             "content": _cap_result(result),
                         })
+                        try:
+                            args_parsed = json.loads(fn_args) if isinstance(fn_args, str) else fn_args
+                        except Exception:
+                            args_parsed = {"raw": fn_args}
+                        resp_summary = {
+                            k: v for k, v in result.items()
+                            if k in ("status", "url", "error", "reflected", "anomaly", "body_snippet", "results", "accessible", "title", "forms")
+                        } if isinstance(result, dict) else str(result)[:200]
+
+                        _cb("tool_call", {
+                            "phase": phase.name,
+                            "tool": fn_name,
+                            "request": {k: str(v)[:300] for k, v in args_parsed.items()} if isinstance(args_parsed, dict) else str(args_parsed)[:400],
+                            "response": {k: str(v)[:200] for k, v in resp_summary.items()} if isinstance(resp_summary, dict) else str(resp_summary)[:400],
+                        })
+
+                        if isinstance(result, dict) and result.get("skipped"):
+                            blocked_url = args_parsed.get("url") or args_parsed.get("endpoint") or args_parsed.get("raw", "")
+                            if blocked_url:
+                                _cb("out_of_scope", {"url": blocked_url, "tool": fn_name, "phase": phase.name})
+
+                        crawl_url = None
                         if fn_name == "navigate" and result.get("url"):
-                            url = result["url"]
-                            if url not in metrics["pages_list"]:
-                                metrics["pages_list"].append(url)
-                                metrics["pages_crawled"] += 1
-                                _cb("crawl", {"url": url, "count": metrics["pages_crawled"]})
-                        elif fn_name == "get_forms" and result.get("forms"):
+                            crawl_url = result["url"]
+                        elif fn_name in ("api_request", "api_request_raw"):
+                            crawl_url = args_parsed.get("url") or args_parsed.get("raw", "")
+                        elif fn_name in ("fuzz_parameter", "test_auth_bypass",
+                                         "test_method_override"):
+                            crawl_url = args_parsed.get("endpoint") or args_parsed.get("url") or ""
+                        elif fn_name == "replay_with_modification":
+                            req = args_parsed.get("request") if isinstance(args_parsed.get("request"), dict) else {}
+                            crawl_url = req.get("url") or args_parsed.get("url") or ""
+                        elif fn_name == "inject_payload":
+                            crawl_url = result.get("url") or ""
+                        crawl_type = _classify_url(crawl_url, result, fn_name) if crawl_url else "page"
+                        if crawl_url and not crawl_url.startswith("http"):
+                            crawl_url = None
+                        if crawl_url and not _is_in_scope(crawl_url, allowed_domains):
+                            crawl_url = None
+                        if crawl_url and crawl_url not in metrics["pages_list"]:
+                            metrics["pages_list"].append(crawl_url)
+                            metrics["pages_crawled"] += 1
+                            _cb("crawl", {"url": crawl_url, "type": crawl_type, "tool": fn_name, "count": metrics["pages_crawled"]})
+                        if fn_name == "get_forms" and result.get("forms"):
                             metrics["forms_found"] += len(result["forms"])
                         elif fn_name in ("get_network_log", "intercept_requests"):
                             registry.add_from_traffic(result)
                         if fn_name in SECURITY_TEST_TOOLS:
-                            try:
-                                args_parsed = json.loads(fn_args) if isinstance(fn_args, str) else fn_args
-                            except Exception:
-                                args_parsed = {"raw": fn_args}
-                            resp_summary = {
-                                k: v for k, v in result.items()
-                                if k in ("status", "error", "reflected", "anomaly", "body_snippet", "results", "accessible")
-                            } if isinstance(result, dict) else str(result)[:200]
                             metrics["test_log"].append({
                                 "phase": phase.id,
                                 "tool": fn_name,
                                 "request": args_parsed,
                                 "response_summary": resp_summary,
                             })
-                            _cb("tool_call", {
-                                "phase": phase.name,
-                                "tool": fn_name,
-                                "request": {k: str(v)[:150] for k, v in args_parsed.items()} if isinstance(args_parsed, dict) else str(args_parsed)[:200],
-                                "response": {k: str(v)[:100] for k, v in resp_summary.items()} if isinstance(resp_summary, dict) else str(resp_summary)[:200],
-                            })
+                    if unknown_in_batch > 0 and unknown_in_batch == len(tool_calls):
+                        correction = (
+                            " | IMPORTANT: All tool calls in this batch were invalid. "
+                            "Use ONLY the tools listed in your system prompt. "
+                            "Do NOT invent tool names."
+                        )
+                        if messages and messages[-1].get("role") == "tool":
+                            messages[-1]["content"] = str(messages[-1].get("content", "")) + correction
+                        else:
+                            messages.append({"role": "user", "content": correction.strip(" |")})
                     if phase_tool_calls % 5 == 0 and _estimate_tokens(messages) > TRIM_TARGET_TOKENS:
                         messages = trim_context(messages, max_tokens=TRIM_TARGET_TOKENS)
                 else:
                     content = msg_dict.get("content") or getattr(msg, "content", "") or ""
+                    snippet = content[:300].replace("\n", " ").strip()
+                    _cb("tool_call", {
+                        "phase": phase.name,
+                        "tool": "[LLM analysis]",
+                        "request": {"prompt": phase.prompt[:120] + "..." if len(phase.prompt) > 120 else phase.prompt},
+                        "response": {"text": snippet[:200] + "..." if len(snippet) > 200 else snippet},
+                    })
                     new_f = extract_findings(str(content))
                     findings.extend(new_f)
                     for f in new_f:
@@ -233,11 +462,56 @@ async def run_scan(
                 "findings": phase_new_findings,
             })
             print(f" {phase_tool_calls} tool calls, {phase_new_findings} findings")
-            _cb("phase_end", {"phase": phase_idx, "name": phase.name, "tool_calls": phase_tool_calls, "findings": phase_new_findings})
+            _cb("phase_end", {"phase": phase_num, "name": phase.name, "tool_calls": phase_tool_calls, "findings": phase_new_findings})
             messages = trim_context(messages, max_tokens=TRIM_TARGET_TOKENS)
 
         metrics["api_endpoints_found"] = len(registry.get_all())
         print(f"  [DONE] Pages: {metrics['pages_crawled']}, Forms: {metrics['forms_found']}, APIs: {metrics['api_endpoints_found']}, Findings: {len(findings)}")
+
+        # ── Runtime Verification Phase (no LLM, replays payloads) ──
+        if findings:
+            _cb("phase_start", {"phase": total_phases, "total": total_phases, "name": "Runtime Verification", "id": "verification"})
+            print("  [VERIFY] Replaying payloads to confirm findings...")
+            try:
+                from scripts.runtime_verifier import verify_all_findings
+
+                def _verify_progress(idx, total, title, verdict):
+                    _cb("tool_call", {
+                        "phase": "Runtime Verification",
+                        "tool": "verify_replay",
+                        "request": {"finding": title[:80], "step": f"{idx}/{total}"},
+                        "response": {"verdict": verdict},
+                    })
+
+                verified = await verify_all_findings(
+                    findings,
+                    target_url=target.url,
+                    cookies=cookie_dict,
+                    headers=headers,
+                    on_progress=_verify_progress,
+                )
+
+                confirmed = sum(1 for f in verified if f.get("verdict") == "CONFIRMED")
+                disproved = sum(1 for f in verified if f.get("verdict") == "DISPROVED")
+                inconclusive = sum(1 for f in verified if f.get("verdict") == "INCONCLUSIVE")
+                unverified = sum(1 for f in verified if f.get("verdict") == "UNVERIFIED")
+
+                print(f"  [VERIFY] {confirmed} confirmed, {disproved} disproved, "
+                      f"{inconclusive} inconclusive, {unverified} unverified")
+
+                metrics["verification"] = {
+                    "confirmed": confirmed,
+                    "disproved": disproved,
+                    "inconclusive": inconclusive,
+                    "unverified": unverified,
+                }
+                findings = verified
+            except Exception as e:
+                print(f"  [VERIFY] Verification failed (non-fatal): {e}")
+                logger.warning("Runtime verification failed: %s", e, exc_info=True)
+
+            _cb("phase_end", {"phase": len(phases), "name": "Runtime Verification",
+                              "tool_calls": len(findings), "findings": 0})
 
         auth_session.stop_monitor()
         await http_client.aclose()
@@ -455,6 +729,7 @@ async def run_dry_scan(
             messages.append({"role": "user", "content": phase.prompt})
 
             for step in range(min(phase.max_steps, 20)):
+                _sanitize_all_messages(messages)
                 response = router.complete(
                     model=model,
                     messages=messages,
@@ -465,13 +740,15 @@ async def run_dry_scan(
                     break
                 msg = response.choices[0].message
                 msg_dict = msg.model_dump() if hasattr(msg, "model_dump") else dict(msg)
+                msg_dict = _sanitize_message(msg_dict)
                 messages.append(msg_dict)
 
-                tool_calls = getattr(msg, "tool_calls", None) or msg_dict.get("tool_calls", [])
+                tool_calls = msg_dict.get("tool_calls") or []
                 if tool_calls:
                     for tc in tool_calls:
                         fn = tc.get("function") if isinstance(tc, dict) else getattr(tc, "function", {})
                         fn_name = fn.get("name") if isinstance(fn, dict) else getattr(fn, "name", "")
+                        fn_name = _sanitize_tool_name(fn_name)
                         fn_args = fn.get("arguments") if isinstance(fn, dict) else getattr(fn, "arguments", "{}")
                         result = await tools.execute(fn_name, fn_args)
                         tc_id = tc.get("id") if isinstance(tc, dict) else getattr(tc, "id", "")

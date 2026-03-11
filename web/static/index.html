@@ -97,6 +97,47 @@ tr:hover td { background: rgba(99,102,241,0.05); }
 
 .live-body { max-height: 400px; overflow-y: auto; background: var(--bg); }
 
+.crawl-tree { font-family: monospace; font-size: 12px; line-height: 1.8; }
+.crawl-dir { cursor: pointer; color: var(--accent2); font-weight: 600; padding: 2px 0; }
+.crawl-dir:hover { text-decoration: underline; }
+.crawl-dir::before { content: '▾ '; font-size: 10px; }
+.crawl-dir.collapsed::before { content: '▸ '; }
+.crawl-dir.collapsed + .crawl-children { display: none; }
+.crawl-children { padding-left: 18px; border-left: 1px solid var(--border); margin-left: 6px; }
+.crawl-page { color: var(--text); padding: 1px 0; display: flex; align-items: center; gap: 6px; }
+.crawl-page a { color: var(--text); text-decoration: none; word-break: break-all; }
+.crawl-page a:hover { color: var(--accent2); text-decoration: underline; }
+.crawl-icon { font-size: 10px; opacity: 0.5; }
+.crawl-badge { font-size: 9px; padding: 1px 5px; border-radius: 3px; font-weight: 600; }
+.crawl-badge-page { background: rgba(99,102,241,0.15); color: var(--accent2); }
+.crawl-badge-api { background: rgba(16,185,129,0.15); color: var(--green); }
+
+.phase-card { border: 1px solid var(--border); border-radius: 6px; margin: 6px 8px; overflow: hidden; }
+.phase-header { display: flex; justify-content: space-between; align-items: center; padding: 10px 14px; background: var(--surface); cursor: pointer; user-select: none; }
+.phase-header:hover { background: var(--surface2); }
+.phase-header .phase-num { font-weight: 700; color: var(--accent2); min-width: 28px; }
+.phase-header .phase-name { flex: 1; font-weight: 600; font-size: 13px; }
+.phase-header .phase-stats { display: flex; gap: 12px; font-size: 11px; color: var(--text2); }
+.phase-header .phase-stats .count-badge { background: rgba(99,102,241,0.15); color: var(--accent2); padding: 2px 8px; border-radius: 10px; font-weight: 600; }
+.phase-header .phase-stats .findings-badge { background: rgba(16,185,129,0.15); color: var(--green); padding: 2px 8px; border-radius: 10px; font-weight: 600; }
+.phase-header .phase-arrow { transition: transform 0.2s; font-size: 10px; color: var(--text2); margin-left: 8px; }
+.phase-header.expanded .phase-arrow { transform: rotate(90deg); }
+.phase-detail { display: none; border-top: 1px solid var(--border); }
+.phase-detail.open { display: block; }
+.tool-group { border-bottom: 1px solid rgba(45,49,72,0.3); }
+.tool-group-header { display: flex; align-items: center; gap: 8px; padding: 6px 14px; background: rgba(26,29,39,0.6); cursor: pointer; font-size: 12px; }
+.tool-group-header:hover { background: rgba(26,29,39,0.9); }
+.tool-group-header .tool-name { color: var(--accent2); font-weight: 700; text-transform: uppercase; font-size: 10px; }
+.tool-group-header .tool-count { color: var(--text2); font-size: 11px; }
+.tool-group-header .tg-arrow { transition: transform 0.2s; font-size: 9px; color: var(--text2); }
+.tool-group-header.expanded .tg-arrow { transform: rotate(90deg); }
+.tool-group-payloads { display: none; max-height: 300px; overflow-y: auto; }
+.tool-group-payloads.open { display: block; }
+.payload-row { display: grid; grid-template-columns: 1fr 1fr; gap: 1px; font-size: 11px; font-family: monospace; border-bottom: 1px solid rgba(45,49,72,0.3); padding: 4px 14px 4px 28px; }
+.payload-row:nth-child(even) { background: rgba(26,29,39,0.3); }
+.payload-req { color: var(--yellow); word-break: break-all; }
+.payload-resp { color: var(--text2); word-break: break-all; }
+
 .live-test-row { display: grid; grid-template-columns: 100px 1fr 1fr; gap: 1px; font-size: 11px; border-bottom: 1px solid rgba(45,49,72,0.5); animation: fadeIn 0.3s; }
 .live-test-row:nth-child(even) { background: rgba(26,29,39,0.5); }
 .live-test-cell { padding: 6px 10px; font-family: monospace; word-break: break-all; }
@@ -201,6 +242,11 @@ tr:hover td { background: rgba(99,102,241,0.05); }
         </select>
       </div>
 
+      <div class="form-group full">
+        <label>Additional Domains in Scope <span style="font-weight:400;color:var(--text2);font-size:11px;">(optional — comma-separated, e.g. partner-cdn.com, api.thirdparty.io)</span></label>
+        <input type="text" id="extra-domains" placeholder="e.g. partner-api.com, cdn.example.io" style="font-size:12px;">
+      </div>
+
       <div class="form-group full" style="margin-top:8px;">
         <div class="expandable" onclick="toggleExpand(this)" style="font-size:13px;font-weight:600;color:var(--text2);letter-spacing:0.3px;">
           API Imports (Optional)
@@ -248,7 +294,7 @@ tr:hover td { background: rgba(99,102,241,0.05); }
           </div>
         </div>
         <div class="live-tabs">
-          <div class="live-tab active" onclick="switchLiveTab('tests')">Live Payloads &amp; Responses</div>
+          <div class="live-tab active" onclick="switchLiveTab('tests')">Live Activity (Payloads &amp; Responses)</div>
           <div class="live-tab" onclick="switchLiveTab('findings')">Findings Detected</div>
           <div class="live-tab" onclick="switchLiveTab('phases')">Phase Progress</div>
         </div>
@@ -282,6 +328,9 @@ tr:hover td { background: rgba(99,102,241,0.05); }
     <div class="card">
       <h2 id="live-scan-title"><span class="scanning-indicator"></span>Scan In Progress</h2>
       <div class="stats" id="live-scan-stats"></div>
+      <div style="margin-bottom:12px;">
+        <button class="btn btn-outline btn-sm" onclick="downloadLivePayloads()" style="border-color:var(--accent2);color:var(--accent2);font-size:12px;">Download Live Activity Log</button>
+      </div>
       <div class="progress-log" id="live-scan-log" style="margin-bottom:16px;"></div>
       <div class="live-panel" style="display:block;">
         <div class="live-header">
@@ -293,9 +342,11 @@ tr:hover td { background: rgba(99,102,241,0.05); }
           </div>
         </div>
         <div class="live-tabs">
-          <div class="live-tab active" onclick="switchLiveTab2('tests')">Live Payloads &amp; Responses</div>
+          <div class="live-tab active" onclick="switchLiveTab2('tests')">Live Activity (Payloads &amp; Responses)</div>
+          <div class="live-tab" onclick="switchLiveTab2('crawled')">Crawled Pages / Endpoints</div>
           <div class="live-tab" onclick="switchLiveTab2('findings')">Findings Detected</div>
           <div class="live-tab" onclick="switchLiveTab2('phases')">Phase Progress</div>
+          <div class="live-tab" onclick="switchLiveTab2('out-of-scope')">Out of Scope <span id="lv-oos-badge" class="badge" style="background:var(--red);color:#fff;margin-left:4px;font-size:9px;padding:1px 5px;border-radius:8px;display:none;">0</span></div>
         </div>
         <div class="live-body" id="lv-body-tests">
           <div style="padding:6px 10px;font-size:10px;font-weight:600;color:var(--text2);display:grid;grid-template-columns:100px 1fr 1fr;gap:1px;background:var(--surface2);">
@@ -303,11 +354,25 @@ tr:hover td { background: rgba(99,102,241,0.05); }
           </div>
           <div id="lv-tests-body"></div>
         </div>
+        <div class="live-body" id="lv-body-crawled" style="display:none;">
+          <div style="padding:8px 12px;font-size:11px;color:var(--text2);background:var(--surface2);display:flex;justify-content:space-between;align-items:center;">
+            <span><strong id="lv-crawled-count">0</strong> unique pages / endpoints discovered</span>
+            <span style="font-size:10px;opacity:0.7;">Auto-updates as scan progresses</span>
+          </div>
+          <div id="lv-crawled-body" style="padding:8px;"></div>
+        </div>
         <div class="live-body" id="lv-body-findings" style="display:none;">
           <div id="lv-findings-body"></div>
         </div>
         <div class="live-body" id="lv-body-phases" style="display:none;">
           <div id="lv-phases-body"></div>
+        </div>
+        <div class="live-body" id="lv-body-out-of-scope" style="display:none;">
+          <div style="padding:8px 12px;font-size:11px;color:var(--text2);background:var(--surface2);display:flex;justify-content:space-between;align-items:center;">
+            <span><strong id="lv-oos-count">0</strong> third-party URLs blocked (not owned by target org)</span>
+            <span style="font-size:10px;opacity:0.7;">These URLs were skipped to keep the scan in scope</span>
+          </div>
+          <div id="lv-oos-body" style="padding:8px;"></div>
         </div>
       </div>
     </div>
@@ -341,6 +406,7 @@ tr:hover td { background: rgba(99,102,241,0.05); }
         <div class="tab" onclick="switchTab('payloads')">Payloads by Endpoint</div>
         <div class="tab" onclick="switchTab('ai-raw')">AI Raw Findings</div>
         <div class="tab" onclick="switchTab('phase-log')">Phase Log</div>
+        <div class="tab" onclick="switchTab('out-of-scope')">Out of Scope <span id="res-oos-badge" class="badge" style="background:var(--red);color:#fff;margin-left:4px;font-size:9px;padding:1px 5px;border-radius:8px;display:none;">0</span></div>
       </div>
 
       <div class="tab-content active" id="tab-comparison"></div>
@@ -348,10 +414,12 @@ tr:hover td { background: rgba(99,102,241,0.05); }
       <div class="tab-content" id="tab-payloads"></div>
       <div class="tab-content" id="tab-ai-raw"></div>
       <div class="tab-content" id="tab-phase-log"></div>
+      <div class="tab-content" id="tab-out-of-scope"></div>
     </div>
     <div class="actions" style="margin-bottom:40px;">
       <button class="btn btn-primary btn-sm" id="gen-report-btn" onclick="generateReport()">Generate PDF Report</button>
       <button class="btn btn-outline btn-sm" id="dl-json-btn" onclick="downloadJSON()">Download Raw JSON</button>
+      <button class="btn btn-outline btn-sm" id="dl-payloads-btn" onclick="downloadPayloads()" style="border-color:var(--accent2);color:var(--accent2);">Download All Payloads (by Phase)</button>
       <span id="report-msg" style="font-size:13px; color:var(--text2);"></span>
     </div>
   </div>
@@ -460,6 +528,9 @@ async function startScan() {
   document.getElementById('live-findings-count').textContent = '0';
   document.getElementById('live-phases-count').textContent = '0';
 
+  const extraDomainsRaw = document.getElementById('extra-domains').value.trim();
+  const extraDomains = extraDomainsRaw ? extraDomainsRaw.split(',').map(d => d.trim().toLowerCase()).filter(Boolean) : [];
+
   const body = {
     target_url: url,
     username: document.getElementById('username').value,
@@ -468,6 +539,7 @@ async function startScan() {
     scan_mode: document.getElementById('scan-mode').value,
     auth_type: document.getElementById('auth-type').value,
     api_imports: api_imports,
+    extra_domains: extraDomains,
   };
 
   const resp = await fetch('/api/scan', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) });
@@ -517,6 +589,10 @@ function renderLiveData(live) {
   document.getElementById('live-tests-count').textContent = live.tests_total || 0;
   document.getElementById('live-findings-count').textContent = live.findings_total || 0;
   document.getElementById('live-phases-count').textContent = (live.phases || []).length;
+
+  if (live.tests && live.tests.length) {
+    _allLiveTests = _allLiveTests.concat(live.tests);
+  }
 
   const testsBody = document.getElementById('live-tests-body');
   if (live.tests && live.tests.length) {
@@ -568,19 +644,7 @@ function renderLiveData(live) {
   }
 
   const phasesBody = document.getElementById('live-phases-body');
-  if (live.phases && live.phases.length) {
-    phasesBody.innerHTML = '';
-    live.phases.forEach(ph => {
-      const row = document.createElement('div');
-      row.className = 'live-phase-row';
-      row.innerHTML = `
-        <div class="live-phase-num">${ph.phase}</div>
-        <div>${esc(ph.name)}</div>
-        <div style="font-size:11px;color:var(--text2)">${ph.tool_calls} tests</div>
-        <div style="font-size:11px;color:${ph.findings > 0 ? 'var(--green)' : 'var(--text2)'}">${ph.findings} findings</div>`;
-      phasesBody.appendChild(row);
-    });
-  }
+  renderPhaseBreakdown(phasesBody, live);
 }
 
 function switchLiveTab(tab) {
@@ -602,14 +666,20 @@ function switchLiveTab2(tab) {
 let lvTestOffset = 0;
 let lvFindingOffset = 0;
 let lvPollInterval = null;
+let _allLiveTests = [];
 
 function openLiveView(scanId) {
   currentScanId = scanId;
   lvTestOffset = 0;
   lvFindingOffset = 0;
+  _allLiveTests = [];
+  _prevPhaseRender = '';
   document.getElementById('lv-tests-body').innerHTML = '';
   document.getElementById('lv-findings-body').innerHTML = '';
   document.getElementById('lv-phases-body').innerHTML = '';
+  document.getElementById('lv-crawled-body').innerHTML = '';
+  document.getElementById('lv-crawled-count').textContent = '0';
+  _prevCrawledCount = 0;
   document.getElementById('lv-phase-text').textContent = 'Loading...';
   document.getElementById('lv-tests-count').textContent = '0';
   document.getElementById('lv-findings-count').textContent = '0';
@@ -643,12 +713,16 @@ async function pollLiveView(scanId) {
       if (liveResp.ok) live = await liveResp.json();
     } catch(e2) {}
 
+    const targetLine = data.target
+      ? `<div style="font-size:14px;font-weight:400;color:var(--accent2);margin-top:4px;">
+           <a href="${esc(data.target)}" target="_blank" style="color:var(--accent2);text-decoration:none;">${esc(data.target)}</a>
+         </div>` : '';
     document.getElementById('live-scan-title').innerHTML =
       data.status === 'running'
-        ? `<span class="scanning-indicator"></span>Scan In Progress — ${esc(data.model || '')}`
+        ? `<span class="scanning-indicator"></span>Scan In Progress — ${esc(data.model || '')}${targetLine}`
         : data.status === 'completed'
-          ? `<span style="color:var(--green);">&#10003;</span> Scan Complete — ${esc(data.model || '')}`
-          : `<span style="color:var(--red);">&#10005;</span> Scan Error — ${esc(data.model || '')}`;
+          ? `<span style="color:var(--green);">&#10003;</span> Scan Complete — ${esc(data.model || '')}${targetLine}`
+          : `<span style="color:var(--red);">&#10005;</span> Scan Error — ${esc(data.model || '')}${targetLine}`;
 
     const log = document.getElementById('live-scan-log');
     if (data.progress && data.progress.length) {
@@ -659,7 +733,8 @@ async function pollLiveView(scanId) {
     log.scrollTop = log.scrollHeight;
 
     document.getElementById('live-scan-stats').innerHTML = [
-      stat(live.tests_total || 0, 'Tests Run'),
+      stat(live.tool_calls || 0, 'Tool Calls'),
+      stat(live.pages_crawled || 0, 'Pages Crawled'),
       stat(live.findings_total || 0, 'Findings'),
       stat((live.phases || []).length, 'Phases Done'),
       stat(data.current_phase || data.status || '-', 'Current Phase'),
@@ -677,8 +752,13 @@ async function pollLiveView(scanId) {
 function renderLiveView(live) {
   if (live.current_phase) document.getElementById('lv-phase-text').textContent = live.current_phase;
   document.getElementById('lv-tests-count').textContent = live.tests_total || 0;
+  renderCrawledTree(live.crawled_urls || []);
   document.getElementById('lv-findings-count').textContent = live.findings_total || 0;
   document.getElementById('lv-phases-count').textContent = (live.phases || []).length;
+
+  if (live.tests && live.tests.length) {
+    _allLiveTests = _allLiveTests.concat(live.tests);
+  }
 
   const testsBody = document.getElementById('lv-tests-body');
   if (live.tests && live.tests.length) {
@@ -728,22 +808,265 @@ function renderLiveView(live) {
   }
 
   const phasesBody = document.getElementById('lv-phases-body');
-  if (live.phases && live.phases.length) {
-    phasesBody.innerHTML = '';
-    live.phases.forEach(ph => {
-      const row = document.createElement('div');
-      row.className = 'live-phase-row';
-      row.innerHTML = `
-        <div class="live-phase-num">${ph.phase}</div>
-        <div>${esc(ph.name)}</div>
-        <div style="font-size:11px;color:var(--text2)">${ph.tool_calls} tests</div>
-        <div style="font-size:11px;color:${ph.findings > 0 ? 'var(--green)' : 'var(--text2)'}">${ph.findings} findings</div>`;
-      phasesBody.appendChild(row);
+  renderPhaseBreakdown(phasesBody, live);
+
+  const oosItems = live.out_of_scope || [];
+  const oosBadge = document.getElementById('lv-oos-badge');
+  const oosCount = document.getElementById('lv-oos-count');
+  if (oosBadge) { oosBadge.textContent = oosItems.length; oosBadge.style.display = oosItems.length ? 'inline' : 'none'; }
+  if (oosCount) oosCount.textContent = oosItems.length;
+  const oosBody = document.getElementById('lv-oos-body');
+  if (oosBody && oosItems.length) {
+    let html = '<table style="width:100%;font-size:12px;border-collapse:collapse;">';
+    html += '<tr style="background:var(--surface2);"><th style="text-align:left;padding:6px 10px;">URL</th><th style="text-align:left;padding:6px 10px;width:100px;">Tool</th><th style="text-align:left;padding:6px 10px;width:100px;">Phase</th></tr>';
+    oosItems.forEach(o => {
+      const domain = (function(){ try { return new URL(o.url).hostname; } catch(e){ return o.url; } })();
+      html += `<tr style="border-bottom:1px solid var(--border);"><td style="padding:6px 10px;word-break:break-all;"><span style="color:var(--red);font-weight:600;">${esc(domain)}</span> <span style="color:var(--text2);font-size:11px;">${esc(o.url)}</span></td><td style="padding:6px 10px;color:var(--text2);">${esc(o.tool)}</td><td style="padding:6px 10px;color:var(--text2);">${esc(o.phase)}</td></tr>`;
     });
+    html += '</table>';
+    oosBody.innerHTML = html;
   }
 }
 
+let _prevPhaseRender = '';
+function renderPhaseBreakdown(container, live) {
+  const phases = live.phases || [];
+  const allTests = _allLiveTests || [];
+  const currentPhase = live.current_phase || '';
+
+  const key = phases.length + '-' + allTests.length;
+  if (key === _prevPhaseRender) return;
+  _prevPhaseRender = key;
+
+  const testsByPhase = {};
+  allTests.forEach(t => {
+    const ph = t.phase || 'Unknown';
+    if (!testsByPhase[ph]) testsByPhase[ph] = [];
+    testsByPhase[ph].push(t);
+  });
+
+  const phaseNames = [];
+  phases.forEach(ph => {
+    if (!phaseNames.includes(ph.name)) phaseNames.push(ph.name);
+  });
+  const cpMatch = currentPhase.match(/\] (.+)$/);
+  if (cpMatch && !phaseNames.includes(cpMatch[1])) phaseNames.push(cpMatch[1]);
+  Object.keys(testsByPhase).forEach(ph => {
+    if (!phaseNames.includes(ph)) phaseNames.push(ph);
+  });
+
+  if (!phaseNames.length) {
+    container.innerHTML = '<div style="padding:16px;color:var(--text2);font-size:12px;">Waiting for phases to complete...</div>';
+    return;
+  }
+
+  let html = '';
+  phaseNames.forEach((phaseName, idx) => {
+    const phaseData = phases.find(p => p.name === phaseName);
+    const tests = testsByPhase[phaseName] || [];
+    const totalCalls = phaseData ? phaseData.tool_calls : tests.length;
+    const findingsCount = phaseData ? phaseData.findings : 0;
+    const isCurrent = currentPhase.includes(phaseName) && !phaseData;
+    const phaseNum = phaseData ? phaseData.phase : idx + 1;
+
+    const toolGroups = {};
+    tests.forEach(t => {
+      const tool = t.tool || 'unknown';
+      if (!toolGroups[tool]) toolGroups[tool] = [];
+      toolGroups[tool].push(t);
+    });
+
+    const statusBadge = isCurrent
+      ? '<span style="color:var(--yellow);font-size:10px;margin-left:6px;">● running</span>'
+      : phaseData
+        ? '<span style="color:var(--green);font-size:10px;margin-left:6px;">✓ done</span>'
+        : '';
+
+    html += '<div class="phase-card">';
+    html += `<div class="phase-header" onclick="togglePhaseDetail(this)">
+      <span class="phase-num">${phaseNum}</span>
+      <span class="phase-name">${esc(phaseName)}${statusBadge}</span>
+      <span class="phase-stats">
+        <span class="count-badge">${totalCalls} tests</span>
+        ${findingsCount > 0 ? '<span class="findings-badge">' + findingsCount + ' findings</span>' : ''}
+        <span style="color:var(--text2);font-size:10px;">${Object.keys(toolGroups).length} tool types</span>
+      </span>
+      <span class="phase-arrow">▶</span>
+    </div>`;
+    html += '<div class="phase-detail">';
+
+    if (Object.keys(toolGroups).length === 0) {
+      html += '<div style="padding:10px 14px;font-size:11px;color:var(--text2);">No detailed payloads recorded for this phase yet.</div>';
+    } else {
+      const sortedTools = Object.entries(toolGroups).sort((a, b) => b[1].length - a[1].length);
+      sortedTools.forEach(([toolName, toolTests]) => {
+        const displayName = toolName === '[LLM analysis]' ? 'LLM Analysis' : toolName;
+        html += '<div class="tool-group">';
+        html += `<div class="tool-group-header" onclick="toggleToolGroup(this)">
+          <span class="tg-arrow">▶</span>
+          <span class="tool-name">${esc(displayName)}</span>
+          <span class="tool-count">${toolTests.length} test${toolTests.length > 1 ? 's' : ''}</span>
+        </div>`;
+        html += '<div class="tool-group-payloads">';
+        toolTests.forEach((t, ti) => {
+          const req = t.request || {};
+          const resp = t.response || {};
+          const isObj = typeof req === 'object';
+          const method = isObj ? (req.method || '').toUpperCase() : '';
+          const url = isObj ? (req.url || req.endpoint || '') : '';
+          const body = isObj ? (req.body || req.raw || req.payload || req.payloads || '') : '';
+          const param = isObj ? (req.param_name || req.selector || '') : '';
+
+          let reqHtml = '';
+          if (url) {
+            reqHtml += `<span style="color:var(--blue);font-weight:600;">${esc(method || 'GET')} ${esc(url)}</span>`;
+          }
+          if (param) {
+            reqHtml += `<br><span style="color:var(--yellow);">param: ${esc(param)}</span>`;
+          }
+          if (body) {
+            reqHtml += `<br><span style="color:var(--yellow);">payload: ${esc(String(body).substring(0, 300))}</span>`;
+          }
+          if (!reqHtml && isObj) {
+            Object.entries(req).forEach(([k, v]) => {
+              reqHtml += (reqHtml ? '<br>' : '') + `<span style="color:var(--text2);">${esc(k)}:</span> ${esc(String(v).substring(0, 200))}`;
+            });
+          } else if (!reqHtml) {
+            reqHtml = esc(String(req).substring(0, 300));
+          }
+
+          let respHtml = '';
+          if (typeof resp === 'object') {
+            Object.entries(resp).forEach(([k, v]) => {
+              let cls = '';
+              const sv = String(v);
+              if (k === 'status' && parseInt(sv) >= 400) cls = 'color:var(--red)';
+              else if (k === 'anomaly' && (sv === 'True' || sv === 'true')) cls = 'color:var(--red);font-weight:700';
+              else if (k === 'reflected' && (sv === 'True' || sv === 'true')) cls = 'color:var(--red);font-weight:700';
+              else if (k === 'verdict') cls = sv === 'CONFIRMED' ? 'color:var(--red);font-weight:700' : sv === 'DISPROVED' ? 'color:var(--green)' : '';
+              respHtml += (respHtml ? '<br>' : '') + `<span style="color:var(--text2);">${esc(k)}:</span> <span${cls ? ' style="'+cls+'"' : ''}>${esc(sv.substring(0, 200))}</span>`;
+            });
+          } else {
+            respHtml = esc(String(resp).substring(0, 300));
+          }
+
+          html += `<div class="payload-row">
+            <div class="payload-req">${reqHtml}</div>
+            <div class="payload-resp">${respHtml}</div>
+          </div>`;
+        });
+        html += '</div></div>';
+      });
+    }
+
+    html += '</div></div>';
+  });
+
+  container.innerHTML = html;
+}
+
+function togglePhaseDetail(el) {
+  el.classList.toggle('expanded');
+  const detail = el.nextElementSibling;
+  detail.classList.toggle('open');
+}
+
+function toggleToolGroup(el) {
+  el.classList.toggle('expanded');
+  const payloads = el.nextElementSibling;
+  payloads.classList.toggle('open');
+}
+
+let _prevCrawledCount = 0;
+function renderCrawledTree(urls) {
+  const el = document.getElementById('lv-crawled-body');
+  const countEl = document.getElementById('lv-crawled-count');
+  if (!urls || !urls.length) {
+    el.innerHTML = '<div style="padding:16px;color:var(--text2);font-size:12px;">No pages crawled yet — waiting for scan to discover pages...</div>';
+    countEl.textContent = '0';
+    return;
+  }
+  if (urls.length === _prevCrawledCount) return;
+  _prevCrawledCount = urls.length;
+  countEl.textContent = urls.length;
+
+  const urlMeta = {};
+  const pageCount = {page: 0, api: 0, test: 0};
+  urls.forEach(item => {
+    const url = typeof item === 'string' ? item : (item.url || '');
+    const ctype = typeof item === 'object' ? (item.type || 'page') : 'page';
+    const tool = typeof item === 'object' ? (item.tool || '') : '';
+    urlMeta[url] = {type: ctype, tool: tool};
+    pageCount[ctype] = (pageCount[ctype] || 0) + 1;
+  });
+
+  const tree = {};
+  Object.keys(urlMeta).forEach(raw => {
+    try {
+      const u = new URL(raw);
+      const host = u.origin;
+      if (!tree[host]) tree[host] = {};
+      const segments = u.pathname.split('/').filter(Boolean);
+      let node = tree[host];
+      segments.forEach((seg, i) => {
+        if (i === segments.length - 1) {
+          const leaf = '/' + segments.join('/') + u.search + u.hash;
+          node[leaf] = raw;
+        } else {
+          if (!node[seg] || typeof node[seg] === 'string') node[seg] = {};
+          node = node[seg];
+        }
+      });
+      if (segments.length === 0) {
+        node['/'] = raw;
+      }
+    } catch(e) {
+      if (!tree['Other']) tree['Other'] = {};
+      tree['Other'][raw] = raw;
+    }
+  });
+
+  const badgeMap = {
+    page: '<span class="crawl-badge crawl-badge-page">PAGE</span>',
+    api: '<span class="crawl-badge crawl-badge-api">API</span>',
+    test: '<span class="crawl-badge" style="background:rgba(245,158,11,0.15);color:var(--yellow);">TEST</span>',
+  };
+
+  function buildNode(obj, depth) {
+    let html = '';
+    const keys = Object.keys(obj).sort((a, b) => {
+      const aDir = typeof obj[a] === 'object' && !urlMeta[obj[a]];
+      const bDir = typeof obj[b] === 'object' && !urlMeta[obj[b]];
+      if (aDir !== bDir) return aDir ? -1 : 1;
+      return a.localeCompare(b);
+    });
+    keys.forEach(key => {
+      const val = obj[key];
+      if (typeof val === 'object' && !urlMeta[val]) {
+        const childCount = Object.keys(val).length;
+        html += `<div class="crawl-dir" onclick="this.classList.toggle('collapsed')">${esc(key)} <span style="font-size:10px;color:var(--text2);font-weight:400;">(${childCount})</span></div>`;
+        html += `<div class="crawl-children">${buildNode(val, depth + 1)}</div>`;
+      } else {
+        const meta = urlMeta[val] || {type: 'page', tool: ''};
+        const badge = badgeMap[meta.type] || badgeMap.page;
+        const toolLabel = meta.tool ? `<span style="font-size:9px;color:var(--text2);margin-left:4px;">(${esc(meta.tool)})</span>` : '';
+        html += `<div class="crawl-page">${badge} <a href="${esc(val)}" target="_blank" title="${esc(val)}">${esc(key)}</a>${toolLabel}</div>`;
+      }
+    });
+    return html;
+  }
+
+  const summary = `<div style="display:flex;gap:12px;margin-bottom:8px;">
+    <span class="crawl-badge crawl-badge-page">PAGE</span> <span style="font-size:11px;">${pageCount.page} pages (browser navigation)</span>
+    <span class="crawl-badge crawl-badge-api">API</span> <span style="font-size:11px;">${pageCount.api} API endpoints (HTTP requests)</span>
+    <span class="crawl-badge" style="background:rgba(245,158,11,0.15);color:var(--yellow);">TEST</span> <span style="font-size:11px;">${pageCount.test} tested endpoints (injection/fuzzing)</span>
+  </div>`;
+
+  el.innerHTML = summary + '<div class="crawl-tree">' + buildNode(tree, 0) + '</div>';
+}
+
 function closeLiveView() {
+  _prevCrawledCount = 0;
   if (lvPollInterval) { clearInterval(lvPollInterval); lvPollInterval = null; }
   document.getElementById('live-scan-view').style.display = 'none';
   document.getElementById('scans-card').style.display = 'block';
@@ -782,7 +1105,8 @@ async function viewScan(scanId) {
 function showErrorView(scanId, data) {
   hideAllViews();
   document.getElementById('error-view').style.display = 'block';
-  document.getElementById('error-title').textContent = `✕ Scan Error — ${data.model || scanId}`;
+  document.getElementById('error-title').innerHTML = `✕ Scan Error — ${esc(data.model || scanId)}` +
+    (data.target ? `<div style="font-size:14px;font-weight:400;color:var(--accent2);margin-top:4px;">${esc(data.target)}</div>` : '');
 
   const error = data.error || 'Unknown error';
   document.getElementById('error-message').textContent = error;
@@ -820,7 +1144,11 @@ function renderResults(data) {
   const tp = data.triaged_findings.filter(f=>f.verdict==='TRUE_POSITIVE').length;
   const fp = data.triaged_findings.filter(f=>f.verdict==='FALSE_POSITIVE').length;
 
-  document.getElementById('result-title').textContent = `Results: ${m.model || 'Unknown Model'}`;
+  document.getElementById('result-title').innerHTML = `Results: ${esc(m.model || 'Unknown Model')}` +
+    (m.target ? `<div style="font-size:14px;font-weight:400;color:var(--accent2);margin-top:4px;">
+      <a href="${esc(m.target)}" target="_blank" style="color:var(--accent2);text-decoration:none;">${esc(m.target)}</a>
+      ${m.scan_mode ? '<span style="color:var(--text2);font-size:12px;margin-left:8px;">(' + esc(m.scan_mode) + ')</span>' : ''}
+    </div>` : '');
 
   const dur = m.duration_seconds ? formatDuration(m.duration_seconds) : '-';
   const tokens = m.total_tokens ? m.total_tokens.toLocaleString() : '-';
@@ -836,6 +1164,8 @@ function renderResults(data) {
     stat(data.ai_findings.length, 'AI Findings'),
     stat(tp, 'True Positives'),
     stat(fp, 'False Positives'),
+    stat(c.verification?.confirmed || '-', 'Replay Confirmed'),
+    stat(c.verification?.disproved || '-', 'Replay Disproved'),
   ].join('') +
   `<div style="grid-column:1/-1;display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:12px;margin-top:4px;">` + [
     stat(dur, 'Scan Duration'),
@@ -862,6 +1192,7 @@ function renderResults(data) {
   renderPayloads(data.payloads_by_endpoint);
   renderAIRaw(data.ai_findings);
   renderPhaseLog(data.phase_log || []);
+  renderOutOfScope(data.out_of_scope || []);
 }
 
 function formatDuration(seconds) {
@@ -878,19 +1209,44 @@ function stat(val, label) {
 function renderComparison(data) {
   const el = document.getElementById('tab-comparison');
   if (!data.triaged_findings.length) { el.innerHTML = '<div class="empty">No findings</div>'; return; }
-  el.innerHTML = `<table><thead><tr>
-    <th>#</th><th>Finding</th><th>AI Severity</th><th>Triage Severity</th><th>Verdict</th><th>CWE</th><th>CVSS</th><th>Reason</th>
+
+  const vStats = data.coverage?.verification || {};
+  const hasVerification = vStats.confirmed != null;
+  let vSummary = '';
+  if (hasVerification) {
+    vSummary = `<div style="padding:10px 14px;margin-bottom:12px;border-radius:8px;background:var(--surface2);font-size:12px;display:flex;gap:16px;align-items:center;">
+      <strong>Runtime Verification:</strong>
+      <span style="color:var(--green);">✓ ${vStats.confirmed || 0} Confirmed</span>
+      <span style="color:var(--red);">✕ ${vStats.disproved || 0} Disproved</span>
+      <span style="color:var(--yellow, #f59e0b);">? ${vStats.inconclusive || 0} Inconclusive</span>
+      <span style="color:var(--text2);">${vStats.unverified || 0} Unverified</span>
+    </div>`;
+  }
+
+  el.innerHTML = vSummary + `<table><thead><tr>
+    <th>#</th><th>Finding</th><th>AI Sev</th><th>Final Sev</th><th>Verdict</th><th>Verified</th><th>CWE</th><th>CVSS</th><th>Reason</th>
   </tr></thead><tbody>` +
-  data.triaged_findings.map((f, i) => `<tr>
+  data.triaged_findings.map((f, i) => {
+    const vBadge = f.verified
+      ? (f.verification_method !== 'none'
+        ? `<span title="${esc(f.verification_evidence||'')}" style="cursor:help;padding:2px 6px;border-radius:4px;font-size:10px;font-weight:600;${
+            f.verdict === 'TRUE_POSITIVE' ? 'background:rgba(34,197,94,0.15);color:var(--green);' :
+            f.verdict === 'FALSE_POSITIVE' ? 'background:rgba(239,68,68,0.15);color:var(--red);' :
+            'background:rgba(245,158,11,0.15);color:#f59e0b;'
+          }">${f.verdict === 'TRUE_POSITIVE' ? '✓ Replay Confirmed' : f.verdict === 'FALSE_POSITIVE' ? '✕ Replay Disproved' : '? Inconclusive'}</span>`
+        : '<span style="font-size:10px;color:var(--text2);">Pattern</span>')
+      : '<span style="font-size:10px;color:var(--text2);">Pattern</span>';
+    return `<tr>
     <td>${i+1}</td>
     <td><strong>${esc(f.title)}</strong><br><span style="font-size:11px;color:var(--text2)">${esc(f.url||'')}</span></td>
     <td><span class="severity sev-${f.ai_severity?.toLowerCase()}">${f.ai_severity}</span></td>
     <td><span class="severity sev-${f.final_severity?.toLowerCase()}">${f.final_severity}</span></td>
     <td><span class="verdict v-${f.verdict?.toLowerCase()}">${f.verdict?.replace(/_/g,' ')}</span></td>
+    <td>${vBadge}</td>
     <td style="font-size:11px">${esc(f.cwe||'')}</td>
     <td>${f.cvss ? f.cvss.toFixed(1) : '-'}</td>
     <td style="font-size:11px;max-width:200px">${esc(f.reason||'')}</td>
-  </tr>`).join('') + '</tbody></table>';
+  </tr>`;}).join('') + '</tbody></table>';
 }
 
 function renderCrawled(endpoints) {
@@ -957,6 +1313,29 @@ function renderPhaseLog(phases) {
   </tr>`).join('') + '</tbody></table>';
 }
 
+function renderOutOfScope(items) {
+  const el = document.getElementById('tab-out-of-scope');
+  const badge = document.getElementById('res-oos-badge');
+  if (badge) { badge.textContent = items.length; badge.style.display = items.length ? 'inline' : 'none'; }
+  if (!items.length) { el.innerHTML = '<div class="empty">No third-party URLs were encountered during the scan</div>'; return; }
+  const byDomain = {};
+  items.forEach(o => {
+    let domain;
+    try { domain = new URL(o.url).hostname; } catch(e) { domain = o.url; }
+    if (!byDomain[domain]) byDomain[domain] = [];
+    byDomain[domain].push(o);
+  });
+  let html = `<p style="color:var(--text2);font-size:13px;margin-bottom:12px">${items.length} third-party URL(s) blocked — not in target scope</p>`;
+  html += '<table><thead><tr><th>Domain</th><th>URL</th><th>Tool</th><th>Phase</th></tr></thead><tbody>';
+  Object.keys(byDomain).sort().forEach(domain => {
+    byDomain[domain].forEach((o, i) => {
+      html += `<tr><td style="font-weight:600;color:var(--red);">${i === 0 ? esc(domain) : ''}</td><td style="word-break:break-all;font-size:12px;">${esc(o.url)}</td><td style="font-size:12px;">${esc(o.tool)}</td><td style="font-size:12px;">${esc(o.phase)}</td></tr>`;
+    });
+  });
+  html += '</tbody></table>';
+  el.innerHTML = html;
+}
+
 function switchTab(name) {
   document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
   document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
@@ -984,6 +1363,23 @@ async function generateReport() {
 function downloadJSON() {
   if (!currentScanId) return;
   window.open(`/api/results/${currentScanId}/download`, '_blank');
+}
+
+function downloadPayloads() {
+  if (!currentScanId) return;
+  window.open(`/api/results/${currentScanId}/payloads`, '_blank');
+}
+
+async function downloadLivePayloads() {
+  if (!currentScanId) return;
+  const resp = await fetch(`/api/scan/${currentScanId}/payloads-live`);
+  const data = await resp.json();
+  const blob = new Blob([JSON.stringify(data, null, 2)], {type: 'application/json'});
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = `live_activity_${currentScanId}.json`;
+  a.click();
+  URL.revokeObjectURL(a.href);
 }
 
 async function deleteScan(scanId) {

@@ -51,16 +51,39 @@ class ScanTools:
         http_client: httpx.AsyncClient,
         registry: EndpointRegistry,
         auth_session: AuthSession | None = None,
+        allowed_domains: set | None = None,
     ):
         self._page = page
         self._http_client = http_client
         self._registry = registry
         self._auth_session = auth_session
+        self._allowed_domains = allowed_domains or set()
+        self._out_of_scope: list[str] = []
         self._network_log: list[dict] = []
         self._ws_connections: dict[str, Any] = {}
         self._intercept_pattern: str | None = None
         if self._page:
             self._page.on("requestfinished", lambda req: asyncio.ensure_future(self._log_request(req)))
+
+    def _url_in_scope(self, url: str) -> bool:
+        """Return True if URL belongs to one of the allowed target domains."""
+        if not self._allowed_domains or not url:
+            return True
+        try:
+            from urllib.parse import urlparse
+            host = (urlparse(url).hostname or "").lower()
+        except Exception:
+            return False
+        for d in self._allowed_domains:
+            if host == d or host.endswith("." + d):
+                return True
+        if url not in self._out_of_scope:
+            self._out_of_scope.append(url)
+        return False
+
+    def get_out_of_scope_urls(self) -> list[str]:
+        """Return list of unique URLs that were blocked as out-of-scope."""
+        return list(self._out_of_scope)
 
     async def execute(self, function_name: str, arguments: str) -> dict:
         try:
@@ -100,7 +123,8 @@ class ScanTools:
 
         handler = handlers.get(function_name)
         if not handler:
-            return {"error": f"Unknown tool: {function_name}"}
+            valid = sorted(handlers.keys())
+            return {"error": f"Unknown tool '{function_name}'. Valid tools: {', '.join(valid)}"}
 
         try:
             result = await handler(**args)
@@ -141,6 +165,8 @@ class ScanTools:
     async def navigate(self, url: str) -> dict:
         if not self._require_page():
             return {"error": "No browser page (API-only mode)"}
+        if not self._url_in_scope(url):
+            return {"error": f"URL out of scope (not in target domain): {url}", "skipped": True}
         try:
             response = await self._page.goto(url, wait_until="networkidle", timeout=30000)
             status_code = response.status if response else None
@@ -243,6 +269,7 @@ class ScanTools:
 
             return {
                 "status": 200,
+                "url": self._page.url,
                 "body_snippet": body_snippet,
                 "errors": errors,
                 "reflected": reflected,
@@ -486,6 +513,8 @@ class ScanTools:
         body: str | None = None,
         auth_token: str | None = None,
     ) -> dict:
+        if not self._url_in_scope(url):
+            return {"error": f"URL out of scope (not in target domain): {url}", "skipped": True}
         try:
             hdrs = dict(headers) if headers else {}
             if auth_token:
@@ -539,6 +568,8 @@ class ScanTools:
                 scheme = "https" if "https" in raw_request[:80].lower() else "http"
                 path = path_or_url if path_or_url.startswith("/") else "/" + path_or_url
                 url = f"{scheme}://{host}{path}"
+            if not self._url_in_scope(url):
+                return {"error": f"URL out of scope (not in target domain): {url}", "skipped": True}
             return await self.api_request(method=method, url=url, headers=headers, body=body)
         except Exception as e:
             return _error_dict(str(e))
@@ -552,6 +583,8 @@ class ScanTools:
         param_location: str = "query",
         baseline_status: int = 200,
     ) -> dict:
+        if not self._url_in_scope(endpoint):
+            return {"error": f"URL out of scope (not in target domain): {endpoint}", "skipped": True}
         results = []
         error_indicators = ["error", "exception", "sql", "syntax", "undefined", "stack trace"]
         for payload in payloads:
@@ -593,6 +626,8 @@ class ScanTools:
             orig = dict(request)
             method = orig.get("method", "GET")
             url = orig.get("url", "")
+            if not self._url_in_scope(url):
+                return {"error": f"URL out of scope: {url}", "skipped": True}
             headers = dict(orig.get("headers", {}))
             body = orig.get("body")
 
@@ -631,6 +666,8 @@ class ScanTools:
         endpoint: str,
         methods: list[str] | None = None,
     ) -> dict:
+        if not self._url_in_scope(endpoint):
+            return {"error": f"URL out of scope: {endpoint}", "skipped": True}
         methods = methods or ["GET", "POST", "PUT", "DELETE"]
         results = []
         for method in methods:
@@ -647,6 +684,8 @@ class ScanTools:
         return {"results": results}
 
     async def test_method_override(self, endpoint: str) -> dict:
+        if not self._url_in_scope(endpoint):
+            return {"error": f"URL out of scope: {endpoint}", "skipped": True}
         methods = ["PUT", "DELETE", "PATCH", "OPTIONS"]
         results = []
         for method in methods:

@@ -9,9 +9,14 @@ targets:
     api_imports: {}                     # postman: imports/api.postman_collection.json
 
 model: bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0   # default model (override with --model)
-# Bedrock Sonnet:   bedrock/us.anthropic.claude-sonnet-4-6
-# Bedrock Mistral:  bedrock/mistral.mistral-small-2402-v1:0
-# LiteLLM proxy:    claude-haiku-4-5-20251001
+# Other Bedrock models (cheapest to most expensive):
+#   bedrock/mistral.ministral-3-8b-instruct          # $0.15/$0.15 - cheapest with tool calling
+#   bedrock/mistral.ministral-3-14b-instruct         # $0.20/$0.20 - best value agentic
+#   bedrock/mistral.mistral-small-2402-v1:0          # $0.10/$0.30 - legacy, weak tool use
+#   bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0  # $0.80/$4 - recommended
+#   bedrock/us.anthropic.claude-sonnet-4-6           # $3/$15 - best quality
+# LiteLLM proxy (if configured):
+#   claude-haiku-4-5-20251001
 
 scan:
   max_steps_per_phase: 50

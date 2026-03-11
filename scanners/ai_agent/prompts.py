@@ -139,26 +139,26 @@ WEB_PHASES: list[ScanPhase] = [
 API_PHASES: list[ScanPhase] = [
     ScanPhase(
         id="api_recon",
-        name="API endpoint mapping",
+        name="Endpoint discovery",
         prompt="Map all API endpoints from imports. Discover undocumented endpoints via path wordlists and OPTIONS probing. Generate discovery strategies from the base paths and patterns you observe.",
         applies_to="api",
     ),
     ScanPhase(
         id="api_auth",
-        name="API authentication testing",
-        prompt="Test authentication. Check for missing auth on protected endpoints, broken token validation, token reuse across contexts, and JWT manipulation. Generate tests from the auth scheme you observed.",
+        name="Authentication testing",
+        prompt="Test authentication on discovered endpoints. Check for missing auth on protected endpoints, broken token validation, token reuse across contexts, and JWT manipulation. Generate tests from the auth scheme you observed.",
         applies_to="api",
     ),
     ScanPhase(
         id="api_authz",
-        name="API authorization / BOLA",
+        name="Authorization / BOLA",
         prompt="Test authorization. For every object ID in path, query, or body, craft IDOR payloads. Test horizontal and vertical privilege escalation. Generate payloads from the ID patterns you observed.",
         applies_to="api",
     ),
     ScanPhase(
         id="api_injection",
-        name="API injection",
-        prompt="Test injection. Probe SQLi, NoSQLi, LDAP injection, XSS in API responses, and XXE in XML endpoints. Infer backend from response structure and errors, then craft targeted payloads.",
+        name="Endpoint injection testing",
+        prompt="Test injection on discovered endpoints. Probe SQLi, NoSQLi, LDAP injection, XSS in responses, and XXE in XML endpoints. Infer backend from response structure and errors, then craft targeted payloads.",
         applies_to="api",
     ),
     ScanPhase(
@@ -175,20 +175,20 @@ API_PHASES: list[ScanPhase] = [
     ),
     ScanPhase(
         id="api_ssrf",
-        name="SSRF via API",
+        name="SSRF testing",
         prompt="Identify URL-accepting parameters (webhooks, file import, redirect). Craft cloud metadata and internal service probes. Generate payloads from the URL parameters you found.",
         applies_to="api",
     ),
     ScanPhase(
         id="api_graphql",
-        name="GraphQL-specific",
+        name="GraphQL testing",
         prompt="If GraphQL is present: test introspection, query batching, deep nesting, and alias brute-force. Generate payloads from the schema and operations you observed.",
         applies_to="api",
     ),
     ScanPhase(
         id="api_data_exposure",
         name="Excessive data exposure",
-        prompt="Compare API response fields to what the UI displays. Look for PII, secrets, or internal IDs. Generate checks from the response structure you observed.",
+        prompt="Compare response fields to what the UI displays. Look for PII, secrets, or internal IDs. Generate checks from the response structure you observed.",
         applies_to="api",
     ),
     ScanPhase(
@@ -221,13 +221,32 @@ def build_system_prompt(
     target: Any,
     endpoint_registry: Any,
     app_info: dict | None = None,
+    extra_domains: list[str] | None = None,
 ) -> str:
     parts: list[str] = [SYSTEM_PROMPT]
     url = getattr(target, "url", "")
     scan_mode = getattr(target, "scan_mode", "both")
 
+    from urllib.parse import urlparse
+
+    GEN_DIGITAL_DOMAINS = {
+        "norton.com", "nortonlifelock.com", "lifelock.com",
+        "avast.com", "avg.com", "ccleaner.com",
+        "avira.com", "reputation.com", "gendigital.com",
+    }
+    target_host = (urlparse(url).hostname or "").lower()
+    parts_d = target_host.split(".")
+    base_domain = ".".join(parts_d[-2:]) if len(parts_d) >= 2 else target_host
+    allowed = {base_domain} if base_domain else set()
+    if base_domain in GEN_DIGITAL_DOMAINS:
+        allowed |= GEN_DIGITAL_DOMAINS
+    if extra_domains:
+        allowed |= set(d.strip().lower() for d in extra_domains if d.strip())
+    scope_str = ", ".join(f"*.{d}" for d in sorted(allowed))
+
     parts.append(f"\n\nTarget: {url}")
     parts.append(f"Scan mode: {scan_mode}")
+    parts.append(f"SCOPE: Only scan URLs under these domains: {scope_str}. Do NOT request any third-party domains (CDNs, analytics, trackers, etc). Any out-of-scope URL will be automatically blocked.")
 
     if scan_mode in ("api", "both") and endpoint_registry is not None:
         get_all = getattr(endpoint_registry, "get_all", None)

@@ -98,13 +98,15 @@ The scanner's `LLMRouter` (in `llm_config.py`) auto-selects the routing path per
 | **AWS Bedrock** (recommended) | Set `AWS_DEFAULT_REGION` (IAM role on EC2) or `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY` | `bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0` |
 | **LiteLLM Proxy** (optional) | Set `LITELLM_BASE_URL` + `LITELLM_API_KEY` | `claude-haiku-4-5-20251001` |
 
-Supported Bedrock models:
+Supported Bedrock models (cheapest to most expensive):
 
 | Model | Bedrock ID | Tool Calling | DAST Quality |
 |-------|-----------|-------------|-------------|
-| Mistral Small | `bedrock/mistral.mistral-small-2402-v1:0` | Basic | Poor (text-only, no tool use) |
-| **Claude Haiku 4.5** | `bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0` | **Strong** | **Good** — recommended |
-| **Claude Sonnet 4.6** | `bedrock/us.anthropic.claude-sonnet-4-6` | **Strong** | **Best** — deepest analysis |
+| Ministral 8B | `bedrock/mistral.ministral-3-8b-instruct` | Good (agentic) | Fair — cheapest with tool calling |
+| **Ministral 14B** | `bedrock/mistral.ministral-3-14b-instruct` | **Strong** (agentic) | Good — best value |
+| Mistral Small | `bedrock/mistral.mistral-small-2402-v1:0` | Weak | Poor (text-only, legacy) |
+| **Claude Haiku 4.5** | `bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0` | **Excellent** | **Good** — recommended for production |
+| **Claude Sonnet 4.6** | `bedrock/us.anthropic.claude-sonnet-4-6` | **Excellent** | **Best** — deepest analysis |
 
 > Amazon Nova models are not supported (content guardrails block security prompts).
 

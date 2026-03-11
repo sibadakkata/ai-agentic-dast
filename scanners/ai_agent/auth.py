@@ -409,17 +409,20 @@ async def authenticate(
     router: LLMRouter,
     model: str,
 ) -> AuthSession:
-    page = await browser.new_page()
-    await page.goto(target.url, wait_until="networkidle", timeout=30000)
-
     auth_config = target.auth_config or {}
     auth_type_config = (auth_config.get("type") or "auto").lower()
     credentials = target.credentials or {}
     has_creds = bool(credentials.get("username") or credentials.get("password")
                      or credentials.get("bearer_token") or credentials.get("api_key"))
 
+    page = await browser.new_page()
+
     if not has_creds and auth_type_config in ("auto", "form", "sso", "oauth"):
         logger.info("No credentials supplied — running unauthenticated scan")
+        try:
+            await page.goto(target.url, wait_until="domcontentloaded", timeout=60000)
+        except Exception:
+            logger.warning("Initial page load timed out — continuing anyway")
         result = AuthResult(
             auth_type="none",
             tokens={},
@@ -428,6 +431,10 @@ async def authenticate(
         )
     elif auth_type_config == "bearer":
         token = auth_config.get("bearer_token", "") or credentials.get("bearer_token", "")
+        try:
+            await page.goto(target.url, wait_until="domcontentloaded", timeout=60000)
+        except Exception:
+            logger.warning("Initial page load timed out — continuing anyway")
         result = AuthResult(
             auth_type="bearer",
             tokens={"access_token": token},
@@ -436,6 +443,10 @@ async def authenticate(
         )
     elif auth_type_config == "api_key":
         key = auth_config.get("api_key", "") or credentials.get("api_key", "")
+        try:
+            await page.goto(target.url, wait_until="domcontentloaded", timeout=60000)
+        except Exception:
+            logger.warning("Initial page load timed out — continuing anyway")
         result = AuthResult(
             auth_type="api_key",
             tokens={"api_key": key},
@@ -443,6 +454,10 @@ async def authenticate(
             success=bool(key),
         )
     else:
+        try:
+            await page.goto(target.url, wait_until="load", timeout=60000)
+        except Exception:
+            logger.warning("Initial page load timed out — continuing with auth attempt")
         result = await detect_and_login(page, target, router, model)
 
     def _refresh_fn() -> Awaitable[AuthResult]:
