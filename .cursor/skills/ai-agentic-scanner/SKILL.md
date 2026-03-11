@@ -95,10 +95,18 @@ The scanner's `LLMRouter` (in `llm_config.py`) auto-selects the routing path per
 
 | Provider | Setup | Model name example |
 |----------|-------|--------------------|
-| **LiteLLM Proxy** | Set `LITELLM_BASE_URL` + `LITELLM_API_KEY` in `targets.env` | `claude-haiku-4-5-20251001` |
-| **AWS Bedrock** | Set `AWS_DEFAULT_REGION` (IAM role) or `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY` | `bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0` |
-| **Direct API** | Set `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, or `GOOGLE_API_KEY` | `claude-haiku-4-5-20251001`, `gemini/gemini-2.5-flash` |
-| **Hybrid** | Set both LiteLLM + AWS creds. `bedrock/` models go direct; others go through proxy | Mix of any above |
+| **AWS Bedrock** (recommended) | Set `AWS_DEFAULT_REGION` (IAM role on EC2) or `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY` | `bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0` |
+| **LiteLLM Proxy** (optional) | Set `LITELLM_BASE_URL` + `LITELLM_API_KEY` | `claude-haiku-4-5-20251001` |
+
+Supported Bedrock models:
+
+| Model | Bedrock ID | Tool Calling | DAST Quality |
+|-------|-----------|-------------|-------------|
+| Mistral Small | `bedrock/mistral.mistral-small-2402-v1:0` | Basic | Poor (text-only, no tool use) |
+| **Claude Haiku 4.5** | `bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0` | **Strong** | **Good** — recommended |
+| **Claude Sonnet 4.6** | `bedrock/us.anthropic.claude-sonnet-4-6` | **Strong** | **Best** — deepest analysis |
+
+> Amazon Nova models are not supported (content guardrails block security prompts).
 
 ## Usage
 
@@ -175,16 +183,15 @@ AI Agentic Scanner Components:
 
 Check in this order:
 
-1. `LITELLM_BASE_URL` + `LITELLM_API_KEY` env vars → test proxy
-2. AWS credentials (`AWS_ACCESS_KEY_ID` etc.) → test Bedrock models
-3. Direct API keys: `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GOOGLE_API_KEY`
-4. Test the configured model with a trivial completion call
-5. Report availability and stop if zero models work
+1. AWS credentials / IAM role → test Bedrock models (primary)
+2. `LITELLM_BASE_URL` + `LITELLM_API_KEY` env vars → test proxy (optional)
+3. Test the configured model with a trivial completion call
+4. Report availability and stop if zero models work
 
 ```python
 import litellm
 
-for model in ["claude-haiku-4-5-20251001", "bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0", "gemini/gemini-2.5-flash"]:
+for model in ["bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0", "bedrock/us.anthropic.claude-sonnet-4-6", "bedrock/mistral.mistral-small-2402-v1:0"]:
     try:
         resp = litellm.completion(model=model, messages=[{"role": "user", "content": "ping"}], max_tokens=5)
         print(f"{model}: OK")

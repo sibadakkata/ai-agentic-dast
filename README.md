@@ -29,27 +29,26 @@ docker run -d --name dast --network host \
   ai-dast-scanner uvicorn web.app:app --host 0.0.0.0 --port 8080
 ```
 
-## Supported Models
+## Supported Models (AWS Bedrock)
 
-### Model Compatibility for DAST Scanning
+All models run through **AWS Bedrock** — no external API keys needed. Uses IAM role or AWS credentials.
 
-Not all models work well for agentic DAST. The scanner requires strong **tool/function calling** to navigate, inject payloads, and analyze responses. Models that lack this capability will generate text-only findings without actually testing the target.
+| Model | Bedrock ID | Cost (in/out per 1M) | Tool Calling | DAST Quality | Recommendation |
+|-------|-----------|---------------------|-------------|-------------|----------------|
+| Mistral Small | `bedrock/mistral.mistral-small-2402-v1:0` | $0.10 / $0.30 | Basic | Poor | Dev/testing only — does not use tools, generates text-only findings |
+| **Claude Haiku 4.5** | `bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0` | $0.80 / $4 | **Strong** | **Good** | **Production scans** — actually probes targets, best cost/value |
+| **Claude Sonnet 4.6** | `bedrock/us.anthropic.claude-sonnet-4-6` | $3 / $15 | **Strong** | **Best** | Deep analysis — most findings, highest quality |
 
-| Model | ID | Cost (in/out per 1M) | Provider | Tool Calling | DAST Quality | Notes |
-|-------|-----|---------------------|----------|-------------|-------------|-------|
-| Gemini 2.5 Flash Lite | `gemini/gemini-2.5-flash-lite` | $0.075 / $0.30 | Google AI | Yes | Fair | Cheapest option, basic scanning |
-| Gemini 2.5 Flash | `gemini/gemini-2.5-flash` | $0.15 / $0.60 | Google AI | Yes | Good | Good balance of cost and quality |
-| Mistral Small | `bedrock/mistral.mistral-small-2402-v1:0` | $0.10 / $0.30 | Bedrock | Basic | Poor | Does not use tools properly — text-only findings |
-| **Claude Haiku 4.5** | `bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0` | $0.80 / $4 | Bedrock | **Strong** | **Good** | **Recommended** — actually probes targets |
-| **Claude Sonnet 4.6** | `bedrock/us.anthropic.claude-sonnet-4-6` | $3 / $15 | Bedrock | **Strong** | **Best** | Deepest analysis, most findings |
+> **Why not other models?**
+> - **Amazon Nova** (Micro/Lite/Pro): Content guardrails block security-testing prompts.
+> - **Gemini**: Requires a separate Google API key (not available via Bedrock).
+> - **Mistral Small**: Responds with hypothetical findings instead of using tools to test.
+>
+> Claude Haiku 4.5 is the minimum for meaningful DAST results.
 
-> **Amazon Nova models** (Micro, Lite, Pro) are **not supported** — their content guardrails block security-testing prompts.
+### Bedrock Setup
 
-### AWS Bedrock (Recommended for deployment)
-
-No API keys needed — uses IAM role or AWS credentials.
-
-**Setup:** Attach an IAM role to your EC2 instance with these permissions:
+Attach an IAM role to your EC2 instance with these permissions:
 - `bedrock:InvokeModel`, `bedrock:InvokeModelWithResponseStream` on `arn:aws:bedrock:*:*:inference-profile/*`
 - `aws-marketplace:ViewSubscriptions`, `aws-marketplace:Subscribe`
 
@@ -58,44 +57,16 @@ Then set:
 export AWS_DEFAULT_REGION=us-east-1
 ```
 
-### Google AI (Gemini)
+### LiteLLM Proxy (Optional)
 
-For Gemini models, set the API key directly:
-
-```bash
-export GOOGLE_API_KEY=your-api-key
-```
-
-### LiteLLM Proxy
-
-Routes requests through a central LiteLLM proxy. Best for teams with an existing proxy deployment.
+If your team has a LiteLLM proxy, you can route non-Bedrock models through it:
 
 ```bash
 export LITELLM_BASE_URL=https://litellm.your-company.com/
 export LITELLM_API_KEY=sk-xxxx
 ```
 
-Models use their standard names (no `bedrock/` prefix):
-
-```bash
-python scripts/run_scan.py --model "claude-haiku-4-5-20251001"
-```
-
-### Direct API Keys
-
-Call LLM providers directly without any proxy. Set the provider's API key as an environment variable.
-
-| Provider | Env Variable | Example Model |
-|----------|-------------|---------------|
-| Anthropic | `ANTHROPIC_API_KEY` | `claude-haiku-4-5-20251001` |
-| Google | `GOOGLE_API_KEY` | `gemini/gemini-2.5-flash` |
-| OpenAI | `OPENAI_API_KEY` | `gpt-4o` |
-
-### Hybrid Routing
-
-You can configure both Bedrock and LiteLLM at the same time. The router picks the right path automatically:
-- Models with `bedrock/`, `vertex_ai/`, `sagemaker/`, `ollama/` prefix → direct (via LiteLLM library)
-- All other models → LiteLLM proxy (if configured) or direct API
+The router auto-selects the path: `bedrock/` prefixed models always go direct to Bedrock; others go through the proxy.
 
 ## Web UI Features
 
@@ -113,23 +84,10 @@ You can configure both Bedrock and LiteLLM at the same time. The router picks th
 
 ### With AWS Bedrock (IAM Role)
 
-Attach an IAM role with Bedrock permissions to the EC2 instance, then:
-
 ```bash
 docker build -t ai-dast-scanner .
 docker run -d --name dast --network host \
   -e AWS_DEFAULT_REGION=us-east-1 \
-  -v /home/ubuntu/ai-dast-scanner/results:/app/results \
-  -v /home/ubuntu/ai-dast-scanner/imports:/app/imports \
-  ai-dast-scanner uvicorn web.app:app --host 0.0.0.0 --port 8080
-```
-
-### With LiteLLM Proxy
-
-```bash
-docker run -d --name dast --network host \
-  -e LITELLM_BASE_URL=https://litellm.your-company.com/ \
-  -e LITELLM_API_KEY=sk-xxxx \
   -v /home/ubuntu/ai-dast-scanner/results:/app/results \
   -v /home/ubuntu/ai-dast-scanner/imports:/app/imports \
   ai-dast-scanner uvicorn web.app:app --host 0.0.0.0 --port 8080
@@ -142,7 +100,9 @@ docker run -d --name dast --network host \
   -e AWS_DEFAULT_REGION=us-east-1 \
   -e DAST_AUTH_USER=admin \
   -e DAST_AUTH_PASS=YourStrongPassword \
-  ...
+  -v /home/ubuntu/ai-dast-scanner/results:/app/results \
+  -v /home/ubuntu/ai-dast-scanner/imports:/app/imports \
+  ai-dast-scanner uvicorn web.app:app --host 0.0.0.0 --port 8080
 ```
 
 ### EC2 Requirements
@@ -155,7 +115,7 @@ docker run -d --name dast --network host \
 ## CLI Usage
 
 ```bash
-# Default scan using config model (Haiku)
+# Default scan (uses Haiku from scanner_config.yaml)
 python scripts/run_scan.py
 
 # Override model
@@ -176,12 +136,12 @@ python scripts/report_generator.py --file results/raw/scan_result.json
 
 ```
 config/
-  scanner_config.yaml       # Default model + scan settings
+  scanner_config.yaml       # Default model (Haiku) + scan settings
   targets.env.example       # Template for CLI credentials
 scanners/ai_agent/
   agent.py                  # Core agent loop + context management
   auth.py                   # Authentication (form/SSO/OAuth/MFA)
-  llm_config.py             # LLM routing (Bedrock/LiteLLM/Direct) + cost tracking
+  llm_config.py             # LLM routing (Bedrock/LiteLLM) + cost tracking
   prompts.py                # System + phase prompts (15 website + 8 API phases)
   tools.py                  # 27 tools (browser, API, WebSocket, fuzzing)
   api_import.py             # Postman/Burp/OpenAPI parsers

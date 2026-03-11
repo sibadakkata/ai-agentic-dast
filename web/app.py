@@ -55,12 +55,7 @@ REPORTS_DIR.mkdir(parents=True, exist_ok=True)
 SCANS: dict[str, dict] = {}
 
 MODELS = [
-    # --- Gemini (direct API, needs GOOGLE_API_KEY) ---
-    {"id": "gemini/gemini-2.5-flash-lite", "name": "Gemini 2.5 Flash Lite (cheapest)", "cost": "~$0.075/$0.30 per 1M tokens", "provider": "Google AI"},
-    {"id": "gemini/gemini-2.5-flash", "name": "Gemini 2.5 Flash", "cost": "~$0.15/$0.60 per 1M tokens", "provider": "Google AI"},
-    # --- Bedrock: Mistral ---
-    {"id": "bedrock/mistral.mistral-small-2402-v1:0", "name": "Mistral Small (Bedrock)", "cost": "~$0.10/$0.30 per 1M tokens", "provider": "Bedrock"},
-    # --- Bedrock: Claude (proven for DAST) ---
+    {"id": "bedrock/mistral.mistral-small-2402-v1:0", "name": "Mistral Small (cheapest)", "cost": "~$0.10/$0.30 per 1M tokens", "provider": "Bedrock"},
     {"id": "bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0", "name": "Claude Haiku 4.5 (recommended)", "cost": "~$0.80/$4 per 1M tokens", "provider": "Bedrock"},
     {"id": "bedrock/us.anthropic.claude-sonnet-4-6", "name": "Claude Sonnet 4.6 (best quality)", "cost": "~$3/$15 per 1M tokens", "provider": "Bedrock"},
 ]

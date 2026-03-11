@@ -9,9 +9,9 @@ targets:
     api_imports: {}                     # postman: imports/api.postman_collection.json
 
 model: bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0   # default model (override with --model)
-# Bedrock Sonnet:  bedrock/us.anthropic.claude-sonnet-4-6
-# LiteLLM proxy:   claude-haiku-4-5-20251001
-# Gemini:          gemini/gemini-2.5-flash
+# Bedrock Sonnet:   bedrock/us.anthropic.claude-sonnet-4-6
+# Bedrock Mistral:  bedrock/mistral.mistral-small-2402-v1:0
+# LiteLLM proxy:    claude-haiku-4-5-20251001
 
 scan:
   max_steps_per_phase: 50
