@@ -31,7 +31,9 @@ venv/
 
 # IDE
 .vscode/
-.cursor/
+.cursor/*
+!.cursor/skills/
+!.cursor/rules/
 *.swp
 *.swo
 
