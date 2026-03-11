@@ -304,6 +304,21 @@ tr:hover td { background: rgba(99,102,241,0.05); }
     </div>
   </div>
 
+  <!-- ERROR DETAIL VIEW -->
+  <div id="error-view" style="display:none;">
+    <div class="back-btn" onclick="showList()">← Back to Scan List</div>
+    <div class="card">
+      <h2 id="error-title" style="color:var(--red);">✕ Scan Error</h2>
+      <div class="stats" id="error-stats"></div>
+      <div style="background:rgba(239,68,68,0.1);border:1px solid rgba(239,68,68,0.3);border-radius:8px;padding:16px;margin-bottom:16px;">
+        <div style="font-size:12px;font-weight:600;color:var(--red);text-transform:uppercase;margin-bottom:8px;">Error Details</div>
+        <div id="error-message" style="font-family:monospace;font-size:13px;color:var(--text);word-break:break-all;"></div>
+      </div>
+      <div style="font-size:12px;font-weight:600;color:var(--text2);text-transform:uppercase;margin-bottom:8px;">Progress Log</div>
+      <div class="progress-log" id="error-log" style="max-height:300px;"></div>
+    </div>
+  </div>
+
   <!-- RESULTS VIEW (shown when clicking a completed scan) -->
   <div id="results-view" style="display:none;">
     <div class="back-btn" onclick="showList()">← Back to Scan List</div>
@@ -368,7 +383,7 @@ async function loadScans() {
   const el = document.getElementById('scans-list');
   if (!scans.length) { el.innerHTML = '<div class="empty">No scans yet.</div>'; return; }
   el.innerHTML = '<div class="scan-list">' + scans.map(s => {
-    const clickFn = s.status === 'running' ? `openLiveView('${s.id}')` : `viewResults('${s.id}')`;
+    const clickFn = s.status === 'running' ? `openLiveView('${s.id}')` : `viewScan('${s.id}')`;
     return `
     <div class="scan-item">
       <div class="target" style="cursor:pointer" onclick="${clickFn}">${esc(s.target)}</div>
@@ -717,26 +732,59 @@ function closeLiveView() {
   loadScans();
 }
 
-async function viewResults(scanId) {
+async function viewScan(scanId) {
   currentScanId = scanId;
   const statusResp = await fetch(`/api/scan/${scanId}`);
-  if (statusResp.ok) {
-    const statusData = await statusResp.json();
-    if (statusData.status === 'running') { openLiveView(scanId); return; }
+  if (!statusResp.ok) { alert('Scan not found'); return; }
+  const statusData = await statusResp.json();
+
+  if (statusData.status === 'running') {
+    openLiveView(scanId);
+    return;
   }
+
+  if (statusData.status === 'error') {
+    showErrorView(scanId, statusData);
+    return;
+  }
+
   const resp = await fetch(`/api/results/${scanId}`);
   if (!resp.ok) { alert('Results not available yet'); return; }
   const data = await resp.json();
   renderResults(data);
-  document.getElementById('scans-card').style.display = 'none';
-  document.getElementById('scan-form-card').style.display = 'none';
-  document.getElementById('live-scan-view').style.display = 'none';
+  hideAllViews();
   document.getElementById('results-view').style.display = 'block';
 }
 
-function showList() {
+function showErrorView(scanId, data) {
+  hideAllViews();
+  document.getElementById('error-view').style.display = 'block';
+  document.getElementById('error-title').textContent = `✕ Scan Error — ${data.model || scanId}`;
+
+  const error = data.error || 'Unknown error';
+  document.getElementById('error-message').textContent = error;
+
+  document.getElementById('error-stats').innerHTML = [
+    stat(data.model || '-', 'Model'),
+    stat(data.started ? new Date(data.started).toLocaleString() : '-', 'Started'),
+    stat(data.duration ? Math.round(data.duration) + 's' : '-', 'Duration'),
+    stat(data.current_phase || '-', 'Last Phase'),
+  ].join('');
+
+  const log = data.progress || [];
+  document.getElementById('error-log').textContent = log.length ? log.join('\n') : 'No progress log available.';
+}
+
+function hideAllViews() {
+  document.getElementById('scans-card').style.display = 'none';
+  document.getElementById('scan-form-card').style.display = 'none';
   document.getElementById('results-view').style.display = 'none';
   document.getElementById('live-scan-view').style.display = 'none';
+  document.getElementById('error-view').style.display = 'none';
+}
+
+function showList() {
+  hideAllViews();
   document.getElementById('scans-card').style.display = 'block';
   document.getElementById('scan-form-card').style.display = 'block';
   if (lvPollInterval) { clearInterval(lvPollInterval); lvPollInterval = null; }
