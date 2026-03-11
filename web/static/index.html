@@ -152,6 +152,15 @@ tr:hover td { background: rgba(99,102,241,0.05); }
 
 <div class="container">
 
+  <div style="background:linear-gradient(90deg,rgba(234,179,8,0.12),rgba(234,179,8,0.04));border:1px solid rgba(234,179,8,0.35);border-radius:10px;padding:14px 20px;margin-bottom:20px;display:flex;align-items:flex-start;gap:12px;">
+    <span style="font-size:20px;line-height:1;">&#9888;</span>
+    <div style="font-size:13px;color:var(--text);line-height:1.6;">
+      <strong style="color:var(--yellow);">Important &mdash; Read Before Scanning</strong><br>
+      Only scan endpoints you are <strong>explicitly authorized</strong> to test. Unauthorized scanning is prohibited.<br>
+      Notify the SOC team via Slack <strong style="color:var(--accent2);">#t-gts-cybersecurity-deconfliction</strong> before running any scan.
+    </div>
+  </div>
+
   <!-- NEW SCAN -->
   <div class="card" id="scan-form-card">
     <h2><span class="icon">🔍</span> New Scan</h2>
