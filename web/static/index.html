@@ -391,21 +391,18 @@ async function loadScans() {
   const scans = await (await fetch('/api/scans')).json();
   const el = document.getElementById('scans-list');
   if (!scans.length) { el.innerHTML = '<div class="empty">No scans yet.</div>'; return; }
-  el.innerHTML = '<div class="scan-list">' + scans.map(s => {
-    const clickFn = s.status === 'running' ? `openLiveView('${s.id}')` : `viewScan('${s.id}')`;
-    return `
-    <div class="scan-item">
-      <div class="target" style="cursor:pointer" onclick="${clickFn}">${esc(s.target)}</div>
+  el.innerHTML = '<div class="scan-list">' + scans.map(s => `
+    <div class="scan-item" style="cursor:pointer" onclick="viewScan('${s.id}')">
+      <div class="target">${esc(s.target)}</div>
       <div class="model">${esc(s.model)}</div>
       <div><span class="badge badge-${s.status}">${s.status}</span></div>
       <div>${s.duration ? Math.round(s.duration) + 's' : '-'}</div>
       <div>${s.cost != null ? '$' + s.cost.toFixed(4) : '-'}</div>
       <div style="display:flex;align-items:center;gap:8px;">
-        <span style="cursor:pointer" onclick="${clickFn}">${s.findings_count != null ? s.findings_count + ' findings' : '-'}</span>
+        <span>${s.findings_count != null ? s.findings_count + ' findings' : '-'}</span>
         <button class="btn btn-outline btn-sm" onclick="event.stopPropagation();deleteScan('${s.id}')" style="padding:3px 8px;font-size:10px;color:var(--red);border-color:rgba(239,68,68,0.3);" title="Delete scan">✕</button>
       </div>
-    </div>`;
-  }).join('') + '</div>';
+    </div>`).join('') + '</div>';
 }
 
 async function uploadFile(inputId) {
@@ -618,9 +615,7 @@ function openLiveView(scanId) {
   document.getElementById('live-scan-log').textContent = '';
   document.getElementById('live-scan-stats').innerHTML = '';
 
-  document.getElementById('scans-card').style.display = 'none';
-  document.getElementById('scan-form-card').style.display = 'none';
-  document.getElementById('results-view').style.display = 'none';
+  hideAllViews();
   document.getElementById('live-scan-view').style.display = 'block';
 
   pollLiveView(scanId);
@@ -630,29 +625,42 @@ function openLiveView(scanId) {
 
 async function pollLiveView(scanId) {
   try {
-    const [statusResp, liveResp] = await Promise.all([
-      fetch(`/api/scan/${scanId}`),
-      fetch(`/api/scan/${scanId}/live?since_test=${lvTestOffset}&since_finding=${lvFindingOffset}`)
-    ]);
+    const statusResp = await fetch(`/api/scan/${scanId}`);
     const data = await statusResp.json();
-    const live = await liveResp.json();
+
+    if (data.status === 'error' && (!data.progress || data.progress.length === 0)) {
+      clearInterval(lvPollInterval);
+      lvPollInterval = null;
+      showErrorView(scanId, data);
+      return;
+    }
+
+    let live = {tests:[], findings:[], phases:[], tests_total:0, findings_total:0, current_phase:''};
+    try {
+      const liveResp = await fetch(`/api/scan/${scanId}/live?since_test=${lvTestOffset}&since_finding=${lvFindingOffset}`);
+      if (liveResp.ok) live = await liveResp.json();
+    } catch(e2) {}
 
     document.getElementById('live-scan-title').innerHTML =
       data.status === 'running'
         ? `<span class="scanning-indicator"></span>Scan In Progress — ${esc(data.model || '')}`
         : data.status === 'completed'
-          ? `<span style="color:var(--green)">✓</span> Scan Complete — ${esc(data.model || '')}`
-          : `<span style="color:var(--red)">✕</span> Scan Error — ${esc(data.model || '')}`;
+          ? `<span style="color:var(--green);">&#10003;</span> Scan Complete — ${esc(data.model || '')}`
+          : `<span style="color:var(--red);">&#10005;</span> Scan Error — ${esc(data.model || '')}`;
 
     const log = document.getElementById('live-scan-log');
-    if (data.progress) log.textContent = data.progress.join('\n');
+    if (data.progress && data.progress.length) {
+      log.textContent = data.progress.join('\n');
+    } else if (data.error) {
+      log.textContent = 'Error: ' + data.error;
+    }
     log.scrollTop = log.scrollHeight;
 
     document.getElementById('live-scan-stats').innerHTML = [
       stat(live.tests_total || 0, 'Tests Run'),
       stat(live.findings_total || 0, 'Findings'),
       stat((live.phases || []).length, 'Phases Done'),
-      stat(data.current_phase || '-', 'Current Phase'),
+      stat(data.current_phase || data.status || '-', 'Current Phase'),
     ].join('');
 
     renderLiveView(live);
@@ -743,26 +751,30 @@ function closeLiveView() {
 
 async function viewScan(scanId) {
   currentScanId = scanId;
-  const statusResp = await fetch(`/api/scan/${scanId}`);
-  if (!statusResp.ok) { alert('Scan not found'); return; }
-  const statusData = await statusResp.json();
+  try {
+    const statusResp = await fetch(`/api/scan/${scanId}`);
+    if (!statusResp.ok) { alert('Scan not found'); return; }
+    const statusData = await statusResp.json();
 
-  if (statusData.status === 'running') {
-    openLiveView(scanId);
-    return;
+    if (statusData.status === 'running') {
+      openLiveView(scanId);
+      return;
+    }
+
+    if (statusData.status === 'error') {
+      showErrorView(scanId, statusData);
+      return;
+    }
+
+    const resp = await fetch(`/api/results/${scanId}`);
+    if (!resp.ok) { alert('Results not available yet — scan may still be processing.'); return; }
+    const data = await resp.json();
+    renderResults(data);
+    hideAllViews();
+    document.getElementById('results-view').style.display = 'block';
+  } catch(e) {
+    alert('Could not load scan: ' + e.message);
   }
-
-  if (statusData.status === 'error') {
-    showErrorView(scanId, statusData);
-    return;
-  }
-
-  const resp = await fetch(`/api/results/${scanId}`);
-  if (!resp.ok) { alert('Results not available yet'); return; }
-  const data = await resp.json();
-  renderResults(data);
-  hideAllViews();
-  document.getElementById('results-view').style.display = 'block';
 }
 
 function showErrorView(scanId, data) {
