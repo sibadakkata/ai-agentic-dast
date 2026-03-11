@@ -84,7 +84,7 @@ async def run_scan(
         page = auth_session.page
         print(f"  [AUTH] Auth type: {auth_session._auth_type}, URL after login: {page.url}")
         _cb("auth", {"status": "done", "type": auth_session._auth_type, "url": page.url})
-        if auth_session._auth_type != "bearer":
+        if auth_session._auth_type not in ("bearer", "none"):
             metrics["auth_pages_detected"] += 1
 
         cookies = await page.context.cookies()

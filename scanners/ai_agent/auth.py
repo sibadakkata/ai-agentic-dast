@@ -414,9 +414,20 @@ async def authenticate(
 
     auth_config = target.auth_config or {}
     auth_type_config = (auth_config.get("type") or "auto").lower()
+    credentials = target.credentials or {}
+    has_creds = bool(credentials.get("username") or credentials.get("password")
+                     or credentials.get("bearer_token") or credentials.get("api_key"))
 
-    if auth_type_config == "bearer":
-        token = auth_config.get("bearer_token", "")
+    if not has_creds and auth_type_config in ("auto", "form", "sso", "oauth"):
+        logger.info("No credentials supplied — running unauthenticated scan")
+        result = AuthResult(
+            auth_type="none",
+            tokens={},
+            cookies=[],
+            success=True,
+        )
+    elif auth_type_config == "bearer":
+        token = auth_config.get("bearer_token", "") or credentials.get("bearer_token", "")
         result = AuthResult(
             auth_type="bearer",
             tokens={"access_token": token},
@@ -424,7 +435,7 @@ async def authenticate(
             success=bool(token),
         )
     elif auth_type_config == "api_key":
-        key = auth_config.get("api_key", "")
+        key = auth_config.get("api_key", "") or credentials.get("api_key", "")
         result = AuthResult(
             auth_type="api_key",
             tokens={"api_key": key},
