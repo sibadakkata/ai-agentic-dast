@@ -33,7 +33,7 @@ description: Builds and runs an LLM-powered agentic web security scanner using L
 ├── web/
 │   ├── app.py                    # FastAPI backend (includes POST /api/scan/{id}/stop)
 │   └── static/index.html         # Single-page web UI (with Stop Scan button)
-├── mcp_server.py                 # MCP server — 14 tools for AI assistant integration
+├── mcp_server.py                 # MCP server — 16 tools for AI assistant integration
 ├── imports/                      # API definition files (Postman/Burp/OpenAPI)
 ├── Dockerfile                    # Production container (Playwright + Chromium)
 ├── requirements.txt

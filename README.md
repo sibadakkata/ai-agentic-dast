@@ -445,6 +445,8 @@ pip install mcp
 | `get_scan_results` | Get full triaged findings |
 | `get_live_activity` | Real-time tool calls and findings for running scans |
 | `get_findings_summary` | Human-readable severity summary |
+| `query_findings` | Search findings across scans by target, keyword, severity, verdict (e.g., "SQL injection in NGP") |
+| `get_scan_stats` | Aggregated statistics: severity/verdict/category breakdown, cost, duration, coverage |
 | `generate_report` | Generate PDF report |
 | `download_payloads` | Export all tested payloads by phase |
 | `upload_api_spec` | Upload Postman/Burp/OpenAPI file |
