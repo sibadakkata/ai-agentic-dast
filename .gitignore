@@ -19,6 +19,7 @@ archive/
 
 # Temp / test scripts
 test_*.py
+!openclaw-skill/test_skill.py
 Winword.rtf
 ~$*
 
