@@ -48,7 +48,7 @@ Build all code first. Present the plan. Wait for explicit user approval before e
 
 | Decision | Choice | Rationale |
 |----------|--------|-----------|
-| Payload generation | **Hybrid** — LLM plans payloads (1 call/endpoint), deterministic engine executes | Smart like pure LLM (~$0.001/endpoint), fast like static (zero LLM cost for HTTP requests) |
+| Payload generation | **Hybrid** — LLM plans payloads (1 call), engine executes, LLM analyzes anomalies (1 call) | Smart (~$0.003/endpoint): LLM plans + identifies IDOR/biz-logic/auth issues from responses |
 | API endpoint import | Postman/Burp/OpenAPI parsed into a unified endpoint registry | Enables testing APIs that aren't discoverable via crawling |
 | Static payload catalog | **Fallback only** — body_fuzzer.py has regex-classified payloads as fallback when LLM planning fails | Primary path is always LLM-planned |
 | Triage | **Offline, evidence-based** — no LLM used for triage | Deterministic rules + confidence scoring, zero cost, reproducible |
@@ -138,7 +138,7 @@ AI Agentic Scanner Components:
 - [x] Step 3: tools.py (28 tools — browser + SPA + WebSocket + API + token security)
 - [x] Step 3b: api_import.py (Postman / Burp / OpenAPI parsers)
 - [x] Step 3c: baseline_executor.py (API happy-path execution + variable auto-chaining)
-- [x] Step 3d: body_fuzzer.py (hybrid LLM-planned body fuzzing + deterministic execution)
+- [x] Step 3d: body_fuzzer.py (hybrid body fuzzing: LLM plans → deterministic execution → LLM anomaly analysis)
 - [x] Step 4: prompts.py (system + scan prompts per OWASP category)
 - [x] Step 5: agent.py (agent loop with SPA detection + dynamic endpoint discovery)
 - [x] Step 6: auth.py (SSO / OAuth / SAML / MFA / form / token auth + session monitor)

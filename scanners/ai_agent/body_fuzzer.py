@@ -274,6 +274,161 @@ def _apply_static_payloads(fields: list[FieldInfo]) -> list[FieldInfo]:
 
 
 # ═══════════════════════════════════════════════════════════════════════
+# LLM Anomaly Analysis (one call after all probes — ~$0.002)
+# ═══════════════════════════════════════════════════════════════════════
+
+LLM_ANALYZE_PROMPT = """\
+You are an API security expert. I just fuzzed a JSON API endpoint and collected anomalous responses.
+Analyze them and identify real API security issues.
+
+## Endpoint
+- Method: {method}
+- URL: {url}
+- Baseline: Status {baseline_status}, {baseline_len} bytes
+
+## Original JSON Body
+```json
+{original_body}
+```
+
+## Anomalous Responses ({anomaly_count} out of {total_count} probes)
+{anomaly_details}
+
+## Your Task
+Analyze each anomaly and determine if it reveals a real API vulnerability.
+
+Look for:
+- **IDOR**: Did changing an ID/account field return a different user's data?
+- **Business Logic**: Did negative amounts, zero values, or boundary values get accepted?
+- **Auth Bypass**: Did removing auth fields or injecting SQL still return 200?
+- **Mass Assignment**: Did injecting extra fields (is_admin, role) get accepted?
+- **NoSQL Injection**: Did $ne/$gt operators return data they shouldn't?
+- **Prototype Pollution**: Did __proto__ injection change behavior?
+- **Missing Validation**: Did wrong types, nulls, or empty values get accepted without error?
+- **Information Disclosure**: Did error responses leak stack traces, DB schemas, or internal paths?
+- **Schema Bypass**: Did the API process fields not in its schema?
+
+For each REAL issue found, output a JSON object. Output ONLY a JSON array:
+```json
+[
+  {{
+    "title": "Short vulnerability title",
+    "severity": "Critical|High|Medium|Low|Info",
+    "type": "idor|biz_logic|auth_bypass|mass_assignment|nosql_injection|prototype_pollution|missing_validation|info_disclosure|schema_bypass|injection",
+    "field": "affected field path",
+    "evidence": "What in the response proves this is real",
+    "payload": "The payload that triggered it",
+    "explanation": "Why this is a security issue"
+  }}
+]
+```
+
+Rules:
+- Only report REAL issues with evidence in the response. No guessing.
+- A 200 OK to a malformed request IS a finding (missing validation).
+- A 500 error with stack trace IS a finding (info disclosure).
+- A 302 redirect to login is NOT a finding (auth is working).
+- If anomaly is just a generic error with no leak, skip it.
+- Output ONLY the JSON array, nothing else. Empty array [] if no real issues."""
+
+
+@dataclass
+class LLMFinding:
+    title: str
+    severity: str
+    finding_type: str
+    field: str
+    evidence: str
+    payload: str
+    explanation: str
+
+
+async def llm_analyze_anomalies(
+    results: list,
+    method: str,
+    url: str,
+    original_body: str,
+    baseline_status: int,
+    baseline_len: int,
+    router: Any,
+    model: str,
+) -> list[LLMFinding]:
+    """Send one LLM call with all anomalous results to identify API security issues.
+
+    Cost: ~$0.001-0.003 per endpoint (one call regardless of anomaly count).
+    """
+    anomalies = [r for r in results if r.anomaly]
+    if not anomalies:
+        return []
+
+    detail_lines = []
+    for i, r in enumerate(anomalies[:30], 1):
+        cat_info = ""
+        if r.field_info:
+            cat_info = f" [{r.field_info.risk_category}/P{r.field_info.priority}]"
+        detail_lines.append(f"### Anomaly #{i}: {r.field_path}{cat_info}")
+        detail_lines.append(f"- Probe type: {r.probe_type}")
+        if r.probe_description:
+            detail_lines.append(f"- Description: {r.probe_description}")
+        detail_lines.append(f"- Payload: {r.payload[:200]}")
+        detail_lines.append(f"- Status: {r.status_code} (baseline: {r.baseline_status})")
+        detail_lines.append(f"- Timing: {r.timing_ms}ms")
+        if r.reflected:
+            detail_lines.append(f"- REFLECTED in response")
+        if r.value_accepted:
+            detail_lines.append(f"- VALUE ACCEPTED by server")
+        if r.anomaly_reasons:
+            detail_lines.append(f"- Anomaly reasons: {', '.join(r.anomaly_reasons)}")
+        detail_lines.append(f"- Response body (first 300 chars):\n```\n{r.body_snippet[:300]}\n```")
+        detail_lines.append("")
+
+    prompt = LLM_ANALYZE_PROMPT.format(
+        method=method,
+        url=url,
+        baseline_status=baseline_status,
+        baseline_len=baseline_len,
+        original_body=original_body[:500],
+        anomaly_count=len(anomalies),
+        total_count=len(results),
+        anomaly_details="\n".join(detail_lines),
+    )
+
+    try:
+        response = router.complete(
+            model=model,
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=3000,
+        )
+        content = response.choices[0].message.content or ""
+        start = content.find("[")
+        end = content.rfind("]") + 1
+        if start < 0 or end <= start:
+            logger.info("LLM analysis: no findings (no JSON array in response)")
+            return []
+        raw_findings = json.loads(content[start:end])
+    except Exception as e:
+        logger.warning("LLM anomaly analysis failed (%s)", e)
+        return []
+
+    findings: list[LLMFinding] = []
+    for item in raw_findings:
+        if not isinstance(item, dict):
+            continue
+        findings.append(LLMFinding(
+            title=str(item.get("title", ""))[:200],
+            severity=str(item.get("severity", "Medium")),
+            finding_type=str(item.get("type", "unknown")),
+            field=str(item.get("field", "")),
+            evidence=str(item.get("evidence", ""))[:500],
+            payload=str(item.get("payload", ""))[:300],
+            explanation=str(item.get("explanation", ""))[:500],
+        ))
+
+    logger.info("LLM analysis found %d API issues from %d anomalies", len(findings), len(anomalies))
+    return findings
+
+
+# ═══════════════════════════════════════════════════════════════════════
 # JSON Schema Validation Probes
 # ═══════════════════════════════════════════════════════════════════════
 
@@ -786,14 +941,37 @@ async def fuzz_body(
         )
         results.append(result)
 
-    return results
+    # ── Phase 4: LLM Anomaly Analysis (one cheap call) ──
+    llm_findings: list[LLMFinding] = []
+    if llm_router and llm_model:
+        anomaly_count = sum(1 for r in results if r.anomaly)
+        if anomaly_count > 0:
+            logger.info("Phase 4: LLM analyzing %d anomalies for API security issues", anomaly_count)
+            if on_progress:
+                on_progress("llm_analysis", {
+                    "anomaly_count": anomaly_count, "total_probes": len(results),
+                })
+            llm_findings = await llm_analyze_anomalies(
+                results, method, url, original_body,
+                baseline_status, baseline_len, llm_router, llm_model,
+            )
+            if on_progress and llm_findings:
+                on_progress("llm_findings", {
+                    "count": len(llm_findings),
+                    "issues": [f.title for f in llm_findings[:5]],
+                })
+
+    return results, llm_findings
 
 
 # ═══════════════════════════════════════════════════════════════════════
 # Format Results for LLM Context
 # ═══════════════════════════════════════════════════════════════════════
 
-def format_fuzz_results_for_llm(results: list[FuzzResult]) -> str:
+def format_fuzz_results_for_llm(
+    results: list[FuzzResult],
+    llm_findings: list[LLMFinding] | None = None,
+) -> str:
     anomalies = [r for r in results if r.anomaly]
 
     field_results = [r for r in results if r.probe_type == "field_fuzz"]
@@ -803,7 +981,7 @@ def format_fuzz_results_for_llm(results: list[FuzzResult]) -> str:
     schema_anomalies = [r for r in anomalies if r.probe_type == "schema_probe"]
     inject_anomalies = [r for r in anomalies if r.probe_type == "json_injection"]
 
-    if not anomalies:
+    if not anomalies and not llm_findings:
         return (f"\n## Body Fuzz Results\n\nTested {len(results)} probes "
                 f"({len(field_results)} field payloads, {len(schema_results)} schema probes, "
                 f"{len(inject_results)} JSON injection probes). "
@@ -845,6 +1023,15 @@ def format_fuzz_results_for_llm(results: list[FuzzResult]) -> str:
                 lines.append(f"  !! SERVER PROCESSED INJECTED PAYLOAD")
             lines.append("")
 
+    if llm_findings:
+        lines.append("### LLM-Identified API Security Issues\n")
+        for f in llm_findings:
+            lines.append(f"- **[{f.severity}] {f.title}** (type: {f.finding_type})")
+            lines.append(f"  Field: `{f.field}`")
+            lines.append(f"  Evidence: {f.evidence[:200]}")
+            lines.append(f"  Explanation: {f.explanation[:200]}")
+            lines.append("")
+
     lines.append("### LLM Follow-up")
-    lines.append("Investigate anomalies above with deeper targeted payloads using fuzz_parameter.\n")
+    lines.append("Investigate the issues above with deeper targeted payloads using fuzz_parameter.\n")
     return "\n".join(lines)

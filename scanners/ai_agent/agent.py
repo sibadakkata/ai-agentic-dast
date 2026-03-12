@@ -368,6 +368,7 @@ async def run_scan(
                 print(f"  [BODY-FUZZ] Fuzzing {len(post_endpoints)} endpoint(s) — {fuzz_mode} mode...")
                 _cb("phase_start", {"phase": 0, "total": 0, "name": f"Body Fuzzing ({fuzz_mode})", "id": "body_fuzz"})
                 all_fuzz_results = []
+                all_llm_findings = []
                 for br in post_endpoints:
                     def _fuzz_progress(event, data):
                         if event == "fuzz_request":
@@ -385,18 +386,39 @@ async def run_scan(
                                 "request": {"fields": data["fields_count"], "mode": data["mode"]},
                                 "response": {},
                             })
-                    fuzz_results = await fuzz_body(
+                    fuzz_results, ep_llm_findings = await fuzz_body(
                         http_client, br.method, br.url, br.request_body,
                         headers=br.request_headers, on_progress=_fuzz_progress,
                         llm_router=router, llm_model=model,
                     )
                     all_fuzz_results.extend(fuzz_results)
-                body_fuzz_context = fmt_fuzz(all_fuzz_results)
+                    all_llm_findings.extend(ep_llm_findings)
+                body_fuzz_context = fmt_fuzz(all_fuzz_results, all_llm_findings)
                 anomalies = sum(1 for r in all_fuzz_results if r.anomaly)
-                print(f"  [BODY-FUZZ] Done: {len(all_fuzz_results)} tests, {anomalies} anomalies")
+                llm_issues = len(all_llm_findings)
+                print(f"  [BODY-FUZZ] Done: {len(all_fuzz_results)} tests, {anomalies} anomalies, {llm_issues} LLM-identified API issues")
+
+                for lf in all_llm_findings:
+                    findings.append({
+                        "title": lf.title,
+                        "severity": lf.severity,
+                        "url": target.url,
+                        "parameter": lf.field,
+                        "evidence": lf.evidence,
+                        "payload": lf.payload,
+                        "owasp_category": "",
+                        "source": "body_fuzzer_llm_analysis",
+                        "explanation": lf.explanation,
+                        "finding_type": lf.finding_type,
+                    })
+                    _cb("finding", {
+                        "title": lf.title, "severity": lf.severity,
+                        "url": target.url, "phase": "Body Fuzzing",
+                    })
+
                 _cb("phase_end", {
                     "phase": 0, "name": f"Body Fuzzing ({fuzz_mode})",
-                    "tool_calls": len(all_fuzz_results), "findings": anomalies,
+                    "tool_calls": len(all_fuzz_results), "findings": anomalies + llm_issues,
                 })
                 metrics["total_tool_calls"] += len(all_fuzz_results)
 
