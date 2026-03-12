@@ -31,9 +31,9 @@ description: Builds and runs an LLM-powered agentic web security scanner using L
 │   ├── reports/                  # Generated PDF reports
 │   └── cache/                    # NVD/OSV API cache
 ├── web/
-│   ├── app.py                    # FastAPI backend (includes POST /api/scan/{id}/stop)
-│   └── static/index.html         # Single-page web UI (with Stop Scan button)
-├── mcp_server.py                 # MCP server — 16 tools for AI assistant integration
+│   ├── app.py                    # FastAPI backend (stop, pause, resume, retry, delete-stops-running)
+│   └── static/index.html         # Single-page web UI (stop/pause/resume, scan mode badges, bulk actions)
+├── mcp_server.py                 # MCP server — 17 tools for AI assistant integration
 ├── imports/                      # API definition files (Postman/Burp/OpenAPI)
 ├── Dockerfile                    # Production container (Playwright + Chromium)
 ├── requirements.txt
@@ -442,7 +442,7 @@ async def run_scan(target: ScanTarget, model: str, router: LLMRouter) -> list[di
 
 **Max steps per phase**: 50 tool calls. If the LLM stops calling tools, move to next phase.
 
-**Scan cancellation**: `run_scan()` accepts a `cancel_flag` (`threading.Event`). The flag is checked at the start of every phase and every LLM step. When set, `ScanCancelled` is raised, partial findings are saved, and the UI transitions to `cancelled` status. The REST API exposes `POST /api/scan/{id}/stop` and the MCP server exposes `stop_scan()`.
+**Scan lifecycle controls**: `run_scan()` accepts `cancel_flag` and `pause_flag` (`threading.Event`). Both are checked at the start of every phase and every LLM step. Cancel raises `ScanCancelled` (partial findings saved). Pause blocks the agent thread with `time.sleep(1)` until cleared. The REST API exposes `POST /api/scan/{id}/stop`, `/pause`, `/resume`, and `/retry`. Delete (`DELETE /api/scan/{id}`) stops running scans first (no further LLM calls) then removes all data. The MCP server exposes `stop_scan()`, `retry_scan()`, and `delete_scan()` (which also stops before deleting).
 
 **Token budget management**: `trim_context()` summarizes older phases when history exceeds 80K tokens. Current phase is never trimmed.
 

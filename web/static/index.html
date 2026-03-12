@@ -6,22 +6,23 @@
 <title>Agentic Web Scanner - AI Security Scanner</title>
 <style>
 :root {
-  --bg: #0f1117; --surface: #1a1d27; --surface2: #242836; --border: #2d3148;
-  --text: #e4e6ed; --text2: #9ca3b4; --accent: #6366f1; --accent2: #818cf8;
-  --green: #22c55e; --red: #ef4444; --yellow: #eab308; --orange: #f97316; --blue: #3b82f6;
+  --bg: #f0f2f7; --surface: #ffffff; --surface2: #f5f6fa; --border: #e2e5ef;
+  --text: #1a1d2e; --text2: #6b7280; --accent: #4f46e5; --accent2: #6366f1;
+  --green: #16a34a; --red: #dc2626; --yellow: #ca8a04; --orange: #ea580c; --blue: #2563eb;
 }
 * { margin: 0; padding: 0; box-sizing: border-box; }
 body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: var(--bg); color: var(--text); min-height: 100vh; }
 
-header { background: linear-gradient(135deg, #0c0a1d 0%, #1e1b4b 40%, #312e81 70%, #4338ca 100%); padding: 24px 32px; border-bottom: 1px solid rgba(99,102,241,0.3); display: flex; justify-content: space-between; align-items: center; }
+header { background: linear-gradient(135deg, #1e1b4b 0%, #312e81 40%, #4338ca 70%, #6366f1 100%); padding: 24px 32px; border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; align-items: center; box-shadow: 0 2px 12px rgba(99,102,241,0.15); }
 header h1 { font-size: 26px; font-weight: 800; letter-spacing: -0.5px; }
 header h1 .logo-icon { display: inline-block; width: 32px; height: 32px; background: linear-gradient(135deg, #6366f1, #a78bfa); border-radius: 8px; text-align: center; line-height: 32px; font-size: 18px; margin-right: 10px; vertical-align: middle; }
 header h1 .highlight { background: linear-gradient(90deg, #818cf8, #c084fc); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
-header .subtitle { color: var(--text2); font-size: 13px; margin-top: 4px; letter-spacing: 0.3px; }
+header h1 { color: #fff; }
+header .subtitle { color: rgba(255,255,255,0.7); font-size: 13px; margin-top: 4px; letter-spacing: 0.3px; }
 
 .container { max-width: 1280px; margin: 0 auto; padding: 24px; }
 
-.card { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 24px; margin-bottom: 20px; }
+.card { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 24px; margin-bottom: 20px; box-shadow: 0 1px 3px rgba(0,0,0,0.06); }
 .card h2 { font-size: 16px; font-weight: 600; margin-bottom: 16px; display: flex; align-items: center; gap: 8px; }
 .card h2 .icon { font-size: 18px; }
 
@@ -31,30 +32,41 @@ header .subtitle { color: var(--text2); font-size: 13px; margin-top: 4px; letter
 label { font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; color: var(--text2); }
 input, select { background: var(--surface2); border: 1px solid var(--border); border-radius: 8px; padding: 10px 14px; color: var(--text); font-size: 14px; outline: none; transition: border-color 0.2s; }
 input:focus, select:focus { border-color: var(--accent); }
-input::placeholder { color: #555; }
+input::placeholder { color: #9ca3af; }
 
 .btn { padding: 10px 24px; border-radius: 8px; border: none; font-size: 14px; font-weight: 600; cursor: pointer; transition: all 0.2s; }
 .btn-primary { background: var(--accent); color: white; }
 .btn-primary:hover { background: var(--accent2); }
-.btn-primary:disabled { opacity: 0.5; cursor: not-allowed; }
+.btn-primary:disabled, .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.btn-danger { background: #dc2626; color: white; }
+.btn-danger:hover { background: #b91c1c; }
+.btn-warning { background: #ca8a04; color: white; }
+.btn-warning:hover { background: #a16207; }
+.btn-success { background: var(--green); color: white; }
+.btn-success:hover { background: #15803d; }
 .btn-sm { padding: 6px 14px; font-size: 12px; }
 .btn-outline { background: transparent; border: 1px solid var(--border); color: var(--text2); }
 .btn-outline:hover { border-color: var(--accent); color: var(--text); }
 
 .actions { display: flex; gap: 12px; margin-top: 20px; align-items: center; }
 
+.scan-toolbar { display: flex; gap: 8px; align-items: center; margin-bottom: 10px; padding: 8px 12px; background: var(--surface2); border-radius: 8px; display: none; }
+.scan-toolbar.visible { display: flex; }
+.scan-toolbar .sel-count { font-size: 12px; font-weight: 600; color: var(--text2); margin-right: 4px; }
 .scan-list { display: flex; flex-direction: column; gap: 8px; }
-.scan-item { display: grid; grid-template-columns: 2fr 1.5fr 1fr 1fr 1fr auto; gap: 12px; align-items: center; padding: 12px 16px; background: var(--surface2); border-radius: 8px; font-size: 13px; cursor: pointer; transition: background 0.15s; }
-.scan-item:hover { background: #2a2e3e; }
+.scan-item { display: grid; grid-template-columns: 28px 2fr 1.5fr 1fr 1fr 1fr auto; gap: 12px; align-items: center; padding: 12px 16px; background: var(--surface2); border-radius: 8px; font-size: 13px; cursor: pointer; transition: background 0.15s; }
+.scan-item:hover { background: #ebedf5; }
 .scan-item .target { font-weight: 600; color: var(--accent2); word-break: break-all; }
 .scan-item .model { color: var(--text2); }
+.scan-item input[type="checkbox"] { width: 16px; height: 16px; accent-color: var(--accent); cursor: pointer; }
 
 .badge { display: inline-block; padding: 2px 10px; border-radius: 12px; font-size: 11px; font-weight: 700; text-transform: uppercase; }
-.badge-running { background: rgba(99,102,241,0.2); color: var(--accent2); }
-.badge-completed { background: rgba(34,197,94,0.2); color: var(--green); }
-.badge-error { background: rgba(239,68,68,0.2); color: var(--red); }
-.badge-cancelled { background: rgba(245,158,11,0.2); color: #f59e0b; }
-.badge-stopping { background: rgba(245,158,11,0.2); color: #f59e0b; }
+.badge-running { background: rgba(79,70,229,0.1); color: var(--accent); }
+.badge-completed { background: rgba(22,163,74,0.1); color: var(--green); }
+.badge-error { background: rgba(220,38,38,0.1); color: var(--red); }
+.badge-cancelled { background: rgba(202,138,4,0.1); color: var(--yellow); }
+.badge-stopping { background: rgba(202,138,4,0.1); color: var(--yellow); }
+.badge-paused { background: rgba(202,138,4,0.1); color: var(--yellow); }
 
 .severity { font-weight: 700; font-size: 11px; }
 .sev-critical { color: #ff4444; } .sev-high { color: var(--orange); } .sev-medium { color: var(--yellow); }
@@ -74,14 +86,14 @@ input::placeholder { color: #555; }
 table { width: 100%; border-collapse: collapse; font-size: 13px; }
 th { text-align: left; padding: 10px 12px; background: var(--surface2); color: var(--text2); font-weight: 600; font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; border-bottom: 1px solid var(--border); }
 td { padding: 10px 12px; border-bottom: 1px solid var(--border); vertical-align: top; }
-tr:hover td { background: rgba(99,102,241,0.05); }
+tr:hover td { background: rgba(79,70,229,0.04); }
 
 .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; margin-bottom: 20px; }
 .stat { background: var(--surface2); border-radius: 8px; padding: 14px; text-align: center; }
 .stat .value { font-size: 22px; font-weight: 700; color: var(--accent2); }
 .stat .label { font-size: 11px; color: var(--text2); margin-top: 4px; text-transform: uppercase; letter-spacing: 0.5px; }
 
-.progress-log { background: var(--surface2); border-radius: 8px; padding: 12px 16px; font-family: monospace; font-size: 12px; color: var(--text2); max-height: 120px; overflow-y: auto; }
+.progress-log { background: var(--surface2); border-radius: 8px; padding: 12px 16px; font-family: monospace; font-size: 12px; color: var(--text); max-height: 120px; overflow-y: auto; line-height: 1.6; }
 
 .empty { color: var(--text2); text-align: center; padding: 40px; font-size: 14px; }
 
@@ -95,9 +107,9 @@ tr:hover td { background: rgba(99,102,241,0.05); }
 .live-tabs { display: flex; border-bottom: 1px solid var(--border); background: var(--surface); }
 .live-tab { padding: 8px 16px; font-size: 12px; font-weight: 600; cursor: pointer; color: var(--text2); border-bottom: 2px solid transparent; transition: all 0.2s; }
 .live-tab:hover { color: var(--text); }
-.live-tab.active { color: var(--accent2); border-color: var(--accent2); background: rgba(99,102,241,0.05); }
+.live-tab.active { color: var(--accent); border-color: var(--accent); background: rgba(79,70,229,0.06); }
 
-.live-body { max-height: 400px; overflow-y: auto; background: var(--bg); }
+.live-body { max-height: 400px; overflow-y: auto; background: var(--surface); }
 
 .crawl-tree { font-family: monospace; font-size: 12px; line-height: 1.8; }
 .crawl-dir { cursor: pointer; color: var(--accent2); font-weight: 600; padding: 2px 0; }
@@ -111,8 +123,8 @@ tr:hover td { background: rgba(99,102,241,0.05); }
 .crawl-page a:hover { color: var(--accent2); text-decoration: underline; }
 .crawl-icon { font-size: 10px; opacity: 0.5; }
 .crawl-badge { font-size: 9px; padding: 1px 5px; border-radius: 3px; font-weight: 600; }
-.crawl-badge-page { background: rgba(99,102,241,0.15); color: var(--accent2); }
-.crawl-badge-api { background: rgba(16,185,129,0.15); color: var(--green); }
+.crawl-badge-page { background: rgba(79,70,229,0.1); color: var(--accent); }
+.crawl-badge-api { background: rgba(22,163,74,0.1); color: var(--green); }
 
 .phase-card { border: 1px solid var(--border); border-radius: 6px; margin: 6px 8px; overflow: hidden; }
 .phase-header { display: flex; justify-content: space-between; align-items: center; padding: 10px 14px; background: var(--surface); cursor: pointer; user-select: none; }
@@ -120,43 +132,43 @@ tr:hover td { background: rgba(99,102,241,0.05); }
 .phase-header .phase-num { font-weight: 700; color: var(--accent2); min-width: 28px; }
 .phase-header .phase-name { flex: 1; font-weight: 600; font-size: 13px; }
 .phase-header .phase-stats { display: flex; gap: 12px; font-size: 11px; color: var(--text2); }
-.phase-header .phase-stats .count-badge { background: rgba(99,102,241,0.15); color: var(--accent2); padding: 2px 8px; border-radius: 10px; font-weight: 600; }
-.phase-header .phase-stats .findings-badge { background: rgba(16,185,129,0.15); color: var(--green); padding: 2px 8px; border-radius: 10px; font-weight: 600; }
+.phase-header .phase-stats .count-badge { background: rgba(79,70,229,0.1); color: var(--accent); padding: 2px 8px; border-radius: 10px; font-weight: 600; }
+.phase-header .phase-stats .findings-badge { background: rgba(22,163,74,0.1); color: var(--green); padding: 2px 8px; border-radius: 10px; font-weight: 600; }
 .phase-header .phase-arrow { transition: transform 0.2s; font-size: 10px; color: var(--text2); margin-left: 8px; }
 .phase-header.expanded .phase-arrow { transform: rotate(90deg); }
 .phase-detail { display: none; border-top: 1px solid var(--border); }
 .phase-detail.open { display: block; }
-.tool-group { border-bottom: 1px solid rgba(45,49,72,0.3); }
-.tool-group-header { display: flex; align-items: center; gap: 8px; padding: 6px 14px; background: rgba(26,29,39,0.6); cursor: pointer; font-size: 12px; }
-.tool-group-header:hover { background: rgba(26,29,39,0.9); }
+.tool-group { border-bottom: 1px solid var(--border); }
+.tool-group-header { display: flex; align-items: center; gap: 8px; padding: 6px 14px; background: var(--surface2); cursor: pointer; font-size: 12px; }
+.tool-group-header:hover { background: #e8eaf0; }
 .tool-group-header .tool-name { color: var(--accent2); font-weight: 700; text-transform: uppercase; font-size: 10px; }
 .tool-group-header .tool-count { color: var(--text2); font-size: 11px; }
 .tool-group-header .tg-arrow { transition: transform 0.2s; font-size: 9px; color: var(--text2); }
 .tool-group-header.expanded .tg-arrow { transform: rotate(90deg); }
 .tool-group-payloads { display: none; max-height: 300px; overflow-y: auto; }
 .tool-group-payloads.open { display: block; }
-.payload-row { display: grid; grid-template-columns: 1fr 1fr; gap: 1px; font-size: 11px; font-family: monospace; border-bottom: 1px solid rgba(45,49,72,0.3); padding: 4px 14px 4px 28px; }
-.payload-row:nth-child(even) { background: rgba(26,29,39,0.3); }
-.payload-req { color: var(--yellow); word-break: break-all; }
-.payload-resp { color: var(--text2); word-break: break-all; }
+.payload-row { display: grid; grid-template-columns: 1fr 1fr; gap: 1px; font-size: 11px; font-family: monospace; border-bottom: 1px solid var(--border); padding: 4px 14px 4px 28px; }
+.payload-row:nth-child(even) { background: var(--surface2); }
+.payload-req { color: #92400e; font-weight: 600; word-break: break-all; }
+.payload-resp { color: var(--text); word-break: break-all; }
 
-.live-test-row { display: grid; grid-template-columns: 100px 1fr 1fr; gap: 1px; font-size: 11px; border-bottom: 1px solid rgba(45,49,72,0.5); animation: fadeIn 0.3s; }
-.live-test-row:nth-child(even) { background: rgba(26,29,39,0.5); }
+.live-test-row { display: grid; grid-template-columns: 100px 1fr 1fr; gap: 1px; font-size: 11px; border-bottom: 1px solid var(--border); animation: fadeIn 0.3s; }
+.live-test-row:nth-child(even) { background: var(--surface2); }
 .live-test-cell { padding: 6px 10px; font-family: monospace; word-break: break-all; }
-.live-test-tool { color: var(--accent2); font-weight: 700; font-size: 10px; text-transform: uppercase; display: flex; align-items: center; }
-.live-test-req { color: var(--yellow); }
-.live-test-resp { color: var(--text2); }
-.live-test-resp .status-ok { color: var(--green); }
-.live-test-resp .status-err { color: var(--red); }
-.live-test-resp .anomaly { color: var(--red); font-weight: 700; }
+.live-test-tool { color: var(--accent); font-weight: 700; font-size: 10px; text-transform: uppercase; display: flex; align-items: center; }
+.live-test-req { color: #92400e; font-weight: 600; }
+.live-test-resp { color: var(--text); }
+.live-test-resp .status-ok { color: #15803d; font-weight: 600; }
+.live-test-resp .status-err { color: #b91c1c; font-weight: 600; }
+.live-test-resp .anomaly { color: #b91c1c; font-weight: 700; }
 
-.live-finding-row { display: flex; align-items: center; gap: 12px; padding: 8px 14px; border-bottom: 1px solid rgba(45,49,72,0.5); animation: fadeIn 0.3s; }
+.live-finding-row { display: flex; align-items: center; gap: 12px; padding: 8px 14px; border-bottom: 1px solid var(--border); animation: fadeIn 0.3s; }
 .live-finding-sev { min-width: 60px; text-align: center; }
 .live-finding-title { font-weight: 600; font-size: 12px; flex: 1; }
 .live-finding-phase { font-size: 11px; color: var(--text2); }
 .live-finding-url { font-size: 11px; color: var(--text2); max-width: 300px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
-.live-phase-row { display: grid; grid-template-columns: 40px 1fr 80px 80px; gap: 8px; padding: 8px 14px; border-bottom: 1px solid rgba(45,49,72,0.5); font-size: 12px; align-items: center; }
+.live-phase-row { display: grid; grid-template-columns: 40px 1fr 80px 80px; gap: 8px; padding: 8px 14px; border-bottom: 1px solid var(--border); font-size: 12px; align-items: center; }
 .live-phase-num { font-weight: 700; color: var(--accent2); }
 .live-phase-bar { height: 4px; background: var(--border); border-radius: 2px; overflow: hidden; margin-top: 4px; }
 .live-phase-bar-fill { height: 100%; background: var(--accent); border-radius: 2px; transition: width 0.3s; }
@@ -192,7 +204,7 @@ tr:hover td { background: rgba(99,102,241,0.05); }
       <div style="color:var(--text2); font-size:11px; text-transform:uppercase; letter-spacing:1px;">Status</div>
       <div id="connectivity-status" style="color:var(--green); font-size:13px; font-weight:600;">Checking...</div>
     </div>
-    <button onclick="doLogout()" style="background:rgba(239,68,68,0.12);border:1px solid rgba(239,68,68,0.3);color:#f87171;padding:8px 16px;border-radius:8px;cursor:pointer;font-size:12px;font-weight:600;letter-spacing:0.5px;transition:all 0.2s;" onmouseover="this.style.background='rgba(239,68,68,0.25)'" onmouseout="this.style.background='rgba(239,68,68,0.12)'">Logout</button>
+    <button onclick="doLogout()" style="background:rgba(255,255,255,0.15);border:1px solid rgba(255,255,255,0.3);color:#fff;padding:8px 16px;border-radius:8px;cursor:pointer;font-size:12px;font-weight:600;letter-spacing:0.5px;transition:all 0.2s;" onmouseover="this.style.background='rgba(255,255,255,0.25)'" onmouseout="this.style.background='rgba(255,255,255,0.15)'">Logout</button>
   </div>
 </header>
 
@@ -207,20 +219,20 @@ tr:hover td { background: rgba(99,102,241,0.05); }
     <div style="flex:1;">
       <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px;">
         <span style="display:inline-block;background:#991b1b;color:#fecaca;font-size:10px;font-weight:800;letter-spacing:2.5px;text-transform:uppercase;padding:3px 10px;border-radius:4px;">Red Team</span>
-        <span style="font-size:13px;font-weight:600;color:#fca5a5;letter-spacing:0.3px;">Authorized Offensive Security Testing</span>
+        <span style="font-size:13px;font-weight:600;color:#b91c1c;letter-spacing:0.3px;">Authorized Offensive Security Testing</span>
       </div>
-      <div style="font-size:12px;color:#d4d4d8;line-height:1.8;font-family:'Segoe UI',system-ui,-apple-system,sans-serif;">
+      <div style="font-size:12px;color:var(--text);line-height:1.8;font-family:'Segoe UI',system-ui,-apple-system,sans-serif;">
         <div style="display:flex;align-items:center;gap:8px;margin-bottom:2px;">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#dc2626" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
-          <span>This tool is restricted to <strong style="color:#fca5a5;">authorized penetration testers</strong> with explicit written approval.</span>
+          <span>This tool is restricted to <strong style="color:#b91c1c;">authorized penetration testers</strong> with explicit written approval.</span>
         </div>
         <div style="display:flex;align-items:center;gap:8px;margin-bottom:2px;">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#f59e0b" stroke-width="2"><path d="M22 16.92v3a2 2 0 01-2.18 2 19.79 19.79 0 01-8.63-3.07 19.5 19.5 0 01-6-6A19.79 19.79 0 012.12 4.18 2 2 0 014.11 2h3a2 2 0 012 1.72c.127.96.362 1.903.7 2.81a2 2 0 01-.45 2.11L8.09 9.91a16 16 0 006 6l1.27-1.27a2 2 0 012.11-.45c.907.338 1.85.573 2.81.7A2 2 0 0122 16.92z"/></svg>
-          <span>Notify SOC via <strong style="color:#818cf8;">#t-gts-cybersecurity-deconfliction</strong> before initiating any engagement.</span>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#ca8a04" stroke-width="2"><path d="M22 16.92v3a2 2 0 01-2.18 2 19.79 19.79 0 01-8.63-3.07 19.5 19.5 0 01-6-6A19.79 19.79 0 012.12 4.18 2 2 0 014.11 2h3a2 2 0 012 1.72c.127.96.362 1.903.7 2.81a2 2 0 01-.45 2.11L8.09 9.91a16 16 0 006 6l1.27-1.27a2 2 0 012.11-.45c.907.338 1.85.573 2.81.7A2 2 0 0122 16.92z"/></svg>
+          <span>Notify SOC via <strong style="color:var(--accent);">#t-gts-cybersecurity-deconfliction</strong> before initiating any engagement.</span>
         </div>
         <div style="display:flex;align-items:center;gap:8px;">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#6b7280" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
-          <span style="color:#9ca3af;">All scan activity is monitored and logged for compliance.</span>
+          <span style="color:var(--text2);">All scan activity is monitored and logged for compliance.</span>
         </div>
       </div>
     </div>
@@ -302,48 +314,20 @@ tr:hover td { background: rgba(99,102,241,0.05); }
       </div>
     </div>
     <div class="actions">
-      <button class="btn btn-primary" id="start-scan-btn" onclick="startScan()">Start Scan</button>
-      <button class="btn btn-sm" id="stop-scan-btn" onclick="stopScan()" style="display:none; background:#b91c1c; color:#fff; border:none; padding:6px 18px; border-radius:6px; cursor:pointer; font-weight:600;">Stop Scan</button>
-      <button class="btn btn-outline btn-sm" onclick="testConnectivity()">Test Connectivity</button>
-      <span id="scan-status-msg" style="font-size:13px; color:var(--text2);"></span>
-    </div>
-    <div id="progress-container" style="display:none; margin-top:16px;">
-      <div class="progress-log" id="progress-log"></div>
-      <div class="live-panel" id="live-panel" style="display:none;">
-        <div class="live-header">
-          <div class="phase-name"><span class="scanning-indicator"></span><span id="live-phase-text">Initializing...</span></div>
-          <div class="counters">
-            <span>Tests: <strong id="live-tests-count">0</strong></span>
-            <span>Findings: <strong id="live-findings-count">0</strong></span>
-            <span>Phases: <strong id="live-phases-count">0</strong></span>
-          </div>
-        </div>
-        <div class="live-tabs">
-          <div class="live-tab active" onclick="switchLiveTab('tests')">Live Activity (Payloads &amp; Responses)</div>
-          <div class="live-tab" onclick="switchLiveTab('findings')">Findings Detected</div>
-          <div class="live-tab" onclick="switchLiveTab('phases')">Phase Progress</div>
-        </div>
-        <div class="live-body" id="live-body-tests">
-          <div style="padding:6px 10px;font-size:10px;font-weight:600;color:var(--text2);display:grid;grid-template-columns:100px 1fr 1fr;gap:1px;background:var(--surface2);">
-            <div style="padding:4px 10px;">TOOL</div><div style="padding:4px 10px;">REQUEST / PAYLOAD</div><div style="padding:4px 10px;">RESPONSE</div>
-          </div>
-          <div id="live-tests-body"></div>
-        </div>
-        <div class="live-body" id="live-body-findings" style="display:none;">
-          <div id="live-findings-body"></div>
-        </div>
-        <div class="live-body" id="live-body-phases" style="display:none;">
-          <div id="live-phases-body"></div>
-        </div>
-      </div>
+      <button type="button" class="btn btn-sm btn-primary" id="start-scan-btn" onclick="startScan()">Start Scan</button>
+      <button type="button" class="btn btn-sm btn-outline" onclick="testConnectivity()">Test Connectivity</button>
     </div>
   </div>
 
   <!-- SCAN LIST -->
   <div class="card" id="scans-card">
-    <h2 style="justify-content:space-between;"><span style="display:flex;align-items:center;gap:8px;"><span class="icon">📋</span> Scan History</span>
-      <button class="btn btn-outline btn-sm" onclick="clearAllScans()" style="font-size:11px;color:var(--red);border-color:var(--red);">Clear All</button>
-    </h2>
+    <h2><span style="display:flex;align-items:center;gap:8px;"><span class="icon">📋</span> Scan History</span></h2>
+    <div class="scan-toolbar" id="scan-toolbar">
+      <span class="sel-count"><span id="sel-count-num">0</span> selected</span>
+      <button type="button" class="btn btn-sm btn-outline" onclick="bulkRetry()" style="color:var(--accent);border-color:var(--accent);">↻ Retry Selected</button>
+      <button type="button" class="btn btn-sm btn-outline" onclick="bulkDelete()" style="color:var(--red);border-color:var(--red);">✕ Delete Selected</button>
+      <button type="button" class="btn btn-sm btn-outline" onclick="clearSelection()" style="font-size:11px;">Deselect All</button>
+    </div>
     <div id="scans-list"><div class="empty">No scans yet. Configure a target above and click Start Scan.</div></div>
   </div>
 
@@ -353,8 +337,12 @@ tr:hover td { background: rgba(99,102,241,0.05); }
     <div class="card">
       <h2 id="live-scan-title"><span class="scanning-indicator"></span>Scan In Progress</h2>
       <div class="stats" id="live-scan-stats"></div>
-      <div style="margin-bottom:12px;">
-        <button class="btn btn-outline btn-sm" onclick="downloadLivePayloads()" style="border-color:var(--accent2);color:var(--accent2);font-size:12px;">Download Live Activity Log</button>
+      <div style="display:flex;gap:8px;align-items:center;margin-bottom:12px;flex-wrap:wrap;">
+        <button type="button" class="btn btn-sm btn-danger" id="stop-scan-btn" onclick="stopScan()" style="display:none;">Stop Scan</button>
+        <button type="button" class="btn btn-sm btn-warning" id="pause-scan-btn" onclick="pauseScan()" style="display:none;">Pause</button>
+        <button type="button" class="btn btn-sm btn-success" id="resume-scan-btn" onclick="resumeScan()" style="display:none;">Resume</button>
+        <button type="button" class="btn btn-outline btn-sm" onclick="downloadLivePayloads()" style="border-color:var(--accent2);color:var(--accent2);font-size:12px;">Download Live Activity Log</button>
+        <span id="scan-status-msg" style="font-size:13px;color:var(--text2);"></span>
       </div>
       <div class="progress-log" id="live-scan-log" style="margin-bottom:16px;"></div>
       <div class="live-panel" style="display:block;">
@@ -409,6 +397,10 @@ tr:hover td { background: rgba(99,102,241,0.05); }
     <div class="card">
       <h2 id="error-title" style="color:var(--red);">✕ Scan Error</h2>
       <div class="stats" id="error-stats"></div>
+      <div style="display:flex;gap:10px;margin-bottom:16px;flex-wrap:wrap;">
+        <button type="button" class="btn btn-primary btn-sm" id="continue-scan-btn" onclick="continueScan()" style="background:var(--accent);font-size:13px;display:none;">▶ Continue From Phase <span id="continue-phase-num"></span></button>
+        <button type="button" class="btn btn-outline btn-sm" id="retry-scan-btn" onclick="restartScan()" style="font-size:13px;color:var(--accent);border-color:var(--accent);">↻ Re-run From Scratch</button>
+      </div>
       <div style="background:rgba(239,68,68,0.1);border:1px solid rgba(239,68,68,0.3);border-radius:8px;padding:16px;margin-bottom:16px;">
         <div style="font-size:12px;font-weight:600;color:var(--red);text-transform:uppercase;margin-bottom:8px;">Error Details</div>
         <div id="error-message" style="font-family:monospace;font-size:13px;color:var(--text);word-break:break-all;"></div>
@@ -442,9 +434,10 @@ tr:hover td { background: rgba(99,102,241,0.05); }
       <div class="tab-content" id="tab-out-of-scope"></div>
     </div>
     <div class="actions" style="margin-bottom:40px;">
-      <button class="btn btn-primary btn-sm" id="gen-report-btn" onclick="generateReport()">Generate PDF Report</button>
-      <button class="btn btn-outline btn-sm" id="dl-json-btn" onclick="downloadJSON()">Download Raw JSON</button>
-      <button class="btn btn-outline btn-sm" id="dl-payloads-btn" onclick="downloadPayloads()" style="border-color:var(--accent2);color:var(--accent2);">Download All Payloads (by Phase)</button>
+      <button type="button" class="btn btn-primary btn-sm" id="gen-report-btn" onclick="generateReport()">Generate PDF Report</button>
+      <button type="button" class="btn btn-outline btn-sm" id="dl-json-btn" onclick="downloadJSON()">Download Raw JSON</button>
+      <button type="button" class="btn btn-outline btn-sm" id="dl-payloads-btn" onclick="downloadPayloads()" style="border-color:var(--accent2);color:var(--accent2);">Download All Payloads (by Phase)</button>
+      <button type="button" class="btn btn-outline btn-sm" id="rescan-btn" onclick="rescanCurrent()" style="border-color:var(--accent);color:var(--accent);">↻ Re-scan (New Entry)</button>
       <span id="report-msg" style="font-size:13px; color:var(--text2);"></span>
     </div>
   </div>
@@ -453,9 +446,6 @@ tr:hover td { background: rgba(99,102,241,0.05); }
 
 <script>
 let currentScanId = null;
-let pollInterval = null;
-let liveTestOffset = 0;
-let liveFindingOffset = 0;
 
 async function init() {
   const models = await (await fetch('/api/models')).json();
@@ -497,19 +487,26 @@ async function testConnectivity() {
 async function loadScans() {
   const scans = await (await fetch('/api/scans')).json();
   const el = document.getElementById('scans-list');
-  if (!scans.length) { el.innerHTML = '<div class="empty">No scans yet.</div>'; return; }
-  el.innerHTML = '<div class="scan-list">' + scans.map(s => `
-    <div class="scan-item" style="cursor:pointer" onclick="viewScan('${s.id}')">
+  if (!scans.length) { el.innerHTML = '<div class="empty">No scans yet.</div>'; updateToolbar(); return; }
+  el.innerHTML = '<div class="scan-list"><div class="scan-item" style="background:transparent;padding:6px 16px;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:0.5px;color:var(--text2);cursor:default;">' +
+    '<div onclick="event.stopPropagation()"><input type="checkbox" id="select-all-scans" onchange="toggleSelectAll(this)" style="width:16px;height:16px;accent-color:var(--accent);cursor:pointer;" title="Select all"></div>' +
+    '<div>Target</div><div>Model</div><div>Status</div><div>Duration</div><div>Cost</div><div>Findings</div></div>' +
+  scans.map(s => `
+    <div class="scan-item" data-scan-id="${s.id}" style="cursor:pointer" onclick="viewScan('${s.id}')">
+      <div onclick="event.stopPropagation()"><input type="checkbox" class="scan-check" data-id="${s.id}" onchange="updateToolbar()" style="width:16px;height:16px;accent-color:var(--accent);cursor:pointer;"></div>
       <div class="target">${esc(s.target)}</div>
       <div class="model">${esc(s.model)}</div>
-      <div><span class="badge badge-${s.status}">${s.status}</span></div>
+      <div><span class="badge badge-${s.status}">${s.status}</span>${s.scan_mode ? ` <span class="badge badge-mode" style="font-size:9px;padding:1px 5px;background:var(--accent2);color:#fff;">${s.scan_mode}</span>` : ''}</div>
       <div>${s.duration ? Math.round(s.duration) + 's' : '-'}</div>
       <div>${s.cost != null ? '$' + s.cost.toFixed(4) : '-'}</div>
-      <div style="display:flex;align-items:center;gap:8px;">
+      <div style="display:flex;align-items:center;gap:6px;">
         <span>${s.findings_count != null ? s.findings_count + ' findings' : '-'}</span>
-        <button class="btn btn-outline btn-sm" onclick="event.stopPropagation();deleteScan('${s.id}')" style="padding:3px 8px;font-size:10px;color:var(--red);border-color:rgba(239,68,68,0.3);" title="Delete scan">✕</button>
+        ${s.status === 'completed' ? `<button class="btn btn-outline btn-sm" onclick="event.stopPropagation();rescanById('${s.id}')" style="padding:3px 8px;font-size:10px;color:var(--accent);border-color:var(--accent);" title="Re-scan (new entry)">↻ Re-scan</button>` : ''}
+        ${(s.status === 'error' || s.status === 'cancelled') ? `<button class="btn btn-outline btn-sm" onclick="event.stopPropagation();retryScanById('${s.id}')" style="padding:3px 8px;font-size:10px;color:var(--accent);border-color:var(--accent);" title="${s.phases_completed > 0 ? 'Continue from phase ' + (s.phases_completed+1) : 'Re-run scan'}">↻${s.phases_completed > 0 ? ' Continue' : ' Re-run'}</button>` : ''}
+        <button class="btn btn-outline btn-sm" onclick="event.stopPropagation();deleteScan('${s.id}')" style="padding:3px 8px;font-size:10px;color:var(--red);border-color:rgba(220,38,38,0.3);" title="Delete scan">✕</button>
       </div>
     </div>`).join('') + '</div>';
+  updateToolbar();
 }
 
 async function uploadFile(inputId) {
@@ -596,8 +593,6 @@ async function startScan() {
   const btn = document.getElementById('start-scan-btn');
   btn.disabled = true;
   btn.textContent = 'Uploading files...';
-  document.getElementById('progress-container').style.display = 'block';
-  document.getElementById('progress-log').textContent = 'Uploading API imports...\n';
 
   const api_imports = {};
   const postman = await uploadFile('file-postman');
@@ -609,19 +604,7 @@ async function startScan() {
   const openapi = await uploadFile('file-openapi');
   if (openapi) api_imports.openapi = openapi;
 
-  btn.textContent = 'Scanning...';
-  document.getElementById('progress-log').textContent = 'Starting scan...\n';
-
-  liveTestOffset = 0;
-  liveFindingOffset = 0;
-  document.getElementById('live-tests-body').innerHTML = '';
-  document.getElementById('live-findings-body').innerHTML = '';
-  document.getElementById('live-phases-body').innerHTML = '';
-  document.getElementById('live-panel').style.display = 'block';
-  document.getElementById('live-phase-text').textContent = 'Initializing...';
-  document.getElementById('live-tests-count').textContent = '0';
-  document.getElementById('live-findings-count').textContent = '0';
-  document.getElementById('live-phases-count').textContent = '0';
+  btn.textContent = 'Starting...';
 
   const extraDomainsRaw = document.getElementById('extra-domains').value.trim();
   const extraDomains = extraDomainsRaw ? extraDomainsRaw.split(',').map(d => d.trim().toLowerCase()).filter(Boolean) : [];
@@ -641,10 +624,28 @@ async function startScan() {
   const data = await resp.json();
   if (data.error) { alert(data.error); btn.disabled = false; btn.textContent = 'Start Scan'; return; }
 
-  currentScanId = data.scan_id;
-  document.getElementById('stop-scan-btn').style.display = 'inline-block';
+  btn.disabled = false;
+  btn.textContent = 'Start Scan';
+  openLiveView(data.scan_id);
   loadScans();
-  pollInterval = setInterval(() => pollScanStatus(data.scan_id), 2000);
+}
+
+function showScanControls(state) {
+  const stop = document.getElementById('stop-scan-btn');
+  const pause = document.getElementById('pause-scan-btn');
+  const resume = document.getElementById('resume-scan-btn');
+  if (stop) {
+    stop.style.display = (state === 'running' || state === 'paused') ? 'inline-block' : 'none';
+    stop.disabled = false; stop.textContent = 'Stop Scan';
+  }
+  if (pause) {
+    pause.style.display = state === 'running' ? 'inline-block' : 'none';
+    pause.disabled = false; pause.textContent = 'Pause';
+  }
+  if (resume) {
+    resume.style.display = state === 'paused' ? 'inline-block' : 'none';
+    resume.disabled = false; resume.textContent = 'Resume';
+  }
 }
 
 async function stopScan() {
@@ -669,114 +670,152 @@ async function stopScan() {
   }
 }
 
-async function pollScanStatus(scanId) {
+async function pauseScan() {
+  if (!currentScanId) return;
+  const btn = document.getElementById('pause-scan-btn');
+  btn.disabled = true; btn.textContent = 'Pausing...';
   try {
-    const [statusResp, liveResp] = await Promise.all([
-      fetch(`/api/scan/${scanId}`),
-      fetch(`/api/scan/${scanId}/live?since_test=${liveTestOffset}&since_finding=${liveFindingOffset}`)
-    ]);
-    const data = await statusResp.json();
-    const live = await liveResp.json();
+    const resp = await fetch(`/api/scan/${currentScanId}/pause`, { method: 'POST' });
+    if (!resp.ok) { const d = await resp.json(); alert(d.detail || 'Failed to pause'); btn.disabled = false; btn.textContent = 'Pause'; return; }
+    showScanControls('paused');
+    document.getElementById('scan-status-msg').textContent = 'Scan paused — will pause after current step...';
+  } catch(e) { alert('Error: ' + e.message); btn.disabled = false; btn.textContent = 'Pause'; }
+}
 
-    const log = document.getElementById('progress-log');
-    if (data.progress) log.textContent = data.progress.join('\n');
-    log.scrollTop = log.scrollHeight;
+async function resumeScan() {
+  if (!currentScanId) return;
+  const btn = document.getElementById('resume-scan-btn');
+  btn.disabled = true; btn.textContent = 'Resuming...';
+  try {
+    const resp = await fetch(`/api/scan/${currentScanId}/resume`, { method: 'POST' });
+    if (!resp.ok) { const d = await resp.json(); alert(d.detail || 'Failed to resume'); btn.disabled = false; btn.textContent = 'Resume'; return; }
+    showScanControls('running');
+    document.getElementById('scan-status-msg').textContent = 'Scan resumed';
+  } catch(e) { alert('Error: ' + e.message); btn.disabled = false; btn.textContent = 'Resume'; }
+}
 
-    renderLiveData(live);
-    loadScans();
+function getSelectedScanIds() {
+  return [...document.querySelectorAll('.scan-check:checked')].map(cb => cb.dataset.id);
+}
 
-    if (data.status === 'completed' || data.status === 'error' || data.status === 'cancelled') {
-      clearInterval(pollInterval);
-      pollInterval = null;
-      const btn = document.getElementById('start-scan-btn');
-      btn.disabled = false;
-      btn.textContent = 'Start Scan';
-      document.getElementById('stop-scan-btn').style.display = 'none';
-      document.getElementById('stop-scan-btn').disabled = false;
-      document.getElementById('stop-scan-btn').textContent = 'Stop Scan';
-      if (data.status === 'completed') {
-        document.getElementById('scan-status-msg').textContent = `Scan complete! ${data.findings_count || 0} findings, $${(data.cost || 0).toFixed(4)}`;
-        document.getElementById('live-phase-text').innerHTML = '<span style="color:var(--green)">Scan Complete</span>';
-      } else if (data.status === 'cancelled') {
-        document.getElementById('scan-status-msg').textContent = `Scan cancelled. ${data.findings_count || 0} partial findings saved.`;
-        document.getElementById('live-phase-text').innerHTML = '<span style="color:#f59e0b">Scan Cancelled</span>';
-      } else {
-        document.getElementById('scan-status-msg').textContent = `Error: ${data.error || 'Unknown'}`;
-        document.getElementById('live-phase-text').innerHTML = '<span style="color:var(--red)">Scan Error</span>';
-      }
+function updateToolbar() {
+  const sel = getSelectedScanIds();
+  const all = document.querySelectorAll('.scan-check');
+  const toolbar = document.getElementById('scan-toolbar');
+  const count = document.getElementById('sel-count-num');
+  if (sel.length > 0) { toolbar.classList.add('visible'); count.textContent = sel.length; }
+  else { toolbar.classList.remove('visible'); }
+  const sa = document.getElementById('select-all-scans');
+  if (sa) sa.checked = all.length > 0 && sel.length === all.length;
+}
+
+function clearSelection() {
+  document.querySelectorAll('.scan-check:checked').forEach(cb => cb.checked = false);
+  const sa = document.getElementById('select-all-scans');
+  if (sa) sa.checked = false;
+  updateToolbar();
+}
+
+function toggleSelectAll(master) {
+  document.querySelectorAll('.scan-check').forEach(cb => cb.checked = master.checked);
+  updateToolbar();
+}
+
+async function bulkDelete() {
+  const ids = getSelectedScanIds();
+  if (!ids.length) return;
+  if (!confirm(`Stop & permanently delete ${ids.length} selected scan(s), results, and reports?`)) return;
+  for (const id of ids) { await fetch(`/api/scan/${id}`, { method: 'DELETE' }); }
+  if (ids.includes(currentScanId)) {
+    if (lvPollInterval) { clearInterval(lvPollInterval); lvPollInterval = null; }
+    showList();
+  }
+  loadScans();
+}
+
+async function bulkRetry() {
+  const ids = getSelectedScanIds();
+  if (!ids.length) return;
+  if (!confirm(`Re-run ${ids.length} selected scan(s)?\n(Completed → new entry, Errored → continue/re-run in-place)`)) return;
+  let ok = 0;
+  let errs = [];
+  for (const id of ids) {
+    const scanItem = document.querySelector(`.scan-item[data-scan-id="${id}"]`);
+    const statusBadge = scanItem ? scanItem.querySelector('.badge') : null;
+    const isCompleted = statusBadge && statusBadge.textContent.trim() === 'completed';
+    const endpoint = isCompleted ? `/api/scan/${id}/rescan` : `/api/scan/${id}/retry`;
+    const resp = await fetch(endpoint, { method: 'POST' });
+    if (resp.ok) { ok++; }
+    else { try { const d = await resp.json(); errs.push(d.detail || 'unknown'); } catch(e) { errs.push('unknown'); } }
+  }
+  clearSelection();
+  loadScans();
+  if (ok > 0) alert(`${ok} scan(s) started.` + (errs.length ? `\n${errs.length} failed: ${errs.join(', ')}` : ''));
+  else if (errs.length) alert(`All failed: ${errs.join(', ')}`);
+}
+
+let _retryScanId = null;
+let _retryScanPhasesCompleted = 0;
+
+async function continueScan() {
+  if (!_retryScanId) return;
+  await retryScanById(_retryScanId, false);
+}
+
+async function restartScan() {
+  if (!_retryScanId) return;
+  await retryScanById(_retryScanId, true);
+}
+
+async function retryScanById(scanId, forceRestart) {
+  const contBtn = document.getElementById('continue-scan-btn');
+  const retBtn = document.getElementById('retry-scan-btn');
+  const activeBtn = forceRestart ? retBtn : contBtn;
+  if (activeBtn) { activeBtn.disabled = true; activeBtn.textContent = 'Starting...'; }
+  try {
+    const body = forceRestart ? JSON.stringify({force_restart: true}) : undefined;
+    const opts = { method: 'POST' };
+    if (body) { opts.headers = {'Content-Type':'application/json'}; opts.body = body; }
+    const resp = await fetch(`/api/scan/${scanId}/retry`, opts);
+    const data = await resp.json();
+    if (!resp.ok) {
+      alert(data.detail || 'Failed to retry scan');
+      if (activeBtn) { activeBtn.disabled = false; activeBtn.textContent = forceRestart ? '↻ Re-run From Scratch' : '▶ Continue'; }
+      return;
     }
-  } catch(e) { /* retry on next poll */ }
+    const msg = data.mode === 'continuing'
+      ? `Continuing scan from phase ${data.start_from_phase + 1} (${data.prior_findings} prior findings)...`
+      : 'Restarting scan from scratch...';
+    openLiveView(scanId);
+    showScanControls('running');
+    document.getElementById('scan-status-msg').textContent = msg;
+    loadScans();
+  } catch(e) {
+    alert('Error retrying scan: ' + e.message);
+    if (activeBtn) { activeBtn.disabled = false; }
+  }
 }
 
-function renderLiveData(live) {
-  if (live.current_phase) document.getElementById('live-phase-text').textContent = live.current_phase;
-  document.getElementById('live-tests-count').textContent = live.tests_total || 0;
-  document.getElementById('live-findings-count').textContent = live.findings_total || 0;
-  document.getElementById('live-phases-count').textContent = (live.phases || []).length;
-
-  if (live.tests && live.tests.length) {
-    _allLiveTests = _allLiveTests.concat(live.tests);
+async function rescanById(scanId) {
+  try {
+    const resp = await fetch(`/api/scan/${scanId}/rescan`, { method: 'POST' });
+    const data = await resp.json();
+    if (!resp.ok) { alert(data.detail || 'Failed to rescan'); return; }
+    openLiveView(data.scan_id);
+    showScanControls('running');
+    document.getElementById('scan-status-msg').textContent = 'New scan started (re-scan)...';
+    loadScans();
+  } catch(e) {
+    alert('Error rescanning: ' + e.message);
   }
-
-  const testsBody = document.getElementById('live-tests-body');
-  if (live.tests && live.tests.length) {
-    live.tests.forEach(t => {
-      const row = document.createElement('div');
-      row.className = 'live-test-row';
-      const reqParts = [];
-      if (t.request) {
-        if (typeof t.request === 'object') {
-          Object.entries(t.request).forEach(([k,v]) => reqParts.push(`${k}: ${v}`));
-        } else { reqParts.push(String(t.request)); }
-      }
-      const respParts = [];
-      if (t.response) {
-        if (typeof t.response === 'object') {
-          Object.entries(t.response).forEach(([k,v]) => {
-            const cls = k === 'status' ? (parseInt(v) < 400 ? 'status-ok' : 'status-err') : (k === 'anomaly' && v === 'True' ? 'anomaly' : '');
-            respParts.push(`<span class="${cls}">${esc(k)}: ${esc(v)}</span>`);
-          });
-        } else { respParts.push(esc(String(t.response))); }
-      }
-      row.innerHTML = `
-        <div class="live-test-cell live-test-tool">${esc(t.tool)}</div>
-        <div class="live-test-cell live-test-req">${reqParts.map(r => esc(r)).join('<br>')}</div>
-        <div class="live-test-cell live-test-resp">${respParts.join('<br>')}</div>`;
-      testsBody.appendChild(row);
-    });
-    liveTestOffset += live.tests.length;
-    testsBody.scrollTop = testsBody.scrollHeight;
-    testsBody.parentElement.scrollTop = testsBody.parentElement.scrollHeight;
-  }
-
-  const findingsBody = document.getElementById('live-findings-body');
-  if (live.findings && live.findings.length) {
-    live.findings.forEach(f => {
-      const row = document.createElement('div');
-      row.className = 'live-finding-row';
-      const sevClass = `sev-${(f.severity || 'info').toLowerCase()}`;
-      row.innerHTML = `
-        <div class="live-finding-sev"><span class="severity ${sevClass}">${esc(f.severity)}</span></div>
-        <div class="live-finding-title">${esc(f.title)}</div>
-        <div class="live-finding-url" title="${esc(f.url)}">${esc(f.url)}</div>
-        <div class="live-finding-phase">${esc(f.phase)}</div>`;
-      findingsBody.appendChild(row);
-    });
-    liveFindingOffset += live.findings.length;
-    findingsBody.scrollTop = findingsBody.scrollHeight;
-    findingsBody.parentElement.scrollTop = findingsBody.parentElement.scrollHeight;
-  }
-
-  const phasesBody = document.getElementById('live-phases-body');
-  renderPhaseBreakdown(phasesBody, live);
 }
 
-function switchLiveTab(tab) {
-  const panel = document.getElementById('live-panel');
-  panel.querySelectorAll('.live-tab').forEach(t => t.classList.remove('active'));
-  panel.querySelectorAll('.live-body').forEach(b => b.style.display = 'none');
-  event.target.classList.add('active');
-  document.getElementById('live-body-' + tab).style.display = 'block';
+async function rescanCurrent() {
+  if (!currentScanId) return;
+  const btn = document.getElementById('rescan-btn');
+  if (btn) { btn.disabled = true; btn.textContent = 'Starting...'; }
+  await rescanById(currentScanId);
+  if (btn) { btn.disabled = false; btn.textContent = '↻ Re-scan (New Entry)'; }
 }
 
 function switchLiveTab2(tab) {
@@ -841,14 +880,20 @@ async function pollLiveView(scanId) {
       ? `<div style="font-size:14px;font-weight:400;color:var(--accent2);margin-top:4px;">
            <a href="${esc(data.target)}" target="_blank" style="color:var(--accent2);text-decoration:none;">${esc(data.target)}</a>
          </div>` : '';
+    if (data.status === 'running') showScanControls('running');
+    else if (data.status === 'paused') showScanControls('paused');
+    else if (data.status === 'completed' || data.status === 'error' || data.status === 'cancelled') showScanControls('idle');
+
     document.getElementById('live-scan-title').innerHTML =
       data.status === 'running' || data.status === 'stopping'
         ? `<span class="scanning-indicator"></span>${data.status === 'stopping' ? 'Stopping' : 'Scan In Progress'} — ${esc(data.model || '')}${targetLine}`
-        : data.status === 'completed'
-          ? `<span style="color:var(--green);">&#10003;</span> Scan Complete — ${esc(data.model || '')}${targetLine}`
-          : data.status === 'cancelled'
-            ? `<span style="color:#f59e0b;">&#9632;</span> Scan Cancelled — ${esc(data.model || '')}${targetLine}`
-            : `<span style="color:var(--red);">&#10005;</span> Scan Error — ${esc(data.model || '')}${targetLine}`;
+        : data.status === 'paused'
+          ? `<span style="color:var(--yellow);">⏸</span> Scan Paused — ${esc(data.model || '')}${targetLine}`
+          : data.status === 'completed'
+            ? `<span style="color:var(--green);">&#10003;</span> Scan Complete — ${esc(data.model || '')}${targetLine}`
+            : data.status === 'cancelled'
+              ? `<span style="color:#f59e0b;">&#9632;</span> Scan Cancelled — ${esc(data.model || '')}${targetLine}`
+              : `<span style="color:var(--red);">&#10005;</span> Scan Error — ${esc(data.model || '')}${targetLine}`;
 
     const log = document.getElementById('live-scan-log');
     if (data.progress && data.progress.length) {
@@ -936,7 +981,7 @@ function renderLiveView(live) {
   const phasesBody = document.getElementById('lv-phases-body');
   renderPhaseBreakdown(phasesBody, live);
 
-  const oosItems = live.out_of_scope || [];
+  const oosItems = (live.out_of_scope || []).filter(o => { try { const u = new URL(o.url); return !!u.hostname; } catch(e) { return false; } });
   const oosBadge = document.getElementById('lv-oos-badge');
   const oosCount = document.getElementById('lv-oos-count');
   if (oosBadge) { oosBadge.textContent = oosItems.length; oosBadge.style.display = oosItems.length ? 'inline' : 'none'; }
@@ -1207,12 +1252,13 @@ async function viewScan(scanId) {
     if (!statusResp.ok) { alert('Scan not found'); return; }
     const statusData = await statusResp.json();
 
-    if (statusData.status === 'running') {
+    if (statusData.status === 'running' || statusData.status === 'paused' || statusData.status === 'stopping') {
       openLiveView(scanId);
+      showScanControls(statusData.status === 'paused' ? 'paused' : 'running');
       return;
     }
 
-    if (statusData.status === 'error') {
+    if (statusData.status === 'error' || statusData.status === 'cancelled') {
       showErrorView(scanId, statusData);
       return;
     }
@@ -1229,19 +1275,40 @@ async function viewScan(scanId) {
 }
 
 function showErrorView(scanId, data) {
+  _retryScanId = scanId;
+  _retryScanPhasesCompleted = data.phases_completed || 0;
   hideAllViews();
   document.getElementById('error-view').style.display = 'block';
-  document.getElementById('error-title').innerHTML = `✕ Scan Error — ${esc(data.model || scanId)}` +
+  const isCancelled = data.status === 'cancelled';
+  document.getElementById('error-title').innerHTML = `${isCancelled ? '⏹ Scan Cancelled' : '✕ Scan Error'} — ${esc(data.model || scanId)}` +
     (data.target ? `<div style="font-size:14px;font-weight:400;color:var(--accent2);margin-top:4px;">${esc(data.target)}</div>` : '');
+  document.getElementById('error-title').style.color = isCancelled ? 'var(--yellow)' : 'var(--red)';
 
   const error = data.error || 'Unknown error';
   document.getElementById('error-message').textContent = error;
 
+  const retryBtn = document.getElementById('retry-scan-btn');
+  if (retryBtn) { retryBtn.disabled = false; retryBtn.textContent = '↻ Re-run From Scratch'; }
+
+  const contBtn = document.getElementById('continue-scan-btn');
+  const contPhase = document.getElementById('continue-phase-num');
+  if (_retryScanPhasesCompleted > 0) {
+    contBtn.style.display = 'inline-block';
+    contBtn.disabled = false;
+    contPhase.textContent = _retryScanPhasesCompleted + 1;
+  } else {
+    contBtn.style.display = 'none';
+  }
+
   document.getElementById('error-stats').innerHTML = [
     stat(data.model || '-', 'Model'),
+    stat(data.scan_mode || '-', 'Scan Mode'),
     stat(data.started ? new Date(data.started).toLocaleString() : '-', 'Started'),
     stat(data.duration ? Math.round(data.duration) + 's' : '-', 'Duration'),
     stat(data.current_phase || '-', 'Last Phase'),
+    stat(_retryScanPhasesCompleted > 0 ? `${_retryScanPhasesCompleted} completed` : '0', 'Phases Done'),
+    stat(data.findings_count != null ? data.findings_count : '-', 'Partial Findings'),
+    stat(data.cost != null ? '$' + data.cost.toFixed(4) : '-', 'Cost So Far'),
   ].join('');
 
   const log = data.progress || [];
@@ -1390,20 +1457,27 @@ function renderCrawled(endpoints) {
 function renderPayloads(byEndpoint) {
   const el = document.getElementById('tab-payloads');
   if (!byEndpoint.length) { el.innerHTML = '<div class="empty">No payload data</div>'; return; }
-  el.innerHTML = `<p style="color:var(--text2);font-size:13px;margin-bottom:12px">${byEndpoint.length} endpoints tested with ${byEndpoint.reduce((a,e)=>a+e.payload_count,0)} total payloads</p>` +
+  const totalPayloads = byEndpoint.reduce((a,e) => a + e.payload_count, 0);
+  el.innerHTML = `<p style="color:var(--text2);font-size:13px;margin-bottom:12px">${byEndpoint.length} endpoints tested with ${totalPayloads} total payloads</p>` +
   byEndpoint.map((ep, idx) => `
-    <div style="margin-bottom:8px;">
-      <div class="expandable" onclick="toggleExpand(this)">
-        <strong>${esc(ep.endpoint)}</strong>
-        <span style="color:var(--text2);font-size:12px;margin-left:8px">${ep.payload_count} payloads</span>
+    <div class="endpoint-group" style="margin-bottom:4px;border:1px solid var(--border);border-radius:8px;overflow:hidden;">
+      <div class="expandable" onclick="toggleExpand(this)" style="padding:10px 12px;background:var(--surface2);font-size:13px;">
+        <strong style="color:var(--text);">${esc(ep.endpoint)}</strong>
+        <span style="color:var(--text2);font-size:12px;margin-left:8px;">${ep.payload_count} payloads</span>
       </div>
-      <div class="expand-content">
-        ${ep.payloads.map(p => `<div class="payload-item">
-          <span style="color:var(--accent2)">${esc(p.method)}</span> ${esc(p.full_url||'')}
-          ${p.body ? '<br>Body: '+esc(p.body) : ''}
-          ${p.status ? '<br>→ Status: '+p.status + (p.anomaly?' <span style="color:var(--red)">ANOMALY</span>':'') : ''}
-        </div>`).join('')}
-        ${ep.payload_count > 50 ? `<div class="payload-item" style="color:var(--text2)">... and ${ep.payload_count-50} more</div>` : ''}
+      <div class="expand-content" style="margin-top:0;padding:0;border-radius:0;">
+        <table style="margin:0;"><thead><tr>
+          <th style="width:60px;">Method</th><th>URL</th><th>Body</th><th style="width:80px;">Status</th><th style="width:80px;">Anomaly</th>
+        </tr></thead><tbody>
+        ${ep.payloads.map(p => `<tr>
+          <td><span style="font-weight:700;color:var(--accent2);font-size:11px;">${esc(p.method||'')}</span></td>
+          <td style="word-break:break-all;font-size:12px;">${esc(p.full_url||'')}</td>
+          <td style="font-size:11px;word-break:break-all;max-width:200px;">${esc(p.body||'—')}</td>
+          <td style="font-size:12px;">${p.status||'—'}</td>
+          <td>${p.anomaly ? '<span style="color:var(--red);font-weight:700;">YES</span>' : '—'}</td>
+        </tr>`).join('')}
+        ${ep.payload_count > 50 ? `<tr><td colspan="5" style="color:var(--text2);font-size:12px;">... and ${ep.payload_count - 50} more</td></tr>` : ''}
+        </tbody></table>
       </div>
     </div>`).join('');
 }
@@ -1439,7 +1513,8 @@ function renderPhaseLog(phases) {
   </tr>`).join('') + '</tbody></table>';
 }
 
-function renderOutOfScope(items) {
+function renderOutOfScope(rawItems) {
+  const items = rawItems.filter(o => { try { const u = new URL(o.url); return !!u.hostname; } catch(e) { return false; } });
   const el = document.getElementById('tab-out-of-scope');
   const badge = document.getElementById('res-oos-badge');
   if (badge) { badge.textContent = items.length; badge.style.display = items.length ? 'inline' : 'none'; }
@@ -1509,14 +1584,20 @@ async function downloadLivePayloads() {
 }
 
 async function deleteScan(scanId) {
-  if (!confirm('Delete this scan and its results?')) return;
+  if (!confirm('Stop (if running) and permanently delete this scan, results, and reports?')) return;
   await fetch(`/api/scan/${scanId}`, { method: 'DELETE' });
+  if (currentScanId === scanId) {
+    if (lvPollInterval) { clearInterval(lvPollInterval); lvPollInterval = null; }
+    showList();
+  }
   loadScans();
 }
 
 async function clearAllScans() {
-  if (!confirm('Delete ALL scan history and results? This cannot be undone.')) return;
+  if (!confirm('Stop all running scans and permanently delete ALL scan history, results, and reports? This cannot be undone.')) return;
   await fetch('/api/scans', { method: 'DELETE' });
+  if (lvPollInterval) { clearInterval(lvPollInterval); lvPollInterval = null; }
+  showList();
   loadScans();
 }
 
@@ -1526,7 +1607,7 @@ init();
 testConnectivity();
 
 setInterval(() => {
-  if (!pollInterval && document.getElementById('results-view').style.display !== 'block') {
+  if (document.getElementById('scans-card').style.display !== 'none') {
     loadScans();
   }
 }, 10000);

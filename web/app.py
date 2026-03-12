@@ -63,6 +63,7 @@ REPORTS_DIR.mkdir(parents=True, exist_ok=True)
 
 SCANS: dict[str, dict] = {}
 CANCEL_FLAGS: dict[str, threading.Event] = {}
+PAUSE_FLAGS: dict[str, threading.Event] = {}
 
 def _load_scans_from_disk():
     """Restore scan metadata from disk on startup."""
@@ -76,11 +77,17 @@ def _load_scans_from_disk():
                     progress = info.get("progress", [])
                     progress.append("--- Container stopped/restarted during scan ---")
                     info["progress"] = progress
+                elif info.get("status") in ("stopping", "paused"):
+                    info["status"] = "cancelled"
+                    progress = info.get("progress", [])
+                    progress.append("--- Container restarted — marked as cancelled ---")
+                    info["progress"] = progress
                 SCANS[scan_id] = info
         except Exception:
             pass
 
 _TRANSIENT_KEYS = frozenset({"live_tests", "live_findings", "live_phases", "live_crawled", "live_forms", "live_tool_calls", "live_out_of_scope"})
+_SECRET_KEYS = frozenset({"_password"})
 
 def _save_scans_to_disk():
     """Persist scan metadata to disk (excluding transient live data)."""
@@ -89,11 +96,31 @@ def _save_scans_to_disk():
         for scan_id, info in SCANS.items():
             persist[scan_id] = {
                 k: v for k, v in info.items()
-                if k not in _TRANSIENT_KEYS
+                if k not in _TRANSIENT_KEYS and k not in _SECRET_KEYS
             }
         SCANS_META_FILE.write_text(json.dumps(persist, default=str), encoding="utf-8")
     except Exception:
         pass
+
+
+def _infer_scan_mode(scan_info: dict) -> str:
+    """Try to infer scan_mode from old scan data that didn't store it."""
+    result_file = scan_info.get("result_file")
+    if result_file:
+        fpath = RAW_DIR / result_file
+        if fpath.exists():
+            try:
+                meta = json.loads(fpath.read_text(encoding="utf-8")).get("metadata", {})
+                mode = meta.get("scan_mode")
+                if mode:
+                    return mode
+            except Exception:
+                pass
+    progress = " ".join(scan_info.get("progress", []))
+    if "API Baseline" in progress or "api" in scan_info.get("target_url", "").lower():
+        return "api"
+    return "both"
+
 
 _load_scans_from_disk()
 
@@ -147,6 +174,8 @@ async def list_scans(creds=Depends(_verify)):
             "duration": info.get("duration"),
             "cost": info.get("cost"),
             "findings_count": info.get("findings_count"),
+            "scan_mode": info.get("scan_mode", ""),
+            "phases_completed": info.get("phases_completed", len(info.get("live_phases", []))),
         })
     existing_ids = {s["id"] for s in scans}
     for f in sorted(RAW_DIR.glob("aiagent_*.json"), key=os.path.getmtime, reverse=True):
@@ -168,6 +197,7 @@ async def list_scans(creds=Depends(_verify)):
             "duration": meta.get("scan_duration_seconds"),
             "cost": meta.get("cost_usd"),
             "findings_count": summary.get("total_findings", len(data.get("findings", []))),
+            "scan_mode": meta.get("scan_mode", ""),
         })
     return scans
 
@@ -208,7 +238,9 @@ async def start_scan(request: Request, creds=Depends(_verify)):
     model_name = next((m["name"] for m in MODELS if m["id"] == model), model)
 
     cancel_flag = threading.Event()
+    pause_flag = threading.Event()
     CANCEL_FLAGS[scan_id] = cancel_flag
+    PAUSE_FLAGS[scan_id] = pause_flag
 
     SCANS[scan_id] = {
         "target_url": target_url,
@@ -217,32 +249,39 @@ async def start_scan(request: Request, creds=Depends(_verify)):
         "status": "running",
         "started": datetime.now().isoformat(),
         "progress": [],
+        "scan_mode": scan_mode,
+        "auth_type": auth_type,
+        "_username": username,
+        "_password": password,
+        "_api_imports": api_imports,
+        "_extra_domains": extra_domains,
     }
     _save_scans_to_disk()
 
     thread = threading.Thread(
         target=_run_scan_in_thread,
-        args=(scan_id, target_url, username, password, model, scan_mode, auth_type, api_imports, extra_domains, cancel_flag),
+        args=(scan_id, target_url, username, password, model, scan_mode, auth_type, api_imports, extra_domains, cancel_flag, pause_flag),
         daemon=True,
     )
     thread.start()
     return {"scan_id": scan_id, "status": "started"}
 
 
-def _run_scan_in_thread(scan_id, target_url, username, password, model, scan_mode, auth_type, api_imports=None, extra_domains=None, cancel_flag=None):
+def _run_scan_in_thread(scan_id, target_url, username, password, model, scan_mode, auth_type, api_imports=None, extra_domains=None, cancel_flag=None, pause_flag=None, start_from_phase=0, initial_findings=None):
     """Run scan in a separate thread with its own event loop so the main UI stays responsive."""
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     try:
         loop.run_until_complete(
-            _run_scan_task(scan_id, target_url, username, password, model, scan_mode, auth_type, api_imports, extra_domains, cancel_flag)
+            _run_scan_task(scan_id, target_url, username, password, model, scan_mode, auth_type, api_imports, extra_domains, cancel_flag, pause_flag, start_from_phase, initial_findings)
         )
     finally:
         loop.close()
         CANCEL_FLAGS.pop(scan_id, None)
+        PAUSE_FLAGS.pop(scan_id, None)
 
 
-async def _run_scan_task(scan_id, target_url, username, password, model, scan_mode, auth_type, api_imports=None, extra_domains=None, cancel_flag=None):
+async def _run_scan_task(scan_id, target_url, username, password, model, scan_mode, auth_type, api_imports=None, extra_domains=None, cancel_flag=None, pause_flag=None, start_from_phase=0, initial_findings=None):
     try:
         scan = SCANS[scan_id]
         scan["progress"].append("Initializing LLM router...")
@@ -340,7 +379,7 @@ async def _run_scan_task(scan_id, target_url, username, password, model, scan_mo
         scan["progress"].append(f"Starting scan with {model}...")
         start = time.perf_counter()
         config_dir = str(BASE / "config")
-        findings, metrics = await run_scan(target, model, router, config_dir, on_progress=_on_progress, extra_domains=extra_domains, cancel_flag=cancel_flag)
+        findings, metrics = await run_scan(target, model, router, config_dir, on_progress=_on_progress, extra_domains=extra_domains, cancel_flag=cancel_flag, pause_flag=pause_flag, start_from_phase=start_from_phase, initial_findings=initial_findings)
         duration = time.perf_counter() - start
 
         model_slug = model.replace("/", "_").replace(".", "_").replace(":", "_")
@@ -371,20 +410,37 @@ async def _run_scan_task(scan_id, target_url, username, password, model, scan_mo
         filepath = str(RAW_DIR / f"aiagent_{model_slug}_{scan_id}.json")
         partial_findings = scan.get("live_findings", [])
         cost_summary = router.get_cost_summary() if router else {}
-        output = save_results(filepath, partial_findings, cost_summary, target, model, duration, metrics={})
+        save_results(filepath, partial_findings, cost_summary, target, model, duration, metrics={})
+        phases_done = len(scan.get("live_phases", []))
         SCANS[scan_id].update({
             "status": "cancelled",
             "duration": round(duration, 1),
             "cost": cost_summary.get("total_cost_usd") if isinstance(cost_summary, dict) else None,
             "findings_count": len(partial_findings),
             "result_file": os.path.basename(filepath),
+            "phases_completed": phases_done,
             "progress": SCANS[scan_id]["progress"] + ["Scan cancelled by user."],
         })
         _save_scans_to_disk()
     except Exception as e:
+        duration = time.perf_counter() - start
+        model_slug = model.replace("/", "_").replace(".", "_").replace(":", "_")
+        filepath = str(RAW_DIR / f"aiagent_{model_slug}_{scan_id}.json")
+        partial_findings = scan.get("live_findings", [])
+        cost_summary = router.get_cost_summary() if router else {}
+        try:
+            save_results(filepath, partial_findings, cost_summary, target, model, duration, metrics={})
+        except Exception:
+            filepath = None
+        phases_done = len(scan.get("live_phases", []))
         SCANS[scan_id].update({
             "status": "error",
             "error": str(e),
+            "duration": round(duration, 1),
+            "cost": cost_summary.get("total_cost_usd") if isinstance(cost_summary, dict) else None,
+            "findings_count": len(partial_findings),
+            "result_file": os.path.basename(filepath) if filepath else None,
+            "phases_completed": phases_done,
             "progress": SCANS[scan_id]["progress"] + [f"Error: {e}"],
         })
         _save_scans_to_disk()
@@ -399,6 +455,7 @@ async def get_scan_status(scan_id: str, creds=Depends(_verify)):
             "status": s.get("status"),
             "target": s.get("target_url", s.get("target", "")),
             "model": s.get("model"),
+            "scan_mode": s.get("scan_mode", ""),
             "started": s.get("started"),
             "progress": s.get("progress", []),
             "current_phase": s.get("current_phase", ""),
@@ -407,6 +464,7 @@ async def get_scan_status(scan_id: str, creds=Depends(_verify)):
             "duration": s.get("duration"),
             "cost": s.get("cost"),
             "findings_count": s.get("findings_count", len(s.get("live_findings", []))),
+            "phases_completed": s.get("phases_completed", len(s.get("live_phases", []))),
         }
     fname = _find_result_file(scan_id)
     if fname:
@@ -454,13 +512,231 @@ async def stop_scan(scan_id: str, creds=Depends(_verify)):
     return {"scan_id": scan_id, "status": "stopping", "message": "Scan stop requested. It will halt after the current step completes."}
 
 
+@app.post("/api/scan/{scan_id}/pause", tags=["Scans"])
+async def pause_scan(scan_id: str, creds=Depends(_verify)):
+    """Pause a running scan. The agent will pause after the current LLM step."""
+    if scan_id not in SCANS:
+        raise HTTPException(status_code=404, detail="Scan not found")
+    s = SCANS[scan_id]
+    if s.get("status") != "running":
+        raise HTTPException(status_code=400, detail=f"Scan is not running (status: {s.get('status')})")
+    flag = PAUSE_FLAGS.get(scan_id)
+    if flag:
+        flag.set()
+    s["status"] = "paused"
+    s["progress"] = s.get("progress", []) + ["Scan paused by user — will pause after current step..."]
+    _save_scans_to_disk()
+    return {"scan_id": scan_id, "status": "paused"}
+
+
+@app.post("/api/scan/{scan_id}/resume", tags=["Scans"])
+async def resume_scan(scan_id: str, creds=Depends(_verify)):
+    """Resume a paused scan."""
+    if scan_id not in SCANS:
+        raise HTTPException(status_code=404, detail="Scan not found")
+    s = SCANS[scan_id]
+    if s.get("status") != "paused":
+        raise HTTPException(status_code=400, detail=f"Scan is not paused (status: {s.get('status')})")
+    flag = PAUSE_FLAGS.get(scan_id)
+    if flag:
+        flag.clear()
+    s["status"] = "running"
+    s["progress"] = s.get("progress", []) + ["Scan resumed by user"]
+    _save_scans_to_disk()
+    return {"scan_id": scan_id, "status": "running"}
+
+
+def _load_partial_findings(scan_info: dict) -> list[dict]:
+    """Load partial findings from a scan's result file (if any)."""
+    rf = scan_info.get("result_file")
+    if not rf:
+        return []
+    try:
+        data = json.loads((RAW_DIR / rf).read_text(encoding="utf-8"))
+        return data.get("findings", [])
+    except Exception:
+        return []
+
+
+def _get_phases_completed(scan_info: dict) -> int:
+    """Determine how many LLM phases a scan completed."""
+    pc = scan_info.get("phases_completed")
+    if pc is not None:
+        return int(pc)
+    progress = scan_info.get("progress", [])
+    count = 0
+    for line in progress:
+        if "] Phase:" in line and "(skipped)" not in line:
+            count += 1
+        elif line.startswith("[") and "/" in line.split("]")[0]:
+            count += 1
+    return count
+
+
+def _extract_scan_params(old: dict) -> dict:
+    """Extract reusable parameters from an existing scan record."""
+    return {
+        "target_url": old.get("target_url", ""),
+        "model": old.get("model", ""),
+        "model_name": old.get("model_name", old.get("model", "")),
+        "scan_mode": old.get("scan_mode") or _infer_scan_mode(old),
+        "auth_type": old.get("auth_type", "auto"),
+        "username": old.get("_username", ""),
+        "password": old.get("_password", ""),
+        "api_imports": old.get("_api_imports", {}) or {},
+        "extra_domains": old.get("_extra_domains", []) or [],
+    }
+
+
+@app.post("/api/scan/{scan_id}/retry", tags=["Scans"])
+async def retry_scan(scan_id: str, request: Request, creds=Depends(_verify)):
+    """Re-run an errored/cancelled scan in-place.  Tries to continue from
+    the last completed phase when possible; falls back to full re-run.
+    Accepts optional JSON body: {scan_mode, model, force_restart: bool}."""
+    if scan_id not in SCANS:
+        raise HTTPException(status_code=404, detail="Scan not found")
+    old = SCANS[scan_id]
+    if old.get("status") not in ("error", "cancelled"):
+        raise HTTPException(status_code=400, detail=f"Only errored/cancelled scans can be retried (status: {old.get('status')})")
+
+    params = _extract_scan_params(old)
+    if not params["target_url"] or not params["model"]:
+        raise HTTPException(status_code=400, detail="Original scan parameters missing — cannot retry")
+
+    overrides = {}
+    try:
+        body = await request.body()
+        if body:
+            overrides = json.loads(body)
+    except Exception:
+        pass
+
+    scan_mode = overrides.get("scan_mode") or params["scan_mode"]
+    model = overrides.get("model") or params["model"]
+    force_restart = overrides.get("force_restart", False)
+
+    start_from = 0
+    prior_findings: list[dict] = []
+    if not force_restart:
+        phases_done = _get_phases_completed(old)
+        if phases_done > 0:
+            prior_findings = _load_partial_findings(old)
+            start_from = phases_done
+
+    mode_label = "continuing" if start_from > 0 else "restarting"
+    phase_msg = f" from phase {start_from + 1}" if start_from > 0 else ""
+
+    cancel_flag = threading.Event()
+    pause_flag = threading.Event()
+    CANCEL_FLAGS[scan_id] = cancel_flag
+    PAUSE_FLAGS[scan_id] = pause_flag
+
+    old.update({
+        "status": "running",
+        "started": datetime.now().isoformat(),
+        "progress": [f"Retry ({mode_label}{phase_msg}, mode: {scan_mode})..."],
+        "error": None,
+        "duration": None,
+        "cost": None,
+        "findings_count": None,
+        "result_file": None,
+        "scan_mode": scan_mode,
+    })
+    _save_scans_to_disk()
+
+    thread = threading.Thread(
+        target=_run_scan_in_thread,
+        args=(scan_id, params["target_url"], params["username"], params["password"],
+              model, scan_mode, params["auth_type"], params["api_imports"],
+              params["extra_domains"], cancel_flag, pause_flag, start_from, prior_findings),
+        daemon=True,
+    )
+    thread.start()
+    return {
+        "scan_id": scan_id,
+        "status": "started",
+        "mode": mode_label,
+        "start_from_phase": start_from,
+        "prior_findings": len(prior_findings),
+    }
+
+
+@app.post("/api/scan/{scan_id}/rescan", tags=["Scans"])
+async def rescan(scan_id: str, request: Request, creds=Depends(_verify)):
+    """Create a NEW scan with the same parameters as an existing (typically
+    completed) scan.  Returns the new scan_id."""
+    if scan_id not in SCANS:
+        raise HTTPException(status_code=404, detail="Scan not found")
+    old = SCANS[scan_id]
+
+    params = _extract_scan_params(old)
+    if not params["target_url"] or not params["model"]:
+        raise HTTPException(status_code=400, detail="Original scan parameters missing — cannot rescan")
+
+    overrides = {}
+    try:
+        body = await request.body()
+        if body:
+            overrides = json.loads(body)
+    except Exception:
+        pass
+
+    scan_mode = overrides.get("scan_mode") or params["scan_mode"]
+    model = overrides.get("model") or params["model"]
+
+    new_id = f"scan_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
+    cancel_flag = threading.Event()
+    pause_flag = threading.Event()
+    CANCEL_FLAGS[new_id] = cancel_flag
+    PAUSE_FLAGS[new_id] = pause_flag
+
+    SCANS[new_id] = {
+        "target_url": params["target_url"],
+        "model": model,
+        "model_name": params["model_name"],
+        "status": "running",
+        "started": datetime.now().isoformat(),
+        "progress": [f"Re-scan of {scan_id} (mode: {scan_mode})..."],
+        "scan_mode": scan_mode,
+        "auth_type": params["auth_type"],
+        "_username": params["username"],
+        "_password": params["password"],
+        "_api_imports": params["api_imports"],
+        "_extra_domains": params["extra_domains"],
+    }
+    _save_scans_to_disk()
+
+    thread = threading.Thread(
+        target=_run_scan_in_thread,
+        args=(new_id, params["target_url"], params["username"], params["password"],
+              model, scan_mode, params["auth_type"], params["api_imports"],
+              params["extra_domains"], cancel_flag, pause_flag),
+        daemon=True,
+    )
+    thread.start()
+    return {"scan_id": new_id, "status": "started", "parent_scan": scan_id}
+
+
 @app.delete("/api/scan/{scan_id}", tags=["Scans"])
 async def delete_scan(scan_id: str, creds=Depends(_verify)):
-    """Delete a scan and its result/report files."""
+    """Stop (if running) and fully delete a scan, its result files, and reports."""
     deleted = []
     if scan_id in SCANS:
+        cur_status = SCANS[scan_id].get("status")
+        if cur_status in ("running", "paused", "stopping"):
+            flag = CANCEL_FLAGS.get(scan_id)
+            if flag:
+                flag.set()
+            pause = PAUSE_FLAGS.get(scan_id)
+            if pause:
+                pause.clear()
+            SCANS[scan_id]["status"] = "cancelled"
+            deleted.append("stopped_running_scan")
+            await asyncio.sleep(0.5)
         result_file = SCANS[scan_id].get("result_file")
         del SCANS[scan_id]
+        CANCEL_FLAGS.pop(scan_id, None)
+        PAUSE_FLAGS.pop(scan_id, None)
         deleted.append("scan_record")
         if result_file:
             fpath = RAW_DIR / result_file
@@ -483,9 +759,20 @@ async def delete_scan(scan_id: str, creds=Depends(_verify)):
 
 @app.delete("/api/scans", tags=["Scans"])
 async def delete_all_scans(creds=Depends(_verify)):
-    """Delete all scan records and result files."""
-    count = 0
+    """Stop all running scans and delete all scan records, result files, and reports."""
+    for sid, info in list(SCANS.items()):
+        if info.get("status") in ("running", "paused", "stopping"):
+            flag = CANCEL_FLAGS.get(sid)
+            if flag:
+                flag.set()
+            pause = PAUSE_FLAGS.get(sid)
+            if pause:
+                pause.clear()
+    await asyncio.sleep(0.5)
     SCANS.clear()
+    CANCEL_FLAGS.clear()
+    PAUSE_FLAGS.clear()
+    count = 0
     for f in RAW_DIR.glob("*.json"):
         f.unlink()
         count += 1

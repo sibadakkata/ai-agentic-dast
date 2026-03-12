@@ -19,7 +19,7 @@ from .api_import import (
     parse_postman_collection,
 )
 from .auth import ScanTarget, authenticate, detect_app_type
-from .llm_config import ContentFiltered, ContextWindowExceeded, LLMRouter
+from .llm_config import ContentFiltered, ContextWindowExceeded, MalformedMessages, LLMRouter
 from .prompts import build_system_prompt, get_phases
 from .tools import TOOL_DEFINITIONS, ScanTools
 
@@ -227,10 +227,13 @@ async def run_scan(
     on_progress: callable | None = None,
     extra_domains: list[str] | None = None,
     cancel_flag=None,
+    pause_flag=None,
+    start_from_phase: int = 0,
+    initial_findings: list[dict] | None = None,
 ) -> tuple[list[dict], dict]:
     config_dir = config_dir or os.getcwd()
     _cb = on_progress or (lambda *a, **k: None)
-    findings: list[dict] = []
+    findings: list[dict] = list(initial_findings) if initial_findings else []
     metrics = {
         "pages_crawled": 0,
         "forms_found": 0,
@@ -245,6 +248,12 @@ async def run_scan(
     def _check_cancel():
         if cancel_flag and cancel_flag.is_set():
             raise ScanCancelled("Scan stopped by user")
+        if pause_flag and pause_flag.is_set():
+            _cb("paused", {})
+            while pause_flag.is_set():
+                if cancel_flag and cancel_flag.is_set():
+                    raise ScanCancelled("Scan stopped by user")
+                time.sleep(1)
 
     SECURITY_TEST_TOOLS = {
         "inject_payload", "fuzz_parameter", "api_request",
@@ -440,6 +449,12 @@ async def run_scan(
         for phase_idx, phase in enumerate(phases):
             _check_cancel()
             phase_num = phase_idx + 1 + phase_offset
+            if start_from_phase > 0 and phase_idx < start_from_phase:
+                print(f"  [{phase_num}/{total_phases}] Phase: {phase.name} — skipped (already completed)")
+                _cb("phase_start", {"phase": phase_num, "total": total_phases, "name": f"{phase.name} (skipped)", "id": phase.id})
+                _cb("phase_end", {"phase": phase_num, "name": f"{phase.name} (skipped)", "tool_calls": 0, "findings": 0})
+                metrics["phases_completed"] += 1
+                continue
             phase_tool_calls = 0
             phase_findings_before = len(findings)
             print(f"  [{phase_num}/{total_phases}] Phase: {phase.name} ({phase.id})...", end="", flush=True)
@@ -450,6 +465,7 @@ async def run_scan(
                 _check_cancel()
                 try:
                     _sanitize_all_messages(messages)
+                    messages = _repair_tool_pairs(messages)
                     response = router.complete(
                         model=model,
                         messages=messages,
@@ -470,6 +486,7 @@ async def run_scan(
                     messages = trim_context(messages, max_tokens=TRIM_TARGET_TOKENS // 2)
                     try:
                         _sanitize_all_messages(messages)
+                        messages = _repair_tool_pairs(messages)
                         response = router.complete(model=model, messages=messages, tools=TOOL_DEFINITIONS)
                     except ContentFiltered:
                         raise ContentFiltered(
@@ -478,6 +495,14 @@ async def run_scan(
                         )
                     except ContextWindowExceeded:
                         logger.error("Still exceeded after aggressive trim, skipping rest of phase %s", phase.id)
+                        break
+                except MalformedMessages:
+                    logger.warning("Malformed message sequence at phase %s step %d, recovering", phase.id, step)
+                    messages = _recover_messages(messages)
+                    try:
+                        response = router.complete(model=model, messages=messages, tools=TOOL_DEFINITIONS)
+                    except MalformedMessages:
+                        logger.error("Recovery failed at phase %s, skipping to next phase", phase.id)
                         break
                 if not response or not getattr(response, "choices", None):
                     logger.warning("Empty response from %s at phase %s step %d", model, phase.id, step)
@@ -524,7 +549,8 @@ async def run_scan(
 
                         if isinstance(result, dict) and result.get("skipped"):
                             blocked_url = args_parsed.get("url") or args_parsed.get("endpoint") or args_parsed.get("raw", "")
-                            if blocked_url:
+                            parsed_blocked = urlparse(blocked_url) if blocked_url else None
+                            if parsed_blocked and parsed_blocked.scheme and parsed_blocked.hostname:
                                 _cb("out_of_scope", {"url": blocked_url, "tool": fn_name, "phase": phase.name})
 
                         crawl_url = None
@@ -695,6 +721,72 @@ def extract_findings(content: str) -> list[dict]:
     return findings
 
 
+def _recover_messages(messages: list[dict]) -> list[dict]:
+    """Last-resort recovery: strip back to the last complete user/assistant exchange.
+    Keeps system message + summary + walks backward to find a safe cut point."""
+    if len(messages) <= 2:
+        return messages
+
+    safe = [messages[0]]
+    cut = len(messages)
+    for i in range(len(messages) - 1, 0, -1):
+        m = messages[i]
+        if m.get("role") == "user" and m.get("content"):
+            cut = i + 1
+            break
+    safe.extend(messages[1:cut])
+    safe = _repair_tool_pairs(safe)
+
+    if len(safe) < 2:
+        safe = [messages[0], {
+            "role": "user",
+            "content": "[Previous context was reset due to a message formatting error. Continue scanning from where you left off.]",
+        }]
+    logger.info("Message recovery: %d -> %d messages", len(messages), len(safe))
+    return safe
+
+
+def _repair_tool_pairs(messages: list[dict]) -> list[dict]:
+    """Ensure every assistant(tool_calls) is followed by its tool results and
+    no orphaned tool messages exist.  Bedrock rejects malformed sequences."""
+    if not messages:
+        return messages
+
+    pending_tc_ids: set[str] = set()
+    repaired: list[dict] = []
+
+    for m in messages:
+        role = m.get("role")
+        if role == "tool":
+            tc_id = m.get("tool_call_id", "")
+            if tc_id not in pending_tc_ids:
+                continue
+            repaired.append(m)
+            pending_tc_ids.discard(tc_id)
+        else:
+            if pending_tc_ids:
+                while repaired and repaired[-1].get("role") == "tool":
+                    repaired.pop()
+                if repaired and repaired[-1].get("tool_calls"):
+                    repaired.pop()
+                pending_tc_ids.clear()
+
+            repaired.append(m)
+            if role == "assistant" and m.get("tool_calls"):
+                for tc in m["tool_calls"]:
+                    tc_id = tc.get("id") if isinstance(tc, dict) else getattr(tc, "id", "")
+                    if tc_id:
+                        pending_tc_ids.add(tc_id)
+
+    if pending_tc_ids:
+        while repaired and repaired[-1].get("role") == "tool":
+            repaired.pop()
+        if repaired and repaired[-1].get("tool_calls"):
+            repaired.pop()
+
+    return repaired
+
+
 def trim_context(messages: list[dict], max_tokens: int = TRIM_TARGET_TOKENS) -> list[dict]:
     estimated = _estimate_tokens(messages)
     if estimated <= max_tokens:
@@ -719,7 +811,7 @@ def trim_context(messages: list[dict], max_tokens: int = TRIM_TARGET_TOKENS) -> 
 
     if len(phase_boundaries) <= 1:
         kept.extend(messages[1:])
-        return kept
+        return _repair_tool_pairs(kept)
 
     last_start = phase_boundaries[-1]
     summary = {
@@ -732,9 +824,9 @@ def trim_context(messages: list[dict], max_tokens: int = TRIM_TARGET_TOKENS) -> 
     if _estimate_tokens(kept) > max_tokens and len(kept) > 10:
         trimmed: list[dict] = [kept[0], kept[1]]
         trimmed.extend(kept[-8:])
-        return trimmed
+        return _repair_tool_pairs(trimmed)
 
-    return kept
+    return _repair_tool_pairs(kept)
 
 
 def save_results(

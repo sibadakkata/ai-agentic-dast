@@ -145,6 +145,41 @@ def stop_scan(scan_id: str) -> dict:
 
 
 @mcp.tool()
+def retry_scan(scan_id: str, force_restart: bool = False) -> dict:
+    """Re-run a failed or cancelled scan in-place (same scan ID).
+
+    By default, tries to continue from the last completed phase.  If no
+    phases completed or force_restart is True, re-runs from scratch.
+
+    Args:
+        scan_id: The scan ID of the errored/cancelled scan to retry.
+        force_restart: If True, ignore prior progress and re-run from scratch.
+
+    Returns:
+        Same scan ID with status 'started', mode ('continuing'/'restarting'),
+        and start_from_phase.
+    """
+    body = {"force_restart": force_restart} if force_restart else {}
+    return _request("POST", f"/api/scan/{scan_id}/retry", json=body)
+
+
+@mcp.tool()
+def rescan(scan_id: str) -> dict:
+    """Create a new scan with the same parameters as an existing scan.
+
+    Useful to re-run a completed scan — creates a separate entry in history.
+    Works on any scan status (completed, error, cancelled).
+
+    Args:
+        scan_id: The scan ID to re-scan.
+
+    Returns:
+        New scan ID with status 'started'.
+    """
+    return _request("POST", f"/api/scan/{scan_id}/rescan")
+
+
+@mcp.tool()
 def wait_for_scan(scan_id: str, poll_interval: int = 15, timeout: int = 3600) -> dict:
     """Wait for a scan to complete, polling periodically.
 
@@ -251,13 +286,16 @@ def upload_api_spec(file_path: str) -> dict:
 
 @mcp.tool()
 def delete_scan(scan_id: str) -> dict:
-    """Delete a scan and its results.
+    """Stop (if running) and permanently delete a scan, its results, and reports.
+
+    If the scan is currently running or paused, it is stopped immediately
+    (no further LLM calls) before deletion.
 
     Args:
         scan_id: The scan ID to delete.
 
     Returns:
-        Confirmation of deletion.
+        List of deleted items (scan record, result files, reports).
     """
     return _request("DELETE", f"/api/scan/{scan_id}")
 

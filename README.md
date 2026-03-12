@@ -135,8 +135,13 @@ The router auto-selects the path: `bedrock/` prefixed models always go direct to
 - **PDF Report** — generate with full evidence: curl commands, response data, CVE/CVSS scores
 - **Download Payloads** — export all payloads tested (grouped by phase) as JSON
 - **Raw JSON** — download full scan data for integration
-- **Delete Scans** — delete individual scans or clear all history
-- **Error Details** — view error messages and progress log for failed scans
+- **Pause / Resume Scan** — pause a running scan to save cost, resume when ready (no lost progress)
+- **Stop Scan** — cancel a running scan; partial findings are saved
+- **Delete Scans** — stops running scans first, then permanently deletes scan record, results, and PDF reports
+- **Bulk Actions** — select multiple scans via checkboxes for batch retry or delete
+- **Retry Failed Scans** — one-click re-run button on errored or cancelled scans (in-place, same ID). Correctly infers scan mode for legacy scans
+- **Scan Mode Badge** — each scan shows its mode (`api`, `website`, `both`) in the scan list and error view
+- **Error Details** — view error messages, scan mode, and progress log for failed scans
 - **Basic Auth** — password-protected (configurable via `DAST_AUTH_USER` / `DAST_AUTH_PASS` env vars)
 
 ## Docker Deployment (EC2)
@@ -287,7 +292,7 @@ Supported import keys: `postman`, `postman_env`, `burp`, `openapi`.
 curl -s -u "$DAST_USER:$DAST_PASS" "$DAST_URL/api/scan/{scan_id}" | jq .
 ```
 
-Returns `status`: `running`, `stopping`, `completed`, `cancelled`, or `error`.
+Returns `status`: `running`, `paused`, `stopping`, `completed`, `cancelled`, or `error`.
 
 ### 5. Stop a Running Scan
 
@@ -300,7 +305,43 @@ curl -s -u "$DAST_USER:$DAST_PASS" \
 
 The scan transitions to `stopping`, then `cancelled` once the current step completes.
 
-### 6. Get Live Activity (While Running)
+### 6. Pause a Running Scan
+
+Pause a scan to save LLM cost temporarily. The agent blocks after the current step — no progress is lost.
+
+```bash
+curl -s -u "$DAST_USER:$DAST_PASS" \
+  -X POST "$DAST_URL/api/scan/{scan_id}/pause" | jq .
+# {"scan_id": "...", "status": "paused"}
+```
+
+### 7. Resume a Paused Scan
+
+```bash
+curl -s -u "$DAST_USER:$DAST_PASS" \
+  -X POST "$DAST_URL/api/scan/{scan_id}/resume" | jq .
+# {"scan_id": "...", "status": "running"}
+```
+
+### 8. Retry a Failed or Cancelled Scan
+
+Re-run a scan that errored or was cancelled. Resets the same scan in-place (same ID) with the original target, model, credentials, and scan mode. For legacy scans without stored `scan_mode`, the mode is inferred from the target URL or result metadata.
+
+```bash
+# Basic retry (uses original parameters)
+curl -s -u "$DAST_USER:$DAST_PASS" \
+  -X POST "$DAST_URL/api/scan/{scan_id}/retry" | jq .
+
+# Override scan_mode or model
+curl -s -u "$DAST_USER:$DAST_PASS" \
+  -X POST "$DAST_URL/api/scan/{scan_id}/retry" \
+  -H "Content-Type: application/json" \
+  -d '{"scan_mode": "api"}' | jq .
+```
+
+The scan status resets to `running` and a fresh scan begins. No duplicate entries are created.
+
+### 9. Get Live Activity (While Running)
 
 ```bash
 curl -s -u "$DAST_USER:$DAST_PASS" \
@@ -309,7 +350,7 @@ curl -s -u "$DAST_USER:$DAST_PASS" \
 
 Returns real-time tool calls, findings, crawled URLs, and phase progress.
 
-### 7. Get Full Results (After Completion)
+### 10. Get Full Results (After Completion)
 
 ```bash
 curl -s -u "$DAST_USER:$DAST_PASS" "$DAST_URL/api/results/{scan_id}" | jq .
@@ -317,14 +358,14 @@ curl -s -u "$DAST_USER:$DAST_PASS" "$DAST_URL/api/results/{scan_id}" | jq .
 
 Returns AI findings, triaged findings, crawled endpoints, payloads by endpoint, coverage stats, and severity/OWASP breakdowns.
 
-### 8. Download Raw JSON
+### 11. Download Raw JSON
 
 ```bash
 curl -s -u "$DAST_USER:$DAST_PASS" \
   "$DAST_URL/api/results/{scan_id}/download" -o scan_result.json
 ```
 
-### 9. Generate & Download PDF Report
+### 12. Generate & Download PDF Report
 
 ```bash
 # Generate
@@ -337,26 +378,29 @@ curl -s -u "$DAST_USER:$DAST_PASS" \
   "$DAST_URL/api/reports/{filename}" -o report.pdf
 ```
 
-### 10. Download All Payloads (by Phase)
+### 13. Download All Payloads (by Phase)
 
 ```bash
 curl -s -u "$DAST_USER:$DAST_PASS" \
   "$DAST_URL/api/results/{scan_id}/payloads" -o payloads.json
 ```
 
-### 11. List All Scans
+### 14. List All Scans
 
 ```bash
 curl -s -u "$DAST_USER:$DAST_PASS" "$DAST_URL/api/scans" | jq .
 ```
 
-### 12. Delete a Scan
+### 15. Delete a Scan
+
+Stops the scan if running/paused (no further LLM calls), then permanently deletes the scan record, result JSON, and PDF reports.
 
 ```bash
 curl -s -u "$DAST_USER:$DAST_PASS" -X DELETE "$DAST_URL/api/scan/{scan_id}" | jq .
+# {"deleted": ["stopped_running_scan", "scan_record", "aiagent_..._scan_....json", "report_....pdf"]}
 ```
 
-### 13. Health Check (No Auth)
+### 16. Health Check (No Auth)
 
 ```bash
 curl -s "$DAST_URL/health" | jq .
@@ -440,7 +484,8 @@ pip install mcp
 | `list_models` | List available LLM models |
 | `start_scan` | Start a new security scan (target URL, model, scan mode, credentials) |
 | `stop_scan` | Stop a running scan to save cost (partial findings are saved) |
-| `get_scan_status` | Poll scan progress |
+| `retry_scan` | Re-run a failed or cancelled scan in-place (same ID, infers scan mode for legacy scans) |
+| `get_scan_status` | Poll scan progress (includes `scan_mode`) |
 | `wait_for_scan` | Block until scan completes (with timeout) |
 | `get_scan_results` | Get full triaged findings |
 | `get_live_activity` | Real-time tool calls and findings for running scans |
@@ -450,8 +495,8 @@ pip install mcp
 | `generate_report` | Generate PDF report |
 | `download_payloads` | Export all tested payloads by phase |
 | `upload_api_spec` | Upload Postman/Burp/OpenAPI file |
-| `list_scans` | List all scan history |
-| `delete_scan` | Delete a scan |
+| `list_scans` | List all scan history (includes `scan_mode` per scan) |
+| `delete_scan` | Stop (if running) and permanently delete a scan, results, and reports |
 
 ### Standalone Mode
 
@@ -936,3 +981,135 @@ Additional report sections:
 - Clickable summary table linking to per-finding details
 - Confirmed vulnerabilities vs. needs-verification separation
 - Full test evidence: actual curl commands, response status codes and body snippets
+
+## Troubleshooting: Scan Errors & Model Issues
+
+When a scan fails, the UI shows a red **Scan Error** banner with the error details. Here's every known failure mode, what causes it, and how to fix it.
+
+### Content Filtered (Guardrails)
+
+```
+ContentFiltered: Model bedrock/... refuses security-testing prompts (content guardrails)
+```
+
+**Cause**: The model's built-in safety guardrails block security-testing prompts (SQL injection payloads, XSS vectors, etc.). The model sees the scan instructions as harmful content and refuses to cooperate.
+
+**Affected models**:
+| Model | Status |
+|-------|--------|
+| Amazon Nova Micro/Lite/Pro | Always blocked — Nova considers pen-test prompts unsafe |
+| Amazon Titan | Always blocked |
+| Claude Haiku 4.5 | Works — no content filtering for security testing |
+| Claude Sonnet 4.6 | Works |
+| Ministral 8B / 14B | Works |
+| Mistral Small | Works but poor quality (doesn't use tools) |
+
+**Fix**: Switch to **Claude Haiku 4.5** or **Ministral 14B**. These models allow security-testing tool calls without triggering guardrails.
+
+### Context Window Exceeded
+
+```
+ContextWindowExceeded: prompt is too long / input is too long
+```
+
+**Cause**: The conversation history (system prompt + all phase messages + tool call results) exceeded the model's maximum token limit. This happens on long scans with many API endpoints or when target responses are very large.
+
+**Auto-recovery**: The scanner automatically trims old phase history and retries. If trimming isn't enough, it skips the current phase and moves to the next one. The scan continues — you don't lose previous findings.
+
+**If it keeps happening**:
+- Use a model with a larger context window (Claude models support 200K tokens)
+- Reduce the number of API endpoints by providing a more targeted Postman collection
+- For websites with huge pages, the scanner already truncates responses to fit
+
+### Malformed Message Sequence (Tool Call Pairing)
+
+```
+BadRequestError: Expected toolResult blocks at messages.X.content for the following Ids: tooluse_...
+```
+
+**Cause**: Bedrock's Claude API requires strict pairing — every assistant message with `tool_calls` must be immediately followed by `tool` result messages with matching IDs. This can happen when context trimming splits a tool-call group, or in rare edge cases with very long multi-tool exchanges.
+
+**Auto-recovery**: Three layers of defense handle this automatically:
+1. **Prevention** — `_repair_tool_pairs()` validates message pairing before every LLM call
+2. **Detection** — The error is caught as `MalformedMessages` (not a generic crash)
+3. **Recovery** — Messages are stripped back to the last safe point and retried. If retry fails, the phase is skipped (not the entire scan)
+
+**If you see this in logs**: It means recovery worked. The scan continued. No action needed.
+
+### Rate Limit / Throttling
+
+```
+429 Too Many Requests / rate limit exceeded
+```
+
+**Cause**: Too many concurrent requests to Bedrock. Each scan makes many LLM calls (one per agent step), and Bedrock has per-model request-per-minute limits.
+
+**Auto-recovery**: The scanner retries with exponential backoff (2s → 4s → 8s), up to 3 retries.
+
+**If it keeps happening**:
+- Run fewer concurrent scans
+- Request a Bedrock quota increase via AWS Service Quotas console
+- Switch to a less popular model (Ministral models typically have higher limits than Claude)
+
+### AWS Credentials / Access Denied
+
+```
+AccessDeniedException / ExpiredTokenException / UnrecognizedClientException
+```
+
+**Cause**: The EC2 instance's IAM role doesn't have Bedrock permissions, or the AWS region is wrong.
+
+**Fix**:
+1. Verify IAM role is attached to the EC2 instance
+2. Check permissions: `bedrock:InvokeModel` on `arn:aws:bedrock:*:*:inference-profile/*`
+3. Ensure `AWS_DEFAULT_REGION` is set (e.g. `us-east-1`)
+4. For cross-region models, enable cross-region inference profiles in Bedrock console
+
+### Model Not Available / Not Subscribed
+
+```
+ResourceNotFoundException / ModelNotAvailableException
+```
+
+**Cause**: The selected Bedrock model isn't enabled in your AWS account or isn't available in your region.
+
+**Fix**:
+1. Go to AWS Bedrock console → **Model access** → Request access for the model
+2. Some models (Claude, Mistral) require clicking "Request access" and waiting for approval
+3. Check that the model is available in your configured region
+
+### Empty Response
+
+```
+Empty response from model at phase X step Y
+```
+
+**Cause**: The model returned an empty response (no content, no tool calls). This can happen when the model is confused by the conversation state or when it "gives up" on a phase.
+
+**Auto-recovery**: The scanner breaks out of the current step loop and moves to the next phase. No findings are lost.
+
+### Authentication Failure (Target App)
+
+```
+Auth failed / login unsuccessful
+```
+
+**Cause**: The scanner couldn't authenticate to the target application with the provided credentials. This affects authenticated scan coverage but doesn't crash the scan.
+
+**Fix**:
+- Verify the username/password are correct for the target app
+- Check if the target has CAPTCHA, MFA, or IP-based rate limiting that blocks automated login
+- For API scans, provide auth tokens directly in the headers field
+
+### Quick Reference: Error → Action
+
+| Error Pattern | Auto-Recovers? | Action Needed |
+|---------------|----------------|---------------|
+| `content_filtered` / `content filtered` | No — fatal | Switch model (use Claude Haiku or Ministral) |
+| `prompt is too long` / `context window` | Yes — trims & retries | None (may skip a phase) |
+| `Expected toolResult` / `tool_use_id` | Yes — repairs & retries | None (may skip a phase) |
+| `rate limit` / `429` / `too many requests` | Yes — backoff & retries | Reduce concurrency or increase quota |
+| `AccessDeniedException` | No — fatal | Fix IAM permissions |
+| `ResourceNotFoundException` | No — fatal | Enable model in Bedrock console |
+| `Empty response` | Yes — skips step | None |
+| `Auth failed` | Partial — scans unauthenticated | Fix target credentials |

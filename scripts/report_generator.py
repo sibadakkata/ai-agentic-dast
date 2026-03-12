@@ -87,13 +87,25 @@ def _build_curl(t):
     m, u = req.get("method", "GET"), req.get("url", "") or req.get("endpoint", "")
     if not u: return ""
     parts = [f"curl -X {m}"]
-    for k, v in list(req.get("headers", {}).items())[:4]:
-        parts.append(f"  -H '{_safe(str(k))}: {_safe(str(v)[:60])}'")
+    headers = req.get("headers", {})
+    for k, v in list(headers.items())[:4]:
+        parts.append(f"  -H '{_safe(str(k))}: {_safe(str(v)[:80])}'")
     body = req.get("body", "")
     if body:
-        b = json.dumps(body, default=str) if isinstance(body, (dict, list)) else str(body)
-        parts.append(f"  -d '{_safe(b[:250])}'")
-    parts.append(f"  '{_safe(u[:200])}'")
+        if isinstance(body, str):
+            try:
+                body_obj = json.loads(body)
+                b = json.dumps(body_obj, indent=2, default=str)
+            except (json.JSONDecodeError, ValueError):
+                b = body
+        elif isinstance(body, (dict, list)):
+            b = json.dumps(body, indent=2, default=str)
+        else:
+            b = str(body)
+        if "content-type" not in {k.lower() for k in headers}:
+            parts.append("  -H 'Content-Type: application/json'")
+        parts.append(f"  -d '{_safe(b[:800])}'")
+    parts.append(f"  '{_safe(u[:250])}'")
     return " \\\n".join(parts)
 
 
@@ -183,11 +195,14 @@ class Report(FPDF):
         self.cell(0, 5, _safe(label), new_x="LMARGIN", new_y="NEXT")
         x, y, w = self.get_x(), self.get_y(), 190
         self.set_font("Courier", "", 7)
-        lines = self.multi_cell(w - 6, 3.5, _safe(text), dry_run=True, output="LINES")
-        h = min(max(len(lines) * 3.5 + 6, 10), 110)
+        safe_text = _safe(text[:2000])
+        lines = self.multi_cell(w - 6, 3.5, safe_text, dry_run=True, output="LINES")
+        h = min(max(len(lines) * 3.5 + 6, 10), 180)
         if y + h > 270:
             self.add_page()
             y = self.get_y()
+            if h > 250:
+                h = 250
         self.set_fill_color(*bg)
         if border:
             self.set_draw_color(*border)
@@ -196,7 +211,7 @@ class Report(FPDF):
             self.rect(x, y, w, h, style="F")
         self.set_xy(x + 3, y + 3)
         self.set_text_color(*tc)
-        self.multi_cell(w - 6, 3.5, _safe(text[:1200]))
+        self.multi_cell(w - 6, 3.5, safe_text)
         self.set_y(y + h + 1)
 
     def badge(self, sev, verdict):
@@ -321,13 +336,16 @@ def _build_repro_steps(f):
         steps.append(f"{step}. Open a browser or API client (e.g. Burp Suite, curl, Postman).")
         step += 1
 
+    best_curl = ""
     if curls:
-        steps.append(f"{step}. Send the following request to the target:")
-        steps.append(f"   {curls[0][:200]}")
-        step += 1
+        with_body = [c for c in curls if "-d " in c]
+        best_curl = with_body[0] if with_body else curls[0]
     elif curl:
+        best_curl = curl
+
+    if best_curl:
         steps.append(f"{step}. Send the following request to the target:")
-        steps.append(f"   {curl[:200]}")
+        steps.append(f"   {best_curl[:400]}")
         step += 1
     elif url:
         steps.append(f"{step}. Navigate to: {url}")
@@ -382,22 +400,32 @@ def _remediation_oneliner(f):
 
 
 def _format_resp_line(ri, resp):
-    """Format a single response entry from the test log."""
-    parts = []
-    if resp.get("status"):
-        parts.append(f"Status: {resp['status']}")
-    if resp.get("reflected"):
-        parts.append(f"Reflected: {resp['reflected']}")
+    """Format a single response entry from the test log with full detail."""
+    lines = []
+    status = resp.get("status", "")
+    if status:
+        lines.append(f"HTTP Status: {status}")
     if resp.get("anomaly"):
-        parts.append("** ANOMALY DETECTED **")
+        lines.append(">>> ANOMALY DETECTED <<<")
+    if resp.get("reflected"):
+        lines.append(f"Reflected: {resp['reflected']}")
     if resp.get("accessible") is not None:
-        parts.append(f"Accessible: {resp['accessible']}")
+        lines.append(f"Accessible: {resp['accessible']}")
     if resp.get("error"):
-        parts.append(f"Error: {resp['error']}")
-    if resp.get("body"):
-        body_preview = str(resp["body"])[:200]
-        parts.append(f"Body: {body_preview}")
-    return f"Response #{ri}: " + " | ".join(parts)
+        lines.append(f"Error: {resp['error']}")
+    body = resp.get("body", "")
+    if body:
+        body_str = str(body)[:500]
+        try:
+            body_obj = json.loads(body_str) if isinstance(body_str, str) else body_str
+            if isinstance(body_obj, (dict, list)):
+                body_str = json.dumps(body_obj, indent=2, default=str)[:500]
+        except (json.JSONDecodeError, ValueError):
+            pass
+        lines.append(f"Response Body:\n{body_str}")
+    if not lines:
+        lines.append("(no response data)")
+    return "\n".join(lines)
 
 
 def render(pdf, idx, f, link_id=None):
@@ -453,27 +481,35 @@ def render(pdf, idx, f, link_id=None):
             color=(30, 60, 120), bg=(230, 238, 255),
         )
 
-        if f.get("scanner_evidence") and v != "FALSE_POSITIVE":
-            pdf.box("LLM EVIDENCE (what the AI agent reported):",
-                    f["scanner_evidence"],
-                    bg=(240, 248, 255), border=(100, 150, 200))
+        if f.get("scanner_evidence"):
+            pdf.box(
+                "EXPLOIT EVIDENCE (what the AI agent detected):"
+                if v == "TRUE_POSITIVE"
+                else "LLM EVIDENCE (what the AI agent reported):",
+                f["scanner_evidence"],
+                bg=(255, 245, 230) if v == "TRUE_POSITIVE" else (240, 248, 255),
+                border=(200, 120, 30) if v == "TRUE_POSITIVE" else (100, 150, 200),
+            )
 
         all_curls = f.get("all_curls", [])
         all_responses = f.get("all_responses", [])
 
         if all_curls:
             for ci, curl in enumerate(all_curls[:3], 1):
-                label = (f"SCAN PAYLOAD #{ci} (sent by AI agent):"
-                         if len(all_curls) > 1
-                         else "SCAN REQUEST (sent by AI agent):")
+                label = f"REQUEST #{ci} (sent by AI agent):"
                 pdf.box(label, curl,
                         bg=(245, 248, 255), border=(100, 120, 180))
 
                 if ci <= len(all_responses):
                     resp = all_responses[ci - 1]
-                    pdf.box(f"  APPLICATION RESPONSE #{ci}:",
-                            _format_resp_line(ci, resp),
-                            bg=(255, 252, 245), border=(180, 160, 100))
+                    resp_text = _format_resp_line(ci, resp)
+                    is_anomaly = resp.get("anomaly")
+                    pdf.box(
+                        f"  RESPONSE #{ci}:" + (" >>> ANOMALY <<<" if is_anomaly else ""),
+                        resp_text,
+                        bg=(255, 230, 230) if is_anomaly else (255, 252, 245),
+                        border=(200, 40, 40) if is_anomaly else (180, 160, 100),
+                    )
         elif f.get("curl"):
             pdf.box("SCAN REQUEST (sent by AI agent):", f["curl"],
                     bg=(245, 248, 255), border=(100, 120, 180))
@@ -482,7 +518,7 @@ def render(pdf, idx, f, link_id=None):
         if remaining_responses:
             resp_lines = [_format_resp_line(ri, resp)
                           for ri, resp in enumerate(remaining_responses, len(all_curls) + 1)]
-            pdf.box("ADDITIONAL APPLICATION RESPONSES:", "\n".join(resp_lines[:5]),
+            pdf.box("ADDITIONAL RESPONSES:", "\n---\n".join(resp_lines[:5]),
                     bg=(255, 252, 245), border=(180, 160, 100))
 
         if not all_curls and not f.get("curl") and f.get("response_status"):
@@ -642,10 +678,90 @@ def _render_summary_table(pdf, all_findings, link_ids):
         pdf.ln(row_h)
 
 
+def _find_best_tests(finding, test_log, limit=3):
+    """Find the most relevant tests for a finding, preferring attack payloads over recon."""
+    url = (finding.get("url", "") or "").split("?")[0]
+    param = (finding.get("parameter", "") or "").lower()
+    title = (finding.get("title", "") or "").lower()
+    evidence = str(finding.get("scanner_evidence", "") or finding.get("evidence", "") or "").lower()
+
+    ATTACK_TOOLS = {"inject_payload", "fuzz_parameter", "test_auth_bypass",
+                    "test_method_override", "replay_with_modification", "api_request_raw"}
+
+    param_parts = [p.strip().lower() for p in re.split(r'[,|/()]', param) if len(p.strip()) >= 3]
+
+    scored = []
+    for t in test_log:
+        req = t.get("request", {})
+        t_url = req.get("url", "") or req.get("endpoint", "")
+        t_url_lower = t_url.lower()
+        method = (req.get("method", "") or "").upper()
+        body = req.get("body", "")
+        body_str = json.dumps(body, default=str).lower() if isinstance(body, (dict, list)) else str(body).lower()
+        resp = t.get("response_summary", {}) or {}
+        resp_body = str(resp.get("body_snippet", "")).lower() if isinstance(resp, dict) else ""
+        phase = (t.get("phase", "") or "").lower()
+        tool = (t.get("tool", "") or "").lower()
+        score = 0
+
+        if url and url in t_url:
+            score += 2
+        for pp in param_parts:
+            if pp in body_str:
+                score += 4
+            if pp in t_url_lower:
+                score += 3
+
+        if tool in ATTACK_TOOLS:
+            score += 5
+
+        if body and body != "{}":
+            score += 3
+        if method in ("POST", "PUT", "PATCH"):
+            score += 1
+        if method == "OPTIONS":
+            score -= 3
+
+        has_query = "?" in t_url and "=" in t_url
+        if has_query and method == "GET":
+            score += 2
+
+        resp_status = resp.get("status") if isinstance(resp, dict) else None
+        if resp_status and resp_status not in (404,):
+            score += 1
+        if resp.get("anomaly"):
+            score += 5
+        if resp.get("reflected"):
+            score += 4
+        if resp.get("error") and isinstance(resp.get("error"), str) and "unexpected" not in resp["error"].lower():
+            score += 2
+
+        title_keywords = re.findall(r'[a-z]{4,}', title)
+        for kw in title_keywords[:5]:
+            if kw in body_str or kw in resp_body or kw in t_url_lower:
+                score += 1
+
+        evidence_keywords = re.findall(r'[a-z_]{4,}', evidence)
+        for kw in evidence_keywords[:5]:
+            if kw in body_str or kw in resp_body or kw in t_url_lower:
+                score += 2
+
+        if "fuzz" in phase or "injection" in phase or "auth" in phase:
+            score += 1
+        if "recon" in phase and not body and method in ("OPTIONS", "HEAD"):
+            score -= 3
+
+        if score > 0:
+            scored.append((score, t))
+
+    scored.sort(key=lambda x: -x[0])
+    return [m[1] for m in scored[:limit]]
+
+
 def _enrich_with_all_tests(classified, test_log):
     """Attach full test evidence (all matching payloads + responses) to each finding."""
     for f in classified:
-        tests = universal_find_tests(f, test_log, limit=5)
+        tests = _find_best_tests(f, test_log, limit=3)
         curls = []
         responses = []
         for t in tests:
@@ -658,13 +774,15 @@ def _enrich_with_all_tests(classified, test_log):
                 if resp.get("status"):
                     entry["status"] = resp["status"]
                 if resp.get("body_snippet"):
-                    entry["body"] = str(resp["body_snippet"])[:300]
+                    entry["body"] = str(resp["body_snippet"])[:600]
+                elif resp.get("body"):
+                    entry["body"] = str(resp["body"])[:600]
                 if resp.get("reflected"):
                     entry["reflected"] = resp["reflected"]
                 if resp.get("anomaly"):
                     entry["anomaly"] = resp["anomaly"]
                 if resp.get("error"):
-                    entry["error"] = str(resp["error"])[:200]
+                    entry["error"] = str(resp["error"])[:300]
                 if resp.get("accessible") is not None:
                     entry["accessible"] = resp["accessible"]
                 for r in resp.get("results", []):
@@ -673,7 +791,7 @@ def _enrich_with_all_tests(classified, test_log):
                         if r.get("status"):
                             sub["status"] = r["status"]
                         if r.get("body_snippet"):
-                            sub["body"] = str(r["body_snippet"])[:200]
+                            sub["body"] = str(r["body_snippet"])[:400]
                         if r.get("reflected"):
                             sub["reflected"] = r["reflected"]
                         if r.get("anomaly"):

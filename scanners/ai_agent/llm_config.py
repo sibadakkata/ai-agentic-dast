@@ -19,6 +19,11 @@ class ContentFiltered(Exception):
     """Raised when the model's guardrails block the request (e.g. Amazon Nova)."""
     pass
 
+
+class MalformedMessages(Exception):
+    """Raised when the provider rejects the message array (e.g. orphaned tool calls)."""
+    pass
+
 MODELS = [
     "bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0",
 ]
@@ -83,6 +88,8 @@ class LLMRouter:
                         f"Model {model} blocked the request (content guardrails). "
                         "Try a model without content filtering (e.g. Claude Haiku/Sonnet)."
                     ) from e
+                if "toolresult" in err_msg or "tool_result" in err_msg or "tool_use_id" in err_msg or "tool use block" in err_msg:
+                    raise MalformedMessages(str(e)) from e
                 is_rate_limit = (
                     "rate limit" in err_msg
                     or "429" in err_msg
