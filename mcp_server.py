@@ -121,10 +121,27 @@ def get_scan_status(scan_id: str) -> dict:
         scan_id: The scan ID returned by start_scan().
 
     Returns:
-        Status ('running', 'completed', 'error'), current phase,
-        progress log, findings count, duration, and cost.
+        Status ('running', 'stopping', 'completed', 'cancelled', 'error'),
+        current phase, progress log, findings count, duration, and cost.
     """
     return _request("GET", f"/api/scan/{scan_id}")
+
+
+@mcp.tool()
+def stop_scan(scan_id: str) -> dict:
+    """Stop a running scan to save cost.
+
+    Sends a cancellation signal. The scan will halt after the current LLM step
+    completes and save any partial findings collected so far.
+
+    Args:
+        scan_id: The scan ID returned by start_scan().
+
+    Returns:
+        Confirmation with updated status ('stopping'). The scan will transition
+        to 'cancelled' once it fully stops.
+    """
+    return _request("POST", f"/api/scan/{scan_id}/stop")
 
 
 @mcp.tool()
@@ -142,7 +159,7 @@ def wait_for_scan(scan_id: str, poll_interval: int = 15, timeout: int = 3600) ->
     start = time.time()
     while time.time() - start < timeout:
         status = _request("GET", f"/api/scan/{scan_id}")
-        if status.get("status") in ("completed", "error"):
+        if status.get("status") in ("completed", "error", "cancelled"):
             return status
         time.sleep(poll_interval)
     return {"error": "timeout", "scan_id": scan_id, "waited_seconds": timeout}

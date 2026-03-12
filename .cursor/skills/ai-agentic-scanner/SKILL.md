@@ -31,8 +31,9 @@ description: Builds and runs an LLM-powered agentic web security scanner using L
 │   ├── reports/                  # Generated PDF reports
 │   └── cache/                    # NVD/OSV API cache
 ├── web/
-│   ├── app.py                    # FastAPI backend
-│   └── static/index.html         # Single-page web UI
+│   ├── app.py                    # FastAPI backend (includes POST /api/scan/{id}/stop)
+│   └── static/index.html         # Single-page web UI (with Stop Scan button)
+├── mcp_server.py                 # MCP server — 14 tools for AI assistant integration
 ├── imports/                      # API definition files (Postman/Burp/OpenAPI)
 ├── Dockerfile                    # Production container (Playwright + Chromium)
 ├── requirements.txt
@@ -440,6 +441,8 @@ async def run_scan(target: ScanTarget, model: str, router: LLMRouter) -> list[di
 ```
 
 **Max steps per phase**: 50 tool calls. If the LLM stops calling tools, move to next phase.
+
+**Scan cancellation**: `run_scan()` accepts a `cancel_flag` (`threading.Event`). The flag is checked at the start of every phase and every LLM step. When set, `ScanCancelled` is raised, partial findings are saved, and the UI transitions to `cancelled` status. The REST API exposes `POST /api/scan/{id}/stop` and the MCP server exposes `stop_scan()`.
 
 **Token budget management**: `trim_context()` summarizes older phases when history exceeds 80K tokens. Current phase is never trimmed.
 

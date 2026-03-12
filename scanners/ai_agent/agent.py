@@ -29,6 +29,10 @@ MAX_MSG_RESULT_CHARS = 1500
 TRIM_TARGET_TOKENS = 40000
 
 
+class ScanCancelled(Exception):
+    """Raised when a scan is cancelled by the user."""
+
+
 def _extract_base_domain(url: str) -> str:
     """Extract the registrable domain from a URL (e.g. 'avg.com' from 'https://www.avg.com/cs-cz')."""
     try:
@@ -222,6 +226,7 @@ async def run_scan(
     config_dir: str | None = None,
     on_progress: callable | None = None,
     extra_domains: list[str] | None = None,
+    cancel_flag=None,
 ) -> tuple[list[dict], dict]:
     config_dir = config_dir or os.getcwd()
     _cb = on_progress or (lambda *a, **k: None)
@@ -237,6 +242,10 @@ async def run_scan(
         "phase_log": [],
         "test_log": [],
     }
+    def _check_cancel():
+        if cancel_flag and cancel_flag.is_set():
+            raise ScanCancelled("Scan stopped by user")
+
     SECURITY_TEST_TOOLS = {
         "inject_payload", "fuzz_parameter", "api_request",
         "test_auth_bypass", "test_method_override", "api_request_raw",
@@ -407,6 +416,7 @@ async def run_scan(
         _cb("scan_start", {"total_phases": total_phases})
         phase_offset = extra_phases
         for phase_idx, phase in enumerate(phases):
+            _check_cancel()
             phase_num = phase_idx + 1 + phase_offset
             phase_tool_calls = 0
             phase_findings_before = len(findings)
@@ -415,6 +425,7 @@ async def run_scan(
             messages.append({"role": "user", "content": phase.prompt})
 
             for step in range(phase.max_steps):
+                _check_cancel()
                 try:
                     _sanitize_all_messages(messages)
                     response = router.complete(
@@ -570,6 +581,7 @@ async def run_scan(
         print(f"  [DONE] Pages: {metrics['pages_crawled']}, Forms: {metrics['forms_found']}, APIs: {metrics['api_endpoints_found']}, Findings: {len(findings)}")
 
         # ── Runtime Verification Phase (no LLM, replays payloads) ──
+        _check_cancel()
         if findings:
             _cb("phase_start", {"phase": total_phases, "total": total_phases, "name": "Runtime Verification", "id": "verification"})
             print("  [VERIFY] Replaying payloads to confirm findings...")

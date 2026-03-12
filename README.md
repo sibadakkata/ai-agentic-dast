@@ -236,9 +236,20 @@ Supported import keys: `postman`, `postman_env`, `burp`, `openapi`.
 curl -s -u "$DAST_USER:$DAST_PASS" "$DAST_URL/api/scan/{scan_id}" | jq .
 ```
 
-Returns `status`: `running`, `completed`, or `error`.
+Returns `status`: `running`, `stopping`, `completed`, `cancelled`, or `error`.
 
-### 5. Get Live Activity (While Running)
+### 5. Stop a Running Scan
+
+Stop a scan early to save LLM cost (e.g., if triggered accidentally). Partial findings are saved.
+
+```bash
+curl -s -u "$DAST_USER:$DAST_PASS" \
+  -X POST "$DAST_URL/api/scan/{scan_id}/stop" | jq .
+```
+
+The scan transitions to `stopping`, then `cancelled` once the current step completes.
+
+### 6. Get Live Activity (While Running)
 
 ```bash
 curl -s -u "$DAST_USER:$DAST_PASS" \
@@ -247,7 +258,7 @@ curl -s -u "$DAST_USER:$DAST_PASS" \
 
 Returns real-time tool calls, findings, crawled URLs, and phase progress.
 
-### 6. Get Full Results (After Completion)
+### 7. Get Full Results (After Completion)
 
 ```bash
 curl -s -u "$DAST_USER:$DAST_PASS" "$DAST_URL/api/results/{scan_id}" | jq .
@@ -255,14 +266,14 @@ curl -s -u "$DAST_USER:$DAST_PASS" "$DAST_URL/api/results/{scan_id}" | jq .
 
 Returns AI findings, triaged findings, crawled endpoints, payloads by endpoint, coverage stats, and severity/OWASP breakdowns.
 
-### 7. Download Raw JSON
+### 8. Download Raw JSON
 
 ```bash
 curl -s -u "$DAST_USER:$DAST_PASS" \
   "$DAST_URL/api/results/{scan_id}/download" -o scan_result.json
 ```
 
-### 8. Generate & Download PDF Report
+### 9. Generate & Download PDF Report
 
 ```bash
 # Generate
@@ -275,26 +286,26 @@ curl -s -u "$DAST_USER:$DAST_PASS" \
   "$DAST_URL/api/reports/{filename}" -o report.pdf
 ```
 
-### 9. Download All Payloads (by Phase)
+### 10. Download All Payloads (by Phase)
 
 ```bash
 curl -s -u "$DAST_USER:$DAST_PASS" \
   "$DAST_URL/api/results/{scan_id}/payloads" -o payloads.json
 ```
 
-### 10. List All Scans
+### 11. List All Scans
 
 ```bash
 curl -s -u "$DAST_USER:$DAST_PASS" "$DAST_URL/api/scans" | jq .
 ```
 
-### 11. Delete a Scan
+### 12. Delete a Scan
 
 ```bash
 curl -s -u "$DAST_USER:$DAST_PASS" -X DELETE "$DAST_URL/api/scan/{scan_id}" | jq .
 ```
 
-### 12. Health Check (No Auth)
+### 13. Health Check (No Auth)
 
 ```bash
 curl -s "$DAST_URL/health" | jq .
@@ -377,6 +388,7 @@ pip install mcp
 | `health_check` | Check if scanner is running |
 | `list_models` | List available LLM models |
 | `start_scan` | Start a new security scan (target URL, model, scan mode, credentials) |
+| `stop_scan` | Stop a running scan to save cost (partial findings are saved) |
 | `get_scan_status` | Poll scan progress |
 | `wait_for_scan` | Block until scan completes (with timeout) |
 | `get_scan_results` | Get full triaged findings |

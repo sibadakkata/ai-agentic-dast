@@ -22,7 +22,7 @@ from fastapi.staticfiles import StaticFiles
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from scanners.ai_agent.agent import run_scan, save_results
+from scanners.ai_agent.agent import run_scan, save_results, ScanCancelled
 from scanners.ai_agent.auth import load_targets_from_dict
 from scanners.ai_agent.llm_config import LLMRouter, check_connectivity
 from scripts.triage_engine import classify as triage_classify
@@ -62,6 +62,7 @@ RAW_DIR.mkdir(parents=True, exist_ok=True)
 REPORTS_DIR.mkdir(parents=True, exist_ok=True)
 
 SCANS: dict[str, dict] = {}
+CANCEL_FLAGS: dict[str, threading.Event] = {}
 
 def _load_scans_from_disk():
     """Restore scan metadata from disk on startup."""
@@ -206,6 +207,9 @@ async def start_scan(request: Request, creds=Depends(_verify)):
     scan_id = f"scan_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
     model_name = next((m["name"] for m in MODELS if m["id"] == model), model)
 
+    cancel_flag = threading.Event()
+    CANCEL_FLAGS[scan_id] = cancel_flag
+
     SCANS[scan_id] = {
         "target_url": target_url,
         "model": model,
@@ -218,26 +222,27 @@ async def start_scan(request: Request, creds=Depends(_verify)):
 
     thread = threading.Thread(
         target=_run_scan_in_thread,
-        args=(scan_id, target_url, username, password, model, scan_mode, auth_type, api_imports, extra_domains),
+        args=(scan_id, target_url, username, password, model, scan_mode, auth_type, api_imports, extra_domains, cancel_flag),
         daemon=True,
     )
     thread.start()
     return {"scan_id": scan_id, "status": "started"}
 
 
-def _run_scan_in_thread(scan_id, target_url, username, password, model, scan_mode, auth_type, api_imports=None, extra_domains=None):
+def _run_scan_in_thread(scan_id, target_url, username, password, model, scan_mode, auth_type, api_imports=None, extra_domains=None, cancel_flag=None):
     """Run scan in a separate thread with its own event loop so the main UI stays responsive."""
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     try:
         loop.run_until_complete(
-            _run_scan_task(scan_id, target_url, username, password, model, scan_mode, auth_type, api_imports, extra_domains)
+            _run_scan_task(scan_id, target_url, username, password, model, scan_mode, auth_type, api_imports, extra_domains, cancel_flag)
         )
     finally:
         loop.close()
+        CANCEL_FLAGS.pop(scan_id, None)
 
 
-async def _run_scan_task(scan_id, target_url, username, password, model, scan_mode, auth_type, api_imports=None, extra_domains=None):
+async def _run_scan_task(scan_id, target_url, username, password, model, scan_mode, auth_type, api_imports=None, extra_domains=None, cancel_flag=None):
     try:
         scan = SCANS[scan_id]
         scan["progress"].append("Initializing LLM router...")
@@ -335,7 +340,7 @@ async def _run_scan_task(scan_id, target_url, username, password, model, scan_mo
         scan["progress"].append(f"Starting scan with {model}...")
         start = time.perf_counter()
         config_dir = str(BASE / "config")
-        findings, metrics = await run_scan(target, model, router, config_dir, on_progress=_on_progress, extra_domains=extra_domains)
+        findings, metrics = await run_scan(target, model, router, config_dir, on_progress=_on_progress, extra_domains=extra_domains, cancel_flag=cancel_flag)
         duration = time.perf_counter() - start
 
         model_slug = model.replace("/", "_").replace(".", "_").replace(":", "_")
@@ -358,6 +363,22 @@ async def _run_scan_task(scan_id, target_url, username, password, model, scan_mo
             "findings_count": summary.get("total_findings", len(findings)),
             "result_file": os.path.basename(filepath),
             "progress": SCANS[scan_id]["progress"] + ["Scan completed."],
+        })
+        _save_scans_to_disk()
+    except ScanCancelled:
+        duration = time.perf_counter() - start
+        model_slug = model.replace("/", "_").replace(".", "_").replace(":", "_")
+        filepath = str(RAW_DIR / f"aiagent_{model_slug}_{scan_id}.json")
+        partial_findings = scan.get("live_findings", [])
+        cost_summary = router.get_cost_summary() if router else {}
+        output = save_results(filepath, partial_findings, cost_summary, target, model, duration, metrics={})
+        SCANS[scan_id].update({
+            "status": "cancelled",
+            "duration": round(duration, 1),
+            "cost": cost_summary.get("total_cost_usd") if isinstance(cost_summary, dict) else None,
+            "findings_count": len(partial_findings),
+            "result_file": os.path.basename(filepath),
+            "progress": SCANS[scan_id]["progress"] + ["Scan cancelled by user."],
         })
         _save_scans_to_disk()
     except Exception as e:
@@ -385,6 +406,7 @@ async def get_scan_status(scan_id: str, creds=Depends(_verify)):
             "error": s.get("error"),
             "duration": s.get("duration"),
             "cost": s.get("cost"),
+            "findings_count": s.get("findings_count", len(s.get("live_findings", []))),
         }
     fname = _find_result_file(scan_id)
     if fname:
@@ -413,6 +435,23 @@ async def get_scan_live(scan_id: str, since_test: int = 0, since_finding: int = 
         "tool_calls": s.get("live_tool_calls", 0),
         "out_of_scope": s.get("live_out_of_scope", []),
     }
+
+
+@app.post("/api/scan/{scan_id}/stop", tags=["Scans"])
+async def stop_scan(scan_id: str, creds=Depends(_verify)):
+    """Stop a running scan. Sets a cancellation flag that the agent checks between steps."""
+    if scan_id not in SCANS:
+        raise HTTPException(status_code=404, detail="Scan not found")
+    s = SCANS[scan_id]
+    if s.get("status") != "running":
+        raise HTTPException(status_code=400, detail=f"Scan is not running (status: {s.get('status')})")
+    flag = CANCEL_FLAGS.get(scan_id)
+    if flag:
+        flag.set()
+    s["status"] = "stopping"
+    s["progress"] = s.get("progress", []) + ["Stop requested by user — cancelling after current step..."]
+    _save_scans_to_disk()
+    return {"scan_id": scan_id, "status": "stopping", "message": "Scan stop requested. It will halt after the current step completes."}
 
 
 @app.delete("/api/scan/{scan_id}", tags=["Scans"])
