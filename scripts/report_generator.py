@@ -211,6 +211,22 @@ class Report(FPDF):
         self.cell(42, 6, _safe(verdict.replace("_", " ")), fill=True, align="C")
         self.ln(8)
 
+    def stage_header(self, label, color=(60, 60, 60), bg=(240, 240, 240)):
+        """Render a labeled stage header to separate pipeline phases."""
+        if self.get_y() > 260:
+            self.add_page()
+        self.ln(2)
+        self.set_fill_color(*bg)
+        self.set_draw_color(*color)
+        self.set_font("Helvetica", "B", 8)
+        self.set_text_color(*color)
+        self.cell(190, 6, _safe(f"  {label}"), fill=True, border="LTR",
+                  new_x="LMARGIN", new_y="NEXT")
+        self.set_line_width(0.3)
+        self.line(10, self.get_y(), 200, self.get_y())
+        self.set_line_width(0.2)
+        self.ln(1)
+
 
 def _impact_oneliner(f):
     """Generate a concise impact statement from finding data."""
@@ -365,6 +381,25 @@ def _remediation_oneliner(f):
     return first_sentence
 
 
+def _format_resp_line(ri, resp):
+    """Format a single response entry from the test log."""
+    parts = []
+    if resp.get("status"):
+        parts.append(f"Status: {resp['status']}")
+    if resp.get("reflected"):
+        parts.append(f"Reflected: {resp['reflected']}")
+    if resp.get("anomaly"):
+        parts.append("** ANOMALY DETECTED **")
+    if resp.get("accessible") is not None:
+        parts.append(f"Accessible: {resp['accessible']}")
+    if resp.get("error"):
+        parts.append(f"Error: {resp['error']}")
+    if resp.get("body"):
+        body_preview = str(resp["body"])[:200]
+        parts.append(f"Body: {body_preview}")
+    return f"Response #{ri}: " + " | ".join(parts)
+
+
 def render(pdf, idx, f, link_id=None):
     if pdf.get_y() > 195:
         pdf.add_page()
@@ -402,70 +437,150 @@ def render(pdf, idx, f, link_id=None):
     if f["parameter"]:
         pdf.kv("Param:", f["parameter"])
 
-    # Verdict box
-    if v == "TRUE_POSITIVE":
-        pdf.box("CONFIRMED:", f["reason"] or "Verified - see evidence below.",
-                bg=(220, 245, 220), border=(60, 160, 60))
-    elif v == "FALSE_POSITIVE":
-        pdf.box("FALSE POSITIVE - NOT A REAL ISSUE:", f["reason"],
-                bg=(255, 225, 225), border=(200, 40, 40))
-    elif v == "NEEDS_VERIFICATION":
-        pdf.box("NEEDS MANUAL VERIFICATION:", f["reason"] or "See steps below.",
-                bg=(255, 245, 210), border=(200, 160, 20))
+    # ══════════════════════════════════════════════════════════════
+    # STAGE 1: AI AGENT — what the LLM found during scanning
+    # ══════════════════════════════════════════════════════════════
+    has_scan_evidence = (
+        f.get("scanner_evidence")
+        or f.get("all_curls")
+        or f.get("curl")
+        or f.get("all_responses")
+        or f.get("response_status")
+    )
+    if has_scan_evidence and v not in ("NOT_A_FINDING",):
+        pdf.stage_header(
+            "STAGE 1: AI AGENT SCAN  (LLM-driven testing during the scan)",
+            color=(30, 60, 120), bg=(230, 238, 255),
+        )
 
-    # Steps to reproduce (auto-generate if not provided)
-    steps_text = f.get("steps") or ""
-    if not steps_text and v != "NOT_A_FINDING":
-        steps_text = _build_repro_steps(f)
-    if steps_text and v != "NOT_A_FINDING":
-        pdf.box("STEPS TO REPRODUCE:", steps_text,
-                bg=(255, 255, 235), border=(180, 140, 40))
+        if f.get("scanner_evidence") and v != "FALSE_POSITIVE":
+            pdf.box("LLM EVIDENCE (what the AI agent reported):",
+                    f["scanner_evidence"],
+                    bg=(240, 248, 255), border=(100, 150, 200))
 
-    # Scanner evidence
-    if f.get("scanner_evidence") and v not in ("NOT_A_FINDING", "FALSE_POSITIVE"):
-        eb = (240, 248, 255) if v == "TRUE_POSITIVE" else (248, 248, 248)
-        bd = (100, 150, 200) if v == "TRUE_POSITIVE" else (190, 190, 190)
-        pdf.box("SCANNER EVIDENCE:", f["scanner_evidence"], bg=eb, border=bd)
+        all_curls = f.get("all_curls", [])
+        all_responses = f.get("all_responses", [])
 
-    # HTTP requests (all tested payloads)
-    all_curls = f.get("all_curls", [])
-    if all_curls and v not in ("NOT_A_FINDING",):
-        for ci, curl in enumerate(all_curls[:3], 1):
-            label = f"TEST PAYLOAD #{ci}:" if len(all_curls) > 1 else "HTTP REQUEST (actual payload tested):"
-            pdf.box(label, curl, bg=(245, 248, 255), border=(100, 120, 180))
-    elif f.get("curl") and v not in ("NOT_A_FINDING",):
-        pdf.box("HTTP REQUEST:", f["curl"], bg=(245, 248, 255), border=(100, 120, 180))
+        if all_curls:
+            for ci, curl in enumerate(all_curls[:3], 1):
+                label = (f"SCAN PAYLOAD #{ci} (sent by AI agent):"
+                         if len(all_curls) > 1
+                         else "SCAN REQUEST (sent by AI agent):")
+                pdf.box(label, curl,
+                        bg=(245, 248, 255), border=(100, 120, 180))
 
-    # Responses (actual app responses)
-    all_responses = f.get("all_responses", [])
-    if all_responses and v not in ("NOT_A_FINDING",):
-        resp_lines = []
-        for ri, resp in enumerate(all_responses[:5], 1):
-            parts = []
-            if resp.get("status"):
-                parts.append(f"Status: {resp['status']}")
-            if resp.get("reflected"):
-                parts.append(f"Reflected: {resp['reflected']}")
-            if resp.get("anomaly"):
-                parts.append("** ANOMALY DETECTED **")
-            if resp.get("accessible") is not None:
-                parts.append(f"Accessible: {resp['accessible']}")
-            if resp.get("error"):
-                parts.append(f"Error: {resp['error']}")
-            if resp.get("body"):
-                body_preview = str(resp["body"])[:200]
-                parts.append(f"Body: {body_preview}")
-            resp_lines.append(f"Response #{ri}: " + " | ".join(parts))
-        pdf.box("APPLICATION RESPONSES:", "\n".join(resp_lines),
-                bg=(255, 252, 245), border=(180, 160, 100))
-    elif f.get("response_status") and v not in ("NOT_A_FINDING",):
-        pdf.box("HTTP RESPONSE:", f"Status codes: {f['response_status']}",
-                bg=(255, 252, 245), border=(180, 160, 100))
+                if ci <= len(all_responses):
+                    resp = all_responses[ci - 1]
+                    pdf.box(f"  APPLICATION RESPONSE #{ci}:",
+                            _format_resp_line(ci, resp),
+                            bg=(255, 252, 245), border=(180, 160, 100))
+        elif f.get("curl"):
+            pdf.box("SCAN REQUEST (sent by AI agent):", f["curl"],
+                    bg=(245, 248, 255), border=(100, 120, 180))
 
-    # Dev action
-    if f.get("dev_action") and v not in ("NOT_A_FINDING",):
-        pdf.box("DEVELOPER ACTION:", f["dev_action"],
-                bg=(230, 240, 255), border=(60, 100, 180))
+        remaining_responses = all_responses[len(all_curls):] if all_curls else all_responses
+        if remaining_responses:
+            resp_lines = [_format_resp_line(ri, resp)
+                          for ri, resp in enumerate(remaining_responses, len(all_curls) + 1)]
+            pdf.box("ADDITIONAL APPLICATION RESPONSES:", "\n".join(resp_lines[:5]),
+                    bg=(255, 252, 245), border=(180, 160, 100))
+
+        if not all_curls and not f.get("curl") and f.get("response_status"):
+            pdf.box("APPLICATION RESPONSE STATUS CODES:",
+                    f"Status codes observed: {f['response_status']}",
+                    bg=(255, 252, 245), border=(180, 160, 100))
+
+    # ══════════════════════════════════════════════════════════════
+    # STAGE 2: RUNTIME VERIFICATION — replay against live target
+    # ══════════════════════════════════════════════════════════════
+    v_method = f.get("verification_method", "none")
+    v_evidence = f.get("verification_evidence", "")
+    has_verification = v_method and v_method != "none"
+
+    if has_verification and v not in ("NOT_A_FINDING",):
+        rv_prefix = ""
+        if "[RUNTIME VERIFIED]" in (f.get("reason") or ""):
+            rv_prefix = "CONFIRMED"
+        elif "[RUNTIME DISPROVED]" in (f.get("reason") or ""):
+            rv_prefix = "DISPROVED"
+        elif "[RUNTIME INCONCLUSIVE]" in (f.get("reason") or ""):
+            rv_prefix = "INCONCLUSIVE"
+
+        if rv_prefix == "CONFIRMED":
+            stg_color, stg_bg = (20, 100, 40), (220, 245, 220)
+        elif rv_prefix == "DISPROVED":
+            stg_color, stg_bg = (160, 30, 30), (255, 230, 230)
+        else:
+            stg_color, stg_bg = (140, 120, 20), (255, 250, 220)
+
+        pdf.stage_header(
+            f"STAGE 2: RUNTIME VERIFICATION  (payload replay against live target)"
+            + (f"  [{rv_prefix}]" if rv_prefix else ""),
+            color=stg_color, bg=stg_bg,
+        )
+
+        pdf.kv("Method:", v_method.replace("_", " ").title(),
+               lc=(60, 60, 60), vc=(30, 30, 30))
+
+        if v_evidence:
+            if rv_prefix == "CONFIRMED":
+                box_bg, box_bd = (220, 245, 220), (20, 140, 60)
+            elif rv_prefix == "DISPROVED":
+                box_bg, box_bd = (255, 230, 230), (200, 40, 40)
+            else:
+                box_bg, box_bd = (255, 250, 220), (180, 150, 40)
+            pdf.box("REPLAY RESULT:", v_evidence, bg=box_bg, border=box_bd)
+    elif v not in ("NOT_A_FINDING",) and has_scan_evidence:
+        pdf.stage_header(
+            "STAGE 2: RUNTIME VERIFICATION  (not attempted for this finding type)",
+            color=(120, 120, 120), bg=(245, 245, 245),
+        )
+        pdf.set_font("Helvetica", "I", 8)
+        pdf.set_text_color(120, 120, 120)
+        pdf.cell(0, 4, _safe("No replay verifier available for this vulnerability class."),
+                 new_x="LMARGIN", new_y="NEXT")
+        pdf.ln(1)
+
+    # ══════════════════════════════════════════════════════════════
+    # STAGE 3: TRIAGE ENGINE — final verdict + reasoning
+    # ══════════════════════════════════════════════════════════════
+    if v not in ("NOT_A_FINDING",):
+        if v == "TRUE_POSITIVE":
+            stg_color, stg_bg = (20, 100, 40), (220, 245, 220)
+        elif v == "FALSE_POSITIVE":
+            stg_color, stg_bg = (160, 30, 30), (255, 230, 230)
+        else:
+            stg_color, stg_bg = (140, 120, 20), (255, 250, 220)
+
+        pdf.stage_header(
+            "STAGE 3: TRIAGE ENGINE DECISION  (automated evidence analysis)",
+            color=stg_color, bg=stg_bg,
+        )
+
+        reason = f.get("reason") or ""
+        if v == "TRUE_POSITIVE":
+            pdf.box("VERDICT: CONFIRMED  -  This is a real vulnerability.",
+                    reason or "Verified — see evidence above.",
+                    bg=(220, 245, 220), border=(60, 160, 60))
+        elif v == "FALSE_POSITIVE":
+            pdf.box("VERDICT: FALSE POSITIVE  -  Not a real issue.",
+                    reason,
+                    bg=(255, 225, 225), border=(200, 40, 40))
+        elif v == "NEEDS_VERIFICATION":
+            pdf.box("VERDICT: NEEDS MANUAL VERIFICATION",
+                    reason or "Automated analysis was inconclusive. Manual testing required.",
+                    bg=(255, 245, 210), border=(200, 160, 20))
+
+        steps_text = f.get("steps") or ""
+        if not steps_text:
+            steps_text = _build_repro_steps(f)
+        if steps_text:
+            pdf.box("STEPS TO REPRODUCE:", steps_text,
+                    bg=(255, 255, 235), border=(180, 140, 40))
+
+        if f.get("dev_action"):
+            pdf.box("DEVELOPER ACTION:", f["dev_action"],
+                    bg=(230, 240, 255), border=(60, 100, 180))
 
     pdf.ln(2)
 
@@ -611,9 +726,18 @@ def gen_report(model_key, classified, raw):
              align="C", new_x="LMARGIN", new_y="NEXT")
     pdf.cell(0, 7,
              f"Date: {datetime.now().strftime('%B %d, %Y')} | "
-             "Methodology: AI-Powered Scan + Evidence Verification",
+             "Three-Stage Pipeline: AI Agent Scan + Runtime Verification + Triage Engine",
              align="C", new_x="LMARGIN", new_y="NEXT")
-    pdf.ln(6)
+    pdf.ln(3)
+
+    pdf.set_font("Helvetica", "", 7)
+    pdf.set_text_color(100, 100, 100)
+    pdf.multi_cell(0, 3.5, _safe(
+        "Stage 1 (AI Agent): LLM autonomously tests the target, generates payloads, and reports findings.  |  "
+        "Stage 2 (Runtime Verification): Payloads are replayed against the live target without LLM — real HTTP responses confirm or disprove each finding.  |  "
+        "Stage 3 (Triage Engine): Deterministic evidence analysis assigns final verdict (True Positive / False Positive / Needs Verification) with CVSS severity."
+    ), align="C")
+    pdf.ln(4)
 
     # ── Scan Metadata (duration, cost, coverage) ──
     meta = raw.get("metadata", {}) if raw else {}
@@ -731,7 +855,8 @@ def gen_report(model_key, classified, raw):
         pdf.multi_cell(0, 5, _safe(
             "Confirmed real issues with CVE/CVSS scores. "
             "Severity is CVSS-based, not scanner-claimed.\n"
-            "Yellow box = steps to reproduce. Blue box = developer fix."))
+            "Each finding shows three stages: (1) AI Agent scan payloads & responses, "
+            "(2) Runtime verification replay results, (3) Triage engine final verdict."))
         pdf.ln(2)
         for i, f in enumerate(tp_sorted, 1):
             render(pdf, i, f, link_id=tp_links[i - 1])
@@ -745,7 +870,7 @@ def gen_report(model_key, classified, raw):
         pdf.set_text_color(80, 80, 80)
         pdf.multi_cell(0, 5, _safe(
             "Manual testing with Burp Suite needed. "
-            "Yellow box has exact test steps."))
+            "Each finding shows the AI agent's test, verification replay result, and triage reasoning."))
         pdf.ln(2)
         for i, f in enumerate(nv_sorted, 1):
             render(pdf, i, f, link_id=nv_links[i - 1])
