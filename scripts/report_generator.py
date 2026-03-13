@@ -568,6 +568,53 @@ def render(pdf, idx, f, link_id=None):
             else:
                 box_bg, box_bd = (255, 250, 220), (180, 150, 40)
             pdf.box("REPLAY RESULT:", v_evidence, bg=box_bg, border=box_bd)
+
+        v_details = f.get("verification_details") or {}
+        exchanges = v_details.get("exchanges", [])
+        for ei, ex in enumerate(exchanges[:5], 1):
+            lbl = ex.get("label", f"Request #{ei}")
+            method = ex.get("method", "GET")
+            ex_url = ex.get("url", "")
+            req_body = ex.get("request_body", "")
+            status = ex.get("status")
+            resp_body = ex.get("response_body", "")
+            resp_size = ex.get("response_size", 0)
+
+            req_text = f"{method} {ex_url}"
+            if req_body:
+                req_text += f"\nBody: {req_body}"
+            pdf.box(f"REPLAY REQUEST #{ei} — {lbl}:", req_text,
+                    bg=(240, 245, 255), border=(80, 100, 160))
+
+            resp_text = f"HTTP {status or '(no response)'}"
+            if resp_size:
+                resp_text += f"  ({resp_size} chars)"
+            if ex.get("response_headers"):
+                resp_text += f"\n--- Headers ---\n{ex['response_headers'][:500]}"
+            if ex.get("set_cookie_headers"):
+                resp_text += "\n--- Set-Cookie ---\n" + "\n".join(ex["set_cookie_headers"])
+            if resp_body and resp_body != "(no response)":
+                resp_text += f"\n--- Body (first 600 chars) ---\n{resp_body[:600]}"
+            pdf.box(f"  REPLAY RESPONSE #{ei}:", resp_text,
+                    bg=(255, 252, 240), border=(160, 140, 80))
+        if has_verification and has_scan_evidence:
+            ai_sev = f.get("scanner_severity", "?")
+            ai_title = (f.get("title") or "")[:80]
+            rv_verdict = f.get("verdict", "?")
+            comparison = (
+                f"AI Agent reported: {ai_title} (severity: {ai_sev})\n"
+                f"Runtime Replay:    {rv_prefix or rv_verdict} via {v_method.replace('_', ' ')}\n"
+                f"Evidence match:    "
+            )
+            if rv_prefix == "CONFIRMED":
+                comparison += "Runtime replay CONFIRMS the AI agent finding — independently exploitable."
+            elif rv_prefix == "DISPROVED":
+                comparison += "Runtime replay CONTRADICTS the AI agent — the finding is NOT exploitable in current state."
+            else:
+                comparison += "Runtime replay was INCONCLUSIVE — cannot independently confirm or deny."
+            pdf.box("AI FINDING vs RUNTIME VERIFICATION:", comparison,
+                    bg=(248, 248, 255), border=(120, 120, 180))
+
     elif v not in ("NOT_A_FINDING",) and has_scan_evidence:
         pdf.stage_header(
             "STAGE 2: RUNTIME VERIFICATION  (not attempted for this finding type)",
