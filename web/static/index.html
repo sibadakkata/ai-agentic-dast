@@ -1420,7 +1420,7 @@ function renderComparison(data) {
   }
 
   el.innerHTML = vSummary + `<table><thead><tr>
-    <th>#</th><th>Finding</th><th>AI Sev</th><th>Final Sev</th><th>Verdict</th><th>Verified</th><th>CWE</th><th>CVSS</th><th>Reason</th>
+    <th>#</th><th>Finding</th><th>AI Sev</th><th>Verdict</th><th>Verified</th><th>CWE</th><th>CVSS</th><th>Reason</th>
   </tr></thead><tbody>` +
   data.triaged_findings.map((f, i) => {
     const vBadge = f.verdict === 'MANUAL_REVIEW'
@@ -1434,13 +1434,10 @@ function renderComparison(data) {
             }">${f.verdict === 'TRUE_POSITIVE' ? '✓ Replay Confirmed' : f.verdict === 'FALSE_POSITIVE' ? '✕ Replay Disproved' : '? Inconclusive'}</span>`
           : '<span style="font-size:10px;color:var(--text2);">Pattern</span>')
         : '<span style="font-size:10px;color:var(--text2);">Pattern</span>';
-    const finalSev = f.final_severity || '-';
-    const finalSevCls = (finalSev === 'Not Exploitable' || finalSev === 'TBD') ? 'color:var(--text2);font-style:italic' : '';
     return `<tr>
     <td>${i+1}</td>
     <td><strong>${esc(f.title)}</strong><br><span style="font-size:11px;color:var(--text2)">${esc(f.url||'')}</span></td>
     <td><span class="severity sev-${f.ai_severity?.toLowerCase()}">${f.ai_severity}</span></td>
-    <td><span class="severity sev-${f.final_severity?.toLowerCase()}" ${finalSevCls ? 'style="'+finalSevCls+'"' : ''}>${finalSev}</span></td>
     <td><span class="verdict v-${f.verdict?.toLowerCase()}">${f.verdict?.replace(/_/g,' ')}</span></td>
     <td>${vBadge}</td>
     <td style="font-size:11px">${esc(f.cwe||'')}</td>
