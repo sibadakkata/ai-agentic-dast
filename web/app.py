@@ -1012,16 +1012,23 @@ def _extract_payloads_by_endpoint(test_log: list) -> list[dict]:
     ep_map = defaultdict(list)
     for t in test_log:
         req = t.get("request", {})
+        if not isinstance(req, dict):
+            continue
         url = (req.get("url", "") or req.get("endpoint", "")).split("?")[0]
         method = req.get("method", "GET")
         if not url:
             continue
         key = f"{method} {url}"
+        raw_headers = req.get("headers", {})
+        if isinstance(raw_headers, dict):
+            headers_info = {k: _truncate(str(v), 60) for k, v in list(raw_headers.items())[:5]}
+        else:
+            headers_info = {"raw": _truncate(str(raw_headers), 200)}
         payload_info = {
             "full_url": req.get("url", ""),
             "method": method,
             "body": _truncate(str(req.get("body", "")), 200),
-            "headers": {k: _truncate(str(v), 60) for k, v in list(req.get("headers", {}).items())[:5]},
+            "headers": headers_info,
         }
         resp = t.get("response_summary", {})
         if isinstance(resp, dict):
