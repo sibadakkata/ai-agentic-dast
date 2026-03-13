@@ -97,6 +97,25 @@ def _runtime_severity(title: str, method: str, details: dict) -> str:
         return "Medium"
     if any(k in t for k in ["rate limit", "brute force"]):
         return "Medium"
+    if any(k in t for k in ["jwt", "json web token", "bearer token", "token security"]):
+        if "none_alg" in method:
+            return "Critical"
+        if "error_handling" in method:
+            return "Medium"
+        return "High"
+    if any(k in t for k in ["sensitive data", "data exposure", "credential", "api key",
+                             "secret", "data leak"]):
+        return "Medium"
+    if any(k in t for k in ["cors", "cross-origin resource"]):
+        acao = details.get("acao", "")
+        if acao == "*" and details.get("acac") == "true":
+            return "High"
+        return "Low"
+    if any(k in t for k in ["information disclosure", "server version", "verbose error",
+                             "stack trace", "debug", "x-powered-by"]):
+        return "Low"
+    if any(k in t for k in ["tls", "ssl", "transport security", "certificate", "https enforcement"]):
+        return "Low"
     if any(k in t for k in ["cookie", "header", "hsts", "csp"]):
         return "Low"
     return "Medium"
@@ -125,6 +144,16 @@ def _runtime_dev_action(title: str) -> str:
         return "Implement object-level authorization on every data access."
     if "rate limit" in t:
         return "Implement rate limiting: 429 after repeated failed attempts."
+    if "cors" in t:
+        return "Configure CORS with specific allowed origins. Never use * with credentials."
+    if any(k in t for k in ["information disclosure", "server version", "x-powered-by", "debug"]):
+        return "Remove version headers. Disable debug mode in production. Return generic error pages."
+    if any(k in t for k in ["tls", "ssl", "transport", "hsts", "certificate"]):
+        return "Enforce TLS 1.2+. Add HSTS header. Disable weak ciphers."
+    if any(k in t for k in ["sensitive data", "credential", "api key", "secret", "data leak"]):
+        return "Remove secrets from client-side code. Use environment variables. Review response content."
+    if any(k in t for k in ["jwt", "json web token", "bearer", "token security"]):
+        return "Validate JWT signatures. Reject alg=none. Check token expiry. Return 401 not 500."
     return "Fix the confirmed vulnerability."
 
 
@@ -139,6 +168,17 @@ def _runtime_cwe(r: dict, title: str):
         "idor": "idor_confirmed", "csrf": "csrf", "rate limit": "rate_limit",
         "brute force": "rate_limit", "hsts": "missing_hsts", "csp": "missing_csp",
         "cookie": "session_mgmt", "open redirect": "open_redirect",
+        "cors": "cors",
+        "information disclosure": "info_disclosure", "server version": "info_disclosure",
+        "verbose error": "error_info", "stack trace": "error_info",
+        "x-powered-by": "info_disclosure", "debug": "debug_staging",
+        "tls": "missing_hsts", "ssl": "missing_hsts",
+        "transport security": "missing_hsts", "certificate": "missing_hsts",
+        "sensitive data": "info_disclosure", "credential": "info_disclosure",
+        "api key": "info_disclosure", "data leak": "info_disclosure",
+        "data exposure": "info_disclosure", "secret": "info_disclosure",
+        "jwt": "auth_bypass", "json web token": "auth_bypass",
+        "bearer token": "auth_bypass", "token security": "auth_bypass",
     }
     for keyword, profile in mapping.items():
         if keyword in t:
@@ -357,6 +397,115 @@ def _compute_confidence(finding, tests, statuses, bodies, evidence):
 
 
 # ══════════════════════════════════════════════════════════════════════
+# SMART INCONCLUSIVE RESOLVER
+# Combines partial runtime signals with HTTP evidence to auto-decide
+# instead of pushing to manual review
+# ══════════════════════════════════════════════════════════════════════
+
+_CONFIG_TITLES = frozenset([
+    "header", "config", "setting", "policy", "cookie", "cache",
+    "transport", "tls", "ssl", "certificate", "encryption",
+    "hardening", "best practice", "recommendation", "cors",
+    "referrer", "permissions", "feature", "hsts", "csp",
+    "x-frame", "x-content-type", "sri", "subresource",
+    "missing", "absent", "lack", "logging",
+])
+
+_INJECTION_TITLES = frozenset([
+    "sql", "xss", "ssrf", "xxe", "injection", "traversal",
+    "command", "deserialization", "rce", "idor",
+])
+
+
+def _resolve_inconclusive(finding, title, confidence, statuses, bodies,
+                           evidence, rv_evidence, rv_details, rv_method):
+    """Try to auto-resolve INCONCLUSIVE runtime results.
+
+    Returns a dict to update the result if resolved, or None to fall through.
+    """
+    rv_ev_lower = (rv_evidence or "").lower()
+    is_config = any(k in title for k in _CONFIG_TITLES)
+    is_injection = any(k in title for k in _INJECTION_TITLES)
+
+    # ── Rule 1: Config/header findings that were inconclusive are almost always
+    #    real (the header IS missing or it ISN'T). Promote to Low TP.
+    if is_config and not is_injection:
+        return dict(
+            verdict="TRUE_POSITIVE", final_severity="Low",
+            reason=f"[AUTO-RESOLVED] Runtime inconclusive for configuration finding. "
+                   f"Config/header findings are verifiable by inspection — {rv_evidence}. "
+                   "Classified as Low TP (defense-in-depth).",
+            dev_action="Apply the suggested hardening measure.",
+        )
+
+    # ── Rule 2: Injection + all responses were 4xx/5xx errors + no evidence
+    #    of actual exploitation → safe to auto-FP
+    if is_injection:
+        all_error_or_denied = statuses and all(s >= 400 for s in statuses)
+        no_positive_indicators = confidence <= 0
+        if all_error_or_denied and no_positive_indicators:
+            return dict(
+                verdict="FALSE_POSITIVE", final_severity="Not Exploitable",
+                reason=f"[AUTO-RESOLVED] Injection claim but all {len(statuses)} responses "
+                       f"returned {list(set(statuses))} (errors/denied). Runtime verifier also "
+                       f"inconclusive. No evidence of successful exploitation.",
+                dev_action="No action — server rejected attack payloads.",
+            )
+
+    # ── Rule 3: Runtime verifier evidence contains strong negative signals
+    negative_runtime_signals = [
+        "rejected", "blocked", "denied", "not reflected", "sanitized",
+        "not accepted", "not found", "404", "403", "filtered",
+        "encoded", "escaped", "removed",
+    ]
+    neg_count = sum(1 for s in negative_runtime_signals if s in rv_ev_lower)
+    if neg_count >= 2 and confidence <= 0:
+        return dict(
+            verdict="FALSE_POSITIVE", final_severity="Not Exploitable",
+            reason=f"[AUTO-RESOLVED] Runtime verifier shows strong rejection signals "
+                   f"({neg_count} indicators: {rv_evidence[:120]}). Combined with low "
+                   f"confidence ({confidence}/10) → auto-dismissed.",
+            dev_action="No action — server defenses appear effective.",
+        )
+
+    # ── Rule 4: Runtime evidence has partial positive signals + moderate confidence
+    positive_runtime_signals = [
+        "accepted", "reflected", "200", "success", "executed",
+        "returned data", "internal", "delayed",
+    ]
+    pos_count = sum(1 for s in positive_runtime_signals if s in rv_ev_lower)
+    if pos_count >= 1 and confidence >= 1:
+        return dict(
+            verdict="TRUE_POSITIVE", final_severity="Low",
+            reason=f"[AUTO-RESOLVED] Runtime verifier shows partial positive signals "
+                   f"({pos_count} indicators) and moderate confidence ({confidence}/10). "
+                   f"Verification detail: {rv_evidence[:150]}. Classified as Low TP.",
+            dev_action="Investigate — some evidence supports this finding.",
+        )
+
+    # ── Rule 5: If confidence is clearly negative AND runtime didn't find anything
+    if confidence <= -2 and pos_count == 0:
+        return dict(
+            verdict="FALSE_POSITIVE", final_severity="Not Exploitable",
+            reason=f"[AUTO-RESOLVED] Low confidence ({confidence}/10) plus inconclusive "
+                   f"runtime verification with no positive indicators. {rv_evidence[:120]}",
+            dev_action="No action — insufficient evidence.",
+        )
+
+    # ── Rule 6: If confidence is clearly positive, just classify as Low TP
+    if confidence >= 1 and not is_injection:
+        return dict(
+            verdict="TRUE_POSITIVE", final_severity="Low",
+            reason=f"[AUTO-RESOLVED] Positive confidence ({confidence}/10) with "
+                   f"inconclusive runtime. Non-injection finding — classified as Low TP. "
+                   f"{rv_evidence[:120]}",
+            dev_action="Review recommended but likely a valid low-severity observation.",
+        )
+
+    return None
+
+
+# ══════════════════════════════════════════════════════════════════════
 # LAYER 1 + 2 + 3: Main classify function
 # ══════════════════════════════════════════════════════════════════════
 
@@ -430,15 +579,23 @@ def classify(finding, test_log):
         if rv_verdict == "DISPROVED":
             r.update(
                 verdict="FALSE_POSITIVE",
-                final_severity="-",
+                final_severity="Not Exploitable",
                 reason=f"[RUNTIME DISPROVED] {rv_evidence}",
                 dev_action="No action — runtime verification confirmed this is not exploitable.",
             )
             return r
 
-        # INCONCLUSIVE — fall through to pattern matching below
-        # but boost/reduce confidence based on what the verifier found
-        r["reason"] = f"[RUNTIME INCONCLUSIVE] {rv_evidence} — using pattern analysis as fallback."
+        # INCONCLUSIVE — smart auto-resolve before falling through
+        # Combine runtime partial signals with HTTP evidence to decide
+        if rv_verdict == "INCONCLUSIVE":
+            inc_decision = _resolve_inconclusive(
+                finding, title, confidence, statuses, bodies, evidence,
+                rv_evidence, rv_details, rv_method
+            )
+            if inc_decision:
+                r.update(**inc_decision)
+                return r
+            r["reason"] = f"[RUNTIME INCONCLUSIVE] {rv_evidence} — using pattern analysis as fallback."
 
     # ==================================================================
     # LAYER 1A: NOT A FINDING - positive observations
@@ -1222,7 +1379,114 @@ def classify(finding, test_log):
         return r
 
     # ==================================================================
-    # LAYER 2: Confidence-based fallback for UNKNOWN finding types
+    # LAYER 1F: BROAD CATCH-ALL for remaining known categories
+    # ==================================================================
+
+    # Authentication/session weakness (generic)
+    if any(k in title for k in ["authentication", "auth bypass", "broken auth",
+                                 "weak password", "password policy", "account lockout",
+                                 "multi-factor", "mfa", "2fa", "token", "bearer"]):
+        has_bypass = any(kw in evidence for kw in ["bypass", "accepted", "200", "success", "no auth"])
+        if has_bypass:
+            r.update(verdict="TRUE_POSITIVE", final_severity="Medium",
+                     cwe="CWE-287", cvss=5.3,
+                     reason="Authentication weakness with evidence of bypass or weak enforcement.",
+                     dev_action="Enforce strong authentication. Implement MFA where appropriate.")
+            return r
+        r.update(verdict="TRUE_POSITIVE", final_severity="Low",
+                 cwe="CWE-287", cvss=3.7,
+                 reason="Authentication hardening recommendation. No active bypass demonstrated.",
+                 dev_action="Review authentication controls. Apply defense-in-depth measures.")
+        return r
+
+    # HTTP method / verb tampering
+    if any(k in title for k in ["http method", "verb tampering", "options method",
+                                 "trace method", "put method", "delete method",
+                                 "method not allowed", "dangerous method"]):
+        r.update(verdict="TRUE_POSITIVE", final_severity="Low",
+                 cwe="CWE-749", cvss=3.7,
+                 reason="Unnecessary HTTP methods enabled. Low risk without specific exploit path.",
+                 dev_action="Disable unnecessary HTTP methods (TRACE, PUT, DELETE) on the web server.")
+        return r
+
+    # Content injection / header injection (non-XSS)
+    if any(k in title for k in ["header injection", "response splitting",
+                                 "crlf injection", "host header"]):
+        has_injection = any(kw in evidence for kw in ["\\r\\n", "crlf", "injected", "reflected"])
+        if has_injection:
+            r.update(verdict="TRUE_POSITIVE", final_severity="Medium",
+                     cwe="CWE-113", cvss=5.3,
+                     reason="HTTP header injection/CRLF confirmed in response.",
+                     dev_action="Sanitize all user input used in HTTP headers.")
+            return r
+        r.update(verdict="FALSE_POSITIVE", final_severity="Not Exploitable",
+                 cwe="CWE-113", cvss=0.0,
+                 reason="Header injection payload not reflected in response headers.",
+                 dev_action="No action — input appears to be sanitized.")
+        return r
+
+    # File upload issues
+    if any(k in title for k in ["file upload", "upload", "unrestricted file",
+                                 "malicious file"]):
+        upload_accepted = any(s == 200 for s in statuses)
+        if upload_accepted:
+            r.update(verdict="TRUE_POSITIVE", final_severity="Medium",
+                     cwe="CWE-434", cvss=5.3,
+                     reason="File upload accepted without apparent restriction.",
+                     dev_action="Validate file type, size, and content. Store outside web root.")
+            return r
+        r.update(verdict="TRUE_POSITIVE", final_severity="Low",
+                 cwe="CWE-434", cvss=3.7,
+                 reason="File upload weakness reported but upload was rejected or blocked.",
+                 dev_action="Ensure file type validation is comprehensive.")
+        return r
+
+    # Directory listing / path disclosure
+    if any(k in title for k in ["directory listing", "directory browsing",
+                                 "path disclosure", "full path", "internal path"]):
+        r.update(verdict="TRUE_POSITIVE", final_severity="Low",
+                 cwe="CWE-548", cvss=3.7,
+                 reason="Directory listing or path disclosure. Aids reconnaissance only.",
+                 dev_action="Disable directory listing. Remove path info from error pages.")
+        return r
+
+    # Insecure communication / mixed content
+    if any(k in title for k in ["mixed content", "insecure resource", "http resource",
+                                 "insecure form", "cleartext"]):
+        r.update(verdict="TRUE_POSITIVE", final_severity="Low",
+                 cwe="CWE-319", cvss=3.7,
+                 reason="Insecure content loaded over HTTP on HTTPS page.",
+                 dev_action="Load all resources over HTTPS. Fix mixed content references.")
+        return r
+
+    # Server-side includes / template issues (non-injection)
+    if any(k in title for k in ["server-side include", "ssi", "source map",
+                                 "backup file", ".bak", ".old", ".swp"]):
+        r.update(verdict="TRUE_POSITIVE", final_severity="Low",
+                 cwe="CWE-538", cvss=3.7,
+                 reason="Potentially sensitive files or includes accessible. Information exposure.",
+                 dev_action="Remove backup files and source maps from production servers.")
+        return r
+
+    # Generic "vulnerability" or "weakness" or "issue" (catch-all for remaining)
+    if any(k in title for k in ["vulnerability", "weakness", "issue", "risk",
+                                 "exposure", "flaw"]):
+        if confidence >= 1:
+            r.update(verdict="TRUE_POSITIVE", final_severity="Low",
+                     reason=f"Generic finding with positive confidence ({confidence}/10). "
+                            "Classified as Low TP for review.",
+                     dev_action="Review and apply recommended fix.")
+            return r
+        if confidence <= -2:
+            r.update(verdict="FALSE_POSITIVE", final_severity="Not Exploitable",
+                     reason=f"Generic finding with negative confidence ({confidence}/10). "
+                            "No evidence supports this claim.",
+                     dev_action="No action — insufficient evidence.")
+            return r
+
+    # ==================================================================
+    # LAYER 2: Confidence-based fallback for truly UNKNOWN finding types
+    # Now with narrower bands — fewer go to manual review
     # ==================================================================
 
     if confidence >= 5:
@@ -1232,25 +1496,36 @@ def classify(finding, test_log):
                  dev_action="Investigate and fix the underlying issue.")
         return r
 
-    if confidence >= 3:
+    if confidence >= 2:
         r.update(verdict="TRUE_POSITIVE", final_severity="Low",
                  reason=f"Moderate confidence ({confidence}/10). Some evidence present "
                         "supporting the finding. Classified as Low TP.",
                  dev_action="Investigate. May warrant Burp Suite confirmation for upgrade.")
         return r
 
+    is_config_finding = any(k in title for k in [
+        "header", "config", "setting", "policy", "cookie", "cache",
+        "transport", "tls", "ssl", "certificate", "encryption",
+        "hardening", "best practice", "recommendation",
+    ])
+
     if confidence >= 0:
-        is_config_finding = any(k in title for k in [
-            "header", "config", "setting", "policy", "cookie", "cache",
-            "transport", "tls", "ssl", "certificate", "encryption",
-            "hardening", "best practice", "recommendation",
-        ])
         if is_config_finding:
             r.update(verdict="TRUE_POSITIVE", final_severity="Low",
                      reason=f"Configuration/hardening finding (confidence {confidence}/10). "
                             "Classified as Low TP — defense-in-depth recommendation.",
                      dev_action="Apply the suggested hardening measure.")
             return r
+
+        all_failed = statuses and all(s >= 400 for s in statuses)
+        if all_failed:
+            r.update(verdict="FALSE_POSITIVE", final_severity="Not Exploitable",
+                     reason=f"Ambiguous confidence ({confidence}/10) but ALL {len(statuses)} "
+                            f"responses returned error/denied ({list(set(statuses))}). "
+                            "Auto-dismissed — no successful exploitation observed.",
+                     dev_action="No action — server rejected all test payloads.")
+            return r
+
         r.update(verdict="MANUAL_REVIEW", final_severity="TBD",
                  reason=f"Insufficient evidence to decide (confidence {confidence}/10). "
                         "No strong positive or negative signals. Requires manual verification "
@@ -1258,12 +1533,17 @@ def classify(finding, test_log):
                  dev_action="Manual review required. Re-test with authenticated session or Burp Suite.")
         return r
 
-    if confidence >= -3:
-        r.update(verdict="MANUAL_REVIEW", final_severity="TBD",
-                 reason=f"Weak signals (confidence {confidence}/10). Negative signals slightly "
-                        "outweigh positive but not enough to confidently dismiss. "
-                        "Needs manual verification.",
-                 dev_action="Manual review recommended. Likely noise but cannot confirm without re-test.")
+    if confidence >= -2:
+        if is_config_finding:
+            r.update(verdict="TRUE_POSITIVE", final_severity="Low",
+                     reason=f"Configuration finding (confidence {confidence}/10). "
+                            "Config findings are valid even with weak signals.",
+                     dev_action="Apply the suggested hardening measure.")
+            return r
+        r.update(verdict="FALSE_POSITIVE", final_severity="Not Exploitable",
+                 reason=f"Weak signals (confidence {confidence}/10). Negative signals outweigh "
+                        "positive. Auto-dismissed — likely scanner noise.",
+                 dev_action="No action. Re-test if concerned.")
         return r
 
     # Very low confidence — clearly FP

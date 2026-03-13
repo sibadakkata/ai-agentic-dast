@@ -695,19 +695,280 @@ async def _verify_rate_limit(client: httpx.AsyncClient, finding: dict) -> dict:
                    {"statuses": statuses, "exchanges": exchanges})
 
 
+async def _verify_cors(client: httpx.AsyncClient, finding: dict) -> dict:
+    """Verify CORS misconfiguration by checking Access-Control headers."""
+    url = finding.get("url", "")
+    if not url:
+        return _result("INCONCLUSIVE", "cors_check", "Missing URL.")
+
+    exchanges = []
+    evil_origin = "https://evil-cors-test.example.com"
+
+    resp = await _request(client, "OPTIONS", url, headers={
+        "Origin": evil_origin,
+        "Access-Control-Request-Method": "GET",
+    })
+    exchanges.append(_capture(resp, url, "OPTIONS", label=f"CORS preflight with Origin: {evil_origin}"))
+
+    acao = (resp.headers.get("access-control-allow-origin", "") if resp else "")
+    acac = (resp.headers.get("access-control-allow-credentials", "").lower() if resp else "")
+
+    if not acao:
+        resp_get = await _get(client, url, headers={"Origin": evil_origin})
+        exchanges.append(_capture(resp_get, url, "GET", label=f"CORS GET with Origin: {evil_origin}"))
+        if resp_get:
+            acao = resp_get.headers.get("access-control-allow-origin", "")
+            acac = resp_get.headers.get("access-control-allow-credentials", "").lower()
+            resp = resp_get
+
+    if resp is None:
+        return _result("INCONCLUSIVE", "cors_check", "Both OPTIONS and GET requests failed.",
+                       {"exchanges": exchanges})
+
+    if acao == "*" and acac == "true":
+        return _result("CONFIRMED", "cors_inspection",
+                       "CORS allows any origin WITH credentials. Critical misconfiguration.",
+                       {"acao": acao, "acac": acac, "exchanges": exchanges})
+
+    if evil_origin.lower() in acao.lower():
+        if acac == "true":
+            return _result("CONFIRMED", "cors_inspection",
+                           f"CORS reflects attacker origin ({evil_origin}) with credentials=true.",
+                           {"acao": acao, "acac": acac, "exchanges": exchanges})
+        return _result("CONFIRMED", "cors_inspection",
+                       f"CORS reflects attacker origin ({evil_origin}). "
+                       "Lower risk without credentials but still a misconfiguration.",
+                       {"acao": acao, "exchanges": exchanges})
+
+    if acao == "*":
+        return _result("CONFIRMED", "cors_inspection",
+                       "CORS allows any origin (Access-Control-Allow-Origin: *). "
+                       "Low risk for public APIs, medium for authenticated endpoints.",
+                       {"acao": acao, "exchanges": exchanges})
+
+    if not acao:
+        return _result("DISPROVED", "cors_inspection",
+                       "No Access-Control-Allow-Origin header returned. "
+                       "Default same-origin policy is enforced (secure).",
+                       {"exchanges": exchanges})
+
+    return _result("DISPROVED", "cors_inspection",
+                   f"CORS configured with specific origin: {acao[:100]}. Not reflecting attacker origin.",
+                   {"acao": acao, "exchanges": exchanges})
+
+
+async def _verify_info_disclosure(client: httpx.AsyncClient, finding: dict) -> dict:
+    """Verify information disclosure by checking response headers and body."""
+    url = finding.get("url", "")
+    if not url:
+        return _result("INCONCLUSIVE", "info_check", "Missing URL.")
+
+    resp = await _get(client, url)
+    if resp is None:
+        return _result("INCONCLUSIVE", "info_check", "Could not reach URL.")
+
+    exchanges = [_capture(resp, url, "GET", label="Fetch URL for info disclosure check")]
+    headers_str = "\n".join(f"{k}: {v}" for k, v in resp.headers.items())
+    exchanges[0]["response_headers"] = headers_str[:1500]
+    body = _body_text(resp)
+
+    version_headers = {}
+    for h in ["server", "x-powered-by", "x-aspnet-version", "x-aspnetmvc-version"]:
+        val = resp.headers.get(h)
+        if val:
+            version_headers[h] = val
+
+    debug_indicators = [
+        "stack trace", "traceback", "exception", "debug mode",
+        "sqlstate", "at line", "file \"", "in /var/", "in /home/",
+        "django.core", "laravel", "symfony", "express",
+    ]
+    debug_found = [kw for kw in debug_indicators if kw in body]
+
+    if version_headers and debug_found:
+        return _result("CONFIRMED", "info_disclosure_inspection",
+                       f"Server version headers ({version_headers}) AND debug info in body: {debug_found[:3]}",
+                       {"version_headers": version_headers, "debug_in_body": debug_found[:5],
+                        "exchanges": exchanges})
+
+    if version_headers:
+        return _result("CONFIRMED", "info_disclosure_inspection",
+                       f"Server version headers exposed: {version_headers}",
+                       {"version_headers": version_headers, "exchanges": exchanges})
+
+    if debug_found:
+        return _result("CONFIRMED", "info_disclosure_inspection",
+                       f"Debug/stack trace information in response body: {debug_found[:3]}",
+                       {"debug_in_body": debug_found[:5], "exchanges": exchanges})
+
+    return _result("DISPROVED", "info_disclosure_inspection",
+                   "No version headers and no debug info found in response.",
+                   {"exchanges": exchanges})
+
+
+async def _verify_tls_headers(client: httpx.AsyncClient, finding: dict) -> dict:
+    """Verify TLS/transport security by checking HSTS and scheme."""
+    url = finding.get("url", "")
+    if not url:
+        return _result("INCONCLUSIVE", "tls_check", "Missing URL.")
+
+    if url.startswith("http://"):
+        https_url = url.replace("http://", "https://", 1)
+    else:
+        https_url = url
+
+    resp = await _get(client, https_url)
+    if resp is None:
+        return _result("INCONCLUSIVE", "tls_check", "Could not reach URL over HTTPS.")
+
+    exchanges = [_capture(resp, https_url, "GET", label="Fetch over HTTPS for TLS header check")]
+    hsts = resp.headers.get("strict-transport-security", "")
+
+    title = (finding.get("title", "") or "").lower()
+    if "hsts" in title or "transport" in title:
+        if hsts:
+            return _result("DISPROVED", "tls_header_check",
+                           f"HSTS header is present: {hsts[:100]}",
+                           {"hsts": hsts, "exchanges": exchanges})
+        return _result("CONFIRMED", "tls_header_check",
+                       "HSTS header is missing. Site does not enforce HTTPS via HSTS.",
+                       {"exchanges": exchanges})
+
+    if hsts and resp.status_code == 200:
+        return _result("DISPROVED", "tls_header_check",
+                       f"HTTPS works and HSTS is set: {hsts[:100]}",
+                       {"hsts": hsts, "status": resp.status_code, "exchanges": exchanges})
+
+    return _result("CONFIRMED", "tls_header_check",
+                   f"TLS issue: HSTS={'present' if hsts else 'missing'}, "
+                   f"status={resp.status_code}",
+                   {"hsts": hsts or "(absent)", "status": resp.status_code,
+                    "exchanges": exchanges})
+
+
+async def _verify_sensitive_data(client: httpx.AsyncClient, finding: dict) -> dict:
+    """Verify sensitive data exposure in responses."""
+    url = finding.get("url", "")
+    if not url:
+        return _result("INCONCLUSIVE", "sensitive_data_check", "Missing URL.")
+
+    resp = await _get(client, url)
+    if resp is None:
+        return _result("INCONCLUSIVE", "sensitive_data_check", "Could not reach URL.")
+
+    exchanges = [_capture(resp, url, "GET", label="Fetch URL to check for sensitive data")]
+    body = _body_text(resp)
+
+    secret_patterns = [
+        (r'(?:api[_-]?key|apikey)["\s:=]+["\']?[A-Za-z0-9_\-]{20,}', "API key"),
+        (r'(?:password|passwd|pwd)["\s:=]+["\']?[^\s"\']{4,}', "password"),
+        (r'(?:secret|token)["\s:=]+["\']?[A-Za-z0-9_\-]{16,}', "secret/token"),
+        (r'(?:aws_access_key_id|aws_secret)["\s:=]+[A-Za-z0-9/+=]{16,}', "AWS credential"),
+        (r'(?:private[_-]?key|BEGIN RSA|BEGIN PRIVATE)', "private key"),
+        (r'(?:bearer\s+)[A-Za-z0-9_\-\.]{20,}', "bearer token"),
+        (r'(?:jdbc:|mongodb://|mysql://|postgres://)\S+', "connection string"),
+    ]
+
+    found_secrets = []
+    for pattern, label in secret_patterns:
+        if re.search(pattern, body, re.IGNORECASE):
+            found_secrets.append(label)
+
+    html_comments_with_secrets = []
+    comments = re.findall(r'<!--(.*?)-->', body, re.DOTALL)
+    for comment in comments[:20]:
+        if any(kw in comment for kw in ["password", "secret", "key", "token", "todo", "fixme", "hack"]):
+            html_comments_with_secrets.append(comment[:100])
+
+    if found_secrets:
+        return _result("CONFIRMED", "sensitive_data_inspection",
+                       f"Sensitive data found in response: {found_secrets}",
+                       {"secrets_found": found_secrets,
+                        "comments_with_secrets": html_comments_with_secrets[:3],
+                        "exchanges": exchanges})
+
+    if html_comments_with_secrets:
+        return _result("CONFIRMED", "sensitive_data_inspection",
+                       f"HTML comments contain sensitive references: {html_comments_with_secrets[:2]}",
+                       {"comments_with_secrets": html_comments_with_secrets[:5],
+                        "exchanges": exchanges})
+
+    return _result("DISPROVED", "sensitive_data_inspection",
+                   "No secrets, credentials, or sensitive data patterns found in response body.",
+                   {"exchanges": exchanges})
+
+
+async def _verify_jwt(client: httpx.AsyncClient, finding: dict) -> dict:
+    """Verify JWT/token security issues."""
+    url = finding.get("url", "")
+    if not url:
+        return _result("INCONCLUSIVE", "jwt_check", "Missing URL.")
+
+    exchanges = []
+    resp_normal = await _get(client, url)
+    exchanges.append(_capture(resp_normal, url, "GET", label="Normal authenticated request"))
+
+    none_alg_token = "eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0.eyJzdWIiOiIxMjM0NTY3ODkwIn0."
+    resp_none = await _get(client, url, headers={"Authorization": f"Bearer {none_alg_token}"})
+    exchanges.append(_capture(resp_none, url, "GET", label="JWT with alg=none"))
+
+    expired_token = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxIiwiZXhwIjoxMDAwMDAwMDAwfQ.invalid"
+    resp_expired = await _get(client, url, headers={"Authorization": f"Bearer {expired_token}"})
+    exchanges.append(_capture(resp_expired, url, "GET", label="Expired/invalid JWT"))
+
+    none_accepted = resp_none and resp_none.status_code == 200
+    expired_accepted = resp_expired and resp_expired.status_code == 200
+    normal_ok = resp_normal and resp_normal.status_code == 200
+
+    if none_accepted and normal_ok:
+        return _result("CONFIRMED", "jwt_none_alg",
+                       "Server accepts JWT with alg=none. Critical authentication bypass.",
+                       {"none_status": resp_none.status_code, "exchanges": exchanges})
+
+    if expired_accepted and not none_accepted and normal_ok:
+        return _result("CONFIRMED", "jwt_expired_accepted",
+                       "Server accepts expired/invalid JWT tokens.",
+                       {"expired_status": resp_expired.status_code, "exchanges": exchanges})
+
+    if resp_none and resp_none.status_code in (401, 403) and \
+       resp_expired and resp_expired.status_code in (401, 403):
+        return _result("DISPROVED", "jwt_validation",
+                       f"Server correctly rejects invalid JWTs "
+                       f"(alg=none: {resp_none.status_code}, expired: {resp_expired.status_code}).",
+                       {"exchanges": exchanges})
+
+    has_500 = (resp_none and resp_none.status_code >= 500) or \
+              (resp_expired and resp_expired.status_code >= 500)
+    if has_500:
+        codes = []
+        if resp_none and resp_none.status_code >= 500:
+            codes.append(f"alg=none→{resp_none.status_code}")
+        if resp_expired and resp_expired.status_code >= 500:
+            codes.append(f"expired→{resp_expired.status_code}")
+        return _result("CONFIRMED", "jwt_error_handling",
+                       f"Server returns 5xx on invalid JWTs ({', '.join(codes)}). "
+                       "Expected 401/403. Broken error handling on auth failures.",
+                       {"exchanges": exchanges})
+
+    return _result("INCONCLUSIVE", "jwt_check",
+                   f"Mixed results: alg=none={resp_none.status_code if resp_none else '?'}, "
+                   f"expired={resp_expired.status_code if resp_expired else '?'}",
+                   {"exchanges": exchanges})
+
+
 # ──────────────────────────────────────────────────────────────────────
 # Dispatcher: route finding to the right verifier
 # ──────────────────────────────────────────────────────────────────────
 
 VULN_DISPATCH = [
-    (["sql", "injection"],                                       _verify_sqli),
+    (["sql injection", "sqli", "sql "],                          _verify_sqli),
     (["xss", "cross-site scripting", "cross site scripting"],    _verify_xss),
-    (["ssrf", "server-side request"],                            _verify_ssrf),
+    (["ssrf", "server-side request forgery"],                    _verify_ssrf),
     (["xxe", "xml external", "xml entity"],                      _verify_xxe),
     (["path traversal", "directory traversal",
       "local file inclusion", "file inclusion"],                 _verify_path_traversal),
     (["command injection", "remote code execution",
-      "os command", "shell injection"],                          _verify_command_injection),
+      "os command", "shell injection", "code execution"],        _verify_command_injection),
     (["open redirect"],                                          _verify_open_redirect),
     (["csrf"],                                                   _verify_csrf),
     (["idor", "insecure direct object", "broken object"],        _verify_idor),
@@ -716,6 +977,17 @@ VULN_DISPATCH = [
       "x-content-type", "security header",
       "referrer policy", "permissions policy"],                  _verify_missing_headers),
     (["cookie", "httponly", "secure flag", "samesite"],          _verify_cookie_attrs),
+    (["cors", "cross-origin resource", "access-control"],        _verify_cors),
+    (["information disclosure", "server version",
+      "version disclosure", "stack trace", "verbose error",
+      "debug", "server information", "x-powered-by"],            _verify_info_disclosure),
+    (["tls", "ssl", "transport security",
+      "https enforcement", "certificate"],                       _verify_tls_headers),
+    (["sensitive data", "data exposure", "data leak",
+      "credential", "api key", "secret", "token exposure",
+      "source code", "html comment"],                            _verify_sensitive_data),
+    (["jwt", "json web token", "token validation",
+      "token security", "bearer token"],                         _verify_jwt),
 ]
 
 
