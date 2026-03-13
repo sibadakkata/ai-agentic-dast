@@ -66,6 +66,7 @@ input::placeholder { color: #9ca3af; }
 .badge-error { background: rgba(220,38,38,0.1); color: var(--red); }
 .badge-cancelled { background: rgba(202,138,4,0.1); color: var(--yellow); }
 .badge-stopping { background: rgba(202,138,4,0.1); color: var(--yellow); }
+.badge-pausing { background: rgba(202,138,4,0.1); color: var(--yellow); }
 .badge-paused { background: rgba(202,138,4,0.1); color: var(--yellow); }
 
 .severity { font-weight: 700; font-size: 11px; }
@@ -502,6 +503,12 @@ async function loadScans() {
       <div>${s.cost != null ? '$' + s.cost.toFixed(4) : '-'}</div>
       <div style="display:flex;align-items:center;gap:6px;">
         <span>${s.findings_count != null ? s.findings_count + ' findings' : '-'}</span>
+        ${s.status === 'running' ? `<button class="btn btn-outline btn-sm" onclick="event.stopPropagation();pauseScanById('${s.id}',this)" style="padding:3px 8px;font-size:10px;color:var(--yellow);border-color:rgba(202,138,4,0.3);" title="Pause scan">⏸ Pause</button>` : ''}
+        ${s.status === 'running' ? `<button class="btn btn-outline btn-sm" onclick="event.stopPropagation();stopScanById('${s.id}',this)" style="padding:3px 8px;font-size:10px;color:var(--red);border-color:rgba(220,38,38,0.3);" title="Stop scan">■ Stop</button>` : ''}
+        ${s.status === 'pausing' ? `<span style="font-size:10px;color:var(--yellow);font-weight:600;">Pausing...</span>` : ''}
+        ${s.status === 'paused' ? `<button class="btn btn-outline btn-sm" onclick="event.stopPropagation();resumeScanById('${s.id}',this)" style="padding:3px 8px;font-size:10px;color:var(--green);border-color:rgba(22,163,74,0.3);" title="Resume scan">▶ Resume</button>` : ''}
+        ${(s.status === 'paused' || s.status === 'pausing') ? `<button class="btn btn-outline btn-sm" onclick="event.stopPropagation();stopScanById('${s.id}',this)" style="padding:3px 8px;font-size:10px;color:var(--red);border-color:rgba(220,38,38,0.3);" title="Stop scan">■ Stop</button>` : ''}
+        ${s.status === 'stopping' ? `<span style="font-size:10px;color:var(--yellow);font-weight:600;">Stopping...</span>` : ''}
         ${s.status === 'completed' ? `<button class="btn btn-outline btn-sm" onclick="event.stopPropagation();rescanById('${s.id}')" style="padding:3px 8px;font-size:10px;color:var(--accent);border-color:var(--accent);" title="Re-scan (new entry)">↻ Re-scan</button>` : ''}
         ${(s.status === 'error' || s.status === 'cancelled') ? `<button class="btn btn-outline btn-sm" onclick="event.stopPropagation();retryScanById('${s.id}')" style="padding:3px 8px;font-size:10px;color:var(--accent);border-color:var(--accent);" title="${s.phases_completed > 0 ? 'Continue from phase ' + (s.phases_completed+1) : 'Re-run scan'}">↻${s.phases_completed > 0 ? ' Continue' : ' Re-run'}</button>` : ''}
         <button class="btn btn-outline btn-sm" onclick="event.stopPropagation();deleteScan('${s.id}')" style="padding:3px 8px;font-size:10px;color:var(--red);border-color:rgba(220,38,38,0.3);" title="Delete scan">✕</button>
@@ -636,7 +643,7 @@ function showScanControls(state) {
   const pause = document.getElementById('pause-scan-btn');
   const resume = document.getElementById('resume-scan-btn');
   if (stop) {
-    stop.style.display = (state === 'running' || state === 'paused') ? 'inline-block' : 'none';
+    stop.style.display = (state === 'running' || state === 'paused' || state === 'pausing') ? 'inline-block' : 'none';
     stop.disabled = false; stop.textContent = 'Stop Scan';
   }
   if (pause) {
@@ -644,11 +651,12 @@ function showScanControls(state) {
     pause.disabled = false; pause.textContent = 'Pause';
   }
   if (resume) {
-    resume.style.display = state === 'paused' ? 'inline-block' : 'none';
+    resume.style.display = (state === 'paused' || state === 'pausing') ? 'inline-block' : 'none';
     resume.disabled = false; resume.textContent = 'Resume';
   }
 }
 
+let stopRequestedAt = null;
 async function stopScan() {
   if (!currentScanId) return;
   const stopBtn = document.getElementById('stop-scan-btn');
@@ -663,7 +671,8 @@ async function stopScan() {
       stopBtn.textContent = 'Stop Scan';
       return;
     }
-    document.getElementById('scan-status-msg').textContent = 'Stop requested — scan will halt after current step...';
+    stopRequestedAt = Date.now();
+    document.getElementById('scan-status-msg').textContent = 'Stop requested — waiting for current LLM/tool call to finish...';
   } catch(e) {
     alert('Error stopping scan: ' + e.message);
     stopBtn.disabled = false;
@@ -671,6 +680,34 @@ async function stopScan() {
   }
 }
 
+async function stopScanById(scanId, btn) {
+  if (btn) { btn.disabled = true; btn.textContent = 'Stopping...'; }
+  try {
+    const resp = await fetch(`/api/scan/${scanId}/stop`, { method: 'POST' });
+    if (resp.ok) loadScans();
+    else { const d = await resp.json(); alert(d.detail || 'Failed to stop'); if(btn){btn.disabled=false;btn.textContent='■ Stop';} }
+  } catch(e) { alert('Error: '+e.message); if(btn){btn.disabled=false;btn.textContent='■ Stop';} }
+}
+
+async function pauseScanById(scanId, btn) {
+  if (btn) { btn.disabled = true; btn.textContent = 'Pausing...'; }
+  try {
+    const resp = await fetch(`/api/scan/${scanId}/pause`, { method: 'POST' });
+    if (resp.ok) loadScans();
+    else { const d = await resp.json(); alert(d.detail || 'Failed to pause'); if(btn){btn.disabled=false;btn.textContent='⏸ Pause';} }
+  } catch(e) { alert('Error: '+e.message); if(btn){btn.disabled=false;btn.textContent='⏸ Pause';} }
+}
+
+async function resumeScanById(scanId, btn) {
+  if (btn) { btn.disabled = true; btn.textContent = 'Resuming...'; }
+  try {
+    const resp = await fetch(`/api/scan/${scanId}/resume`, { method: 'POST' });
+    if (resp.ok) loadScans();
+    else { const d = await resp.json(); alert(d.detail || 'Failed to resume'); if(btn){btn.disabled=false;btn.textContent='▶ Resume';} }
+  } catch(e) { alert('Error: '+e.message); if(btn){btn.disabled=false;btn.textContent='▶ Resume';} }
+}
+
+let pauseRequestedAt = null;
 async function pauseScan() {
   if (!currentScanId) return;
   const btn = document.getElementById('pause-scan-btn');
@@ -678,13 +715,14 @@ async function pauseScan() {
   try {
     const resp = await fetch(`/api/scan/${currentScanId}/pause`, { method: 'POST' });
     if (!resp.ok) { const d = await resp.json(); alert(d.detail || 'Failed to pause'); btn.disabled = false; btn.textContent = 'Pause'; return; }
-    showScanControls('paused');
-    document.getElementById('scan-status-msg').textContent = 'Scan paused — will pause after current step...';
+    pauseRequestedAt = Date.now();
+    document.getElementById('scan-status-msg').textContent = 'Pause requested — waiting for current step to finish...';
   } catch(e) { alert('Error: ' + e.message); btn.disabled = false; btn.textContent = 'Pause'; }
 }
 
 async function resumeScan() {
   if (!currentScanId) return;
+  pauseRequestedAt = null;
   const btn = document.getElementById('resume-scan-btn');
   btn.disabled = true; btn.textContent = 'Resuming...';
   try {
@@ -882,12 +920,33 @@ async function pollLiveView(scanId) {
            <a href="${esc(data.target)}" target="_blank" style="color:var(--accent2);text-decoration:none;">${esc(data.target)}</a>
          </div>` : '';
     if (data.status === 'running') showScanControls('running');
-    else if (data.status === 'paused') showScanControls('paused');
-    else if (data.status === 'completed' || data.status === 'error' || data.status === 'cancelled') showScanControls('idle');
+    else if (data.status === 'stopping') {
+      const stopBtn = document.getElementById('stop-scan-btn');
+      if (stopBtn) { stopBtn.disabled = true; stopBtn.textContent = 'Stopping...'; }
+    }
+    else if (data.status === 'pausing') {
+      const pauseBtn = document.getElementById('pause-scan-btn');
+      if (pauseBtn) { pauseBtn.disabled = true; pauseBtn.textContent = 'Pausing...'; }
+      const stopBtn = document.getElementById('stop-scan-btn');
+      if (stopBtn) { stopBtn.style.display = 'inline-block'; stopBtn.disabled = false; stopBtn.textContent = 'Stop Scan'; }
+    }
+    else if (data.status === 'paused') { showScanControls('paused'); pauseRequestedAt = null; }
+    else if (data.status === 'completed' || data.status === 'error' || data.status === 'cancelled') { showScanControls('idle'); stopRequestedAt = null; pauseRequestedAt = null; }
+
+    let stoppingLabel = 'Stopping';
+    if (data.status === 'stopping' && stopRequestedAt) {
+      const elapsed = Math.round((Date.now() - stopRequestedAt) / 1000);
+      stoppingLabel = `Stopping (${elapsed}s) — waiting for current step`;
+    }
+    let pausingLabel = 'Pausing';
+    if (data.status === 'pausing' && pauseRequestedAt) {
+      const elapsed = Math.round((Date.now() - pauseRequestedAt) / 1000);
+      pausingLabel = `Pausing (${elapsed}s) — waiting for current step`;
+    }
 
     document.getElementById('live-scan-title').innerHTML =
-      data.status === 'running' || data.status === 'stopping'
-        ? `<span class="scanning-indicator"></span>${data.status === 'stopping' ? 'Stopping' : 'Scan In Progress'} — ${esc(data.model || '')}${targetLine}`
+      data.status === 'running' || data.status === 'stopping' || data.status === 'pausing'
+        ? `<span class="scanning-indicator"></span>${data.status === 'stopping' ? stoppingLabel : data.status === 'pausing' ? pausingLabel : 'Scan In Progress'} — ${esc(data.model || '')}${targetLine}`
         : data.status === 'paused'
           ? `<span style="color:var(--yellow);">⏸</span> Scan Paused — ${esc(data.model || '')}${targetLine}`
           : data.status === 'completed'
@@ -1253,7 +1312,7 @@ async function viewScan(scanId) {
     if (!statusResp.ok) { alert('Scan not found'); return; }
     const statusData = await statusResp.json();
 
-    if (statusData.status === 'running' || statusData.status === 'paused' || statusData.status === 'stopping') {
+    if (statusData.status === 'running' || statusData.status === 'paused' || statusData.status === 'pausing' || statusData.status === 'stopping') {
       openLiveView(scanId);
       showScanControls(statusData.status === 'paused' ? 'paused' : 'running');
       return;

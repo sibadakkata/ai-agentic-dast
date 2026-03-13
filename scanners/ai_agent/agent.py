@@ -254,6 +254,7 @@ async def run_scan(
                 if cancel_flag and cancel_flag.is_set():
                     raise ScanCancelled("Scan stopped by user")
                 time.sleep(1)
+            _cb("resumed", {})
 
     SECURITY_TEST_TOOLS = {
         "inject_payload", "fuzz_parameter", "api_request",
@@ -311,6 +312,7 @@ async def run_scan(
             registry=registry,
             auth_session=auth_session,
             allowed_domains=allowed_domains,
+            cancel_flag=cancel_flag,
         )
 
         app_info = await detect_app_type(page)
@@ -470,7 +472,10 @@ async def run_scan(
                         model=model,
                         messages=messages,
                         tools=TOOL_DEFINITIONS,
+                        cancel_flag=cancel_flag,
                     )
+                except ScanCancelled:
+                    raise
                 except ContentFiltered:
                     logger.warning(
                         "Content filtered by %s at phase %s step %d — model guardrails blocked request",
@@ -487,7 +492,7 @@ async def run_scan(
                     try:
                         _sanitize_all_messages(messages)
                         messages = _repair_tool_pairs(messages)
-                        response = router.complete(model=model, messages=messages, tools=TOOL_DEFINITIONS)
+                        response = router.complete(model=model, messages=messages, tools=TOOL_DEFINITIONS, cancel_flag=cancel_flag)
                     except ContentFiltered:
                         raise ContentFiltered(
                             f"Model {model} refuses security-testing prompts (content guardrails). "
@@ -500,10 +505,11 @@ async def run_scan(
                     logger.warning("Malformed message sequence at phase %s step %d, recovering", phase.id, step)
                     messages = _recover_messages(messages)
                     try:
-                        response = router.complete(model=model, messages=messages, tools=TOOL_DEFINITIONS)
+                        response = router.complete(model=model, messages=messages, tools=TOOL_DEFINITIONS, cancel_flag=cancel_flag)
                     except MalformedMessages:
                         logger.error("Recovery failed at phase %s, skipping to next phase", phase.id)
                         break
+                _check_cancel()
                 if not response or not getattr(response, "choices", None):
                     logger.warning("Empty response from %s at phase %s step %d", model, phase.id, step)
                     break
@@ -516,6 +522,7 @@ async def run_scan(
                 unknown_in_batch = 0
                 if tool_calls:
                     for tc in tool_calls:
+                        _check_cancel()
                         tc_id = tc.get("id") if isinstance(tc, dict) else getattr(tc, "id", "")
                         fn = tc.get("function") if isinstance(tc, dict) else getattr(tc, "function", {})
                         fn_name = fn.get("name") if isinstance(fn, dict) else getattr(fn, "name", "")
@@ -650,6 +657,8 @@ async def run_scan(
                     cookies=cookie_dict,
                     headers=headers,
                     on_progress=_verify_progress,
+                    cancel_flag=cancel_flag,
+                    pause_flag=pause_flag,
                 )
 
                 confirmed = sum(1 for f in verified if f.get("verdict") == "CONFIRMED")

@@ -77,7 +77,7 @@ def _load_scans_from_disk():
                     progress = info.get("progress", [])
                     progress.append("--- Container stopped/restarted during scan ---")
                     info["progress"] = progress
-                elif info.get("status") in ("stopping", "paused"):
+                elif info.get("status") in ("stopping", "paused", "pausing"):
                     info["status"] = "cancelled"
                     progress = info.get("progress", [])
                     progress.append("--- Container restarted — marked as cancelled ---")
@@ -348,6 +348,14 @@ async def _run_scan_task(scan_id, target_url, username, password, model, scan_mo
                 scan["live_crawled"].append({"url": url, "type": ctype, "tool": tool})
                 label = {"page": "Page", "api": "API", "test": "Test"}.get(ctype, "URL")
                 scan["progress"].append(f"Crawled ({label}): {url} (#{data.get('count', 0)})")
+            elif event == "paused":
+                scan["status"] = "paused"
+                scan["progress"].append("Scan paused — waiting for resume...")
+                _save_scans_to_disk()
+            elif event == "resumed":
+                scan["status"] = "running"
+                scan["progress"].append("Scan resumed — continuing...")
+                _save_scans_to_disk()
             elif event == "out_of_scope":
                 url = data.get("url", "")
                 if url and url not in [u["url"] for u in scan.get("live_out_of_scope", [])]:
@@ -501,11 +509,14 @@ async def stop_scan(scan_id: str, creds=Depends(_verify)):
     if scan_id not in SCANS:
         raise HTTPException(status_code=404, detail="Scan not found")
     s = SCANS[scan_id]
-    if s.get("status") != "running":
+    if s.get("status") not in ("running", "paused", "pausing"):
         raise HTTPException(status_code=400, detail=f"Scan is not running (status: {s.get('status')})")
     flag = CANCEL_FLAGS.get(scan_id)
     if flag:
         flag.set()
+    pause = PAUSE_FLAGS.get(scan_id)
+    if pause:
+        pause.clear()
     s["status"] = "stopping"
     s["progress"] = s.get("progress", []) + ["Stop requested by user — cancelling after current step..."]
     _save_scans_to_disk()
@@ -518,15 +529,15 @@ async def pause_scan(scan_id: str, creds=Depends(_verify)):
     if scan_id not in SCANS:
         raise HTTPException(status_code=404, detail="Scan not found")
     s = SCANS[scan_id]
-    if s.get("status") != "running":
+    if s.get("status") not in ("running",):
         raise HTTPException(status_code=400, detail=f"Scan is not running (status: {s.get('status')})")
     flag = PAUSE_FLAGS.get(scan_id)
     if flag:
         flag.set()
-    s["status"] = "paused"
-    s["progress"] = s.get("progress", []) + ["Scan paused by user — will pause after current step..."]
+    s["status"] = "pausing"
+    s["progress"] = s.get("progress", []) + ["Pause requested — will pause after current step..."]
     _save_scans_to_disk()
-    return {"scan_id": scan_id, "status": "paused"}
+    return {"scan_id": scan_id, "status": "pausing", "message": "Pause requested. Scan will pause after the current step completes."}
 
 
 @app.post("/api/scan/{scan_id}/resume", tags=["Scans"])
@@ -535,7 +546,7 @@ async def resume_scan(scan_id: str, creds=Depends(_verify)):
     if scan_id not in SCANS:
         raise HTTPException(status_code=404, detail="Scan not found")
     s = SCANS[scan_id]
-    if s.get("status") != "paused":
+    if s.get("status") not in ("paused", "pausing"):
         raise HTTPException(status_code=400, detail=f"Scan is not paused (status: {s.get('status')})")
     flag = PAUSE_FLAGS.get(scan_id)
     if flag:
@@ -723,7 +734,7 @@ async def delete_scan(scan_id: str, creds=Depends(_verify)):
     deleted = []
     if scan_id in SCANS:
         cur_status = SCANS[scan_id].get("status")
-        if cur_status in ("running", "paused", "stopping"):
+        if cur_status in ("running", "paused", "pausing", "stopping"):
             flag = CANCEL_FLAGS.get(scan_id)
             if flag:
                 flag.set()
@@ -761,7 +772,7 @@ async def delete_scan(scan_id: str, creds=Depends(_verify)):
 async def delete_all_scans(creds=Depends(_verify)):
     """Stop all running scans and delete all scan records, result files, and reports."""
     for sid, info in list(SCANS.items()):
-        if info.get("status") in ("running", "paused", "stopping"):
+        if info.get("status") in ("running", "paused", "pausing", "stopping"):
             flag = CANCEL_FLAGS.get(sid)
             if flag:
                 flag.set()

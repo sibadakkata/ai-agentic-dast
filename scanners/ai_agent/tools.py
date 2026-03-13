@@ -83,12 +83,14 @@ class ScanTools:
         registry: EndpointRegistry,
         auth_session: AuthSession | None = None,
         allowed_domains: set | None = None,
+        cancel_flag=None,
     ):
         self._page = page
         self._http_client = http_client
         self._registry = registry
         self._auth_session = auth_session
         self._allowed_domains = allowed_domains or set()
+        self._cancel_flag = cancel_flag
         self._out_of_scope: list[str] = []
         self._network_log: list[dict] = []
         self._ws_connections: dict[str, Any] = {}
@@ -120,7 +122,13 @@ class ScanTools:
         """Return list of unique URLs that were blocked as out-of-scope."""
         return list(self._out_of_scope)
 
+    def _is_cancelled(self) -> bool:
+        return self._cancel_flag is not None and self._cancel_flag.is_set()
+
     async def execute(self, function_name: str, arguments: str) -> dict:
+        if self._is_cancelled():
+            from .agent import ScanCancelled
+            raise ScanCancelled("Scan stopped by user")
         try:
             args = json.loads(arguments) if arguments else {}
         except json.JSONDecodeError as e:

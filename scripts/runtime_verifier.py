@@ -760,6 +760,8 @@ async def verify_all_findings(
     cookies: dict | None = None,
     headers: dict | None = None,
     on_progress=None,
+    cancel_flag=None,
+    pause_flag=None,
 ) -> list[dict]:
     """Verify all findings from a scan against the live target.
 
@@ -769,12 +771,16 @@ async def verify_all_findings(
         cookies: auth cookies from the scan session
         headers: auth headers from the scan session
         on_progress: optional callback(idx, total, finding_title, verdict)
+        cancel_flag: threading.Event to signal cancellation
+        pause_flag: threading.Event to signal pause
 
     Returns:
         list of findings enriched with verification data
     """
     if not findings:
         return []
+
+    import time as _time
 
     async with httpx.AsyncClient(
         cookies=cookies or {},
@@ -785,6 +791,17 @@ async def verify_all_findings(
         verified = []
         total = len(findings)
         for idx, finding in enumerate(findings):
+            if cancel_flag and cancel_flag.is_set():
+                for remaining in findings[idx:]:
+                    verified.append({**remaining, **NOT_VERIFIED})
+                break
+            if pause_flag and pause_flag.is_set():
+                while pause_flag.is_set():
+                    if cancel_flag and cancel_flag.is_set():
+                        for remaining in findings[idx:]:
+                            verified.append({**remaining, **NOT_VERIFIED})
+                        return verified
+                    _time.sleep(1)
             logger.info("Verifying [%d/%d]: %s", idx + 1, total, finding.get("title", "?"))
             result = await verify_finding(client, finding)
             verified.append(result)

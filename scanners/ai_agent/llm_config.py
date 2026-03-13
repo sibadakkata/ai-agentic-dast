@@ -65,19 +65,28 @@ class LLMRouter:
         model: str,
         messages: list[dict],
         tools: list[dict] | None = None,
+        cancel_flag=None,
         **kwargs,
     ):
+        from .agent import ScanCancelled
+
         delays = [2, 4, 8]
         last_exc: BaseException | None = None
         use_direct = self._use_direct(model) or not self._has_proxy
         for attempt in range(4):
+            if cancel_flag and cancel_flag.is_set():
+                raise ScanCancelled("Scan stopped by user")
             try:
                 if use_direct:
                     response = self._direct_complete(model, messages, tools, **kwargs)
                 else:
                     response = self._proxy_complete(model, messages, tools, **kwargs)
                 self._track(model, response)
+                if cancel_flag and cancel_flag.is_set():
+                    raise ScanCancelled("Scan stopped by user")
                 return response
+            except ScanCancelled:
+                raise
             except Exception as e:
                 last_exc = e
                 err_msg = str(e).lower()
@@ -101,7 +110,10 @@ class LLMRouter:
                         "Rate limit hit for %s, retrying in %ds (attempt %d/3)",
                         model, delay, attempt + 1,
                     )
-                    time.sleep(delay)
+                    for _ in range(delay):
+                        if cancel_flag and cancel_flag.is_set():
+                            raise ScanCancelled("Scan stopped by user")
+                        time.sleep(1)
                 else:
                     raise
         if last_exc:
