@@ -1438,7 +1438,7 @@ function renderComparison(data) {
     <td>${i+1}</td>
     <td><strong>${esc(f.title)}</strong><br><span style="font-size:11px;color:var(--text2)">${esc(f.url||'')}</span></td>
     <td><span class="severity sev-${f.ai_severity?.toLowerCase()}">${f.ai_severity}</span></td>
-    <td><span class="verdict v-${f.verdict?.toLowerCase()}">${f.verdict?.replace(/_/g,' ').replace(/\b\w/g,c=>c.toUpperCase()).replace(/\bOf\b/,'of')}</span></td>
+    <td><span class="verdict v-${f.verdict?.toLowerCase()}">${f.verdict?.replace(/_/g,' ').toLowerCase().replace(/\b\w/g,c=>c.toUpperCase())}</span></td>
     <td>${vBadge}</td>
     <td style="font-size:11px">${esc(f.cwe||'')}</td>
     <td>${f.cvss ? f.cvss.toFixed(1) : '-'}</td>
