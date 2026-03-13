@@ -79,7 +79,7 @@ SEV_ORDER = {"Critical": 0, "High": 1, "Medium": 2, "Low": 3, "Info": 4}
 
 def _safe(text):
     if not text: return ""
-    return str(text).encode("latin-1", errors="replace").decode("latin-1")[:2500]
+    return str(text).encode("latin-1", errors="replace").decode("latin-1")[:3500]
 
 
 def _build_curl(t):
@@ -88,8 +88,8 @@ def _build_curl(t):
     if not u: return ""
     parts = [f"curl -X {m}"]
     headers = req.get("headers", {})
-    for k, v in list(headers.items())[:4]:
-        parts.append(f"  -H '{_safe(str(k))}: {_safe(str(v)[:80])}'")
+    for k, v in list(headers.items())[:8]:
+        parts.append(f"  -H '{_safe(str(k))}: {_safe(str(v)[:120])}'")
     body = req.get("body", "")
     if body:
         if isinstance(body, str):
@@ -104,8 +104,8 @@ def _build_curl(t):
             b = str(body)
         if "content-type" not in {k.lower() for k in headers}:
             parts.append("  -H 'Content-Type: application/json'")
-        parts.append(f"  -d '{_safe(b[:800])}'")
-    parts.append(f"  '{_safe(u[:250])}'")
+        parts.append(f"  -d '{_safe(b[:1200])}'")
+    parts.append(f"  '{_safe(u[:400])}'")
     return " \\\n".join(parts)
 
 
@@ -195,14 +195,14 @@ class Report(FPDF):
         self.cell(0, 5, _safe(label), new_x="LMARGIN", new_y="NEXT")
         x, y, w = self.get_x(), self.get_y(), 190
         self.set_font("Courier", "", 7)
-        safe_text = _safe(text[:2000])
+        safe_text = _safe(text[:3000])
         lines = self.multi_cell(w - 6, 3.5, safe_text, dry_run=True, output="LINES")
-        h = min(max(len(lines) * 3.5 + 6, 10), 180)
+        h = min(max(len(lines) * 3.5 + 6, 10), 240)
         if y + h > 270:
             self.add_page()
             y = self.get_y()
-            if h > 250:
-                h = 250
+            if h > 260:
+                h = 260
         self.set_fill_color(*bg)
         if border:
             self.set_draw_color(*border)
@@ -314,76 +314,131 @@ def _impact_oneliner(f):
 
 
 def _build_repro_steps(f):
-    """Auto-generate steps to reproduce from finding data."""
+    """Auto-generate clear, copy-pasteable steps to reproduce from finding data."""
     url = f.get("url") or ""
     param = f.get("parameter") or ""
     title = f.get("title") or ""
     curls = f.get("all_curls") or []
-    curl = f.get("curl") or ""
-    evidence = f.get("scanner_evidence") or ""
+    curl_single = f.get("curl") or ""
     responses = f.get("all_responses") or []
-    method = "GET"
-
-    if curls:
-        first_curl = curls[0]
-        if "-X POST" in first_curl or "-X PUT" in first_curl:
-            method = "POST" if "-X POST" in first_curl else "PUT"
-
-    steps = []
-    step = 1
-
-    if url:
-        steps.append(f"{step}. Open a browser or API client (e.g. Burp Suite, curl, Postman).")
-        step += 1
+    evidence = f.get("scanner_evidence") or ""
+    v_method = f.get("verification_method") or ""
+    v_evidence = f.get("verification_evidence") or ""
+    title_lower = title.lower()
 
     best_curl = ""
     if curls:
         with_body = [c for c in curls if "-d " in c]
         best_curl = with_body[0] if with_body else curls[0]
-    elif curl:
-        best_curl = curl
+    elif curl_single:
+        best_curl = curl_single
 
-    if best_curl:
-        steps.append(f"{step}. Send the following request to the target:")
-        steps.append(f"   {best_curl[:400]}")
-        step += 1
-    elif url:
-        steps.append(f"{step}. Navigate to: {url}")
-        step += 1
+    resp_status = ""
+    if responses and isinstance(responses[0], dict):
+        resp_status = str(responses[0].get("status", ""))
 
+    steps = []
+    s = 1
+
+    # -- Prerequisites --
+    steps.append(f"{s}. Prerequisites:")
+    steps.append("   - Tool: curl (terminal), Burp Suite, or Postman")
+    if url:
+        steps.append(f"   - Target URL: {url}")
     if param:
-        steps.append(f"{step}. Locate the parameter/component: {param}")
-        step += 1
+        steps.append(f"   - Affected parameter/component: {param}")
+    s += 1
 
-    if responses:
-        resp = responses[0] if isinstance(responses[0], str) else str(responses[0])
-        status = ""
-        if "Status:" in resp:
-            status = resp.split("Status:")[1].split("|")[0].strip()[:10]
-        if status:
-            steps.append(f"{step}. Observe the server response (HTTP {status}).")
-        else:
-            steps.append(f"{step}. Observe the server response.")
-        step += 1
+    # -- Send the request --
+    if best_curl:
+        steps.append(f"\n{s}. Copy and run this exact request:")
+        steps.append(f"\n{best_curl[:600]}")
+        s += 1
+    elif url:
+        steps.append(f"\n{s}. Send a request to: {url}")
+        s += 1
 
-    title_lower = title.lower()
-    if "header" in title_lower or "missing" in title_lower or "cookie" in title_lower:
-        steps.append(f"{step}. Inspect the response headers for the missing security control.")
-    elif "injection" in title_lower or "sqli" in title_lower or "xss" in title_lower:
-        steps.append(f"{step}. Check if the payload is reflected in the response or triggers an error/behavior change.")
+    # -- Expected behavior / what to look for (type-specific) --
+    steps.append(f"\n{s}. What to look for in the response:")
+
+    if "header" in title_lower or "hsts" in title_lower or "csp" in title_lower or "x-frame" in title_lower:
+        steps.append("   - Open browser DevTools (F12) > Network tab > click the request")
+        steps.append("   - Check 'Response Headers' section")
+        steps.append(f"   - Confirm the header '{param or title}' is ABSENT from the response")
+        if v_evidence:
+            steps.append(f"   - Scanner confirmed: {v_evidence[:200]}")
+    elif "cookie" in title_lower or "httponly" in title_lower or "samesite" in title_lower:
+        steps.append("   - Inspect the Set-Cookie response headers")
+        steps.append("   - Check if HttpOnly, Secure, and SameSite flags are present")
+        steps.append(f"   - Missing attribute: {param or 'see evidence above'}")
+    elif "sql" in title_lower and "injection" in title_lower:
+        steps.append(f"   - Inject a single quote (') into the '{param}' parameter")
+        steps.append("   - Look for SQL error messages in the response (e.g. 'syntax error', 'mysql', 'ORA-')")
+        steps.append("   - Also try: ' OR '1'='1 vs ' OR '1'='2 — compare response lengths")
+        if resp_status:
+            steps.append(f"   - Original response returned HTTP {resp_status}")
+    elif "xss" in title_lower or "cross-site scripting" in title_lower:
+        steps.append(f"   - Inject a test payload into '{param}': <script>alert(1)</script>")
+        steps.append("   - Check if the payload appears UNENCODED in the HTML response")
+        steps.append("   - If encoded as &lt;script&gt; — it is properly sanitized (not vulnerable)")
     elif "ssrf" in title_lower:
-        steps.append(f"{step}. Check if the server made an outbound request to the injected URL.")
+        steps.append(f"   - Set '{param}' to: http://169.254.169.254/latest/meta-data/")
+        steps.append("   - Check if the response contains AWS metadata (ami-id, instance-id)")
+        steps.append("   - Also try: http://127.0.0.1:80/ and check for internal content")
+    elif "redirect" in title_lower:
+        steps.append(f"   - Set '{param}' to: https://evil.example.com/")
+        steps.append("   - Check if the server returns 301/302 with Location: https://evil.example.com/")
+        steps.append("   - If it does, open redirect is confirmed")
+    elif "csrf" in title_lower:
+        steps.append("   - Submit the form/POST request WITHOUT any CSRF token")
+        steps.append("   - If the server accepts it (HTTP 200/201), CSRF protection is missing")
+        steps.append("   - If the server rejects it (HTTP 403/422), protection is enforced")
+    elif "rate limit" in title_lower or "brute" in title_lower:
+        steps.append("   - Send the same POST request 15+ times rapidly")
+        steps.append("   - Check if you ever get HTTP 429 (Too Many Requests)")
+        steps.append("   - If all requests return 200, no rate limiting is in place")
+    elif "idor" in title_lower or "insecure direct" in title_lower:
+        steps.append("   - Change the numeric ID in the URL to a different user's ID (e.g. +1)")
+        steps.append("   - If you get HTTP 200 with different user data, IDOR is confirmed")
+        steps.append("   - If you get HTTP 403/401, access control is enforced")
+    elif "path traversal" in title_lower or "file inclusion" in title_lower:
+        steps.append(f"   - Set '{param}' to: ../../../../../../etc/passwd")
+        steps.append("   - Check if the response contains 'root:x:0' or similar OS file content")
+    elif "command" in title_lower and "injection" in title_lower:
+        steps.append(f"   - Set '{param}' to: ; sleep 5")
+        steps.append("   - Measure response time — if it takes ~5s longer than normal, OS command executed")
+        steps.append("   - Also try: ; id  — look for 'uid=' in the response")
+    elif "exposure" in title_lower or "sensitive" in title_lower or "information" in title_lower:
+        steps.append("   - Examine the response body for sensitive data:")
+        steps.append("   - Look for: internal IPs, stack traces, API keys, version numbers, user data")
     elif "auth" in title_lower or "session" in title_lower or "token" in title_lower:
-        steps.append(f"{step}. Verify whether the authentication/session control is enforced.")
-    elif "exposure" in title_lower or "sensitive" in title_lower or "pii" in title_lower:
-        steps.append(f"{step}. Check the response body for sensitive data that should not be exposed.")
-    elif "log" in title_lower or "debug" in title_lower or "error" in title_lower:
-        steps.append(f"{step}. Check if debug/error information or internal state is leaked in the response.")
+        steps.append("   - Try accessing the endpoint without authentication headers")
+        steps.append("   - If access is granted, authentication bypass is confirmed")
     else:
-        steps.append(f"{step}. Verify the vulnerability by examining the response for anomalous behavior.")
-    step += 1
+        steps.append("   - Compare the response with a normal/baseline request")
+        steps.append("   - Look for unexpected behavior, error messages, or data leakage")
+    s += 1
 
-    steps.append(f"{step}. Compare with a baseline (normal) request to confirm the difference.")
+    # -- Actual observed behavior --
+    if resp_status or evidence:
+        steps.append(f"\n{s}. What the scanner actually observed:")
+        if resp_status:
+            steps.append(f"   - Server responded with HTTP {resp_status}")
+        if evidence:
+            ev_short = evidence[:300].replace("\n", " ")
+            steps.append(f"   - Evidence: {ev_short}")
+        s += 1
+
+    # -- Verification --
+    if v_method and v_method != "none":
+        steps.append(f"\n{s}. Runtime verification result:")
+        steps.append(f"   - Method: {v_method.replace('_', ' ').title()}")
+        if v_evidence:
+            steps.append(f"   - Result: {v_evidence[:250]}")
+        s += 1
+
+    # -- Baseline comparison --
+    steps.append(f"\n{s}. To confirm: send a clean/normal request (no payload) and compare both responses.")
 
     return "\n".join(steps)
 
@@ -404,22 +459,26 @@ def _format_resp_line(ri, resp):
     lines = []
     status = resp.get("status", "")
     if status:
-        lines.append(f"HTTP Status: {status}")
+        lines.append(f"HTTP {status}")
     if resp.get("anomaly"):
         lines.append(">>> ANOMALY DETECTED <<<")
     if resp.get("reflected"):
-        lines.append(f"Reflected: {resp['reflected']}")
+        lines.append(f"Payload Reflected: {resp['reflected']}")
     if resp.get("accessible") is not None:
         lines.append(f"Accessible: {resp['accessible']}")
     if resp.get("error"):
         lines.append(f"Error: {resp['error']}")
+    hdrs = resp.get("headers")
+    if hdrs and isinstance(hdrs, dict):
+        hdr_lines = [f"  {k}: {v}" for k, v in list(hdrs.items())[:10]]
+        lines.append("Response Headers:\n" + "\n".join(hdr_lines))
     body = resp.get("body", "")
     if body:
-        body_str = str(body)[:500]
+        body_str = str(body)[:1000]
         try:
             body_obj = json.loads(body_str) if isinstance(body_str, str) else body_str
             if isinstance(body_obj, (dict, list)):
-                body_str = json.dumps(body_obj, indent=2, default=str)[:500]
+                body_str = json.dumps(body_obj, indent=2, default=str)[:1000]
         except (json.JSONDecodeError, ValueError):
             pass
         lines.append(f"Response Body:\n{body_str}")
@@ -828,16 +887,24 @@ def _enrich_with_all_tests(classified, test_log):
                 entry = {}
                 if resp.get("status"):
                     entry["status"] = resp["status"]
-                if resp.get("body_snippet"):
-                    entry["body"] = str(resp["body_snippet"])[:600]
-                elif resp.get("body"):
-                    entry["body"] = str(resp["body"])[:600]
+                if resp.get("headers") and isinstance(resp["headers"], dict):
+                    entry["headers"] = {k: str(v)[:120] for k, v in list(resp["headers"].items())[:12]}
+                raw_body = resp.get("body_snippet") or resp.get("body") or ""
+                if raw_body:
+                    body_str = str(raw_body)[:1000]
+                    try:
+                        body_obj = json.loads(body_str) if isinstance(body_str, str) else body_str
+                        if isinstance(body_obj, (dict, list)):
+                            body_str = json.dumps(body_obj, indent=2, default=str)[:1000]
+                    except (json.JSONDecodeError, ValueError):
+                        pass
+                    entry["body"] = body_str
                 if resp.get("reflected"):
                     entry["reflected"] = resp["reflected"]
                 if resp.get("anomaly"):
                     entry["anomaly"] = resp["anomaly"]
                 if resp.get("error"):
-                    entry["error"] = str(resp["error"])[:300]
+                    entry["error"] = str(resp["error"])[:400]
                 if resp.get("accessible") is not None:
                     entry["accessible"] = resp["accessible"]
                 for r in resp.get("results", []):
@@ -845,8 +912,9 @@ def _enrich_with_all_tests(classified, test_log):
                         sub = {}
                         if r.get("status"):
                             sub["status"] = r["status"]
-                        if r.get("body_snippet"):
-                            sub["body"] = str(r["body_snippet"])[:400]
+                        raw_sub = r.get("body_snippet") or r.get("body") or ""
+                        if raw_sub:
+                            sub["body"] = str(raw_sub)[:800]
                         if r.get("reflected"):
                             sub["reflected"] = r["reflected"]
                         if r.get("anomaly"):

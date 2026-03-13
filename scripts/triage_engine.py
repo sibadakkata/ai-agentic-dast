@@ -202,13 +202,22 @@ def _build_curl(t):
     if not u:
         return ""
     parts = [f"curl -X {m}"]
-    for k, v in list(req.get("headers", {}).items())[:4]:
-        parts.append(f"  -H '{k}: {str(v)[:60]}'")
+    headers = req.get("headers", {})
+    for k, v in list(headers.items())[:8]:
+        parts.append(f"  -H '{k}: {str(v)[:120]}'")
     body = req.get("body", "")
     if body:
-        b = json.dumps(body, default=str) if isinstance(body, (dict, list)) else str(body)
-        parts.append(f"  -d '{b[:250]}'")
-    parts.append(f"  '{u[:200]}'")
+        if isinstance(body, (dict, list)):
+            try:
+                b = json.dumps(body, indent=2, default=str)
+            except (TypeError, ValueError):
+                b = str(body)
+        else:
+            b = str(body)
+        if "content-type" not in {k.lower() for k in headers}:
+            parts.append("  -H 'Content-Type: application/json'")
+        parts.append(f"  -d '{b[:600]}'")
+    parts.append(f"  '{u[:300]}'")
     return " \\\n".join(parts)
 
 
