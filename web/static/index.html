@@ -1423,19 +1423,23 @@ function renderComparison(data) {
     <th>#</th><th>Finding</th><th>AI Sev</th><th>Verdict</th><th>Verified</th><th>CWE</th><th>CVSS</th><th>Reason</th>
   </tr></thead><tbody>` +
   data.triaged_findings.map((f, i) => {
-    const vBadge = f.verdict === 'MANUAL_REVIEW'
+    const vText = f.verdict === 'MANUAL_REVIEW'
       ? 'Needs Human Review'
       : f.verified
         ? (f.verification_method !== 'none'
           ? (f.verdict === 'TRUE_POSITIVE' ? 'Replay Confirmed' : f.verdict === 'FALSE_POSITIVE' ? 'Replay Disproved' : 'Inconclusive')
           : 'Pattern')
         : 'Pattern';
+    const vColor = f.verdict === 'MANUAL_REVIEW' ? 'color:#d97706;'
+      : (vText === 'Replay Confirmed' || vText === 'Replay Disproved') ? 'color:var(--green);'
+      : vText === 'Inconclusive' ? 'color:#f59e0b;'
+      : 'color:var(--text2);';
     return `<tr>
     <td>${i+1}</td>
     <td><strong>${esc(f.title)}</strong><br><span style="font-size:11px;color:var(--text2)">${esc(f.url||'')}</span></td>
     <td><span class="severity sev-${f.ai_severity?.toLowerCase()}">${f.ai_severity}</span></td>
     <td><span class="verdict v-${f.verdict?.toLowerCase()}">${f.verdict?.replace(/_/g,' ').toLowerCase().replace(/\b\w/g,c=>c.toUpperCase())}</span></td>
-    <td style="font-size:11px">${vBadge}</td>
+    <td style="font-size:11px;${vColor}">${vText}</td>
     <td style="font-size:11px">${esc(f.cwe||'')}</td>
     <td style="font-size:11px">${f.cvss ? f.cvss.toFixed(1) : '-'}</td>
     <td style="font-size:11px;max-width:200px">${esc(f.reason||'')}</td>
