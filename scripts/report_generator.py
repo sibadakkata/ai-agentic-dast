@@ -73,7 +73,7 @@ def _model_slug(model_key):
     return slug
 
 SEV_COLORS = {"Critical": (180, 30, 30), "High": (220, 80, 30), "Medium": (220, 160, 30), "Low": (60, 140, 200), "Info": (120, 120, 120)}
-VERDICT_COLORS = {"TRUE_POSITIVE": (20, 140, 60), "FALSE_POSITIVE": (200, 40, 40), "NEEDS_VERIFICATION": (200, 160, 20), "NOT_A_FINDING": (120, 120, 120)}
+VERDICT_COLORS = {"TRUE_POSITIVE": (20, 140, 60), "FALSE_POSITIVE": (200, 40, 40), "NEEDS_VERIFICATION": (200, 160, 20), "NOT_A_FINDING": (120, 120, 120), "MANUAL_REVIEW": (217, 119, 6)}
 SEV_ORDER = {"Critical": 0, "High": 1, "Medium": 2, "Low": 3, "Info": 4}
 
 
@@ -482,14 +482,16 @@ def render(pdf, idx, f, link_id=None):
         )
 
         if f.get("scanner_evidence"):
-            pdf.box(
-                "EXPLOIT EVIDENCE (what the AI agent detected):"
-                if v == "TRUE_POSITIVE"
-                else "LLM EVIDENCE (what the AI agent reported):",
-                f["scanner_evidence"],
-                bg=(255, 245, 230) if v == "TRUE_POSITIVE" else (240, 248, 255),
-                border=(200, 120, 30) if v == "TRUE_POSITIVE" else (100, 150, 200),
-            )
+            if v == "TRUE_POSITIVE":
+                ev_label = "EXPLOIT EVIDENCE (what the AI agent detected):"
+                ev_bg, ev_border = (255, 245, 230), (200, 120, 30)
+            elif v == "MANUAL_REVIEW":
+                ev_label = "AI EVIDENCE (requires human verification):"
+                ev_bg, ev_border = (255, 248, 230), (217, 119, 6)
+            else:
+                ev_label = "LLM EVIDENCE (what the AI agent reported):"
+                ev_bg, ev_border = (240, 248, 255), (100, 150, 200)
+            pdf.box(ev_label, f["scanner_evidence"], bg=ev_bg, border=ev_border)
 
         all_curls = f.get("all_curls", [])
         all_responses = f.get("all_responses", [])
@@ -585,6 +587,8 @@ def render(pdf, idx, f, link_id=None):
             stg_color, stg_bg = (20, 100, 40), (220, 245, 220)
         elif v == "FALSE_POSITIVE":
             stg_color, stg_bg = (160, 30, 30), (255, 230, 230)
+        elif v == "MANUAL_REVIEW":
+            stg_color, stg_bg = (160, 90, 0), (255, 243, 220)
         else:
             stg_color, stg_bg = (140, 120, 20), (255, 250, 220)
 
@@ -602,6 +606,10 @@ def render(pdf, idx, f, link_id=None):
             pdf.box("VERDICT: FALSE POSITIVE  -  Not a real issue.",
                     reason,
                     bg=(255, 225, 225), border=(200, 40, 40))
+        elif v == "MANUAL_REVIEW":
+            pdf.box("VERDICT: MANUAL REVIEW REQUIRED  -  Cannot auto-classify.",
+                    reason or "Insufficient evidence to decide. Human review needed.",
+                    bg=(255, 243, 220), border=(217, 119, 6))
         elif v == "NEEDS_VERIFICATION":
             pdf.box("VERDICT: NEEDS MANUAL VERIFICATION",
                     reason or "Automated analysis was inconclusive. Manual testing required.",
@@ -817,14 +825,15 @@ def gen_report(model_key, classified, raw):
     tp = [f for f in classified if f["verdict"] == "TRUE_POSITIVE"]
     fp = [f for f in classified if f["verdict"] == "FALSE_POSITIVE"]
     nv = [f for f in classified if f["verdict"] == "NEEDS_VERIFICATION"]
+    mr = [f for f in classified if f["verdict"] == "MANUAL_REVIEW"]
     na = [f for f in classified if f["verdict"] == "NOT_A_FINDING"]
     total = len(classified)
     if not total:
         return None
 
-    # Sort TP and NV by severity for consistent ordering
     tp_sorted = sorted(tp, key=lambda x: SEV_ORDER.get(x["final_severity"], 5))
     nv_sorted = sorted(nv, key=lambda x: SEV_ORDER.get(x["final_severity"], 5))
+    mr_sorted = sorted(mr, key=lambda x: x.get("confidence", 0), reverse=True)
 
     target_url = raw.get("target", "") if raw else ""
     pdf = Report(display, target=target_url)
@@ -853,7 +862,7 @@ def gen_report(model_key, classified, raw):
     pdf.multi_cell(0, 3.5, _safe(
         "Stage 1 (AI Agent): LLM autonomously tests the target, generates payloads, and reports findings.  |  "
         "Stage 2 (Runtime Verification): Payloads are replayed against the live target without LLM — real HTTP responses confirm or disprove each finding.  |  "
-        "Stage 3 (Triage Engine): Deterministic evidence analysis assigns final verdict (True Positive / False Positive / Needs Verification) with CVSS severity."
+        "Stage 3 (Triage Engine): Deterministic evidence analysis assigns final verdict (True Positive / False Positive / Manual Review) with CVSS severity."
     ), align="C")
     pdf.ln(4)
 
@@ -891,6 +900,7 @@ def gen_report(model_key, classified, raw):
         ("Total Findings:", str(total)),
         ("True Positives:", str(len(tp))),
         ("False Positives:", str(len(fp))),
+        ("Manual Review:", str(len(mr))),
         ("Needs Verify:", str(len(nv))),
         ("Not a Finding:", str(len(na))),
         ("Precision:", f"{len(tp)/(len(tp)+len(fp))*100:.0f}%"
@@ -918,6 +928,7 @@ def gen_report(model_key, classified, raw):
 
     # Pre-create internal link IDs for every finding (used in tables -> detail jump)
     tp_links = [pdf.add_link() for _ in tp_sorted]
+    mr_links = [pdf.add_link() for _ in mr_sorted]
     nv_links = [pdf.add_link() for _ in nv_sorted]
     fp_links = [pdf.add_link() for _ in fp]
 
@@ -933,6 +944,19 @@ def gen_report(model_key, classified, raw):
             "evidence, and reproduction steps."))
         pdf.ln(2)
         _render_summary_table(pdf, tp_sorted, tp_links)
+
+    # ── Clickable Summary Table: Manual Review ──
+    if mr_sorted:
+        pdf.add_page()
+        pdf.section("Findings Overview - Manual Review Required (click to jump)",
+                     (217, 119, 6))
+        pdf.set_font("Helvetica", "I", 8)
+        pdf.set_text_color(80, 80, 80)
+        pdf.multi_cell(0, 4, _safe(
+            "Triage engine could not confidently classify these as TP or FP. "
+            "Human review with Burp Suite or authenticated re-scan required."))
+        pdf.ln(2)
+        _render_summary_table(pdf, mr_sorted, mr_links)
 
     # ── Clickable Summary Table: Needs Verification ──
     if nv_sorted:
@@ -978,6 +1002,20 @@ def gen_report(model_key, classified, raw):
         pdf.ln(2)
         for i, f in enumerate(tp_sorted, 1):
             render(pdf, i, f, link_id=tp_links[i - 1])
+
+    # ── Manual Review ──
+    if mr_sorted:
+        pdf.add_page()
+        pdf.section(f"Manual Review Required - Details ({len(mr)})",
+                     (217, 119, 6))
+        pdf.set_font("Helvetica", "I", 9)
+        pdf.set_text_color(80, 80, 80)
+        pdf.multi_cell(0, 5, _safe(
+            "Insufficient evidence to auto-classify. These need human review "
+            "with Burp Suite or authenticated re-scan to determine if they are real vulnerabilities."))
+        pdf.ln(2)
+        for i, f in enumerate(mr_sorted, 1):
+            render(pdf, i, f, link_id=mr_links[i - 1])
 
     # ── Needs Verification ──
     if nv_sorted:
@@ -1077,9 +1115,10 @@ def main():
         classified = [universal_classify(f, test_log) for f in findings]
         tp = len([c for c in classified if c["verdict"] == "TRUE_POSITIVE"])
         fp = len([c for c in classified if c["verdict"] == "FALSE_POSITIVE"])
+        mr = len([c for c in classified if c["verdict"] == "MANUAL_REVIEW"])
         nv = len([c for c in classified if c["verdict"] == "NEEDS_VERIFICATION"])
         na = len([c for c in classified if c["verdict"] == "NOT_A_FINDING"])
-        print(f"  {display}: {len(findings)} findings -> {tp} TP, {fp} FP, {nv} NV, {na} NA")
+        print(f"  {display}: {len(findings)} findings -> {tp} TP, {fp} FP, {mr} MR, {nv} NV, {na} NA")
 
         result = gen_report(model_key, classified, raw)
         if result:

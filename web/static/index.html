@@ -75,6 +75,7 @@ input::placeholder { color: #9ca3af; }
 .verdict { font-weight: 600; font-size: 11px; text-transform: uppercase; }
 .v-true_positive { color: var(--green); } .v-false_positive { color: var(--red); }
 .v-needs_verification { color: var(--yellow); } .v-not_a_finding { color: var(--text2); }
+.v-manual_review { color: #d97706; font-weight: 700; }
 
 .tabs { display: flex; gap: 4px; margin-bottom: 20px; border-bottom: 1px solid var(--border); padding-bottom: 0; }
 .tab { padding: 10px 20px; font-size: 13px; font-weight: 600; cursor: pointer; color: var(--text2); border-bottom: 2px solid transparent; transition: all 0.2s; }
@@ -1336,6 +1337,7 @@ function renderResults(data) {
   const c = data.coverage;
   const tp = data.triaged_findings.filter(f=>f.verdict==='TRUE_POSITIVE').length;
   const fp = data.triaged_findings.filter(f=>f.verdict==='FALSE_POSITIVE').length;
+  const mr = data.triaged_findings.filter(f=>f.verdict==='MANUAL_REVIEW').length;
 
   document.getElementById('result-title').innerHTML = `Results: ${esc(m.model || 'Unknown Model')}` +
     (m.target ? `<div style="font-size:14px;font-weight:400;color:var(--accent2);margin-top:4px;">
@@ -1357,6 +1359,7 @@ function renderResults(data) {
     stat(data.ai_findings.length, 'AI Findings'),
     stat(tp, 'True Positives'),
     stat(fp, 'False Positives'),
+    stat(mr, 'Manual Review'),
     stat(c.verification?.confirmed || '-', 'Replay Confirmed'),
     stat(c.verification?.disproved || '-', 'Replay Disproved'),
   ].join('') +
@@ -1420,20 +1423,24 @@ function renderComparison(data) {
     <th>#</th><th>Finding</th><th>AI Sev</th><th>Final Sev</th><th>Verdict</th><th>Verified</th><th>CWE</th><th>CVSS</th><th>Reason</th>
   </tr></thead><tbody>` +
   data.triaged_findings.map((f, i) => {
-    const vBadge = f.verified
-      ? (f.verification_method !== 'none'
-        ? `<span title="${esc(f.verification_evidence||'')}" style="cursor:help;padding:2px 6px;border-radius:4px;font-size:10px;font-weight:600;${
-            f.verdict === 'TRUE_POSITIVE' ? 'background:rgba(34,197,94,0.15);color:var(--green);' :
-            f.verdict === 'FALSE_POSITIVE' ? 'background:rgba(239,68,68,0.15);color:var(--red);' :
-            'background:rgba(245,158,11,0.15);color:#f59e0b;'
-          }">${f.verdict === 'TRUE_POSITIVE' ? '✓ Replay Confirmed' : f.verdict === 'FALSE_POSITIVE' ? '✕ Replay Disproved' : '? Inconclusive'}</span>`
-        : '<span style="font-size:10px;color:var(--text2);">Pattern</span>')
-      : '<span style="font-size:10px;color:var(--text2);">Pattern</span>';
+    const vBadge = f.verdict === 'MANUAL_REVIEW'
+      ? '<span style="padding:2px 6px;border-radius:4px;font-size:10px;font-weight:600;background:rgba(217,119,6,0.15);color:#d97706;">⚠ Needs Human Review</span>'
+      : f.verified
+        ? (f.verification_method !== 'none'
+          ? `<span title="${esc(f.verification_evidence||'')}" style="cursor:help;padding:2px 6px;border-radius:4px;font-size:10px;font-weight:600;${
+              f.verdict === 'TRUE_POSITIVE' ? 'background:rgba(34,197,94,0.15);color:var(--green);' :
+              f.verdict === 'FALSE_POSITIVE' ? 'background:rgba(239,68,68,0.15);color:var(--red);' :
+              'background:rgba(245,158,11,0.15);color:#f59e0b;'
+            }">${f.verdict === 'TRUE_POSITIVE' ? '✓ Replay Confirmed' : f.verdict === 'FALSE_POSITIVE' ? '✕ Replay Disproved' : '? Inconclusive'}</span>`
+          : '<span style="font-size:10px;color:var(--text2);">Pattern</span>')
+        : '<span style="font-size:10px;color:var(--text2);">Pattern</span>';
+    const finalSev = (f.final_severity === '-' || f.final_severity === 'TBD') ? f.final_severity : f.final_severity;
+    const finalSevCls = (f.final_severity === '-' || f.final_severity === 'TBD') ? 'color:var(--text2)' : '';
     return `<tr>
     <td>${i+1}</td>
     <td><strong>${esc(f.title)}</strong><br><span style="font-size:11px;color:var(--text2)">${esc(f.url||'')}</span></td>
     <td><span class="severity sev-${f.ai_severity?.toLowerCase()}">${f.ai_severity}</span></td>
-    <td><span class="severity sev-${f.final_severity?.toLowerCase()}">${f.final_severity}</span></td>
+    <td><span class="severity sev-${f.final_severity?.toLowerCase()}" ${finalSevCls ? 'style="'+finalSevCls+'"' : ''}>${finalSev}</span></td>
     <td><span class="verdict v-${f.verdict?.toLowerCase()}">${f.verdict?.replace(/_/g,' ')}</span></td>
     <td>${vBadge}</td>
     <td style="font-size:11px">${esc(f.cwe||'')}</td>
