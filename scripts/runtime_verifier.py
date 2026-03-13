@@ -762,6 +762,7 @@ async def verify_all_findings(
     on_progress=None,
     cancel_flag=None,
     pause_flag=None,
+    on_pause=None,
 ) -> list[dict]:
     """Verify all findings from a scan against the live target.
 
@@ -773,6 +774,7 @@ async def verify_all_findings(
         on_progress: optional callback(idx, total, finding_title, verdict)
         cancel_flag: threading.Event to signal cancellation
         pause_flag: threading.Event to signal pause
+        on_pause: optional callback(event, data) for pause/resume events
 
     Returns:
         list of findings enriched with verification data
@@ -796,12 +798,18 @@ async def verify_all_findings(
                     verified.append({**remaining, **NOT_VERIFIED})
                 break
             if pause_flag and pause_flag.is_set():
+                if on_pause:
+                    try: on_pause("paused", {})
+                    except Exception: pass
                 while pause_flag.is_set():
                     if cancel_flag and cancel_flag.is_set():
                         for remaining in findings[idx:]:
                             verified.append({**remaining, **NOT_VERIFIED})
                         return verified
                     _time.sleep(1)
+                if on_pause:
+                    try: on_pause("resumed", {})
+                    except Exception: pass
             logger.info("Verifying [%d/%d]: %s", idx + 1, total, finding.get("title", "?"))
             result = await verify_finding(client, finding)
             verified.append(result)

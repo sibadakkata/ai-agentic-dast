@@ -659,6 +659,7 @@ async def run_scan(
                     on_progress=_verify_progress,
                     cancel_flag=cancel_flag,
                     pause_flag=pause_flag,
+                    on_pause=_cb,
                 )
 
                 confirmed = sum(1 for f in verified if f.get("verdict") == "CONFIRMED")
