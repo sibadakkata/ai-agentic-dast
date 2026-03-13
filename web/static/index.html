@@ -1360,8 +1360,7 @@ function renderResults(data) {
     stat(tp, 'True Positives'),
     stat(fp, 'False Positives'),
     stat(mr, 'Manual Review'),
-    stat(c.verification?.confirmed || '-', 'Replay Confirmed'),
-    stat(c.verification?.disproved || '-', 'Replay Disproved'),
+    stat((c.verification?.confirmed || 0) + (c.verification?.disproved || 0) || '-', 'Replay Confirmed'),
   ].join('') +
   `<div style="grid-column:1/-1;display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:12px;margin-top:4px;">` + [
     stat(dur, 'Scan Duration'),
@@ -1412,8 +1411,7 @@ function renderComparison(data) {
   if (hasVerification) {
     vSummary = `<div style="padding:10px 14px;margin-bottom:12px;border-radius:8px;background:var(--surface2);font-size:12px;display:flex;gap:16px;align-items:center;">
       <strong>Runtime Verification:</strong>
-      <span style="color:var(--green);">✓ ${vStats.confirmed || 0} Confirmed</span>
-      <span style="color:var(--green);">✓ ${vStats.disproved || 0} Disproved</span>
+      <span style="color:var(--green);">✓ ${(vStats.confirmed || 0) + (vStats.disproved || 0)} Confirmed</span>
       <span style="color:var(--yellow, #f59e0b);">? ${vStats.inconclusive || 0} Inconclusive</span>
       <span style="color:var(--text2);">${vStats.unverified || 0} Unverified</span>
     </div>`;
@@ -1427,11 +1425,11 @@ function renderComparison(data) {
       ? 'Needs Human Review'
       : f.verified
         ? (f.verification_method !== 'none'
-          ? (f.verdict === 'TRUE_POSITIVE' ? 'Replay Confirmed' : f.verdict === 'FALSE_POSITIVE' ? 'Replay Disproved' : 'Inconclusive')
+          ? (f.verdict === 'TRUE_POSITIVE' ? 'Replay Confirmed' : f.verdict === 'FALSE_POSITIVE' ? 'Replay Confirmed' : 'Inconclusive')
           : 'Pattern')
         : 'Pattern';
     const vColor = f.verdict === 'MANUAL_REVIEW' ? 'color:#d97706;'
-      : (vText === 'Replay Confirmed' || vText === 'Replay Disproved') ? 'color:var(--green);'
+      : vText === 'Replay Confirmed' ? 'color:var(--green);'
       : vText === 'Inconclusive' ? 'color:#f59e0b;'
       : 'color:var(--text2);';
     return `<tr>
