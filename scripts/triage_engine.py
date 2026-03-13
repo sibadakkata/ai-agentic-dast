@@ -452,7 +452,7 @@ def classify(finding, test_log):
 
     # Zero evidence
     if not ev_raw and not payload and not tests:
-        r.update(verdict="FALSE_POSITIVE", final_severity="-",
+        r.update(verdict="FALSE_POSITIVE", final_severity="Not Exploitable",
                  reason="Zero evidence: no payload, no test data, no scanner evidence. "
                         "Cannot validate a finding with no supporting data.",
                  dev_action="No action - no evidence.")
@@ -466,7 +466,7 @@ def classify(finding, test_log):
             "command", "deserialization", "rce", "idor",
         ])
         if is_injection:
-            r.update(verdict="FALSE_POSITIVE", final_severity="-",
+            r.update(verdict="FALSE_POSITIVE", final_severity="Not Exploitable",
                      reason=f"All {len(statuses)} responses were {list(set(statuses))} redirects. "
                             "Scanner was not authenticated. Injection findings require "
                             "authenticated access to the actual endpoint to be valid.",
@@ -475,7 +475,7 @@ def classify(finding, test_log):
 
     # HPKP (deprecated by all browsers in 2018)
     if "hpkp" in title or "public key pin" in title:
-        r.update(verdict="FALSE_POSITIVE", final_severity="-",
+        r.update(verdict="FALSE_POSITIVE", final_severity="Not Exploitable",
                  reason="HTTP Public Key Pinning (HPKP) was deprecated by Chrome in 2018 "
                         "and removed from all browsers. Not a valid finding.",
                  dev_action="No action. HPKP is deprecated.")
@@ -483,7 +483,7 @@ def classify(finding, test_log):
 
     # SameSite=Lax flagged as weak (it's the OWASP recommendation)
     if "samesite" in title and "lax" in title:
-        r.update(verdict="FALSE_POSITIVE", final_severity="-",
+        r.update(verdict="FALSE_POSITIVE", final_severity="Not Exploitable",
                  reason="SameSite=Lax is the browser DEFAULT and OWASP-recommended setting. "
                         "Strict breaks legitimate cross-site navigation.",
                  dev_action="No action. SameSite=Lax is correct.")
@@ -492,7 +492,7 @@ def classify(finding, test_log):
     # performance.timing API flagged (standard browser API, not a vuln)
     if "performance" in title and ("timing" in title or "api" in title):
         if "navigation" in title or "resource" in title or "performance.timing" in evidence:
-            r.update(verdict="FALSE_POSITIVE", final_severity="-",
+            r.update(verdict="FALSE_POSITIVE", final_severity="Not Exploitable",
                      reason="performance.timing is a standard browser API on every website. "
                             "Not a vulnerability.",
                      dev_action="No action.")
@@ -500,7 +500,7 @@ def classify(finding, test_log):
 
     # Dynamic script creation (standard JS, not a vuln without XSS)
     if "dynamic script" in title and ("creation" in title or "source" in title):
-        r.update(verdict="FALSE_POSITIVE", final_severity="-",
+        r.update(verdict="FALSE_POSITIVE", final_severity="Not Exploitable",
                  reason="document.createElement('script') is standard JavaScript used by "
                         "every SPA and analytics library. Not a vulnerability without XSS.",
                  dev_action="No action.")
@@ -530,7 +530,7 @@ def classify(finding, test_log):
             return r
         else:
             _cwe_apply(r, "error_handling")
-            r.update(verdict="FALSE_POSITIVE", final_severity="-",
+            r.update(verdict="FALSE_POSITIVE", final_severity="Not Exploitable",
                      cve=f"N/A ({r['cwe']}: Improper Error Handling)",
                      reason="HTTP 500 on special characters but NO SQL error strings, "
                             "no data extraction, no boolean/time-based differential. "
@@ -560,7 +560,7 @@ def classify(finding, test_log):
                      dev_action="HTML-encode all output. Implement CSP.")
             return r
         else:
-            r.update(verdict="FALSE_POSITIVE", final_severity="-",
+            r.update(verdict="FALSE_POSITIVE", final_severity="Not Exploitable",
                      cwe="CWE-79",
                      reason="XSS claimed but payload NOT reflected in response body. "
                             "Input appears to be sanitized or rejected.",
@@ -584,7 +584,7 @@ def classify(finding, test_log):
                      dev_action="Whitelist allowed outbound URLs. Block RFC1918 and metadata IPs.")
             return r
         else:
-            r.update(verdict="FALSE_POSITIVE", final_severity="-",
+            r.update(verdict="FALSE_POSITIVE", final_severity="Not Exploitable",
                      cwe="CWE-918",
                      reason="SSRF payloads returned redirects or generic responses. "
                             "No internal/metadata content in response body. "
@@ -608,7 +608,7 @@ def classify(finding, test_log):
                      dev_action="Disable external entities in XML parser. Use JSON instead of XML.")
             return r
         else:
-            r.update(verdict="FALSE_POSITIVE", final_severity="-",
+            r.update(verdict="FALSE_POSITIVE", final_severity="Not Exploitable",
                      cwe="CWE-611",
                      reason="XXE payload sent but no file content or entity expansion in response.",
                      dev_action="No action - XML parser appears to reject external entities.")
@@ -631,7 +631,7 @@ def classify(finding, test_log):
                      dev_action="Validate and canonicalize file paths. Use allowlists.")
             return r
         else:
-            r.update(verdict="FALSE_POSITIVE", final_severity="-",
+            r.update(verdict="FALSE_POSITIVE", final_severity="Not Exploitable",
                      cwe="CWE-22",
                      reason="Path traversal payload sent but no file content in response. "
                             "Server appears to reject or sanitize path input.",
@@ -657,7 +657,7 @@ def classify(finding, test_log):
             return r
         else:
             _cwe_apply(r, "error_handling")
-            r.update(verdict="FALSE_POSITIVE", final_severity="-",
+            r.update(verdict="FALSE_POSITIVE", final_severity="Not Exploitable",
                      reason="Command injection payload sent but no OS output in response. "
                             "Server crashed or returned generic error.",
                      dev_action="Improve error handling for unexpected input.")
@@ -676,7 +676,7 @@ def classify(finding, test_log):
                      dev_action="Do not deserialize untrusted data. Use allowlists for classes.")
             return r
         else:
-            r.update(verdict="FALSE_POSITIVE", final_severity="-",
+            r.update(verdict="FALSE_POSITIVE", final_severity="Not Exploitable",
                      cwe="CWE-502",
                      reason="Deserialization payload sent but zero execution markers "
                             "(no Java stack traces, no pickle errors, no class loading). "
@@ -692,7 +692,7 @@ def classify(finding, test_log):
             kw in b for b in bodies for kw in ["email", "name", "address", "phone", "ssn", "account"]
         )
         if all_denied:
-            r.update(verdict="FALSE_POSITIVE", final_severity="-",
+            r.update(verdict="FALSE_POSITIVE", final_severity="Not Exploitable",
                      reason=f"All {len(statuses)} requests returned 401/403. "
                             "Server enforces authorization correctly.",
                      dev_action="No action - authorization checks are effective.")
@@ -728,7 +728,7 @@ def classify(finding, test_log):
                      dev_action="Never pass user input into template expressions. Use sandboxed templates.")
             return r
         else:
-            r.update(verdict="FALSE_POSITIVE", final_severity="-",
+            r.update(verdict="FALSE_POSITIVE", final_severity="Not Exploitable",
                      reason="Template injection payload sent but not executed. "
                             "Input stored as text, not evaluated.",
                      dev_action="No action - template engine does not evaluate user input.")
@@ -836,7 +836,7 @@ def classify(finding, test_log):
         all_ok = all(s in (200, 302) for s in statuses) if statuses else False
         _cwe_apply(r, "rate_limit")
         if has_429:
-            r.update(verdict="FALSE_POSITIVE", final_severity="-",
+            r.update(verdict="FALSE_POSITIVE", final_severity="Not Exploitable",
                      reason=f"Server returned HTTP 429 (Too Many Requests). "
                             "Rate limiting is implemented.",
                      dev_action="No action - rate limiting is active.")
@@ -872,7 +872,7 @@ def classify(finding, test_log):
         accepted_without_token = any(s == 200 for s in statuses) and no_token_evidence
 
         if has_token_evidence and not no_token_evidence:
-            r.update(verdict="FALSE_POSITIVE", final_severity="-",
+            r.update(verdict="FALSE_POSITIVE", final_severity="Not Exploitable",
                      reason="CSRF token detected in evidence. Server implements CSRF protection. "
                             "Modern SameSite=Lax cookies provide additional defense.",
                      dev_action="No action - CSRF protection is implemented.")
@@ -941,7 +941,7 @@ def classify(finding, test_log):
                            "3. CONFIRMED - server blindly redirects to user-supplied URL",
                      dev_action="Whitelist allowed redirect destinations. Reject external URLs.")
             return r
-        r.update(verdict="FALSE_POSITIVE", final_severity="-",
+        r.update(verdict="FALSE_POSITIVE", final_severity="Not Exploitable",
                  reason="Open redirect payload sent but no evidence of external redirect. "
                         "Server either rejected the payload, redirected to same domain, "
                         "or returned an error.",
@@ -1093,7 +1093,7 @@ def classify(finding, test_log):
                             "browser history, server logs, and referrer headers.",
                      dev_action="Change login form to method=POST. Never send credentials via GET.")
             return r
-        r.update(verdict="FALSE_POSITIVE", final_severity="-",
+        r.update(verdict="FALSE_POSITIVE", final_severity="Not Exploitable",
                  cwe="CWE-598", cvss=0.0,
                  reason="Scanner fabricated a GET request with password in URL. "
                         "Real login forms universally use POST. The application does not "
@@ -1106,7 +1106,7 @@ def classify(finding, test_log):
         all_denied = all(s in (401, 403) for s in statuses) if statuses else False
         unauthorized_access = any(s == 200 for s in statuses) and not all_denied
         if all_denied:
-            r.update(verdict="FALSE_POSITIVE", final_severity="-",
+            r.update(verdict="FALSE_POSITIVE", final_severity="Not Exploitable",
                      cwe="CWE-285", cvss=0.0,
                      reason=f"All {len(statuses)} requests returned 401/403. "
                             "Server enforces access control correctly.",
@@ -1257,7 +1257,7 @@ def classify(finding, test_log):
         return r
 
     # Very low confidence — clearly FP
-    r.update(verdict="FALSE_POSITIVE", final_severity="-",
+    r.update(verdict="FALSE_POSITIVE", final_severity="Not Exploitable",
              reason=f"Very low confidence ({confidence}/10). Strong negative signals: "
                     "all redirects, all 403/404, or zero evidence. Scanner noise.",
              dev_action="No action.")
