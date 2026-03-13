@@ -73,7 +73,7 @@ def _model_slug(model_key):
     return slug
 
 SEV_COLORS = {"Critical": (180, 30, 30), "High": (220, 80, 30), "Medium": (220, 160, 30), "Low": (60, 140, 200), "Info": (120, 120, 120)}
-VERDICT_COLORS = {"TRUE_POSITIVE": (20, 140, 60), "FALSE_POSITIVE": (200, 40, 40), "NEEDS_VERIFICATION": (200, 160, 20), "NOT_A_FINDING": (120, 120, 120), "MANUAL_REVIEW": (217, 119, 6)}
+VERDICT_COLORS = {"TRUE_POSITIVE": (200, 40, 40), "FALSE_POSITIVE": (20, 140, 60), "NEEDS_VERIFICATION": (200, 160, 20), "NOT_A_FINDING": (120, 120, 120), "MANUAL_REVIEW": (217, 119, 6)}
 SEV_ORDER = {"Critical": 0, "High": 1, "Medium": 2, "Low": 3, "Info": 4}
 
 
@@ -223,7 +223,7 @@ class Report(FPDF):
         self.cell(22, 6, _safe(sev), fill=True, align="C")
         self.cell(2, 6, "")
         self.set_fill_color(*vc)
-        self.cell(42, 6, _safe(verdict.replace("_", " ")), fill=True, align="C")
+        self.cell(42, 6, _safe(verdict.replace("_", " ").title()), fill=True, align="C")
         self.ln(8)
 
     def stage_header(self, label, color=(60, 60, 60), bg=(240, 240, 240)):

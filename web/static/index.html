@@ -72,8 +72,8 @@ input::placeholder { color: #9ca3af; }
 .sev-critical { color: #ff4444; } .sev-high { color: var(--orange); } .sev-medium { color: var(--yellow); }
 .sev-low { color: var(--blue); } .sev-info { color: var(--text2); }
 
-.verdict { font-weight: 600; font-size: 11px; text-transform: uppercase; }
-.v-true_positive { color: var(--green); } .v-false_positive { color: var(--red); }
+.verdict { font-weight: 600; font-size: 11px; }
+.v-true_positive { color: var(--red); } .v-false_positive { color: var(--green); }
 .v-needs_verification { color: var(--yellow); } .v-not_a_finding { color: var(--text2); }
 .v-manual_review { color: #d97706; font-weight: 700; }
 
@@ -1115,7 +1115,7 @@ function renderPhaseBreakdown(container, live) {
               if (k === 'status' && parseInt(sv) >= 400) cls = 'color:var(--red)';
               else if (k === 'anomaly' && (sv === 'True' || sv === 'true')) cls = 'color:var(--red);font-weight:700';
               else if (k === 'reflected' && (sv === 'True' || sv === 'true')) cls = 'color:var(--red);font-weight:700';
-              else if (k === 'verdict') cls = sv === 'CONFIRMED' ? 'color:var(--red);font-weight:700' : sv === 'DISPROVED' ? 'color:var(--green)' : '';
+              else if (k === 'verdict') cls = sv === 'CONFIRMED' ? 'color:var(--green);font-weight:700' : sv === 'DISPROVED' ? 'color:var(--green)' : '';
               respHtml += (respHtml ? '<br>' : '') + `<span style="color:var(--text2);">${esc(k)}:</span> <span${cls ? ' style="'+cls+'"' : ''}>${esc(sv.substring(0, 200))}</span>`;
             });
           } else {
@@ -1413,7 +1413,7 @@ function renderComparison(data) {
     vSummary = `<div style="padding:10px 14px;margin-bottom:12px;border-radius:8px;background:var(--surface2);font-size:12px;display:flex;gap:16px;align-items:center;">
       <strong>Runtime Verification:</strong>
       <span style="color:var(--green);">✓ ${vStats.confirmed || 0} Confirmed</span>
-      <span style="color:var(--red);">✕ ${vStats.disproved || 0} Disproved</span>
+      <span style="color:var(--green);">✓ ${vStats.disproved || 0} Disproved</span>
       <span style="color:var(--yellow, #f59e0b);">? ${vStats.inconclusive || 0} Inconclusive</span>
       <span style="color:var(--text2);">${vStats.unverified || 0} Unverified</span>
     </div>`;
@@ -1429,16 +1429,16 @@ function renderComparison(data) {
         ? (f.verification_method !== 'none'
           ? `<span title="${esc(f.verification_evidence||'')}" style="cursor:help;padding:2px 6px;border-radius:4px;font-size:10px;font-weight:600;${
               f.verdict === 'TRUE_POSITIVE' ? 'background:rgba(34,197,94,0.15);color:var(--green);' :
-              f.verdict === 'FALSE_POSITIVE' ? 'background:rgba(239,68,68,0.15);color:var(--red);' :
+              f.verdict === 'FALSE_POSITIVE' ? 'background:rgba(34,197,94,0.15);color:var(--green);' :
               'background:rgba(245,158,11,0.15);color:#f59e0b;'
-            }">${f.verdict === 'TRUE_POSITIVE' ? '✓ Replay Confirmed' : f.verdict === 'FALSE_POSITIVE' ? '✕ Replay Disproved' : '? Inconclusive'}</span>`
+            }">${f.verdict === 'TRUE_POSITIVE' ? '✓ Replay Confirmed' : f.verdict === 'FALSE_POSITIVE' ? '✓ Replay Disproved' : '? Inconclusive'}</span>`
           : '<span style="font-size:10px;color:var(--text2);">Pattern</span>')
         : '<span style="font-size:10px;color:var(--text2);">Pattern</span>';
     return `<tr>
     <td>${i+1}</td>
     <td><strong>${esc(f.title)}</strong><br><span style="font-size:11px;color:var(--text2)">${esc(f.url||'')}</span></td>
     <td><span class="severity sev-${f.ai_severity?.toLowerCase()}">${f.ai_severity}</span></td>
-    <td><span class="verdict v-${f.verdict?.toLowerCase()}">${f.verdict?.replace(/_/g,' ')}</span></td>
+    <td><span class="verdict v-${f.verdict?.toLowerCase()}">${f.verdict?.replace(/_/g,' ').replace(/\b\w/g,c=>c.toUpperCase()).replace(/\bOf\b/,'of')}</span></td>
     <td>${vBadge}</td>
     <td style="font-size:11px">${esc(f.cwe||'')}</td>
     <td>${f.cvss ? f.cvss.toFixed(1) : '-'}</td>
