@@ -1424,16 +1424,12 @@ function renderComparison(data) {
   </tr></thead><tbody>` +
   data.triaged_findings.map((f, i) => {
     const vBadge = f.verdict === 'MANUAL_REVIEW'
-      ? '<span style="color:#d97706;">⚠ Needs Human Review</span>'
+      ? 'Needs Human Review'
       : f.verified
         ? (f.verification_method !== 'none'
-          ? `<span title="${esc(f.verification_evidence||'')}" style="cursor:help;${
-              f.verdict === 'TRUE_POSITIVE' ? 'color:var(--green);' :
-              f.verdict === 'FALSE_POSITIVE' ? 'color:var(--green);' :
-              'color:#f59e0b;'
-            }">${f.verdict === 'TRUE_POSITIVE' ? '✓ Replay Confirmed' : f.verdict === 'FALSE_POSITIVE' ? '✓ Replay Disproved' : '? Inconclusive'}</span>`
-          : '<span style="color:var(--text2);">Pattern</span>')
-        : '<span style="color:var(--text2);">Pattern</span>';
+          ? (f.verdict === 'TRUE_POSITIVE' ? 'Replay Confirmed' : f.verdict === 'FALSE_POSITIVE' ? 'Replay Disproved' : 'Inconclusive')
+          : 'Pattern')
+        : 'Pattern';
     return `<tr>
     <td>${i+1}</td>
     <td><strong>${esc(f.title)}</strong><br><span style="font-size:11px;color:var(--text2)">${esc(f.url||'')}</span></td>
