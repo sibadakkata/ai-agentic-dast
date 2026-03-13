@@ -101,7 +101,7 @@ WEB_PHASES: list[ScanPhase] = [
     ScanPhase(
         id="web_a07",
         name="Authentication Failures",
-        prompt="Test authentication. Probe for session fixation, weak or predictable tokens, brute-force resistance, JWT manipulation (alg:none, key confusion, claim tampering), and password reset flaws. Generate tests from the auth mechanisms you observed.",
+        prompt="Test authentication. Probe for session fixation, weak or predictable tokens, brute-force resistance, JWT manipulation (alg:none, key confusion, claim tampering), and password reset flaws. IMPORTANT: Send requests with invalid/expired/malformed tokens and check if the server returns HTTP 500 instead of 401/403 — that indicates broken error handling. Generate tests from the auth mechanisms you observed.",
         applies_to="website",
     ),
     ScanPhase(
@@ -146,7 +146,7 @@ API_PHASES: list[ScanPhase] = [
     ScanPhase(
         id="api_auth",
         name="Authentication testing",
-        prompt="Test authentication on discovered endpoints. Check for missing auth on protected endpoints, broken token validation, token reuse across contexts, and JWT manipulation. Generate tests from the auth scheme you observed.",
+        prompt="Test authentication on discovered endpoints. Check for missing auth on protected endpoints, broken token validation, token reuse across contexts, and JWT manipulation. IMPORTANT: Send requests with invalid/expired/malformed bearer tokens and check if the server returns HTTP 500 instead of 401/403 — that indicates broken error handling in token validation. Generate tests from the auth scheme you observed.",
         applies_to="api",
     ),
     ScanPhase(

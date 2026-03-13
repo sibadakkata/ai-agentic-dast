@@ -723,12 +723,20 @@ class ScanTools:
         for method in methods:
             try:
                 resp = await self._http_client.request(method.upper(), endpoint)
-                accessible = resp.status_code < 400
-                results.append({
+                st = resp.status_code
+                accessible = st < 400
+                entry = {
                     "method": method,
-                    "status": resp.status_code,
+                    "status": st,
                     "accessible": accessible,
-                })
+                }
+                if st >= 500:
+                    entry["finding"] = (
+                        f"ERROR_HANDLING: {method} {endpoint} returned HTTP {st} without auth. "
+                        f"Expected 401/403 but got a server error."
+                    )
+                    entry["server_error"] = True
+                results.append(entry)
             except Exception as e:
                 results.append({"method": method, "status": None, "accessible": False, "error": str(e)})
         return {"results": results}
@@ -796,12 +804,22 @@ class ScanTools:
             ("no_token", None),
             ("empty_bearer", "Bearer "),
             ("tampered_token", f"Bearer {token[:-1] + ('A' if token[-1] != 'A' else 'B')}"),
+            ("invalid_bearer", "Bearer INVALID_TOKEN_12345"),
+            ("malformed_auth", "NotBearer xyz"),
         ]:
             r = await _test(name, auth)
-            bypassed = r.get("status", 999) < 400
+            st = r.get("status", 999)
+            bypassed = st < 400
             r["bypassed"] = bypassed
             if bypassed and name != "valid_token":
-                r["finding"] = f"AUTH_BYPASS: {name} accepted (status {r.get('status')})"
+                r["finding"] = f"AUTH_BYPASS: {name} accepted (status {st})"
+            elif st >= 500:
+                r["finding"] = (
+                    f"ERROR_HANDLING: Server returned HTTP {st} for {name.replace('_', ' ')}. "
+                    f"Expected 401/403 but got a server error — indicates unhandled exception "
+                    f"in token validation logic."
+                )
+                r["server_error"] = True
             results["tests"].append(r)
 
         if is_jwt and decoded_header and decoded_payload:

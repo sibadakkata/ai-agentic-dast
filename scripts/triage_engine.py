@@ -48,6 +48,7 @@ CWE_PROFILES = {
     "info_disclosure":  {"cwe": "CWE-200", "cvss": 3.7, "vec": "AV:N/AC:H/PR:N/UI:N/S:U/C:L/I:N/A:N"},
     "error_info":       {"cwe": "CWE-209", "cvss": 3.7, "vec": "AV:N/AC:H/PR:N/UI:N/S:U/C:L/I:N/A:N"},
     "error_handling":   {"cwe": "CWE-391", "cvss": 3.7, "vec": "AV:N/AC:H/PR:N/UI:N/S:U/C:L/I:N/A:N"},
+    "auth_error_500":   {"cwe": "CWE-755", "cvss": 5.3, "vec": "AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:L"},
     "input_validation": {"cwe": "CWE-20",  "cvss": 3.7, "vec": "AV:N/AC:H/PR:N/UI:N/S:U/C:N/I:L/A:N"},
     "open_redirect":    {"cwe": "CWE-601", "cvss": 4.7, "vec": "AV:N/AC:L/PR:N/UI:R/S:C/C:L/I:N/A:N"},
     "session_mgmt":     {"cwe": "CWE-384", "cvss": 5.3, "vec": "AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N"},
