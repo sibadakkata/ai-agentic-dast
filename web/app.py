@@ -873,7 +873,7 @@ async def get_results(scan_id: str, creds=Depends(_verify)):
             "verification_evidence": triaged.get("verification_evidence", ""),
         }
 
-        overrides = scan.get("cvss_overrides", {}) if scan_id in SCANS else {}
+        overrides = SCANS[scan_id].get("cvss_overrides", {}) if scan_id in SCANS else {}
         key = f"{triaged.get('title', '')}||{triaged.get('url', '')}"
         if key in overrides:
             finding_entry["cvss_override"] = overrides[key]["cvss"]
