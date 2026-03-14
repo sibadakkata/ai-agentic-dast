@@ -56,13 +56,15 @@ GET {SCANNER_URL}/api/scan/{scan_id}
 
 Returns status (`running`, `paused`, `completed`, `error`, `cancelled`), progress log, cost, duration, and findings count.
 
-### 3. List All Scans
+### 3. List Scans (Paginated)
 
 ```
-GET {SCANNER_URL}/api/scans
+GET {SCANNER_URL}/api/scans?page=1&per_page=25&search=NGP
 ```
 
-Returns all scan history. Each entry has: `id`, `target`, `model`, `status`, `started`, `duration`, `cost`, `findings_count`, `scan_mode`, `phases_completed`.
+Query params (all optional): `page` (default 1), `per_page` (default 25, max 100), `search` (filters by target, model, id, or status).
+
+Returns `{ items: [...], total, page, per_page, total_pages }`. Each item has: `id`, `target`, `model`, `status`, `started`, `duration`, `cost`, `findings_count`, `scan_mode`, `phases_completed`.
 
 ### 4. Stop a Running Scan
 

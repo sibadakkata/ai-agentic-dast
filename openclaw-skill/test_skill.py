@@ -65,7 +65,10 @@ def _api(method, path, body=None, retries=2, timeout=60):
 
 
 def _get_scans():
-    return _api("GET", "/api/scans")
+    data = _api("GET", "/api/scans?per_page=100")
+    if isinstance(data, dict) and "items" in data:
+        return data["items"]
+    return data
 
 
 def _filter_scans(scans, url_filter=None, model_filter=None):

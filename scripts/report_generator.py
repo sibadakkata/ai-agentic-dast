@@ -72,7 +72,7 @@ def _model_slug(model_key):
     slug = re.sub(r"[^a-zA-Z0-9]+", "_", slug).strip("_")
     return slug
 
-SEV_COLORS = {"Critical": (180, 30, 30), "High": (220, 80, 30), "Medium": (220, 160, 30), "Low": (60, 140, 200), "Info": (120, 120, 120)}
+SEV_COLORS = {"Critical": (180, 30, 30), "High": (220, 80, 30), "Medium": (220, 160, 30), "Low": (60, 140, 200), "Info": (120, 120, 120), "Not Exploitable": (20, 140, 60), "TBD": (217, 119, 6)}
 VERDICT_COLORS = {"TRUE_POSITIVE": (200, 40, 40), "FALSE_POSITIVE": (20, 140, 60), "NEEDS_VERIFICATION": (200, 160, 20), "NOT_A_FINDING": (120, 120, 120), "MANUAL_REVIEW": (217, 119, 6)}
 SEV_ORDER = {"Critical": 0, "High": 1, "Medium": 2, "Low": 3, "Info": 4}
 
@@ -510,9 +510,11 @@ def render(pdf, idx, f, link_id=None):
     pdf.badge(sev, v)
 
     if f["scanner_severity"] != sev:
-        pdf.kv("Sev Change:", f"{f['scanner_severity']} -> {sev} (corrected per CVSS)", vc=(180, 30, 30))
+        pdf.kv("AI Sev -> Triage Sev:", f"{f['scanner_severity']} -> {sev}", vc=(180, 30, 30))
     if f.get("cvss"):
         pdf.kv("CVSS:", f"{f['cvss']:.1f} ({f.get('cvss_vector', '')})")
+    if f.get("cvss_rationale"):
+        pdf.kv("CVSS Rationale:", f["cvss_rationale"])
     if f.get("cve"):
         pdf.kv("CVE/CWE:", f["cve"])
     if f.get("cwe") and f["cwe"] not in (f.get("cve") or ""):
@@ -737,7 +739,7 @@ def render(pdf, idx, f, link_id=None):
 
 def _render_summary_table(pdf, all_findings, link_ids):
     """Render a clickable summary table. Each row links to the detail via link_ids."""
-    col_w = [8, 14, 68, 52, 48]  # #, Sev, Finding, Impact, Remediation
+    col_w = [8, 14, 14, 62, 48, 44]  # #, AI Sev, Triage Sev, Finding, Impact, Remediation
     row_h = 5.5
     hdr_h = 7
 
@@ -745,7 +747,7 @@ def _render_summary_table(pdf, all_findings, link_ids):
         pdf.set_font("Helvetica", "B", 7)
         pdf.set_fill_color(30, 60, 120)
         pdf.set_text_color(255, 255, 255)
-        for w, label in zip(col_w, ["#", "Sev", "Finding", "Impact", "Remediation"]):
+        for w, label in zip(col_w, ["#", "AI Sev", "Triage", "Finding", "Impact", "Remediation"]):
             pdf.cell(w, hdr_h, _safe(label), border=1, fill=True, align="C")
         pdf.ln(hdr_h)
 
@@ -753,11 +755,13 @@ def _render_summary_table(pdf, all_findings, link_ids):
 
     pdf.set_font("Helvetica", "", 6.5)
     for i, f in enumerate(all_findings, 1):
-        sev = f["final_severity"]
-        sc = SEV_COLORS.get(sev, (100, 100, 100))
-        title_short = (f["title"] or "")[:48]
-        impact = _impact_oneliner(f)[:42]
-        remed = _remediation_oneliner(f)[:38]
+        ai_sev = f.get("ai_severity", "") or ""
+        triage_sev = f["final_severity"]
+        ai_sc = SEV_COLORS.get(ai_sev, (100, 100, 100))
+        tr_sc = SEV_COLORS.get(triage_sev, (100, 100, 100))
+        title_short = (f["title"] or "")[:42]
+        impact = _impact_oneliner(f)[:38]
+        remed = _remediation_oneliner(f)[:34]
         lid = link_ids[i - 1] if i - 1 < len(link_ids) else None
 
         if pdf.get_y() + row_h > 272:
@@ -771,24 +775,29 @@ def _render_summary_table(pdf, all_findings, link_ids):
 
         pdf.cell(col_w[0], row_h, str(i), border="LTB", fill=True, align="C")
 
-        pdf.set_fill_color(*sc)
+        pdf.set_fill_color(*ai_sc)
         pdf.set_text_color(255, 255, 255)
         pdf.set_font("Helvetica", "B", 6)
-        pdf.cell(col_w[1], row_h, _safe(sev[:4]), border="TB", fill=True, align="C")
+        pdf.cell(col_w[1], row_h, _safe(ai_sev[:4]), border="TB", fill=True, align="C")
+
+        pdf.set_fill_color(*tr_sc)
+        pdf.set_text_color(255, 255, 255)
+        pdf.set_font("Helvetica", "B", 6)
+        pdf.cell(col_w[2], row_h, _safe(triage_sev[:4]), border="TB", fill=True, align="C")
 
         pdf.set_fill_color(*bg)
         pdf.set_text_color(30, 60, 180)
         pdf.set_font("Helvetica", "U", 6.5)
-        pdf.cell(col_w[2], row_h, _safe(title_short), border="TB", fill=True,
+        pdf.cell(col_w[3], row_h, _safe(title_short), border="TB", fill=True,
                  link=lid)
 
         pdf.set_text_color(60, 60, 60)
         pdf.set_font("Helvetica", "", 6)
-        pdf.cell(col_w[3], row_h, _safe(impact), border="TB", fill=True)
+        pdf.cell(col_w[4], row_h, _safe(impact), border="TB", fill=True)
 
         pdf.set_text_color(30, 100, 30)
         pdf.set_font("Helvetica", "I", 6)
-        pdf.cell(col_w[4], row_h, _safe(remed), border="RTB", fill=True)
+        pdf.cell(col_w[5], row_h, _safe(remed), border="RTB", fill=True)
         pdf.ln(row_h)
 
 

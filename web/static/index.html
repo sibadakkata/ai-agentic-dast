@@ -53,6 +53,16 @@ input::placeholder { color: #9ca3af; }
 .scan-toolbar { display: flex; gap: 8px; align-items: center; margin-bottom: 10px; padding: 8px 12px; background: var(--surface2); border-radius: 8px; display: none; }
 .scan-toolbar.visible { display: flex; }
 .scan-toolbar .sel-count { font-size: 12px; font-weight: 600; color: var(--text2); margin-right: 4px; }
+.scan-controls-bar { display:flex; align-items:center; gap:10px; margin-bottom:10px; flex-wrap:wrap; }
+.scan-search { padding:7px 12px; border:1px solid var(--border); border-radius:6px; font-size:13px; width:260px; background:var(--surface2); color:var(--text); outline:none; transition:border-color 0.15s; }
+.scan-search:focus { border-color:var(--accent); box-shadow:0 0 0 2px rgba(79,70,229,0.12); }
+.scan-page-size { padding:6px 8px; border:1px solid var(--border); border-radius:6px; font-size:12px; background:var(--surface2); color:var(--text); cursor:pointer; }
+.scan-pagination { display:flex; align-items:center; gap:4px; margin-top:12px; justify-content:center; }
+.scan-pagination button { padding:5px 10px; border:1px solid var(--border); border-radius:5px; background:var(--surface2); color:var(--text); font-size:12px; cursor:pointer; transition:all 0.15s; }
+.scan-pagination button:hover:not(:disabled) { background:var(--accent); color:#fff; border-color:var(--accent); }
+.scan-pagination button:disabled { opacity:0.4; cursor:default; }
+.scan-pagination button.active { background:var(--accent); color:#fff; border-color:var(--accent); font-weight:600; }
+.scan-pagination .page-info { font-size:12px; color:var(--text2); margin:0 8px; }
 .scan-list { display: flex; flex-direction: column; gap: 8px; }
 .scan-item { display: grid; grid-template-columns: 28px 2fr 1.5fr 1fr 1fr 1fr auto; gap: 12px; align-items: center; padding: 12px 16px; background: var(--surface2); border-radius: 8px; font-size: 13px; cursor: pointer; transition: background 0.15s; }
 .scan-item:hover { background: #ebedf5; }
@@ -72,6 +82,7 @@ input::placeholder { color: #9ca3af; }
 .severity { font-weight: 700; font-size: 11px; }
 .sev-critical { color: #ff4444; } .sev-high { color: var(--orange); } .sev-medium { color: var(--yellow); }
 .sev-low { color: var(--blue); } .sev-info { color: var(--text2); }
+.sev-notexploitable { color: var(--green); } .sev-tbd { color: #d97706; }
 
 .verdict { font-weight: 600; font-size: 11px; }
 .v-true_positive { color: var(--red); } .v-false_positive { color: var(--green); }
@@ -324,6 +335,17 @@ tr:hover td { background: rgba(79,70,229,0.04); }
   <!-- SCAN LIST -->
   <div class="card" id="scans-card">
     <h2><span style="display:flex;align-items:center;gap:8px;"><span class="icon">📋</span> Scan History</span></h2>
+    <div class="scan-controls-bar">
+      <input type="text" id="scan-search" class="scan-search" placeholder="Search by target, model, status..." oninput="onScanSearchInput()">
+      <label style="font-size:12px;color:var(--text2);display:flex;align-items:center;gap:4px;">Show
+        <select id="scan-page-size" class="scan-page-size" onchange="onPageSizeChange()">
+          <option value="25" selected>25</option>
+          <option value="50">50</option>
+        </select>
+        per page
+      </label>
+      <span id="scan-total-count" style="font-size:12px;color:var(--text2);margin-left:auto;"></span>
+    </div>
     <div class="scan-toolbar" id="scan-toolbar">
       <span class="sel-count"><span id="sel-count-num">0</span> selected</span>
       <button type="button" class="btn btn-sm btn-outline" onclick="bulkRetry()" style="color:var(--accent);border-color:var(--accent);">↻ Retry Selected</button>
@@ -331,6 +353,7 @@ tr:hover td { background: rgba(79,70,229,0.04); }
       <button type="button" class="btn btn-sm btn-outline" onclick="clearSelection()" style="font-size:11px;">Deselect All</button>
     </div>
     <div id="scans-list"><div class="empty">No scans yet. Configure a target above and click Start Scan.</div></div>
+    <div id="scan-pagination" class="scan-pagination" style="display:none;"></div>
   </div>
 
   <!-- LIVE SCAN VIEW (shown when clicking a running scan) -->
@@ -448,6 +471,7 @@ tr:hover td { background: rgba(79,70,229,0.04); }
 
 <script>
 let currentScanId = null;
+let currentTriagedFindings = [];
 
 async function init() {
   const models = await (await fetch('/api/models')).json();
@@ -486,10 +510,52 @@ async function testConnectivity() {
   }
 }
 
+let _scanPage = 1;
+let _scanPerPage = 25;
+let _scanSearch = '';
+let _scanSearchTimer = null;
+
+function onScanSearchInput() {
+  clearTimeout(_scanSearchTimer);
+  _scanSearchTimer = setTimeout(() => {
+    _scanSearch = document.getElementById('scan-search').value.trim();
+    _scanPage = 1;
+    loadScans();
+  }, 300);
+}
+
+function onPageSizeChange() {
+  _scanPerPage = parseInt(document.getElementById('scan-page-size').value, 10);
+  _scanPage = 1;
+  loadScans();
+}
+
+function goToScanPage(p) {
+  _scanPage = p;
+  loadScans();
+}
+
 async function loadScans() {
-  const scans = await (await fetch('/api/scans')).json();
+  const params = new URLSearchParams({ page: _scanPage, per_page: _scanPerPage });
+  if (_scanSearch) params.set('search', _scanSearch);
+  const resp = await fetch('/api/scans?' + params.toString());
+  const result = await resp.json();
+  const scans = result.items || result;
+  const total = result.total || scans.length;
+  const totalPages = result.total_pages || 1;
+  const curPage = result.page || 1;
+
   const el = document.getElementById('scans-list');
-  if (!scans.length) { el.innerHTML = '<div class="empty">No scans yet.</div>'; updateToolbar(); return; }
+  const countEl = document.getElementById('scan-total-count');
+  countEl.textContent = total + ' scan' + (total !== 1 ? 's' : '') + (_scanSearch ? ' matching "' + _scanSearch + '"' : ' total');
+
+  if (!scans.length) {
+    el.innerHTML = '<div class="empty">' + (_scanSearch ? 'No scans match "' + esc(_scanSearch) + '".' : 'No scans yet.') + '</div>';
+    document.getElementById('scan-pagination').style.display = 'none';
+    updateToolbar();
+    return;
+  }
+
   el.innerHTML = '<div class="scan-list"><div class="scan-item" style="background:transparent;padding:6px 16px;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:0.5px;color:var(--text2);cursor:default;">' +
     '<div onclick="event.stopPropagation()"><input type="checkbox" id="select-all-scans" onchange="toggleSelectAll(this)" style="width:16px;height:16px;accent-color:var(--accent);cursor:pointer;" title="Select all"></div>' +
     '<div>Target</div><div>Model</div><div>Status</div><div>Duration</div><div>Cost</div><div>Findings</div></div>' +
@@ -515,6 +581,24 @@ async function loadScans() {
       </div>
     </div>`).join('') + '</div>';
   updateToolbar();
+
+  const pagEl = document.getElementById('scan-pagination');
+  if (totalPages <= 1) { pagEl.style.display = 'none'; return; }
+  pagEl.style.display = 'flex';
+  let pagHtml = '';
+  pagHtml += `<button ${curPage <= 1 ? 'disabled' : ''} onclick="goToScanPage(${curPage - 1})">Prev</button>`;
+  const maxBtns = 7;
+  let startP = Math.max(1, curPage - Math.floor(maxBtns / 2));
+  let endP = Math.min(totalPages, startP + maxBtns - 1);
+  if (endP - startP < maxBtns - 1) startP = Math.max(1, endP - maxBtns + 1);
+  if (startP > 1) { pagHtml += `<button onclick="goToScanPage(1)">1</button>`; if (startP > 2) pagHtml += `<span class="page-info">...</span>`; }
+  for (let p = startP; p <= endP; p++) {
+    pagHtml += `<button class="${p === curPage ? 'active' : ''}" onclick="goToScanPage(${p})">${p}</button>`;
+  }
+  if (endP < totalPages) { if (endP < totalPages - 1) pagHtml += `<span class="page-info">...</span>`; pagHtml += `<button onclick="goToScanPage(${totalPages})">${totalPages}</button>`; }
+  pagHtml += `<button ${curPage >= totalPages ? 'disabled' : ''} onclick="goToScanPage(${curPage + 1})">Next</button>`;
+  pagHtml += `<span class="page-info">Page ${curPage} of ${totalPages}</span>`;
+  pagEl.innerHTML = pagHtml;
 }
 
 async function uploadFile(inputId) {
@@ -1441,6 +1525,7 @@ function renderResults(data) {
       </div>`;
   }
 
+  currentTriagedFindings = data.triaged_findings || [];
   renderComparison(data);
   renderCrawled(data.crawled_endpoints);
   renderPayloads(data.payloads_by_endpoint);
@@ -1464,6 +1549,7 @@ function renderComparison(data) {
   const el = document.getElementById('tab-comparison');
   if (!data.triaged_findings.length) { el.innerHTML = '<div class="empty">No findings</div>'; return; }
 
+  window._lastCoverage = data.coverage || {};
   const vStats = data.coverage?.verification || {};
   const hasVerification = vStats.confirmed != null;
   let vSummary = '';
@@ -1477,7 +1563,7 @@ function renderComparison(data) {
   }
 
   el.innerHTML = vSummary + `<table><thead><tr>
-    <th>#</th><th>Finding</th><th>AI Sev</th><th>Verdict</th><th>Verified</th><th>CWE</th><th>CVSS</th><th>Reason</th>
+    <th>#</th><th>Finding</th><th>AI Sev</th><th>Triage Sev</th><th>Verdict</th><th>Verified</th><th>CWE</th><th>CVSS</th><th>Reason</th>
   </tr></thead><tbody>` +
   data.triaged_findings.map((f, i) => {
     const vText = f.verdict === 'MANUAL_REVIEW'
@@ -1495,12 +1581,44 @@ function renderComparison(data) {
     <td>${i+1}</td>
     <td><strong>${esc(f.title)}</strong><br><span style="font-size:11px;color:var(--text2)">${esc(f.url||'')}</span></td>
     <td><span class="severity sev-${f.ai_severity?.toLowerCase()}">${f.ai_severity}</span></td>
+    <td><span class="severity sev-${(f.final_severity||'').toLowerCase().replace(/\s+/g,'')}">${f.final_severity||'-'}</span></td>
     <td><span class="verdict v-${f.verdict?.toLowerCase()}">${f.verdict?.replace(/_/g,' ').toLowerCase().replace(/\b\w/g,c=>c.toUpperCase())}</span></td>
     <td style="font-size:11px;font-weight:600;${vColor}">${vText}</td>
     <td style="font-size:11px">${esc(f.cwe||'')}</td>
-    <td style="font-size:11px">${f.cvss ? f.cvss.toFixed(1) : '-'}</td>
+    <td style="font-size:11px">
+      <span class="cvss-cell" title="${esc(f.cvss_rationale||'')}" style="cursor:help;border-bottom:1px dotted var(--text2);">
+        ${f.cvss_override != null ? f.cvss_override.toFixed(1) : (f.cvss ? f.cvss.toFixed(1) : '-')}
+      </span>
+      ${f.cvss_override != null ? '<span style="font-size:9px;color:var(--accent2);" title="Manually overridden"> *</span>' : ''}
+      <span class="cvss-edit" onclick="editCvss(${i})" style="cursor:pointer;font-size:10px;color:var(--text2);margin-left:3px;" title="Override CVSS">&#9998;</span>
+    </td>
     <td style="font-size:11px;max-width:200px">${esc(f.reason||'')}</td>
   </tr>`;}).join('') + '</tbody></table>';
+}
+
+async function editCvss(idx) {
+  const f = currentTriagedFindings[idx];
+  if (!f || !currentScanId) return;
+  const current = f.cvss_override != null ? f.cvss_override : (f.cvss || 0);
+  const rationale = f.cvss_rationale || 'No rationale available';
+  const msg = `CVSS Score for: ${f.title}\n\nAuto-calculated: ${f.cvss ? f.cvss.toFixed(1) : '-'}\nRationale: ${rationale}\n${f.cvss_override != null ? 'Current override: ' + f.cvss_override.toFixed(1) + (f.cvss_override_note ? ' (' + f.cvss_override_note + ')' : '') + '\n' : ''}\nEnter new CVSS (0.0-10.0) or leave empty to keep:`;
+  const input = prompt(msg, current.toFixed(1));
+  if (input === null) return;
+  const val = parseFloat(input);
+  if (isNaN(val) || val < 0 || val > 10) { alert('Invalid CVSS score. Must be 0.0 to 10.0.'); return; }
+  const note = prompt('Optional: why are you changing this score?', f.cvss_override_note || '') || '';
+  try {
+    const resp = await fetch(`/api/results/${currentScanId}/cvss-override`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ title: f.title, url: f.url, cvss: val, note })
+    });
+    if (resp.ok) {
+      f.cvss_override = val;
+      f.cvss_override_note = note;
+      renderComparison({triaged_findings: currentTriagedFindings, coverage: window._lastCoverage || {}});
+    } else { alert('Failed to save override'); }
+  } catch(e) { alert('Error: ' + e.message); }
 }
 
 function renderCrawled(endpoints) {

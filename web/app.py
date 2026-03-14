@@ -83,6 +83,14 @@ def _load_scans_from_disk():
                     progress.append("--- Container restarted — marked as cancelled ---")
                     info["progress"] = progress
                 SCANS[scan_id] = info
+            for scan_id in list(SCANS.keys()):
+                override_file = Path("results/raw") / f"{scan_id}_cvss_overrides.json"
+                if override_file.exists():
+                    try:
+                        SCANS[scan_id]["cvss_overrides"] = json.loads(
+                            override_file.read_text(encoding="utf-8"))
+                    except Exception:
+                        pass
         except Exception:
             pass
 
@@ -162,10 +170,18 @@ async def get_models(creds=Depends(_verify)):
 
 
 @app.get("/api/scans", tags=["Scans"])
-async def list_scans(creds=Depends(_verify)):
-    scans = []
+async def list_scans(
+    page: int = 1,
+    per_page: int = 25,
+    search: str = "",
+    creds=Depends(_verify),
+):
+    per_page = min(max(per_page, 1), 100)
+    page = max(page, 1)
+
+    all_scans = []
     for scan_id, info in sorted(SCANS.items(), key=lambda x: x[1].get("started", ""), reverse=True):
-        scans.append({
+        all_scans.append({
             "id": scan_id,
             "target": info.get("target_url", ""),
             "model": info.get("model_name", ""),
@@ -177,7 +193,7 @@ async def list_scans(creds=Depends(_verify)):
             "scan_mode": info.get("scan_mode", ""),
             "phases_completed": info.get("phases_completed", len(info.get("live_phases", []))),
         })
-    existing_ids = {s["id"] for s in scans}
+    existing_ids = {s["id"] for s in all_scans}
     for f in sorted(RAW_DIR.glob("aiagent_*.json"), key=os.path.getmtime, reverse=True):
         fid = f.stem
         if fid in existing_ids or any(eid in fid for eid in existing_ids):
@@ -188,7 +204,7 @@ async def list_scans(creds=Depends(_verify)):
             continue
         meta = data.get("metadata", {})
         summary = data.get("summary", {})
-        scans.append({
+        all_scans.append({
             "id": fid,
             "target": data.get("target", ""),
             "model": meta.get("model", ""),
@@ -199,7 +215,27 @@ async def list_scans(creds=Depends(_verify)):
             "findings_count": summary.get("total_findings", len(data.get("findings", []))),
             "scan_mode": meta.get("scan_mode", ""),
         })
-    return scans
+
+    if search:
+        q = search.lower()
+        all_scans = [s for s in all_scans if q in (s["target"] or "").lower()
+                     or q in (s["model"] or "").lower()
+                     or q in (s["id"] or "").lower()
+                     or q in (s["status"] or "").lower()]
+
+    total = len(all_scans)
+    total_pages = max(1, (total + per_page - 1) // per_page)
+    page = min(page, total_pages)
+    start = (page - 1) * per_page
+    items = all_scans[start : start + per_page]
+
+    return {
+        "items": items,
+        "total": total,
+        "page": page,
+        "per_page": per_page,
+        "total_pages": total_pages,
+    }
 
 
 IMPORTS_DIR = BASE / "imports"
@@ -820,7 +856,7 @@ async def get_results(scan_id: str, creds=Depends(_verify)):
             "confidence": f.get("confidence", ""),
         })
         triaged = triage_classify(f, test_log)
-        triaged_findings.append({
+        finding_entry = {
             "title": triaged.get("title", ""),
             "ai_severity": f.get("severity", ""),
             "final_severity": triaged.get("final_severity", ""),
@@ -830,11 +866,19 @@ async def get_results(scan_id: str, creds=Depends(_verify)):
             "url": triaged.get("url", ""),
             "cwe": triaged.get("cwe", ""),
             "cvss": triaged.get("cvss"),
+            "cvss_rationale": triaged.get("cvss_rationale", ""),
             "cve": triaged.get("cve", ""),
             "verified": f.get("verified", False),
             "verification_method": triaged.get("verification_method", "none"),
             "verification_evidence": triaged.get("verification_evidence", ""),
-        })
+        }
+
+        overrides = scan.get("cvss_overrides", {}) if scan_id in SCANS else {}
+        key = f"{triaged.get('title', '')}||{triaged.get('url', '')}"
+        if key in overrides:
+            finding_entry["cvss_override"] = overrides[key]["cvss"]
+            finding_entry["cvss_override_note"] = overrides[key].get("note", "")
+        triaged_findings.append(finding_entry)
 
     crawled = _extract_crawled(summary, test_log)
     payloads_by_endpoint = _extract_payloads_by_endpoint(test_log)
@@ -877,6 +921,46 @@ async def download_raw(scan_id: str, creds=Depends(_verify)):
     if not fname:
         return JSONResponse({"error": "Not found"}, status_code=404)
     return FileResponse(fname, filename=os.path.basename(fname), media_type="application/json")
+
+
+@app.post("/api/results/{scan_id}/cvss-override", tags=["Results"])
+async def cvss_override(scan_id: str, request: Request, creds=Depends(_verify)):
+    """Save a CVSS override for a specific finding in a scan."""
+    body = await request.json()
+    title = body.get("title", "")
+    url = body.get("url", "")
+    cvss_value = body.get("cvss")
+    note = body.get("note", "")
+
+    if cvss_value is None or not title:
+        raise HTTPException(400, "title and cvss are required")
+    try:
+        cvss_value = round(float(cvss_value), 1)
+        if not (0.0 <= cvss_value <= 10.0):
+            raise ValueError
+    except (ValueError, TypeError):
+        raise HTTPException(400, "cvss must be a number between 0.0 and 10.0")
+
+    scan = SCANS.get(scan_id)
+    if not scan:
+        raise HTTPException(404, "Scan not found")
+
+    if "cvss_overrides" not in scan:
+        scan["cvss_overrides"] = {}
+
+    key = f"{title}||{url}"
+    scan["cvss_overrides"][key] = {"cvss": cvss_value, "note": note}
+
+    # Persist to disk
+    scan_dir = Path("results/raw")
+    override_file = scan_dir / f"{scan_id}_cvss_overrides.json"
+    try:
+        import json as _json
+        override_file.write_text(_json.dumps(scan["cvss_overrides"], indent=2))
+    except Exception as e:
+        logger.warning("Failed to persist CVSS override: %s", e)
+
+    return {"status": "ok", "key": key, "cvss": cvss_value, "note": note}
 
 
 @app.post("/api/results/{scan_id}/report", tags=["Results"])

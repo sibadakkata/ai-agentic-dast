@@ -76,6 +76,112 @@ def _cwe_apply(r, profile_key):
     r["cvss_vector"] = p.get("vec", "")
 
 
+def _adjust_cvss(r, finding, statuses, bodies, evidence, title):
+    """Context-aware CVSS adjustment based on actual evidence.
+
+    Adjusts the base CVSS score up or down based on what was actually observed,
+    and builds a human-readable rationale explaining the score.
+    """
+    base = r.get("cvss", 0.0)
+    if base == 0.0:
+        r["cvss_rationale"] = "No CVSS assigned (informational or no CWE mapped)."
+        return
+
+    adjustments = []
+    verdict = r.get("verdict", "")
+
+    if verdict == "FALSE_POSITIVE":
+        r["cvss"] = 0.0
+        r["cvss_rationale"] = "CVSS set to 0.0 — finding is not exploitable (false positive)."
+        return
+
+    if verdict == "MANUAL_REVIEW":
+        r["cvss_rationale"] = (
+            f"Base CVSS {base:.1f} from {r.get('cwe', 'CWE profile')}. "
+            "Score is preliminary — requires manual verification to confirm."
+        )
+        return
+
+    # --- Context adjustments for TRUE_POSITIVE findings ---
+
+    # 1. Runtime verified vs pattern-only
+    rv_method = r.get("verification_method", "none")
+    if rv_method != "none" and "RUNTIME" in (r.get("reason", "") or ""):
+        adjustments.append("+0.0 Runtime verification confirmed exploitability")
+    elif "pattern" in rv_method or rv_method == "none":
+        if base >= 7.0:
+            base -= 1.0
+            adjustments.append("-1.0 Not runtime-verified (pattern match only, high-sev finding)")
+
+    # 2. Data sensitivity signals in response
+    pii_keywords = ["email", "password", "ssn", "credit card", "phone",
+                     "address", "name", "account", "balance", "token"]
+    has_pii = any(kw in b for b in bodies for kw in pii_keywords)
+    if has_pii and base < 9.0:
+        base += 0.5
+        adjustments.append("+0.5 PII/sensitive data observed in response")
+
+    # 3. All responses are error codes (attack partially blocked)
+    if statuses and all(s >= 400 for s in statuses):
+        if base >= 5.0:
+            base -= 1.5
+            adjustments.append(f"-1.5 All {len(statuses)} responses were errors ({list(set(statuses))})")
+
+    # 4. Mixed success/error (partial exploitation)
+    if statuses and any(s < 400 for s in statuses) and any(s >= 400 for s in statuses):
+        adjustments.append("+0.0 Mixed responses — partial exploitation observed")
+
+    # 5. Injection confirmed with data extraction
+    data_extract_kw = ["table_name", "column_name", "union select",
+                        "information_schema", "root:x:0", "uid="]
+    if any(kw in evidence for kw in data_extract_kw):
+        if base < 9.5:
+            base += 0.5
+            adjustments.append("+0.5 Data extraction or system info confirmed in response")
+
+    # 6. XSS in JSON API vs HTML (JSON XSS much lower risk)
+    if any(k in title for k in ["xss", "cross-site"]):
+        json_response = any("application/json" in b for b in bodies)
+        if json_response:
+            base -= 2.0
+            adjustments.append("-2.0 XSS in JSON response (not rendered as HTML by browser)")
+
+    # 7. Config/header findings — already Low, no adjustment needed
+    config_kw = ["header", "hsts", "csp", "cookie", "referrer", "permissions",
+                 "x-frame", "x-content-type", "cache", "tls", "ssl"]
+    if any(k in title for k in config_kw):
+        adjustments.append("+0.0 Configuration/hardening finding (standard base score)")
+
+    # 8. CORS with credentials vs without
+    if "cors" in title:
+        acao = str(finding.get("verification_details", {}).get("acao", ""))
+        acac = str(finding.get("verification_details", {}).get("acac", ""))
+        if acao == "*" and acac == "true":
+            base = max(base, 6.5)
+            adjustments.append(f"Set to {base:.1f} — CORS * with credentials is exploitable")
+        elif acao == "*":
+            adjustments.append("+0.0 CORS wildcard without credentials (lower risk)")
+
+    # 9. Rate limit with actual account compromise evidence
+    if "rate limit" in title or "brute force" in title:
+        if any(kw in evidence for kw in ["success", "logged in", "welcome", "dashboard"]):
+            base += 2.0
+            adjustments.append("+2.0 Brute force succeeded — account access confirmed")
+
+    # Clamp to valid range
+    base = max(0.0, min(10.0, round(base, 1)))
+    r["cvss"] = base
+
+    # Build rationale
+    cwe = r.get("cwe", "")
+    original = r.get("cvss", base)
+    parts = [f"Base: {CWE_PROFILES.get(cwe, {}).get('cvss', original):.1f} from {cwe or 'profile'}"]
+    if adjustments:
+        parts.extend(adjustments)
+    parts.append(f"Final: {base:.1f} ({SEV_FROM_CVSS(base)})")
+    r["cvss_rationale"] = " | ".join(parts)
+
+
 def _runtime_severity(title: str, method: str, details: dict) -> str:
     """Assign severity for a runtime-CONFIRMED finding."""
     t = title.lower()
@@ -511,8 +617,20 @@ def _resolve_inconclusive(finding, title, confidence, statuses, bodies,
 
 def classify(finding, test_log):
     """Universal triage: classify any scanner finding from any target.
-    Returns dict with verdict, severity, CVE/CWE, evidence, steps, etc."""
+    Returns dict with verdict, severity, CVE/CWE, evidence, steps, cvss_rationale, etc."""
+    r = _classify_inner(finding, test_log)
+    title = (finding.get("title", "") or "").lower()
+    ev_raw = finding.get("evidence", "") or ""
+    evidence = str(ev_raw).lower() if not isinstance(ev_raw, dict) else json.dumps(ev_raw).lower()
+    tests = find_tests(finding, test_log)
+    statuses = get_statuses(tests)
+    bodies = get_response_bodies(tests)
+    _adjust_cvss(r, finding, statuses, bodies, evidence, title)
+    return r
 
+
+def _classify_inner(finding, test_log):
+    """Core classification logic."""
     title = (finding.get("title", "") or "").lower()
     ev_raw = finding.get("evidence", "") or ""
     evidence = str(ev_raw).lower() if not isinstance(ev_raw, dict) else json.dumps(ev_raw).lower()
@@ -537,6 +655,7 @@ def classify(finding, test_log):
         "verdict": "NEEDS_VERIFICATION",
         "final_severity": "Low",
         "cve": "", "cwe": "", "cvss": 0.0, "cvss_vector": "",
+        "cvss_rationale": "",
         "exploit_evidence": "",
         "steps": "",
         "dev_action": "",
