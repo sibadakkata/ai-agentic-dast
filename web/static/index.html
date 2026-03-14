@@ -339,15 +339,18 @@ tr:hover td { background: rgba(79,70,229,0.04); }
       <input type="text" id="scan-search" class="scan-search" placeholder="Search by target, model, status..." oninput="onScanSearchInput()">
       <label style="font-size:12px;color:var(--text2);display:flex;align-items:center;gap:4px;">Show
         <select id="scan-page-size" class="scan-page-size" onchange="onPageSizeChange()">
+          <option value="10">10</option>
           <option value="25" selected>25</option>
           <option value="50">50</option>
         </select>
         per page
       </label>
+      <button type="button" class="btn btn-sm btn-outline" onclick="exportScansToExcel()" style="font-size:11px;padding:5px 12px;color:var(--green);border-color:rgba(16,185,129,0.4);" title="Export scan history to Excel">Export Excel</button>
       <span id="scan-total-count" style="font-size:12px;color:var(--text2);margin-left:auto;"></span>
     </div>
     <div class="scan-toolbar" id="scan-toolbar">
       <span class="sel-count"><span id="sel-count-num">0</span> selected</span>
+      <button type="button" class="btn btn-sm btn-outline" onclick="exportScansToExcel()" style="color:var(--green);border-color:rgba(16,185,129,0.4);">Export Selected</button>
       <button type="button" class="btn btn-sm btn-outline" onclick="bulkRetry()" style="color:var(--accent);border-color:var(--accent);">↻ Retry Selected</button>
       <button type="button" class="btn btn-sm btn-outline" onclick="bulkDelete()" style="color:var(--red);border-color:var(--red);">✕ Delete Selected</button>
       <button type="button" class="btn btn-sm btn-outline" onclick="clearSelection()" style="font-size:11px;">Deselect All</button>
@@ -514,6 +517,7 @@ let _scanPage = 1;
 let _scanPerPage = 25;
 let _scanSearch = '';
 let _scanSearchTimer = null;
+let _loadedScans = [];
 
 function onScanSearchInput() {
   clearTimeout(_scanSearchTimer);
@@ -544,6 +548,7 @@ async function loadScans() {
   const total = result.total || scans.length;
   const totalPages = result.total_pages || 1;
   const curPage = result.page || 1;
+  _loadedScans = scans;
 
   const el = document.getElementById('scans-list');
   const countEl = document.getElementById('scan-total-count');
@@ -842,6 +847,53 @@ function clearSelection() {
 function toggleSelectAll(master) {
   document.querySelectorAll('.scan-check').forEach(cb => cb.checked = master.checked);
   updateToolbar();
+}
+
+async function exportScansToExcel() {
+  const selectedIds = getSelectedScanIds();
+  let dataToExport;
+
+  if (selectedIds.length > 0) {
+    dataToExport = _loadedScans.filter(s => selectedIds.includes(s.id));
+  } else {
+    const resp = await fetch('/api/scans?' + new URLSearchParams({ per_page: 10000, search: _scanSearch || '' }));
+    const result = await resp.json();
+    dataToExport = result.items || result;
+  }
+
+  if (!dataToExport.length) { alert('No scans to export.'); return; }
+
+  const headers = ['Target', 'Model', 'Scan Mode', 'Status', 'Started', 'Duration (s)', 'Cost (USD)', 'Findings', 'Scan ID'];
+  const rows = dataToExport.map(s => [
+    s.target || '',
+    s.model || '',
+    s.scan_mode || '',
+    s.status || '',
+    s.started || '',
+    s.duration != null ? Math.round(s.duration) : '',
+    s.cost != null ? s.cost.toFixed(4) : '',
+    s.findings_count != null ? s.findings_count : '',
+    s.id || '',
+  ]);
+
+  const csvEscape = v => {
+    const str = String(v);
+    if (str.includes(',') || str.includes('"') || str.includes('\n')) return '"' + str.replace(/"/g, '""') + '"';
+    return str;
+  };
+
+  const bom = '\uFEFF';
+  const csv = bom + [headers.map(csvEscape).join(','), ...rows.map(r => r.map(csvEscape).join(','))].join('\r\n');
+  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  const dateStr = new Date().toISOString().slice(0, 10);
+  a.download = `scan-history-${dateStr}.csv`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
 }
 
 async function bulkDelete() {
