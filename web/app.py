@@ -50,21 +50,69 @@ app = FastAPI(
     redoc_url="/redoc",
 )
 
-# --- Basic Auth ---------------------------------------------------------------
-_security = HTTPBasic()
+# --- Auth (cookie sessions + Basic Auth fallback for API clients) -------------
+_security = HTTPBasic(auto_error=False)
 _AUTH_USER = os.environ.get("DAST_AUTH_USER", "dast-admin")
 _AUTH_PASS = os.environ.get("DAST_AUTH_PASS", "changeme")
+_SESSION_SECRET = os.environ.get("DAST_SESSION_SECRET", secrets.token_hex(32))
+_SESSION_COOKIE = "dast_session"
+_SESSION_MAX_AGE = 86400 * 7  # 7 days
 
-def _verify(credentials: HTTPBasicCredentials = Depends(_security)):
+
+def _create_session_token(username: str) -> str:
+    ts = str(int(time.time()))
+    payload = f"{username}:{ts}"
+    sig = hmac.new(_SESSION_SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()[:32]
+    return f"{payload}:{sig}"
+
+
+def _verify_session_token(token: str) -> str | None:
+    if not token:
+        return None
+    parts = token.split(":")
+    if len(parts) != 3:
+        return None
+    username, ts_str, sig = parts
+    try:
+        ts = int(ts_str)
+    except ValueError:
+        return None
+    if time.time() - ts > _SESSION_MAX_AGE:
+        return None
+    expected = hmac.new(_SESSION_SECRET.encode(), f"{username}:{ts_str}".encode(), hashlib.sha256).hexdigest()[:32]
+    if not hmac.compare_digest(sig, expected):
+        return None
+    return username
+
+
+def _check_basic_auth(credentials: HTTPBasicCredentials | None) -> bool:
+    if not credentials:
+        return False
     user_ok = hmac.compare_digest(credentials.username.encode(), _AUTH_USER.encode())
     pass_ok = hmac.compare_digest(credentials.password.encode(), _AUTH_PASS.encode())
-    if not (user_ok and pass_ok):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid credentials",
-            headers={"WWW-Authenticate": "Basic"},
-        )
-    return credentials
+    return user_ok and pass_ok
+
+
+async def _verify(request: Request, credentials: HTTPBasicCredentials | None = Depends(_security)):
+    """Authenticate via session cookie (browser) or Basic Auth (API/curl)."""
+    cookie = request.cookies.get(_SESSION_COOKIE)
+    if cookie and _verify_session_token(cookie):
+        return True
+    if _check_basic_auth(credentials):
+        return True
+    if credentials:
+        raise HTTPException(status_code=401, detail="Invalid credentials", headers={"WWW-Authenticate": "Basic"})
+    raise HTTPException(status_code=401, detail="Authentication required", headers={"WWW-Authenticate": "Basic"})
+
+
+async def _verify_or_redirect(request: Request, credentials: HTTPBasicCredentials | None = Depends(_security)):
+    """For browser pages: redirect to /login if not authenticated."""
+    cookie = request.cookies.get(_SESSION_COOKIE)
+    if cookie and _verify_session_token(cookie):
+        return True
+    if _check_basic_auth(credentials):
+        return True
+    return False
 
 app.mount("/static", StaticFiles(directory=Path(__file__).parent / "static"), name="static")
 
@@ -136,7 +184,7 @@ def _load_scans_from_disk():
         except Exception:
             pass
 
-_TRANSIENT_KEYS = frozenset({"live_tests", "live_findings", "live_phases", "live_crawled", "live_forms", "live_tool_calls", "live_out_of_scope"})
+_TRANSIENT_KEYS = frozenset({"live_tests", "live_findings", "live_phases", "live_crawled", "live_forms", "live_tool_calls", "live_out_of_scope", "live_tokens", "live_llm_calls", "live_cost", "_router"})
 _SECRET_KEYS = frozenset({"_password"})
 
 def _save_scans_to_disk():
@@ -234,7 +282,7 @@ _FALLBACK_MODELS = [
     {"id": "bedrock/mistral.ministral-3-14b-instruct", "name": "Ministral 14B (best value + tools)", "cost": "~$0.20/$0.20 per 1M tokens", "provider": "Mistral", "input_cost_per_m": 0.20},
     {"id": "bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0", "name": "Claude Haiku 4.5 (recommended)", "cost": "~$0.80/$4 per 1M tokens", "provider": "Anthropic", "input_cost_per_m": 0.80},
     {"id": "bedrock/us.anthropic.claude-sonnet-4-6", "name": "Claude Sonnet 4.6 (best quality)", "cost": "~$3/$15 per 1M tokens", "provider": "Anthropic", "input_cost_per_m": 3.00},
-    {"id": "bedrock/us.anthropic.claude-opus-4-20250514", "name": "Claude Opus 4 (premium)", "cost": "~$15/$75 per 1M tokens", "provider": "Anthropic", "input_cost_per_m": 15.00, "high_cost": True},
+    {"id": "bedrock/us.anthropic.claude-opus-4-6-v1", "name": "Claude Opus 4.6 (premium)", "cost": "~$15/$75 per 1M tokens", "provider": "Anthropic", "input_cost_per_m": 15.00, "high_cost": True},
 ]
 
 _MODEL_DISCOVERY_INTERVAL = int(os.environ.get("MODEL_DISCOVERY_INTERVAL_H", "24")) * 3600
@@ -293,19 +341,53 @@ async def health_check():
     return {"status": "ok", "scans_running": running, "total_scans": len(SCANS)}
 
 
-@app.get("/logout", include_in_schema=False)
-async def logout():
-    """Return 401 to force browser to clear Basic Auth credentials."""
-    return Response(
-        content="Logged out. <a href='/'>Login again</a>",
-        status_code=401,
-        headers={"WWW-Authenticate": 'Basic realm="Logged out"'},
-        media_type="text/html",
+@app.get("/login", include_in_schema=False)
+async def login_page(request: Request):
+    """Serve the login page. If already authenticated, redirect to /."""
+    cookie = request.cookies.get(_SESSION_COOKIE)
+    if cookie and _verify_session_token(cookie):
+        from fastapi.responses import RedirectResponse
+        return RedirectResponse("/", status_code=302)
+    return FileResponse(
+        Path(__file__).parent / "static" / "login.html",
+        headers={"Cache-Control": "no-cache, no-store, must-revalidate"},
     )
 
 
+@app.post("/login", include_in_schema=False)
+async def login_submit(request: Request):
+    """Validate credentials and set session cookie."""
+    form = await request.form()
+    username = form.get("username", "")
+    password = form.get("password", "")
+    if hmac.compare_digest(str(username).encode(), _AUTH_USER.encode()) and \
+       hmac.compare_digest(str(password).encode(), _AUTH_PASS.encode()):
+        from fastapi.responses import RedirectResponse
+        token = _create_session_token(str(username))
+        resp = RedirectResponse("/", status_code=302)
+        resp.set_cookie(
+            key=_SESSION_COOKIE, value=token,
+            max_age=_SESSION_MAX_AGE, httponly=True, samesite="lax",
+        )
+        return resp
+    from fastapi.responses import RedirectResponse
+    return RedirectResponse("/login?error=1", status_code=302)
+
+
+@app.get("/logout", include_in_schema=False)
+async def logout():
+    """Clear session cookie and redirect to login."""
+    from fastapi.responses import RedirectResponse
+    resp = RedirectResponse("/login", status_code=302)
+    resp.delete_cookie(_SESSION_COOKIE)
+    return resp
+
+
 @app.get("/", response_class=HTMLResponse, include_in_schema=False)
-async def index(creds=Depends(_verify)):
+async def index(request: Request, auth=Depends(_verify_or_redirect)):
+    if auth is not True:
+        from fastapi.responses import RedirectResponse
+        return RedirectResponse("/login", status_code=302)
     return FileResponse(
         Path(__file__).parent / "static" / "index.html",
         headers={"Cache-Control": "no-cache, no-store, must-revalidate", "Pragma": "no-cache"},
@@ -534,7 +616,8 @@ async def list_scans(
             "status": info.get("status", "unknown"),
             "started": info.get("started", ""),
             "duration": info.get("duration"),
-            "cost": info.get("cost"),
+            "cost": info.get("cost") if info.get("cost") is not None else info.get("live_cost"),
+            "total_tokens": info.get("total_tokens") or info.get("live_tokens", 0),
             "findings_count": info.get("findings_count"),
             "scan_mode": info.get("scan_mode", ""),
             "phases_completed": info.get("phases_completed", len(info.get("live_phases", []))),
@@ -861,6 +944,12 @@ async def _run_scan_task(scan_id, target_url, username, password, model, scan_mo
                 })
                 if len(scan["live_tests"]) > 500:
                     scan["live_tests"] = scan["live_tests"][-500:]
+                _r = scan.get("_router")
+                if _r:
+                    _cs = _r.get_cost_summary()
+                    scan["live_tokens"] = sum(c.get("input_tokens", 0) + c.get("output_tokens", 0) for c in _cs)
+                    scan["live_llm_calls"] = sum(c.get("calls", 0) for c in _cs)
+                    scan["live_cost"] = round(sum(c.get("cost_usd", 0) for c in _cs), 4)
                 if scan["live_tool_calls"] % 10 == 0:
                     _save_scans_to_disk()
             elif event == "finding":
@@ -895,6 +984,7 @@ async def _run_scan_task(scan_id, target_url, username, password, model, scan_mo
                     })
 
         router = LLMRouter(models=[model])
+        scan["_router"] = router
 
         resolved_imports = {}
         for key in ("postman", "postman_env", "burp", "openapi"):
@@ -941,6 +1031,8 @@ async def _run_scan_task(scan_id, target_url, username, password, model, scan_mo
             "status": "completed",
             "duration": round(duration, 1),
             "cost": meta.get("cost_usd"),
+            "total_tokens": meta.get("total_tokens"),
+            "llm_calls": meta.get("llm_calls"),
             "findings_count": summary.get("total_findings", len(findings)),
             "result_file": os.path.basename(filepath),
             "progress": SCANS[scan_id]["progress"] + ["Scan completed."],
@@ -951,13 +1043,18 @@ async def _run_scan_task(scan_id, target_url, username, password, model, scan_mo
         model_slug = model.replace("/", "_").replace(".", "_").replace(":", "_")
         filepath = str(RAW_DIR / f"aiagent_{model_slug}_{scan_id}.json")
         partial_findings = scan.get("live_findings", [])
-        cost_summary = router.get_cost_summary() if router else {}
+        cost_summary = router.get_cost_summary() if router else []
         save_results(filepath, partial_findings, cost_summary, target, model, duration, metrics={})
+        _tok = sum(c.get("input_tokens", 0) + c.get("output_tokens", 0) for c in cost_summary) if isinstance(cost_summary, list) else None
+        _calls = sum(c.get("calls", 0) for c in cost_summary) if isinstance(cost_summary, list) else None
+        _cost = sum(c.get("cost_usd", 0) for c in cost_summary) if isinstance(cost_summary, list) else None
         phases_done = len(scan.get("live_phases", []))
         SCANS[scan_id].update({
             "status": "cancelled",
             "duration": round(duration, 1),
-            "cost": cost_summary.get("total_cost_usd") if isinstance(cost_summary, dict) else None,
+            "cost": _cost,
+            "total_tokens": _tok,
+            "llm_calls": _calls,
             "findings_count": len(partial_findings),
             "result_file": os.path.basename(filepath),
             "phases_completed": phases_done,
@@ -1009,7 +1106,9 @@ async def get_scan_status(scan_id: str):
             "result_file": s.get("result_file"),
             "error": s.get("error"),
             "duration": s.get("duration"),
-            "cost": s.get("cost"),
+            "cost": s.get("cost") if s.get("cost") is not None else s.get("live_cost"),
+            "total_tokens": s.get("total_tokens") or s.get("live_tokens", 0),
+            "llm_calls": s.get("llm_calls") or s.get("live_llm_calls", 0),
             "findings_count": s.get("findings_count", len(s.get("live_findings", []))),
             "phases_completed": s.get("phases_completed", len(s.get("live_phases", []))),
         }
@@ -1038,6 +1137,9 @@ async def get_scan_live(scan_id: str, since_test: int = 0, since_finding: int = 
         "pages_crawled": len(s.get("live_crawled", [])),
         "crawled_urls": s.get("live_crawled", []),
         "tool_calls": s.get("live_tool_calls", 0),
+        "total_tokens": s.get("live_tokens", 0),
+        "llm_calls": s.get("live_llm_calls", 0),
+        "live_cost": s.get("live_cost", 0),
         "out_of_scope": s.get("live_out_of_scope", []),
     }
 

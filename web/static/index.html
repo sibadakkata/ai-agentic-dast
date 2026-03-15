@@ -1319,15 +1319,7 @@ async function refreshModels() {
 }
 
 function doLogout() {
-  const logoutUrl = window.location.origin + '/logout';
-  const xhr = new XMLHttpRequest();
-  xhr.open('GET', logoutUrl, true, 'logout', 'logout');
-  xhr.onreadystatechange = function() {
-    if (xhr.readyState === 4) {
-      window.location.replace(window.location.origin);
-    }
-  };
-  xhr.send();
+  window.location.href = '/logout';
 }
 
 async function testConnectivity() {
@@ -1693,7 +1685,9 @@ async function loadScans() {
         '</div>' +
         '<div style="font-size:13px;color:var(--text2);">' + started + '</div>' +
         '<div style="font-size:13px;color:var(--text2);">' + dur + '</div>' +
-        '<div style="font-size:13px;color:var(--text2);">' + cost + '</div>' +
+        '<div style="font-size:13px;color:var(--text2);">' + cost +
+          (s.total_tokens ? '<div style="font-size:10px;color:var(--text2);opacity:0.7;margin-top:1px;">' + _fmtTokens(s.total_tokens) + '</div>' : '') +
+        '</div>' +
         '<div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">' +
           '<span style="font-size:13px;font-weight:600;color:' + fcColor + ';min-width:36px;">' + fc + ' <span style="font-size:10px;font-weight:500;color:var(--text2);">findings</span></span>' +
           actions +
@@ -1740,6 +1734,12 @@ function _fmtDur(sec) {
   if (sec < 60) return Math.round(sec) + 's';
   if (sec < 3600) return Math.floor(sec / 60) + 'm ' + Math.round(sec % 60) + 's';
   return Math.floor(sec / 3600) + 'h ' + Math.floor((sec % 3600) / 60) + 'm';
+}
+function _fmtTokens(n) {
+  if (!n || n <= 0) return '';
+  if (n >= 1000000) return (n / 1000000).toFixed(1) + 'M tokens';
+  if (n >= 1000) return (n / 1000).toFixed(1) + 'K tokens';
+  return n + ' tokens';
 }
 
 function _fmtTime(iso) {
@@ -2297,6 +2297,8 @@ async function pollLiveView(scanId) {
           ${stat(live.pages_crawled || 0, 'Pages Crawled')}
           ${stat(live.findings_total || 0, 'AI Findings')}
           ${stat((live.phases || []).length, 'Phases')}
+          ${stat(live.total_tokens ? live.total_tokens.toLocaleString() : '0', 'Tokens Used')}
+          ${stat(live.live_cost != null && live.live_cost > 0 ? '$' + live.live_cost.toFixed(4) : '-', 'Est. Cost')}
         </div>
       </div>`;
 
@@ -3378,6 +3380,6 @@ function _buildTable(rows) {
 }
 
 </script>
-<div style="position:fixed;bottom:12px;right:16px;font-size:10px;color:rgba(255,255,255,0.25);letter-spacing:1.5px;text-transform:uppercase;font-weight:600;pointer-events:none;z-index:9999;user-select:none;">Internal Use Only</div>
+<div style="position:fixed;bottom:12px;right:16px;font-size:10px;color:rgba(0,0,0,0.45);letter-spacing:1.5px;text-transform:uppercase;font-weight:700;pointer-events:none;z-index:9999;user-select:none;">&#128274; Internal Use Only</div>
 </body>
 </html>
