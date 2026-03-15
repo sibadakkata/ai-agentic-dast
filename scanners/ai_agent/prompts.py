@@ -21,7 +21,8 @@ Rules:
 - Never use pre-built payload lists — generate every payload from reasoning
 - Record evidence for every finding (request, response, indicator)
 - Classify findings by OWASP category and severity
-- Stop after exhausting reasonable test cases (max 50 actions per page)
+- Stop after exhausting reasonable test cases (action limit per page set by scan intensity)
+- NEVER click logout/signout links or navigate to logout URLs. This will destroy the authenticated session and break the scan. Avoid any link or button whose text, href, or action contains: logout, log-out, log_out, signout, sign-out, sign_out, /logout, /signout, ?action=logout, disconnect, end-session. If you see such a link, skip it and move to the next element.
 
 When you find a vulnerability, output a structured finding as JSON:
 {"title": "...", "severity": "Critical|High|Medium|Low|Info", "owasp_category": "A01-A10", "url": "affected URL", "parameter": "affected parameter", "payload": "what was injected", "evidence": "response indicator", "confidence": "High|Medium|Low", "remediation": "fix recommendation"}
@@ -200,19 +201,83 @@ API_PHASES: list[ScanPhase] = [
 ]
 
 
-def get_phases(scan_mode: str, app_info: dict | None = None) -> list[ScanPhase]:
+_FOCUS_PHASE_MAP: dict[str, set[str]] = {
+    "xss":          {"web_a03_xss", "api_injection"},
+    "sqli":         {"web_a03_sqli", "api_injection"},
+    "sql injection": {"web_a03_sqli", "api_injection"},
+    "cmdi":         {"web_a03_cmdi", "api_injection"},
+    "command injection": {"web_a03_cmdi", "api_injection"},
+    "ssti":         {"web_a03_ssti", "api_injection"},
+    "ssrf":         {"web_a10", "api_ssrf"},
+    "idor":         {"web_a01", "api_authz"},
+    "bola":         {"web_a01", "api_authz"},
+    "auth":         {"web_a07", "api_auth"},
+    "authentication": {"web_a07", "api_auth"},
+    "access control": {"web_a01", "api_authz"},
+    "csrf":         {"web_extras"},
+    "upload":       {"web_extras"},
+    "misconfig":    {"web_a05"},
+    "crypto":       {"web_a02"},
+    "graphql":      {"api_graphql"},
+    "rate limit":   {"api_rate_limit"},
+    "mass assignment": {"api_mass_assign"},
+    "business logic": {"web_extras", "api_business_logic"},
+    "data exposure": {"api_data_exposure"},
+}
+
+_RECON_PHASE_IDS = {"web_recon", "api_recon"}
+
+
+def _resolve_focus_phases(focus_areas: list[str]) -> set[str] | None:
+    """Map user-friendly focus area names to the set of phase IDs to keep.
+
+    Returns None if focus_areas is empty (= run everything).
+    Always includes recon phases so the LLM has context.
+    """
+    if not focus_areas:
+        return None
+    matched: set[str] = set()
+    for area in focus_areas:
+        key = area.strip().lower()
+        if key in _FOCUS_PHASE_MAP:
+            matched |= _FOCUS_PHASE_MAP[key]
+        else:
+            for map_key, phase_ids in _FOCUS_PHASE_MAP.items():
+                if key in map_key or map_key in key:
+                    matched |= phase_ids
+    if not matched:
+        return None
+    matched |= _RECON_PHASE_IDS
+    return matched
+
+
+def get_phases(scan_mode: str, app_info: dict | None = None,
+               scan_scope: str = "directory",
+               focus_areas: list[str] | None = None) -> list[ScanPhase]:
     phases: list[ScanPhase] = []
     app_info = app_info or {}
     has_websockets = app_info.get("has_websockets", True)
 
+    skip_recon = scan_scope == "url_only"
+    allowed_ids = _resolve_focus_phases(focus_areas or [])
+
     if scan_mode in ("website", "both"):
         for p in WEB_PHASES:
+            if skip_recon and p.id == "web_recon":
+                continue
             if p.id == "web_websocket" and not has_websockets:
+                continue
+            if allowed_ids is not None and p.id not in allowed_ids:
                 continue
             phases.append(p)
 
     if scan_mode in ("api", "both"):
-        phases.extend(API_PHASES)
+        for p in API_PHASES:
+            if skip_recon and p.id == "api_recon":
+                continue
+            if allowed_ids is not None and p.id not in allowed_ids:
+                continue
+            phases.append(p)
 
     return phases
 
@@ -244,9 +309,45 @@ def build_system_prompt(
         allowed |= set(d.strip().lower() for d in extra_domains if d.strip())
     scope_str = ", ".join(f"*.{d}" for d in sorted(allowed))
 
+    scan_scope = getattr(target, "scan_scope", "directory")
+    focus_urls = getattr(target, "focus_urls", None) or []
+
     parts.append(f"\n\nTarget: {url}")
     parts.append(f"Scan mode: {scan_mode}")
     parts.append(f"SCOPE: Only scan URLs under these domains: {scope_str}. Do NOT request any third-party domains (CDNs, analytics, trackers, etc). Any out-of-scope URL will be automatically blocked.")
+
+    if scan_scope == "url_only":
+        parts.append(
+            "\n\n*** URL-ONLY SCOPE ***\n"
+            "CRITICAL RESTRICTION: You must ONLY test the exact URL(s) listed below. "
+            "Do NOT crawl, do NOT follow links, do NOT discover other pages or endpoints. "
+            "Focus all your testing effort on these specific URL(s) only:\n"
+        )
+        targets = focus_urls if focus_urls else [url]
+        for u in targets:
+            parts.append(f"  - {u}")
+        parts.append(
+            "\nSkip any reconnaissance/crawling phase. Go directly to security testing "
+            "on the URL(s) above. Test all applicable vulnerability classes on these "
+            "specific URL(s)."
+        )
+    elif scan_scope == "directory":
+        parsed_path = urlparse(url).path.rstrip("/")
+        parts.append(
+            f"\n\nDIRECTORY SCOPE: Limit scanning to {url} and its sub-paths "
+            f"(anything under {parsed_path}/). Do NOT crawl outside this directory. "
+            "Keep reconnaissance lightweight — only discover pages under this path prefix."
+        )
+        if focus_urls:
+            parts.append("Additionally, prioritize these specific URLs:")
+            for u in focus_urls:
+                parts.append(f"  - {u}")
+    else:
+        if focus_urls:
+            parts.append("\nPrioritize testing these specific URLs first:")
+            for u in focus_urls:
+                parts.append(f"  - {u}")
+            parts.append("Then continue with full-site crawl and testing.")
 
     if scan_mode in ("api", "both") and endpoint_registry is not None:
         get_all = getattr(endpoint_registry, "get_all", None)
@@ -259,6 +360,74 @@ def build_system_prompt(
                 parts.append(f"  - {method} {path}")
             if len(eps) > 20:
                 parts.append(f"  ... and {len(eps) - 20} more")
+
+    focus_areas = getattr(target, "focus_areas", None) or []
+    if focus_areas:
+        areas_str = ", ".join(focus_areas)
+        parts.append(
+            f"\n\n*** FOCUS AREA RESTRICTION ***\n"
+            f"You must ONLY test for: {areas_str}.\n"
+            f"Do NOT test for any other vulnerability class. Skip all unrelated checks.\n"
+            f"Focus 100% of your effort on {areas_str} and directly related relevance checks "
+            f"(e.g., for XSS: input reflection, output encoding, DOM manipulation, CSP bypass; "
+            f"for SQLi: error-based, blind, time-based, union-based).\n"
+            f"If a page or endpoint is not relevant to {areas_str}, skip it immediately."
+        )
+
+    exclude_urls = getattr(target, "exclude_urls", None) or []
+    if exclude_urls:
+        parts.append(
+            "\n\n*** EXCLUDED URLs / PATHS ***\n"
+            "The user has explicitly excluded the following URLs/paths from scanning. "
+            "You MUST NOT navigate to, crawl, test, or send any requests to these. "
+            "Skip them entirely — any attempt will be automatically blocked:\n"
+        )
+        for u in exclude_urls:
+            parts.append(f"  - {u}")
+        parts.append(
+            "\nIf you encounter links pointing to excluded URLs, ignore them. "
+            "Do not include excluded URLs in any test payloads or redirect targets."
+        )
+
+    scan_intensity = getattr(target, "scan_intensity", "deep")
+    if scan_intensity == "light":
+        parts.append(
+            "\n\n*** SCAN INTENSITY: LIGHT ***\n"
+            "This is a quick reconnaissance-level scan. Be fast and efficient:\n"
+            "- Per input/parameter: test 3-5 payloads maximum per vulnerability class\n"
+            "- Use only the most common/effective payloads (top canonical examples)\n"
+            "- Skip edge cases, encoding variations, and WAF bypass techniques\n"
+            "- Max 15 actions per page/endpoint. Move on quickly if no obvious indicator\n"
+            "- Prioritize breadth over depth — check more pages with fewer payloads each\n"
+            "- Skip low-severity checks (info-level headers, verbose errors, etc.)"
+        )
+    elif scan_intensity == "standard":
+        parts.append(
+            "\n\n*** SCAN INTENSITY: STANDARD ***\n"
+            "Balanced scan for reasonable coverage:\n"
+            "- Per input/parameter: test 8-15 payloads per vulnerability class\n"
+            "- Include common encoding variations (URL-encode, HTML entities, double-encode)\n"
+            "- Try basic WAF bypass for each class (case variation, comment insertion)\n"
+            "- Max 30 actions per page/endpoint\n"
+            "- Test both reflected and stored variants where applicable\n"
+            "- Include standard header checks (CORS, CSP, X-Frame-Options, etc.)"
+        )
+    else:
+        parts.append(
+            "\n\n*** SCAN INTENSITY: DEEP ***\n"
+            "Maximum coverage — be thorough and exhaustive:\n"
+            "- Per input/parameter: test 20-40+ payloads per vulnerability class\n"
+            "- Include ALL encoding variations: URL, double-URL, HTML entities, Unicode, hex, octal\n"
+            "- Extensive WAF/filter bypass: case mixing, null bytes, comment injection, nested tags, "
+            "polyglot payloads, alternative syntax, protocol-relative URLs\n"
+            "- Max 50+ actions per page/endpoint — exhaust all reasonable test cases\n"
+            "- Test reflected, stored, DOM-based, and blind variants\n"
+            "- Check secondary injection points: headers (Referer, User-Agent, X-Forwarded-For), "
+            "cookies, JSON values, multipart boundaries, file upload names\n"
+            "- Attempt chained attacks (e.g., open redirect → XSS, SSRF → internal port scan)\n"
+            "- Test for race conditions, parameter pollution, HTTP smuggling where relevant\n"
+            "- Generate context-aware payloads that match the technology stack observed"
+        )
 
     app_info = app_info or {}
     if app_info.get("is_spa"):

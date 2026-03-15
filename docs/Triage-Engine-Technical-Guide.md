@@ -1,6 +1,6 @@
 # AI Agentic DAST Scanner — Triage Engine Technical Guide
 
-**Version:** 1.0  
+**Version:** 1.1  
 **Last Updated:** March 2026  
 **Author:** Security Engineering Team  
 **Classification:** Internal — Team Reference
@@ -505,9 +505,81 @@ The findings table in the scanner UI shows:
 
 ---
 
-## 12. Maintenance & Tuning
+## 12. Data Flow: How Triage Results Reach the UI
 
-### Adding a New Verifier
+Understanding the data flow is critical to understanding when and where triage runs.
+
+### 12.1 Scan Execution Pipeline
+
+```
+AI Agent produces raw findings
+        │
+        ▼
+Runtime Verifier (scripts/runtime_verifier.py)
+  Each finding gets: verified=True/False, verdict=CONFIRMED/DISPROVED/INCONCLUSIVE/UNVERIFIED
+        │
+        ▼
+save_results() writes JSON to results/raw/
+  Contains: raw findings with runtime verifier verdicts
+        │
+        ▼
+SCANS[scan_id] updated with: status=completed, result_file, findings_count
+  (triaged_findings NOT stored yet — triage is lazy)
+```
+
+### 12.2 Lazy Triage & Caching
+
+The triage engine does NOT run during scan execution. Instead, it runs **lazily on first access** via `_ensure_triaged()` in `app.py`:
+
+```
+Dashboard request (GET /api/dashboard)
+  or Results request (GET /api/results/{scan_id})
+  or Insights request (POST /api/insights/query)
+        │
+        ▼
+_ensure_triaged(scan_id, scan_info)
+  1. Check: SCANS[scan_id]["triaged_findings"] exists? → return cached
+  2. Load raw findings from result file on disk
+  3. Run triage_classify() on EACH finding
+  4. Cache result in SCANS[scan_id]["triaged_findings"]
+  5. Return triaged findings with proper verdicts
+```
+
+This means:
+- **First dashboard load** after server restart triggers triage for all scans (one-time cost, ~50ms per scan)
+- **Subsequent requests** return cached results instantly
+- **Verdicts shown on dashboard** are always the final triage verdicts (TRUE_POSITIVE, FALSE_POSITIVE, etc.), never the raw runtime verifier verdicts (UNVERIFIED, INCONCLUSIVE)
+
+### 12.3 Verdict Lifecycle
+
+A finding's verdict progresses through these stages:
+
+| Stage | Source | Possible Verdicts | Stored Where |
+|-------|--------|-------------------|--------------|
+| **AI Agent** | LLM reasoning | (no verdict — raw findings only have severity) | result JSON `findings[]` |
+| **Runtime Verifier** | Payload replay | CONFIRMED, DISPROVED, INCONCLUSIVE, UNVERIFIED | result JSON `findings[].verdict` |
+| **Triage Engine** | Evidence analysis | TRUE_POSITIVE, FALSE_POSITIVE, MANUAL_REVIEW, NOT_A_FINDING | `SCANS[].triaged_findings[].verdict` |
+
+The **dashboard and UI always display the triage engine verdict** (rightmost column). Raw runtime verifier verdicts are internal intermediates — they feed into the triage engine but are not displayed directly.
+
+### 12.4 Why "UNVERIFIED" is Not a Final Verdict
+
+The runtime verifier marks a finding as `UNVERIFIED` when:
+1. No verifier function matches the finding title (e.g., "Password policy weakness" has no replay verifier)
+2. The scan was cancelled before verification could run
+
+When the triage engine processes an UNVERIFIED finding:
+- Layer 0 (runtime verification) is skipped (because `verified=False`)
+- Layers 1-2 (pattern classification + confidence scoring) take over
+- The finding ALWAYS gets a final verdict: TRUE_POSITIVE, FALSE_POSITIVE, or MANUAL_REVIEW
+
+There should be **zero UNVERIFIED findings** in the final dashboard. If any appear, it indicates the triage engine was bypassed (a bug in the data flow, not in the triage logic).
+
+---
+
+## 13. Maintenance & Tuning
+
+### 13.1 Adding a New Verifier
 
 1. Create an `async def _verify_new_type(client, finding)` function in `runtime_verifier.py`
 2. Add dispatch entry to `VULN_DISPATCH` list
@@ -516,7 +588,7 @@ The findings table in the scanner UI shows:
 5. Add remediation text in `_runtime_dev_action()`
 6. Add CWE routing in `_runtime_cwe()`
 
-### Adding a New Pattern Rule
+### 13.2 Adding a New Pattern Rule
 
 1. Add the rule in the appropriate Layer 1 section of `_classify_inner()` in `triage_engine.py`
 2. Always set both `verdict` and `final_severity`
@@ -524,7 +596,7 @@ The findings table in the scanner UI shows:
 4. Include a `dev_action` with specific remediation guidance
 5. Apply CWE/CVSS via `_cwe_apply()` where applicable
 
-### Tuning Confidence Bands
+### 13.3 Tuning Confidence Bands
 
 Edit the confidence thresholds in Layer 2 of `_classify_inner()`. The current bands are:
 - `≥5` → TP Medium
@@ -537,7 +609,7 @@ Narrowing the Manual Review band reduces human workload; widening it increases s
 
 ---
 
-## 13. Files Reference
+## 14. Files Reference
 
 | File | Purpose |
 |------|---------|

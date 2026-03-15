@@ -22,7 +22,7 @@ svg text, svg tspan { font-family: 'Inter', -apple-system, BlinkMacSystemFont, s
 .sidebar { position:fixed; top:0; left:0; width:250px; height:100vh; background:linear-gradient(180deg,#1e1b4b 0%,#312e81 100%); display:flex; flex-direction:column; z-index:100; }
 .sidebar-logo { padding:20px 22px; display:flex; align-items:center; gap:14px; border-bottom:1px solid rgba(255,255,255,0.08); }
 .sidebar-logo .logo-icon { font-size:22px; width:40px; height:40px; background:linear-gradient(135deg,#6366f1,#a78bfa); border-radius:12px; display:flex; align-items:center; justify-content:center; box-shadow:0 2px 8px rgba(99,102,241,0.4); }
-.sidebar-logo .logo-title { color:#fff; font-size:16px; font-weight:700; letter-spacing:-0.3px; }
+.sidebar-logo .logo-title { color:#fff; font-size:14px; font-weight:700; letter-spacing:-0.3px; white-space:nowrap; }
 .sidebar-logo .logo-subtitle { color:rgba(255,255,255,0.45); font-size:11px; font-weight:500; letter-spacing:0.5px; }
 .sidebar-section { padding:24px 22px 8px; font-size:10px; font-weight:700; letter-spacing:1.5px; color:rgba(255,255,255,0.25); text-transform:uppercase; }
 .sidebar nav { padding:0 12px; flex:1; }
@@ -250,6 +250,13 @@ tr:hover td { background:rgba(79,70,229,0.03); }
 @keyframes pulse { 0%,100% { opacity:1; } 50% { opacity:0.4; } }
 .scanning-indicator { display:inline-block; width:8px; height:8px; border-radius:50%; background:var(--accent); animation:pulse 1.5s ease-in-out infinite; margin-right:8px; }
 
+.focus-chips { display:flex; flex-wrap:wrap; gap:6px; }
+.focus-chip { padding:6px 14px; border-radius:20px; border:1.5px solid var(--border); background:var(--surface); color:var(--text2); font-size:12px; font-weight:500; cursor:pointer; transition:all 0.15s; font-family:inherit; }
+.focus-chip:hover { border-color:var(--accent2); color:var(--accent); background:#eef2ff; }
+.focus-chip.active { border-color:var(--accent); background:var(--accent); color:#fff; }
+.focus-chip.active:hover { background:var(--accent2); border-color:var(--accent2); }
+.focus-chip[data-value=""]:not(.active) { border-style:dashed; }
+
 .expandable { cursor:pointer; }
 .expandable::before { content:"▸ "; color:var(--text2); }
 .expandable.open::before { content:"▾ "; }
@@ -279,8 +286,8 @@ tr:hover td { background:rgba(79,70,229,0.03); }
 .insight-welcome .example-q:hover { border-color:var(--accent); background:rgba(79,70,229,0.04); box-shadow:var(--shadow-sm); transform:translateY(-1px); }
 
 .insight-msg {
-  padding:12px 16px; border-radius:14px; font-size:14px; line-height:1.7;
-  max-width:88%; word-wrap:break-word;
+  padding:14px 18px; border-radius:14px; font-size:14px; line-height:1.7;
+  max-width:95%; word-wrap:break-word;
 }
 .insight-msg.user {
   background:linear-gradient(135deg,var(--accent),var(--accent2)); color:#fff; align-self:flex-end;
@@ -290,14 +297,38 @@ tr:hover td { background:rgba(79,70,229,0.03); }
   background:var(--surface); color:var(--text); align-self:flex-start;
   border:1px solid var(--border); border-bottom-left-radius:4px; box-shadow:var(--shadow-sm);
 }
-.insight-msg.assistant table { font-size:12px; margin:10px 0; border-collapse:collapse; width:100%; }
+.insight-msg.assistant table { font-size:12px; margin:12px 0; border-collapse:collapse; width:100%; border-radius:8px; overflow:hidden; border:1px solid var(--border); }
 .insight-msg.assistant table th,
-.insight-msg.assistant table td { padding:6px 10px; border:1px solid var(--border); text-align:left; }
-.insight-msg.assistant table th { background:var(--surface2); font-weight:600; font-size:11px; text-transform:uppercase; letter-spacing:0.3px; }
+.insight-msg.assistant table td { padding:8px 12px; border:1px solid var(--border); text-align:left; vertical-align:top; }
+.insight-msg.assistant table th { background:linear-gradient(135deg,#f0f0ff,var(--surface2)); font-weight:600; font-size:11px; text-transform:uppercase; letter-spacing:0.3px; color:var(--accent); }
+.insight-msg.assistant table tr:nth-child(even) td { background:var(--surface2); }
+.insight-msg.assistant table tr:hover td { background:rgba(79,70,229,0.04); }
 .insight-msg.assistant strong { color:var(--accent); }
-.insight-msg.assistant code { background:rgba(0,0,0,0.05); padding:2px 6px; border-radius:4px; font-size:12px; font-family:'SF Mono','Cascadia Code','Consolas',monospace; }
-.insight-msg .meta { font-size:10px; color:rgba(255,255,255,0.6); margin-top:6px; }
+.insight-msg.assistant code { background:rgba(79,70,229,0.08); padding:2px 6px; border-radius:4px; font-size:12px; font-family:'SF Mono','Cascadia Code','Consolas',monospace; color:#4338ca; }
+.insight-msg.assistant pre { background:#1e1b4b; color:#e2e8f0; padding:14px 16px; border-radius:8px; font-size:12px; overflow-x:auto; margin:10px 0; font-family:'SF Mono','Cascadia Code','Consolas',monospace; line-height:1.6; }
+.insight-msg.assistant pre code { background:none; color:inherit; padding:0; }
+.insight-msg.assistant h2,
+.insight-msg.assistant h3,
+.insight-msg.assistant h4 { margin:14px 0 6px; color:var(--text); }
+.insight-msg.assistant h2 { font-size:16px; border-bottom:2px solid var(--accent); padding-bottom:4px; display:inline-block; }
+.insight-msg.assistant h3 { font-size:14px; }
+.insight-msg.assistant h4 { font-size:13px; color:var(--text2); }
+.insight-msg.assistant ul, .insight-msg.assistant ol { margin:6px 0 6px 18px; }
+.insight-msg.assistant li { margin:3px 0; line-height:1.6; }
+.insight-msg.assistant hr { border:none; border-top:1px solid var(--border); margin:12px 0; }
+.insight-msg.assistant blockquote { border-left:3px solid var(--accent); margin:8px 0; padding:6px 12px; background:rgba(79,70,229,0.04); border-radius:0 6px 6px 0; color:var(--text2); font-style:italic; }
+.insight-msg.assistant a { color:var(--accent); text-decoration:underline; }
+.insight-msg .meta { font-size:10px; color:rgba(255,255,255,0.6); margin-top:8px; }
 .insight-msg.assistant .meta { color:var(--text2); }
+.sev-badge { display:inline-block; padding:1px 8px; border-radius:10px; font-size:11px; font-weight:600; letter-spacing:0.3px; }
+.sev-critical { background:#fef2f2; color:#991b1b; border:1px solid #fca5a5; }
+.sev-high { background:#fff7ed; color:#9a3412; border:1px solid #fdba74; }
+.sev-medium { background:#fffbeb; color:#92400e; border:1px solid #fcd34d; }
+.sev-low { background:#f0fdf4; color:#166534; border:1px solid #86efac; }
+.sev-info { background:#eff6ff; color:#1e40af; border:1px solid #93c5fd; }
+.verdict-tp { color:#059669; font-weight:600; }
+.verdict-fp { color:#6b7280; font-weight:600; }
+.verdict-mr { color:#d97706; font-weight:600; }
 
 .insight-typing {
   display:flex; gap:5px; align-items:center; padding:14px 18px; align-self:flex-start;
@@ -340,7 +371,7 @@ tr:hover td { background:rgba(79,70,229,0.03); }
   <div class="sidebar-logo">
     <span class="logo-icon">&#9889;</span>
     <div>
-      <div class="logo-title">Agentic Scanner</div>
+      <div class="logo-title">Agentic Web Scanner</div>
       <div class="logo-subtitle">AI DAST Platform</div>
     </div>
   </div>
@@ -392,6 +423,7 @@ tr:hover td { background:rgba(79,70,229,0.03); }
         <span style="width:7px;height:7px;border-radius:50%;background:var(--green);display:inline-block;"></span>
         Connected
       </span>
+      <span id="models-status-bar" style="font-size:11px;color:var(--text2);display:flex;align-items:center;gap:6px;cursor:pointer;" onclick="refreshModels()" title="Click to refresh models from Bedrock"></span>
       <button onclick="doLogout()" class="btn btn-sm btn-outline">Logout</button>
     </div>
   </div>
@@ -467,14 +499,45 @@ tr:hover td { background:rgba(79,70,229,0.03); }
         <label style="text-transform:none;font-size:13px;font-weight:500;color:var(--text2);letter-spacing:0;">Describe what you want to scan — the AI will build a plan for your approval</label>
         <textarea id="ai-instruction" class="ai-instruct-area" placeholder="Example: Scan https://my-int.norton.com using user@email.com / MyP@ss123. Focus only on /extspa/backup page and look for XSS vulnerabilities — we found one during manual pen-testing."></textarea>
       </div>
+      <div class="form-group full" style="margin-top:8px;">
+        <div class="expandable" onclick="toggleExpand(this)" style="font-size:13px;font-weight:600;color:var(--text2);letter-spacing:0.3px;">
+          API Imports (Optional — Postman, Swagger, Burp)
+        </div>
+        <div class="expand-content" id="ai-api-imports-section">
+          <p style="font-size:12px;color:var(--text2);margin:0 0 10px;">Upload API specs so the AI planner can see your endpoints and build a smarter scan plan.</p>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
+            <div class="form-group">
+              <label>Postman Collection</label>
+              <input type="file" id="ai-file-postman" accept=".json" style="font-size:12px;">
+              <span id="ai-file-postman-status" style="font-size:11px;color:var(--text2);"></span>
+            </div>
+            <div class="form-group">
+              <label>Postman Environment</label>
+              <input type="file" id="ai-file-postman-env" accept=".json" style="font-size:12px;">
+              <span id="ai-file-postman-env-status" style="font-size:11px;color:var(--text2);"></span>
+            </div>
+            <div class="form-group">
+              <label>Swagger / OpenAPI Spec</label>
+              <input type="file" id="ai-file-openapi" accept=".json,.yaml,.yml" style="font-size:12px;">
+              <span id="ai-file-openapi-status" style="font-size:11px;color:var(--text2);"></span>
+            </div>
+            <div class="form-group">
+              <label>Burp Proxy Export</label>
+              <input type="file" id="ai-file-burp" accept=".json,.xml" style="font-size:12px;">
+              <span id="ai-file-burp-status" style="font-size:11px;color:var(--text2);"></span>
+            </div>
+          </div>
+        </div>
+      </div>
       <div style="display:flex;gap:12px;align-items:flex-end;margin-top:12px;flex-wrap:wrap;">
         <div class="form-group" style="min-width:220px;">
           <label>Model</label>
-          <select id="ai-model-select" style="padding:8px 12px;font-size:13px;"></select>
+          <select id="ai-model-select" style="padding:8px 12px;font-size:13px;" onchange="_onModelChange(this,'ai-model-warning')"></select>
         </div>
         <button type="button" class="btn btn-sm btn-primary" id="analyze-btn" onclick="analyzeInstruction()" style="height:38px;">Analyze & Plan</button>
         <span id="analyze-status" style="font-size:13px;color:var(--text2);"></span>
       </div>
+      <div id="ai-model-warning" style="display:none;margin-top:8px;padding:10px 14px;border-radius:8px;background:rgba(251,191,36,0.08);border:1px solid rgba(251,191,36,0.25);font-size:12px;color:#b45309;line-height:1.5;"></div>
       <div id="ai-plan-container" style="display:none;"></div>
     </div>
 
@@ -495,7 +558,8 @@ tr:hover td { background:rgba(79,70,229,0.03); }
       </div>
       <div class="form-group">
         <label>Model</label>
-        <select id="model-select"></select>
+        <select id="model-select" onchange="_onModelChange(this,'manual-model-warning')"></select>
+        <div id="manual-model-warning" style="display:none;margin-top:6px;padding:10px 14px;border-radius:8px;background:rgba(251,191,36,0.08);border:1px solid rgba(251,191,36,0.25);font-size:12px;color:#b45309;line-height:1.5;"></div>
       </div>
       <div class="form-group">
         <label>Scan Mode</label>
@@ -503,6 +567,22 @@ tr:hover td { background:rgba(79,70,229,0.03); }
           <option value="both">Website + API</option>
           <option value="website">Website Only</option>
           <option value="api">API Only</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label>Scan Scope</label>
+        <select id="scan-scope" onchange="onScanScopeChange()">
+          <option value="url_only">This URL Only</option>
+          <option value="directory" selected>URL + Sub-paths (default)</option>
+          <option value="full_site">Full Site Crawl</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label>Scan Intensity</label>
+        <select id="scan-intensity">
+          <option value="light">Light — quick recon, few payloads</option>
+          <option value="standard">Standard — balanced coverage</option>
+          <option value="deep" selected>Deep — exhaustive payloads (default)</option>
         </select>
       </div>
       <div class="form-group">
@@ -516,10 +596,37 @@ tr:hover td { background:rgba(79,70,229,0.03); }
           <option value="bearer">Bearer Token</option>
         </select>
       </div>
+      <div class="form-group full">
+        <label>Vulnerability Focus <span style="font-weight:400;color:var(--text2);font-size:11px;">(select specific types or leave "Full Scan" for all checks)</span></label>
+        <div id="focus-chips" class="focus-chips">
+          <button type="button" class="focus-chip active" data-value="" onclick="toggleFocusChip(this)">Full Scan (All)</button>
+          <button type="button" class="focus-chip" data-value="XSS" onclick="toggleFocusChip(this)">XSS</button>
+          <button type="button" class="focus-chip" data-value="SQLi" onclick="toggleFocusChip(this)">SQL Injection</button>
+          <button type="button" class="focus-chip" data-value="CMDI" onclick="toggleFocusChip(this)">Command Injection</button>
+          <button type="button" class="focus-chip" data-value="SSTI" onclick="toggleFocusChip(this)">SSTI</button>
+          <button type="button" class="focus-chip" data-value="SSRF" onclick="toggleFocusChip(this)">SSRF</button>
+          <button type="button" class="focus-chip" data-value="IDOR" onclick="toggleFocusChip(this)">IDOR / BOLA</button>
+          <button type="button" class="focus-chip" data-value="Auth" onclick="toggleFocusChip(this)">Authentication</button>
+          <button type="button" class="focus-chip" data-value="CSRF" onclick="toggleFocusChip(this)">CSRF</button>
+          <button type="button" class="focus-chip" data-value="Misconfig" onclick="toggleFocusChip(this)">Misconfig</button>
+          <button type="button" class="focus-chip" data-value="Upload" onclick="toggleFocusChip(this)">File Upload</button>
+          <button type="button" class="focus-chip" data-value="Business Logic" onclick="toggleFocusChip(this)">Business Logic</button>
+          <button type="button" class="focus-chip" data-value="GraphQL" onclick="toggleFocusChip(this)">GraphQL</button>
+        </div>
+        <input type="hidden" id="focus-areas" value="">
+      </div>
 
+      <div class="form-group full" id="focus-urls-group">
+        <label>Specific URLs / Endpoints <span style="font-weight:400;color:var(--text2);font-size:11px;">(optional — one per line, only tested when scope is "This URL Only")</span></label>
+        <textarea id="focus-urls" rows="2" placeholder="e.g. https://example.com/api/v1/users&#10;https://example.com/login" style="font-size:12px;font-family:var(--font-mono);resize:vertical;"></textarea>
+      </div>
       <div class="form-group full">
         <label>Additional Domains in Scope <span style="font-weight:400;color:var(--text2);font-size:11px;">(optional — comma-separated, e.g. partner-cdn.com, api.thirdparty.io)</span></label>
         <input type="text" id="extra-domains" placeholder="e.g. partner-api.com, cdn.example.io" style="font-size:12px;">
+      </div>
+      <div class="form-group full">
+        <label>Exclude from Crawl / Scan <span style="font-weight:400;color:var(--text2);font-size:11px;">(optional — one per line, URLs or path patterns the scanner must skip)</span></label>
+        <textarea id="exclude-urls" rows="2" placeholder="e.g. https://example.com/logout&#10;/admin/&#10;/api/v1/delete-account" style="font-size:12px;font-family:var(--font-mono);resize:vertical;"></textarea>
       </div>
 
       <div class="form-group full" style="margin-top:8px;">
@@ -542,6 +649,11 @@ tr:hover td { background:rgba(79,70,229,0.03); }
               <label>Swagger / OpenAPI Spec</label>
               <input type="file" id="file-openapi" accept=".json,.yaml,.yml" style="font-size:12px;">
               <span id="file-openapi-status" style="font-size:11px;color:var(--text2);"></span>
+            </div>
+            <div class="form-group">
+              <label>Burp Proxy Export</label>
+              <input type="file" id="file-burp" accept=".json,.xml" style="font-size:12px;">
+              <span id="file-burp-status" style="font-size:11px;color:var(--text2);"></span>
             </div>
           </div>
         </div>
@@ -791,7 +903,7 @@ function navigateTo(page) {
   if (titleEl) titleEl.textContent = titles[page] || page;
 
   if (page === 'dashboard') loadDashboard();
-  if (page === 'scans') { loadScans(); const sc = document.getElementById('scans-card'); if (sc) sc.style.display = 'block'; }
+  if (page === 'scans') { _showScansList(); }
   if (page === 'reports') loadReports();
   if (page === 'settings') loadSettings();
 }
@@ -861,7 +973,7 @@ async function loadDashboard() {
       document.getElementById('dash-recent').innerHTML = '<table><thead><tr><th>Target</th><th>Model</th><th>Status</th><th>Findings</th><th>Cost</th><th>Started</th></tr></thead><tbody>' +
         recent.map(function(s) {
           var fcStyle = (s.findings > 0) ? 'font-weight:700;color:' + (s.findings >= 10 ? 'var(--red)' : s.findings >= 3 ? 'var(--orange)' : 'var(--text)') : 'color:var(--text2)';
-          return '<tr style="cursor:pointer;" onclick="navigateTo(\'scans\');viewScan(\'' + s.id + '\')">' +
+          return '<tr style="cursor:pointer;" onclick="viewScan(\'' + s.id + '\')">' +
             '<td style="font-weight:600;color:var(--accent2);max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + esc(s.target) + '</td>' +
             '<td style="font-size:12px;color:var(--text2);">' + esc(s.model) + '</td>' +
             '<td><span class="badge badge-' + (s.status || 'unknown') + '">' + ((s.status || '-').charAt(0).toUpperCase() + (s.status || '-').slice(1)) + '</span></td>' +
@@ -1098,7 +1210,9 @@ async function sendInsightFull() {
     if (data.error) {
       _insightAddMsgFull('assistant', '<span style="color:var(--red);">Error: ' + esc(data.error) + '</span>');
     } else {
-      const metaInfo = (data.scans_analyzed || 0) + ' scans, ' + (data.findings_analyzed || 0) + ' findings analyzed' + (data.cost ? ' · ~$' + Number(data.cost).toFixed(3) : '');
+      let metaInfo = (data.scans_analyzed || 0) + ' scans, ' + (data.findings_analyzed || 0) + ' findings analyzed';
+      if (data.cost) metaInfo += ' · ~$' + Number(data.cost).toFixed(4);
+      if (data.model_used) metaInfo += ' · ' + data.model_used.split('/').pop();
       _insightAddMsgFull('assistant', _insightRenderMd(data.answer), metaInfo);
     }
   } catch (e) {
@@ -1112,26 +1226,96 @@ async function sendInsightFull() {
 }
 
 async function init() {
+  await _loadModelDropdowns();
+  _loadModelStatus();
+  loadScans();
+  navigateTo('dashboard');
+}
+
+var _modelMeta = {};
+
+async function _loadModelDropdowns() {
   try {
     const resp = await fetch('/api/models');
     if (resp.ok) {
       const models = await resp.json();
-      const selectors = [document.getElementById('model-select'), document.getElementById('ai-model-select')];
-      selectors.forEach(sel => {
+      _modelMeta = {};
+      models.forEach(m => { _modelMeta[m.id] = m; });
+      const selectors = [
+        {sel: document.getElementById('model-select'), warn: 'manual-model-warning'},
+        {sel: document.getElementById('ai-model-select'), warn: 'ai-model-warning'},
+      ];
+      selectors.forEach(({sel, warn}) => {
         if (!sel) return;
+        const prev = sel.value;
+        sel.innerHTML = '';
         models.forEach(m => {
           const opt = document.createElement('option');
           opt.value = m.id;
           const provider = m.provider ? ` [${m.provider}]` : '';
           const cost = m.cost ? ` — ${m.cost}` : '';
-          opt.textContent = `${m.name}${provider}${cost}`;
+          const tag = m.high_cost ? ' ⚠ PREMIUM' : '';
+          opt.textContent = `${m.name}${provider}${cost}${tag}`;
+          if (m.high_cost) opt.style.color = '#b45309';
           sel.appendChild(opt);
         });
+        if (prev) sel.value = prev;
+        _onModelChange(sel, warn);
       });
     }
-  } catch(e) { console.error('init models error:', e); }
-  loadScans();
-  navigateTo('dashboard');
+  } catch(e) { console.error('load models error:', e); }
+}
+
+function _onModelChange(sel, warnId) {
+  const w = document.getElementById(warnId);
+  if (!w) return;
+  const m = _modelMeta[sel.value];
+  if (m && m.high_cost) {
+    w.innerHTML = '<strong style="color:#92400e;">&#9888; Premium Model — High Cost</strong><br>' +
+      'This model costs significantly more per scan (up to 10–50x compared to Haiku). ' +
+      'Best suited for <strong>targeted assessments</strong> — small attack surfaces, specific endpoints, ' +
+      'or in-depth testing for hard-to-find vulnerabilities. ' +
+      '<strong>Not recommended for full-site crawls</strong>, which can run up substantial costs quickly.';
+    w.style.display = 'block';
+  } else {
+    w.style.display = 'none';
+  }
+}
+
+async function _loadModelStatus() {
+  const bar = document.getElementById('models-status-bar');
+  if (!bar) return;
+  try {
+    const resp = await fetch('/api/models/status');
+    if (!resp.ok) return;
+    const d = await resp.json();
+    const count = d.ui_models || d.model_count || 0;
+    let ago = '';
+    if (d.last_checked) {
+      const mins = Math.round((Date.now() - new Date(d.last_checked).getTime()) / 60000);
+      if (mins < 1) ago = 'just now';
+      else if (mins < 60) ago = mins + 'm ago';
+      else if (mins < 1440) ago = Math.round(mins / 60) + 'h ago';
+      else ago = Math.round(mins / 1440) + 'd ago';
+    }
+    bar.innerHTML = `<span style="font-size:10px;">&#9881;</span> ${count} models` + (ago ? ` · checked ${ago}` : '');
+    bar.title = `${count} Bedrock models available (${d.hidden_models || 0} hidden). Click to refresh.\nLast checked: ${d.last_checked || 'never'}`;
+  } catch(e) { /* silent */ }
+}
+
+async function refreshModels() {
+  const bar = document.getElementById('models-status-bar');
+  if (bar) bar.innerHTML = '<span style="font-size:10px;">&#9881;</span> Discovering models...';
+  try {
+    await fetch('/api/models/refresh', {method: 'POST'});
+    setTimeout(async () => {
+      await _loadModelDropdowns();
+      await _loadModelStatus();
+    }, 45000);
+    setTimeout(() => _loadModelStatus(), 5000);
+  } catch(e) {
+    if (bar) bar.innerHTML = '<span style="color:#f87171;">Refresh failed</span>';
+  }
 }
 
 function doLogout() {
@@ -1181,23 +1365,47 @@ function setScanMode(mode) {
 }
 
 let _currentPlan = null;
+let _aiApiImports = {};
+
+async function _uploadAiImports() {
+  const imports = {};
+  const postman = await uploadFile('ai-file-postman');
+  if (postman) imports.postman = postman;
+  const postmanEnv = await uploadFile('ai-file-postman-env');
+  if (postmanEnv) imports.postman_env = postmanEnv;
+  const openapi = await uploadFile('ai-file-openapi');
+  if (openapi) imports.openapi = openapi;
+  const burp = await uploadFile('ai-file-burp');
+  if (burp) imports.burp = burp;
+  return imports;
+}
 
 async function analyzeInstruction() {
   const text = document.getElementById('ai-instruction').value.trim();
   if (!text) { alert('Please describe what you want to scan.'); return; }
   const btn = document.getElementById('analyze-btn');
   const status = document.getElementById('analyze-status');
-  btn.disabled = true; btn.textContent = 'Analyzing...';
-  status.textContent = 'Sending to AI...';
+  btn.disabled = true; btn.textContent = 'Uploading files...';
+  status.textContent = '';
   try {
+    _aiApiImports = await _uploadAiImports();
+    btn.textContent = 'Analyzing...';
+    status.textContent = 'Sending to AI...';
+    const selectedModel = document.getElementById('ai-model-select').value;
     const resp = await fetch('/api/scan/analyze', {
       method: 'POST',
       headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({instruction: text}),
+      body: JSON.stringify({instruction: text, model: selectedModel, api_imports: _aiApiImports}),
     });
+    if (!resp.ok) {
+      const txt = await resp.text();
+      try { const j = JSON.parse(txt); status.textContent = j.error || j.detail || txt; } catch(_) { status.textContent = 'Server error (' + resp.status + ')'; }
+      btn.disabled = false; btn.textContent = 'Analyze & Plan'; return;
+    }
     const data = await resp.json();
     if (data.error) { status.textContent = data.error; btn.disabled = false; btn.textContent = 'Analyze & Plan'; return; }
     _currentPlan = data.plan;
+    if (data.api_endpoints_summary) _currentPlan._api_endpoints_summary = data.api_endpoints_summary;
     renderPlan(data.plan);
     status.textContent = '';
   } catch(e) {
@@ -1220,7 +1428,9 @@ function renderPlan(plan) {
       <div><span class="plan-label">Target</span><div class="plan-value">${esc(plan.target_url || '')}</div></div>
       <div><span class="plan-label">Auth</span><div class="plan-value">${plan.username ? esc(plan.username) + ' / ' + maskPw(plan.password) : '<span style="color:var(--text2)">No credentials</span>'}</div></div>
       <div><span class="plan-label">Scan Mode</span><div class="plan-value" style="text-transform:capitalize;">${esc(plan.scan_mode || 'both')}</div></div>
+      <div><span class="plan-label">Scan Scope</span><div class="plan-value" style="text-transform:capitalize;">${esc((plan.scan_scope || 'directory').replace('_', ' '))}</div></div>
       <div><span class="plan-label">Auth Type</span><div class="plan-value" style="text-transform:capitalize;">${esc(plan.auth_type || 'auto')}</div></div>
+      <div><span class="plan-label">Intensity</span><div class="plan-value" style="text-transform:capitalize;">${esc(plan.scan_intensity || 'deep')}</div></div>
       <div><span class="plan-label">Est. Time</span><div class="plan-value">${esc(plan.estimated_time || '5-15 min')}</div></div>
       <div><span class="plan-label">Est. Cost</span><div class="plan-value">${esc(plan.estimated_cost || '$0.50-2.00')}</div></div>
     </div>`;
@@ -1228,11 +1438,23 @@ function renderPlan(plan) {
   if (focusUrls.length) {
     html += `<div style="margin-bottom:12px;"><span class="plan-label" style="display:block;margin-bottom:6px;">Focus URLs</span><div class="ai-plan-tags">${focusUrls.map(u => `<span class="ai-plan-tag focus-url">${esc(u)}</span>`).join('')}</div></div>`;
   }
-  if (focusAreas.length) {
-    html += `<div style="margin-bottom:12px;"><span class="plan-label" style="display:block;margin-bottom:6px;">Focus Areas</span><div class="ai-plan-tags">${focusAreas.map(a => `<span class="ai-plan-tag">${esc(a)}</span>`).join('')}</div></div>`;
+  const excludeUrls = (plan.exclude_urls || []).filter(Boolean);
+  if (excludeUrls.length) {
+    html += `<div style="margin-bottom:12px;"><span class="plan-label" style="display:block;margin-bottom:6px;">Excluded URLs</span><div class="ai-plan-tags">${excludeUrls.map(u => `<span class="ai-plan-tag" style="background:rgba(239,68,68,0.1);color:#dc2626;border-color:rgba(239,68,68,0.3);text-decoration:line-through;">${esc(u)}</span>`).join('')}</div></div>`;
   }
+  html += `<div style="margin-bottom:12px;"><span class="plan-label" style="display:block;margin-bottom:6px;">Vulnerability Focus</span><div class="ai-plan-tags">${focusAreas.length ? focusAreas.map(a => `<span class="ai-plan-tag">${esc(a)}</span>`).join('') : '<span class="ai-plan-tag" style="background:#059669;color:#fff;border-color:#059669;">Full Scan (All)</span>'}</div></div>`;
   if (ctx) {
     html += `<div style="margin-bottom:14px;padding:10px 14px;background:rgba(79,70,229,0.05);border-radius:8px;font-size:13px;color:var(--text2);"><strong style="color:var(--text);">Context:</strong> ${esc(ctx)}</div>`;
+  }
+  const apiSummary = plan._api_endpoints_summary;
+  if (apiSummary && apiSummary.total > 0) {
+    html += `<div style="margin-bottom:14px;"><span class="plan-label" style="display:block;margin-bottom:6px;">API Endpoints Imported</span>`;
+    html += `<div style="font-size:12px;color:var(--text2);margin-bottom:8px;">${apiSummary.total} endpoint${apiSummary.total > 1 ? 's' : ''} across ${apiSummary.unique_paths} unique paths</div>`;
+    const paths = (apiSummary.paths || []).slice(0, 15);
+    html += `<div class="ai-plan-tags">${paths.map(p => `<span class="ai-plan-tag" style="font-family:var(--font-mono);font-size:11px;">${esc(p)}</span>`).join('')}${apiSummary.paths.length > 15 ? `<span class="ai-plan-tag" style="background:var(--bg2);color:var(--text2);">+${apiSummary.paths.length - 15} more</span>` : ''}</div></div>`;
+  }
+  if (Object.keys(_aiApiImports || {}).length > 0 && (!apiSummary || apiSummary.total === 0)) {
+    html += `<div style="margin-bottom:14px;padding:8px 12px;background:rgba(251,191,36,0.1);border-radius:8px;font-size:12px;color:#b45309;">API files uploaded but no endpoints were parsed — check file format.</div>`;
   }
   if (steps.length) {
     html += `<div style="margin-bottom:14px;"><span class="plan-label" style="display:block;margin-bottom:10px;">What the AI will do</span><ol class="ai-plan-steps">${steps.map(s => `<li>${esc(s)}</li>`).join('')}</ol></div>`;
@@ -1258,10 +1480,15 @@ async function confirmPlan() {
     password: p.password || '',
     model: model,
     scan_mode: p.scan_mode || 'both',
+    scan_scope: p.scan_scope || 'directory',
+    focus_urls: (p.focus_urls || []).filter(Boolean),
+    focus_areas: (p.focus_areas || []).filter(Boolean),
+    scan_intensity: p.scan_intensity || document.getElementById('scan-intensity').value || 'deep',
     auth_type: p.auth_type || 'auto',
     scanner: 'ai',
-    api_imports: {},
-    extra_domains: [],
+    api_imports: _aiApiImports || {},
+    extra_domains: p.extra_domains || [],
+    exclude_urls: p.exclude_urls || [],
   };
   const planCard = document.querySelector('#ai-plan-container .ai-plan-card');
   if (planCard) {
@@ -1271,6 +1498,11 @@ async function confirmPlan() {
   }
   try {
     const resp = await fetch('/api/scan', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)});
+    if (!resp.ok) {
+      const txt = await resp.text();
+      try { const j = JSON.parse(txt); alert(j.error || j.detail || txt); } catch(_) { alert('Server error (' + resp.status + '): ' + txt.slice(0, 200)); }
+      return;
+    }
     const data = await resp.json();
     if (data.error) { alert(data.error); return; }
     _currentPlan = null;
@@ -1291,6 +1523,19 @@ function editPlan() {
   document.getElementById('password').value = p.password || '';
   if (p.scan_mode) document.getElementById('scan-mode').value = p.scan_mode;
   if (p.auth_type) document.getElementById('auth-type').value = p.auth_type;
+  if (p.scan_scope) document.getElementById('scan-scope').value = p.scan_scope;
+  if (p.focus_urls && p.focus_urls.length) {
+    document.getElementById('focus-urls').value = p.focus_urls.join('\n');
+  }
+  if (p.extra_domains && p.extra_domains.length) {
+    document.getElementById('extra-domains').value = p.extra_domains.join(', ');
+  }
+  if (p.exclude_urls && p.exclude_urls.length) {
+    document.getElementById('exclude-urls').value = p.exclude_urls.join('\n');
+  }
+  setFocusAreasFromList(p.focus_areas || []);
+  if (p.scan_intensity) document.getElementById('scan-intensity').value = p.scan_intensity;
+  onScanScopeChange();
   setScanMode('form');
   _currentPlan = null;
   document.getElementById('ai-plan-container').style.display = 'none';
@@ -1300,6 +1545,60 @@ function discardPlan() {
   _currentPlan = null;
   document.getElementById('ai-plan-container').style.display = 'none';
   document.getElementById('ai-instruction').value = '';
+}
+
+function onScanScopeChange() {
+  var scope = document.getElementById('scan-scope').value;
+  var group = document.getElementById('focus-urls-group');
+  if (group) group.style.display = (scope === 'full_site') ? 'none' : '';
+}
+
+function toggleFocusChip(el) {
+  const container = document.getElementById('focus-chips');
+  const allChip = container.querySelector('[data-value=""]');
+  const val = el.getAttribute('data-value');
+
+  if (val === '') {
+    container.querySelectorAll('.focus-chip').forEach(c => c.classList.remove('active'));
+    allChip.classList.add('active');
+  } else {
+    allChip.classList.remove('active');
+    el.classList.toggle('active');
+    const anySelected = container.querySelectorAll('.focus-chip.active[data-value]:not([data-value=""])').length > 0;
+    if (!anySelected) allChip.classList.add('active');
+  }
+  _syncFocusAreas();
+}
+
+function _syncFocusAreas() {
+  const chips = document.querySelectorAll('#focus-chips .focus-chip.active[data-value]:not([data-value=""])');
+  const areas = Array.from(chips).map(c => c.getAttribute('data-value'));
+  document.getElementById('focus-areas').value = areas.join(',');
+  var sel = document.getElementById('scan-intensity');
+  if (areas.length > 0) {
+    sel.value = 'deep';
+    sel.disabled = true;
+    sel.title = 'Specific vuln types always use Deep intensity for maximum coverage';
+  } else {
+    sel.disabled = false;
+    sel.title = '';
+  }
+}
+
+function setFocusAreasFromList(areas) {
+  const container = document.getElementById('focus-chips');
+  container.querySelectorAll('.focus-chip').forEach(c => c.classList.remove('active'));
+  if (!areas || !areas.length) {
+    container.querySelector('[data-value=""]').classList.add('active');
+  } else {
+    areas.forEach(a => {
+      const chip = container.querySelector('[data-value="' + a + '"]');
+      if (chip) chip.classList.add('active');
+    });
+    const anyActive = container.querySelectorAll('.focus-chip.active[data-value]:not([data-value=""])').length > 0;
+    if (!anyActive) container.querySelector('[data-value=""]').classList.add('active');
+  }
+  _syncFocusAreas();
 }
 
 let _scanPage = 1;
@@ -1545,11 +1844,19 @@ async function startScan() {
   if (postmanEnv) api_imports.postman_env = postmanEnv;
   const openapi = await uploadFile('file-openapi');
   if (openapi) api_imports.openapi = openapi;
+  const burp = await uploadFile('file-burp');
+  if (burp) api_imports.burp = burp;
 
   btn.textContent = 'Starting...';
 
   const extraDomainsRaw = document.getElementById('extra-domains').value.trim();
   const extraDomains = extraDomainsRaw ? extraDomainsRaw.split(',').map(d => d.trim().toLowerCase()).filter(Boolean) : [];
+
+  const scanScope = document.getElementById('scan-scope').value;
+  const focusUrlsRaw = (document.getElementById('focus-urls').value || '').trim();
+  const focusUrls = focusUrlsRaw ? focusUrlsRaw.split('\n').map(u => u.trim()).filter(Boolean) : [];
+  const focusAreasRaw = (document.getElementById('focus-areas').value || '').trim();
+  const focusAreas = focusAreasRaw ? focusAreasRaw.split(',').map(a => a.trim()).filter(Boolean) : [];
 
   const body = {
     target_url: url,
@@ -1557,13 +1864,23 @@ async function startScan() {
     password: document.getElementById('password').value,
     model: document.getElementById('model-select').value,
     scan_mode: document.getElementById('scan-mode').value,
+    scan_scope: scanScope,
+    focus_urls: focusUrls,
+    focus_areas: focusAreas,
+    scan_intensity: document.getElementById('scan-intensity').value,
     auth_type: document.getElementById('auth-type').value,
     scanner: 'ai',
     api_imports: api_imports,
     extra_domains: extraDomains,
+    exclude_urls: (document.getElementById('exclude-urls').value || '').trim().split('\n').map(u => u.trim()).filter(Boolean),
   };
 
   const resp = await fetch('/api/scan', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) });
+  if (!resp.ok) {
+    const txt = await resp.text();
+    try { const j = JSON.parse(txt); alert(j.error || j.detail || txt); } catch(_) { alert('Server error (' + resp.status + '): ' + txt.slice(0, 200)); }
+    btn.disabled = false; btn.textContent = 'Start Scan'; return;
+  }
   const data = await resp.json();
   if (data.error) { alert(data.error); btn.disabled = false; btn.textContent = 'Start Scan'; return; }
 
@@ -2331,15 +2648,21 @@ function renderCrawledTree(urls) {
 function closeLiveView() {
   _prevCrawledCount = 0;
   if (lvPollInterval) { clearInterval(lvPollInterval); lvPollInterval = null; }
-  const lv = document.getElementById('live-scan-view');
-  const sc = document.getElementById('scans-card');
-  if (lv) lv.style.display = 'none';
-  if (sc) sc.style.display = 'block';
-  loadScans();
+  _showScansList();
 }
 
 async function viewScan(scanId) {
-  if (currentPage !== 'scans') navigateTo('scans');
+  if (currentPage !== 'scans') {
+    currentPage = 'scans';
+    document.querySelectorAll('.page').forEach(p => p.style.display = 'none');
+    const el = document.getElementById('page-scans');
+    if (el) el.style.display = 'block';
+    document.querySelectorAll('.nav-item').forEach(a => a.classList.remove('active'));
+    const active = document.querySelector('.nav-item[data-page="scans"]');
+    if (active) active.classList.add('active');
+    const titleEl = document.getElementById('page-title');
+    if (titleEl) titleEl.textContent = 'Scan History';
+  }
   currentScanId = scanId;
 
   hideAllViews();
@@ -2409,6 +2732,9 @@ function showErrorView(scanId, data) {
   let errStatsHtml = [
     stat(data.model || '-', 'Model'),
     stat(data.scan_mode || '-', 'Scan Mode'),
+    stat((data.scan_scope || 'directory').replace('_', ' '), 'Scope'),
+    stat((data.focus_areas || []).length ? data.focus_areas.join(', ') : 'Full Scan', 'Vuln Focus'),
+    stat((data.scan_intensity || 'deep').charAt(0).toUpperCase() + (data.scan_intensity || 'deep').slice(1), 'Intensity'),
     stat(data.started ? new Date(data.started).toLocaleString() : '-', 'Started'),
     stat(data.duration ? Math.round(data.duration) + 's' : '-', 'Duration'),
     stat(data.current_phase || '-', 'Last Phase'),
@@ -2442,13 +2768,17 @@ function hideAllViews() {
   if (ev) ev.style.display = 'none';
 }
 
-function showList() {
-  navigateTo('scans');
+function _showScansList() {
   hideAllViews();
   const sc = document.getElementById('scans-card');
   if (sc) sc.style.display = 'block';
-  if (lvPollInterval) { clearInterval(lvPollInterval); lvPollInterval = null; }
   loadScans();
+}
+
+function showList() {
+  if (currentPage !== 'scans') navigateTo('scans');
+  else _showScansList();
+  if (lvPollInterval) { clearInterval(lvPollInterval); lvPollInterval = null; }
 }
 
 function renderResults(data) {
@@ -2918,54 +3248,136 @@ startAutoRefresh();
 
 
 function _insightRenderMd(text) {
-  let html = esc(text);
-  html = html.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>');
-  html = html.replace(/`([^`]+)`/g, '<code>$1</code>');
-  html = html.replace(/^### (.+)$/gm, '<div style="font-weight:700;font-size:14px;margin:8px 0 4px;">$1</div>');
-  html = html.replace(/^## (.+)$/gm, '<div style="font-weight:700;font-size:15px;margin:10px 0 4px;">$1</div>');
-  html = html.replace(/^- (.+)$/gm, '<div style="padding-left:12px;">&#8226; $1</div>');
-  html = html.replace(/^\d+\.\s+(.+)$/gm, function(m, p1, offset, str) {
-    return '<div style="padding-left:12px;">' + m.match(/^\d+/)[0] + '. ' + p1 + '</div>';
+  if (!text) return '';
+  let src = text;
+
+  // Extract fenced code blocks first to protect them
+  const codeBlocks = [];
+  src = src.replace(/```(\w*)\n([\s\S]*?)```/g, function(_, lang, code) {
+    codeBlocks.push('<pre><code>' + esc(code.trimEnd()) + '</code></pre>');
+    return '\x00CB' + (codeBlocks.length - 1) + '\x00';
   });
 
+  let html = esc(src);
+
+  // Restore code blocks
+  html = html.replace(/\x00CB(\d+)\x00/g, function(_, i) { return codeBlocks[+i]; });
+
+  // Inline: bold, italic, inline code, links
+  html = html.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>');
+  html = html.replace(/(?<!\*)\*([^*]+)\*(?!\*)/g, '<em>$1</em>');
+  html = html.replace(/`([^`]+)`/g, '<code>$1</code>');
+  html = html.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
+
+  // Severity badges
+  html = html.replace(/<strong>(Critical)<\/strong>/gi, '<span class="sev-badge sev-critical">Critical</span>');
+  html = html.replace(/<strong>(High)<\/strong>/gi, '<span class="sev-badge sev-high">High</span>');
+  html = html.replace(/<strong>(Medium)<\/strong>/gi, '<span class="sev-badge sev-medium">Medium</span>');
+  html = html.replace(/<strong>(Low)<\/strong>/gi, '<span class="sev-badge sev-low">Low</span>');
+  html = html.replace(/<strong>(Info)<\/strong>/gi, '<span class="sev-badge sev-info">Info</span>');
+
+  // Verdict styling
+  html = html.replace(/\bTRUE.?POSITIVE\b/gi, '<span class="verdict-tp">TRUE_POSITIVE</span>');
+  html = html.replace(/\bFALSE.?POSITIVE\b/gi, '<span class="verdict-fp">FALSE_POSITIVE</span>');
+  html = html.replace(/\bMANUAL.?REVIEW\b/gi, '<span class="verdict-mr">MANUAL_REVIEW</span>');
+  html = html.replace(/\bNEEDS.?VERIFICATION\b/gi, '<span class="verdict-mr">NEEDS_VERIFICATION</span>');
+
+  // Horizontal rule
+  html = html.replace(/^-{3,}$/gm, '<hr>');
+
+  // Blockquotes
+  html = html.replace(/^&gt;\s?(.+)$/gm, '<blockquote>$1</blockquote>');
+
+  // Process line by line for headings, lists, tables
   const lines = html.split('\n');
-  let inTable = false;
-  let tableHtml = '';
-  let tableRows = [];
-  const processed = [];
+  const out = [];
+  let inTable = false, tableRows = [], inUl = false, inOl = false;
+
+  function closeList() {
+    if (inUl) { out.push('</ul>'); inUl = false; }
+    if (inOl) { out.push('</ol>'); inOl = false; }
+  }
+  function closeTable() {
+    if (inTable) { out.push(_buildTable(tableRows)); inTable = false; tableRows = []; }
+  }
 
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
-    if (line.trim().startsWith('|') && line.trim().endsWith('|')) {
-      if (!inTable) { inTable = true; tableRows = []; }
-      const stripped = line.trim();
-      if (/^\|[\s\-:|]+\|$/.test(stripped)) continue;
-      tableRows.push(stripped);
-    } else {
-      if (inTable) {
-        processed.push(_buildTable(tableRows));
-        inTable = false;
-        tableRows = [];
-      }
-      processed.push(line);
-    }
-  }
-  if (inTable) processed.push(_buildTable(tableRows));
+    const trimmed = line.trim();
 
-  return processed.join('\n').replace(/\n/g, '<br>');
+    // Table rows
+    if (trimmed.startsWith('|') && trimmed.endsWith('|')) {
+      closeList();
+      if (!inTable) { inTable = true; tableRows = []; }
+      if (/^\|[\s\-:|]+\|$/.test(trimmed)) continue;
+      tableRows.push(trimmed);
+      continue;
+    }
+    closeTable();
+
+    // Headings
+    if (/^#### (.+)$/.test(trimmed)) { closeList(); out.push('<h4>' + trimmed.replace(/^#### /, '') + '</h4>'); continue; }
+    if (/^### (.+)$/.test(trimmed)) { closeList(); out.push('<h3>' + trimmed.replace(/^### /, '') + '</h3>'); continue; }
+    if (/^## (.+)$/.test(trimmed)) { closeList(); out.push('<h2>' + trimmed.replace(/^## /, '') + '</h2>'); continue; }
+
+    // Unordered list
+    if (/^[-*]\s+(.+)$/.test(trimmed)) {
+      if (inOl) { out.push('</ol>'); inOl = false; }
+      if (!inUl) { out.push('<ul>'); inUl = true; }
+      out.push('<li>' + trimmed.replace(/^[-*]\s+/, '') + '</li>');
+      continue;
+    }
+
+    // Ordered list
+    if (/^\d+\.\s+(.+)$/.test(trimmed)) {
+      if (inUl) { out.push('</ul>'); inUl = false; }
+      if (!inOl) { out.push('<ol>'); inOl = true; }
+      out.push('<li>' + trimmed.replace(/^\d+\.\s+/, '') + '</li>');
+      continue;
+    }
+
+    closeList();
+
+    // Empty line = paragraph break
+    if (trimmed === '') { out.push('<br>'); continue; }
+
+    out.push(trimmed);
+  }
+  closeTable();
+  closeList();
+
+  let result = out.join('\n');
+  // Clean up excessive breaks
+  result = result.replace(/(<br>\s*){3,}/g, '<br><br>');
+  // Wrap consecutive non-tag lines in <p>
+  result = result.replace(/\n/g, '<br>');
+  return result;
 }
 
 function _buildTable(rows) {
   if (rows.length === 0) return '';
   let h = '<table>';
-  rows.forEach((row, idx) => {
-    const cells = row.split('|').filter(c => c.trim() !== '');
+  rows.forEach(function(row, idx) {
+    const cells = row.split('|').filter(function(c) { return c.trim() !== ''; });
     const tag = idx === 0 ? 'th' : 'td';
-    h += '<tr>' + cells.map(c => '<' + tag + '>' + c.trim() + '</' + tag + '>').join('') + '</tr>';
+    h += '<tr>' + cells.map(function(c) {
+      let cell = c.trim();
+      // Apply severity badges inside table cells too
+      cell = cell.replace(/\b(Critical)\b/gi, '<span class="sev-badge sev-critical">Critical</span>');
+      cell = cell.replace(/\b(High)\b/gi, '<span class="sev-badge sev-high">High</span>');
+      cell = cell.replace(/\b(Medium)\b/gi, '<span class="sev-badge sev-medium">Medium</span>');
+      cell = cell.replace(/\b(Low)\b/gi, '<span class="sev-badge sev-low">Low</span>');
+      cell = cell.replace(/\b(Info)\b/gi, '<span class="sev-badge sev-info">Info</span>');
+      cell = cell.replace(/\bTRUE.?POSITIVE\b/gi, '<span class="verdict-tp">TRUE_POSITIVE</span>');
+      cell = cell.replace(/\bFALSE.?POSITIVE\b/gi, '<span class="verdict-fp">FALSE_POSITIVE</span>');
+      cell = cell.replace(/\bMANUAL.?REVIEW\b/gi, '<span class="verdict-mr">MANUAL_REVIEW</span>');
+      return '<' + tag + '>' + cell + '</' + tag + '>';
+    }).join('') + '</tr>';
   });
   return h + '</table>';
 }
 
 </script>
+<div style="position:fixed;bottom:12px;right:16px;font-size:10px;color:rgba(255,255,255,0.25);letter-spacing:1.5px;text-transform:uppercase;font-weight:600;pointer-events:none;z-index:9999;user-select:none;">Internal Use Only</div>
 </body>
 </html>

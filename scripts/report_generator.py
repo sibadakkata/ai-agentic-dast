@@ -957,7 +957,7 @@ def _enrich_with_all_tests(classified, test_log):
     return classified
 
 
-def gen_report(model_key, classified, raw):
+def gen_report(model_key, classified, raw, scan_id=None):
     display = _model_display(model_key)
     slug = _model_slug(model_key)
 
@@ -1205,7 +1205,8 @@ def gen_report(model_key, classified, raw):
                      new_x="LMARGIN", new_y="NEXT")
 
     os.makedirs(OUT_DIR, exist_ok=True)
-    out = os.path.join(OUT_DIR, f"scan_{slug}.pdf")
+    pdf_name = f"report_{scan_id}.pdf" if scan_id else f"scan_{slug}.pdf"
+    out = os.path.join(OUT_DIR, pdf_name)
     pdf.output(out)
     return out, total, len(tp), len(fp), len(nv), len(na)
 

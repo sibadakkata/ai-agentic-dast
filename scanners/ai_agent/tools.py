@@ -84,6 +84,7 @@ class ScanTools:
         auth_session: AuthSession | None = None,
         allowed_domains: set | None = None,
         cancel_flag=None,
+        exclude_urls: list[str] | None = None,
     ):
         self._page = page
         self._http_client = http_client
@@ -91,12 +92,37 @@ class ScanTools:
         self._auth_session = auth_session
         self._allowed_domains = allowed_domains or set()
         self._cancel_flag = cancel_flag
+        self._exclude_patterns: list[str] = [p.strip().rstrip("/") for p in (exclude_urls or []) if p.strip()]
         self._out_of_scope: list[str] = []
+        self._excluded_hits: list[str] = []
         self._network_log: list[dict] = []
         self._ws_connections: dict[str, Any] = {}
         self._intercept_pattern: str | None = None
         if self._page:
             self._page.on("requestfinished", lambda req: asyncio.ensure_future(self._log_request(req)))
+
+    def _url_excluded(self, url: str) -> bool:
+        """Return True if URL matches any user-defined exclusion pattern."""
+        if not self._exclude_patterns or not url:
+            return False
+        url_lower = url.lower().rstrip("/")
+        try:
+            from urllib.parse import urlparse
+            path_lower = (urlparse(url).path or "/").lower().rstrip("/")
+        except Exception:
+            path_lower = ""
+        for pattern in self._exclude_patterns:
+            p = pattern.lower().rstrip("/")
+            if url_lower == p or url_lower.startswith(p + "/"):
+                if url not in self._excluded_hits:
+                    self._excluded_hits.append(url)
+                return True
+            if p.startswith("/") and path_lower:
+                if path_lower == p or path_lower.startswith(p + "/"):
+                    if url not in self._excluded_hits:
+                        self._excluded_hits.append(url)
+                    return True
+        return False
 
     def _url_in_scope(self, url: str) -> bool:
         """Return True if URL belongs to one of the allowed target domains."""
@@ -121,6 +147,32 @@ class ScanTools:
     def get_out_of_scope_urls(self) -> list[str]:
         """Return list of unique URLs that were blocked as out-of-scope."""
         return list(self._out_of_scope)
+
+    def get_excluded_urls(self) -> list[str]:
+        """Return list of unique URLs that were blocked by exclusion rules."""
+        return list(self._excluded_hits)
+
+    _LOGOUT_PATTERNS = (
+        "/logout", "/log-out", "/log_out",
+        "/signout", "/sign-out", "/sign_out",
+        "/disconnect", "/end-session", "/endsession",
+        "action=logout", "action=signout", "action=sign_out",
+        "?logout", "?signout",
+    )
+
+    @staticmethod
+    def _is_logout_url(url: str) -> bool:
+        """Return True if a URL looks like a logout/signout endpoint."""
+        lower = (url or "").lower()
+        return any(p in lower for p in ScanTools._LOGOUT_PATTERNS)
+
+    @staticmethod
+    def _is_logout_selector(selector: str) -> bool:
+        """Return True if a CSS selector targets a logout element."""
+        lower = (selector or "").lower()
+        logout_kw = ("logout", "log-out", "log_out", "signout",
+                     "sign-out", "sign_out", "disconnect")
+        return any(kw in lower for kw in logout_kw)
 
     def _is_cancelled(self) -> bool:
         return self._cancel_flag is not None and self._cancel_flag.is_set()
@@ -209,6 +261,10 @@ class ScanTools:
     async def navigate(self, url: str) -> dict:
         if not self._require_page():
             return {"error": "No browser page (API-only mode)"}
+        if self._is_logout_url(url):
+            return {"error": "BLOCKED: This is a logout/signout URL. Navigating here would destroy the authenticated session.", "skipped": True}
+        if self._url_excluded(url):
+            return {"error": f"EXCLUDED by user: {url} — this URL is in the exclusion list.", "skipped": True}
         if not self._url_in_scope(url):
             return {"error": f"URL out of scope (not in target domain): {url}", "skipped": True}
         try:
@@ -240,6 +296,24 @@ class ScanTools:
     async def click(self, selector: str) -> dict:
         if not self._require_page():
             return {"error": "No browser page (API-only mode)"}
+        if self._is_logout_selector(selector):
+            return {"error": "BLOCKED: Selector targets a logout element. Clicking would destroy the authenticated session.", "skipped": True}
+        try:
+            href = await self._page.evaluate(
+                """(sel) => {
+                    const el = document.querySelector(sel);
+                    if (!el) return '';
+                    const h = el.getAttribute('href') || '';
+                    const t = (el.textContent || '').trim().toLowerCase();
+                    return h + '|' + t;
+                }""", selector
+            )
+        except Exception:
+            href = ""
+        href_lower = (href or "").lower()
+        logout_kw = ("logout", "log-out", "log_out", "signout", "sign-out", "sign_out", "disconnect")
+        if any(kw in href_lower for kw in logout_kw):
+            return {"error": "BLOCKED: This element links to logout/signout. Clicking would destroy the authenticated session.", "skipped": True}
         try:
             before_url = self._page.url
             before_count = len(self._network_log)
@@ -248,6 +322,11 @@ class ScanTools:
             await self._page.wait_for_load_state("networkidle", timeout=5000)
 
             new_url = self._page.url
+            if self._is_logout_url(new_url):
+                logger.warning("Click navigated to logout URL %s — attempting to go back", new_url)
+                await self._page.go_back(wait_until="networkidle", timeout=10000)
+                return {"error": f"RECOVERED: Click led to logout URL ({new_url}). Navigated back to preserve session.", "skipped": True}
+
             triggered = self._network_log[before_count:] if len(self._network_log) > before_count else []
 
             return {
@@ -422,7 +501,14 @@ class ScanTools:
                 });
                 return links;
             }""")
-            return {"links": links}
+            filtered = [
+                lnk for lnk in links
+                if not self._is_logout_url(lnk.get("href", ""))
+                and not self._url_excluded(lnk.get("href", ""))
+                and not any(kw in (lnk.get("text", "").lower())
+                            for kw in ("logout", "log out", "sign out", "signout", "disconnect"))
+            ]
+            return {"links": filtered}
         except Exception as e:
             return _error_dict(str(e))
 
@@ -557,6 +643,8 @@ class ScanTools:
         body: str | None = None,
         auth_token: str | None = None,
     ) -> dict:
+        if self._url_excluded(url):
+            return {"error": f"EXCLUDED by user: {url}", "skipped": True}
         if not self._url_in_scope(url):
             return {"error": f"URL out of scope (not in target domain): {url}", "skipped": True}
         try:
@@ -612,6 +700,8 @@ class ScanTools:
                 scheme = "https" if "https" in raw_request[:80].lower() else "http"
                 path = path_or_url if path_or_url.startswith("/") else "/" + path_or_url
                 url = f"{scheme}://{host}{path}"
+            if self._url_excluded(url):
+                return {"error": f"EXCLUDED by user: {url}", "skipped": True}
             if not self._url_in_scope(url):
                 return {"error": f"URL out of scope (not in target domain): {url}", "skipped": True}
             return await self.api_request(method=method, url=url, headers=headers, body=body)
@@ -629,6 +719,8 @@ class ScanTools:
         original_body: str | None = None,
         headers: dict | None = None,
     ) -> dict:
+        if self._url_excluded(endpoint):
+            return {"error": f"EXCLUDED by user: {endpoint}", "skipped": True}
         if not self._url_in_scope(endpoint):
             return {"error": f"URL out of scope (not in target domain): {endpoint}", "skipped": True}
         results = []
@@ -684,6 +776,8 @@ class ScanTools:
             orig = dict(request)
             method = orig.get("method", "GET")
             url = orig.get("url", "")
+            if self._url_excluded(url):
+                return {"error": f"EXCLUDED by user: {url}", "skipped": True}
             if not self._url_in_scope(url):
                 return {"error": f"URL out of scope: {url}", "skipped": True}
             headers = dict(orig.get("headers", {}))
@@ -724,6 +818,8 @@ class ScanTools:
         endpoint: str,
         methods: list[str] | None = None,
     ) -> dict:
+        if self._url_excluded(endpoint):
+            return {"error": f"EXCLUDED by user: {endpoint}", "skipped": True}
         if not self._url_in_scope(endpoint):
             return {"error": f"URL out of scope: {endpoint}", "skipped": True}
         methods = methods or ["GET", "POST", "PUT", "DELETE"]
@@ -750,6 +846,8 @@ class ScanTools:
         return {"results": results}
 
     async def test_method_override(self, endpoint: str) -> dict:
+        if self._url_excluded(endpoint):
+            return {"error": f"EXCLUDED by user: {endpoint}", "skipped": True}
         if not self._url_in_scope(endpoint):
             return {"error": f"URL out of scope: {endpoint}", "skipped": True}
         methods = ["PUT", "DELETE", "PATCH", "OPTIONS"]
@@ -771,6 +869,8 @@ class ScanTools:
         body: str | None = None, headers: dict | None = None,
     ) -> dict:
         """Test bearer token / JWT security."""
+        if self._url_excluded(endpoint):
+            return {"error": f"EXCLUDED by user: {endpoint}", "skipped": True}
         if not self._url_in_scope(endpoint):
             return {"error": f"URL out of scope: {endpoint}", "skipped": True}
         results: dict[str, Any] = {"token_analysis": {}, "tests": []}

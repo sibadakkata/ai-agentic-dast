@@ -8,6 +8,7 @@ import logging
 import hmac
 import json
 import os
+import re
 import secrets
 import sys
 import threading
@@ -26,8 +27,18 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 logger = logging.getLogger(__name__)
 
 from scanners.ai_agent.agent import run_scan, save_results, ScanCancelled
+from scanners.ai_agent.api_import import (
+    parse_postman_collection,
+    parse_openapi_spec,
+    EndpointRegistry,
+)
 from scanners.ai_agent.auth import load_targets_from_dict
 from scanners.ai_agent.llm_config import LLMRouter, check_connectivity
+from scanners.ai_agent.model_discovery import (
+    discover_models,
+    get_cached_models,
+    get_cache_meta,
+)
 from scripts.triage_engine import classify as triage_classify
 
 app = FastAPI(
@@ -142,6 +153,59 @@ def _save_scans_to_disk():
         pass
 
 
+def _ensure_triaged(sid: str, s: dict) -> list[dict]:
+    """Return triaged findings for a scan, computing & caching if needed.
+
+    On first call for a scan, loads raw findings from the result file,
+    runs the triage engine on each one, and stores the result in
+    SCANS[sid]['triaged_findings'] so the dashboard shows proper verdicts.
+    """
+    cached = s.get("triaged_findings")
+    if cached:
+        return cached
+
+    result_file = s.get("result_file")
+    if not result_file:
+        return []
+    fpath = RAW_DIR / result_file
+    if not fpath.exists():
+        return []
+    try:
+        rdata = json.loads(fpath.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+
+    raw_findings = rdata.get("findings", [])
+    if not raw_findings:
+        return []
+
+    test_log = rdata.get("summary", {}).get("test_log", [])
+    triaged = []
+    for f in raw_findings:
+        t = triage_classify(f, test_log)
+        triaged.append({
+            "title": t.get("title", ""),
+            "ai_severity": f.get("severity", ""),
+            "severity": t.get("final_severity", "Info"),
+            "final_severity": t.get("final_severity", "Info"),
+            "verdict": t.get("verdict", ""),
+            "reason": t.get("reason", ""),
+            "confidence_score": t.get("confidence"),
+            "url": t.get("url", ""),
+            "cwe": t.get("cwe", ""),
+            "cvss": t.get("cvss"),
+            "cvss_rationale": t.get("cvss_rationale", ""),
+            "cve": t.get("cve", ""),
+            "verified": f.get("verified", False),
+            "verification_method": t.get("verification_method", "none"),
+            "verification_evidence": t.get("verification_evidence", ""),
+        })
+
+    s["triaged_findings"] = triaged
+    s["findings_count"] = len(triaged)
+    return triaged
+
+
 def _infer_scan_mode(scan_info: dict) -> str:
     """Try to infer scan_mode from old scan data that didn't store it."""
     result_file = scan_info.get("result_file")
@@ -163,13 +227,63 @@ def _infer_scan_mode(scan_info: dict) -> str:
 
 _load_scans_from_disk()
 
-MODELS = [
-    {"id": "bedrock/mistral.ministral-3-8b-instruct", "name": "Ministral 8B (cheapest + tools)", "cost": "~$0.15/$0.15 per 1M tokens", "provider": "Bedrock"},
-    {"id": "bedrock/mistral.ministral-3-14b-instruct", "name": "Ministral 14B (best value + tools)", "cost": "~$0.20/$0.20 per 1M tokens", "provider": "Bedrock"},
-    {"id": "bedrock/mistral.mistral-small-2402-v1:0", "name": "Mistral Small (legacy, weak tools)", "cost": "~$0.10/$0.30 per 1M tokens", "provider": "Bedrock"},
-    {"id": "bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0", "name": "Claude Haiku 4.5 (recommended)", "cost": "~$0.80/$4 per 1M tokens", "provider": "Bedrock"},
-    {"id": "bedrock/us.anthropic.claude-sonnet-4-6", "name": "Claude Sonnet 4.6 (best quality)", "cost": "~$3/$15 per 1M tokens", "provider": "Bedrock"},
+# --- Model registry (dynamic, auto-discovered from Bedrock) ------------------
+# Fallback used when the cache is empty (discovery not yet run, or IAM missing bedrock:ListFoundationModels).
+_FALLBACK_MODELS = [
+    {"id": "bedrock/mistral.ministral-3-8b-instruct", "name": "Ministral 8B (cheapest + tools)", "cost": "~$0.15/$0.15 per 1M tokens", "provider": "Mistral", "input_cost_per_m": 0.15},
+    {"id": "bedrock/mistral.ministral-3-14b-instruct", "name": "Ministral 14B (best value + tools)", "cost": "~$0.20/$0.20 per 1M tokens", "provider": "Mistral", "input_cost_per_m": 0.20},
+    {"id": "bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0", "name": "Claude Haiku 4.5 (recommended)", "cost": "~$0.80/$4 per 1M tokens", "provider": "Anthropic", "input_cost_per_m": 0.80},
+    {"id": "bedrock/us.anthropic.claude-sonnet-4-6", "name": "Claude Sonnet 4.6 (best quality)", "cost": "~$3/$15 per 1M tokens", "provider": "Anthropic", "input_cost_per_m": 3.00},
+    {"id": "bedrock/us.anthropic.claude-opus-4-20250514", "name": "Claude Opus 4 (premium)", "cost": "~$15/$75 per 1M tokens", "provider": "Anthropic", "input_cost_per_m": 15.00, "high_cost": True},
 ]
+
+_MODEL_DISCOVERY_INTERVAL = int(os.environ.get("MODEL_DISCOVERY_INTERVAL_H", "24")) * 3600
+_model_discovery_lock = threading.Lock()
+_last_discovery_time: float = 0.0
+
+
+def _get_models() -> list[dict]:
+    """Return the current model list — dynamic cache with fallback."""
+    cached = get_cached_models()
+    return cached if cached else _FALLBACK_MODELS
+
+
+def _cheapest_model() -> str:
+    """Return the model ID with the lowest input cost."""
+    models = _get_models()
+    return min(models, key=lambda m: m.get("input_cost_per_m", float("inf")))["id"]
+
+
+def _run_model_discovery_bg():
+    """Run model discovery in a background thread (non-blocking)."""
+    global _last_discovery_time
+    with _model_discovery_lock:
+        if time.time() - _last_discovery_time < 60:
+            return
+        _last_discovery_time = time.time()
+    logger.info("Starting background model discovery...")
+    try:
+        result = discover_models()
+        logger.info("Model discovery complete: %d/%d passed in %.1fs",
+                     result.get("passed", 0), result.get("tested", 0), result.get("duration_sec", 0))
+    except Exception as e:
+        logger.error("Model discovery failed: %s", e)
+
+
+def _schedule_model_discovery():
+    """Run discovery on startup, then schedule periodic re-checks."""
+    _run_model_discovery_bg()
+    def _periodic():
+        while True:
+            time.sleep(_MODEL_DISCOVERY_INTERVAL)
+            _run_model_discovery_bg()
+    t = threading.Thread(target=_periodic, daemon=True, name="model-discovery")
+    t.start()
+    logger.info("Model discovery scheduler started (interval=%dh)", _MODEL_DISCOVERY_INTERVAL // 3600)
+
+
+# Kick off discovery on import (runs in background thread so startup isn't blocked)
+threading.Thread(target=_schedule_model_discovery, daemon=True, name="model-discovery-init").start()
 
 
 @app.get("/health", tags=["System"])
@@ -214,16 +328,7 @@ async def get_dashboard():
 
     for sid, s in SCANS.items():
         total_cost += s.get("cost", 0) or 0
-        findings = s.get("triaged_findings") or s.get("findings") or []
-
-        if not findings and s.get("findings_count", 0) and s.get("result_file"):
-            try:
-                fpath = RAW_DIR / s["result_file"]
-                if fpath.exists():
-                    rdata = json.loads(fpath.read_text(encoding="utf-8"))
-                    findings = rdata.get("findings", [])
-            except Exception:
-                pass
+        findings = _ensure_triaged(sid, s)
 
         if not findings:
             total_findings += s.get("findings_count", 0) or 0
@@ -241,7 +346,7 @@ async def get_dashboard():
     recent = []
     sorted_scans = sorted(SCANS.items(), key=lambda x: x[1].get("started", ""), reverse=True)[:10]
     for sid, s in sorted_scans:
-        findings_list = s.get("triaged_findings") or s.get("findings") or []
+        findings_list = _ensure_triaged(sid, s)
         recent.append({
             "id": sid,
             "target": s.get("target_url", ""),
@@ -263,9 +368,68 @@ async def get_dashboard():
     }
 
 
+
+_INSIGHTS_SYSTEM_PROMPT = """\
+You are a security findings analyst. You MUST format every response using this exact structure:
+
+### Summary
+One or two sentences directly answering the question with key numbers.
+
+### Details
+Use ONE of these formats depending on the question:
+
+FORMAT A — When listing findings or comparing items, ALWAYS use a markdown table:
+| # | Title | Severity | Verdict | Target | CWE |
+|---|-------|----------|---------|--------|-----|
+| 1 | ... | **High** | TRUE_POSITIVE | https://... | CWE-79 |
+
+FORMAT B — When giving counts/statistics, use a summary table then bullet details:
+| Category | Count | Percentage |
+|----------|-------|------------|
+| ... | ... | ...% |
+
+FORMAT C — When explaining or summarizing, use bullet lists with bold labels:
+- **Finding**: description
+- **Severity**: **High**
+- **Evidence**: what was found
+
+Rules:
+- ALWAYS bold severity names: **Critical**, **High**, **Medium**, **Low**, **Info**
+- ALWAYS include specific counts and percentages from the data
+- ALWAYS use tables for 3+ items — never use long prose paragraphs
+- Show target URLs when relevant
+- Keep total response under 500 words
+- No filler text, no disclaimers, no "let me know if you need more"
+"""
+
+
+def _postprocess_insight(text: str) -> str:
+    """Clean up LLM insight response for consistent rendering."""
+    if not text:
+        return "_No results found._"
+    lines = text.strip().splitlines()
+    cleaned = []
+    for line in lines:
+        stripped = line.rstrip()
+        if stripped.startswith("```markdown"):
+            continue
+        if stripped == "```" and not cleaned:
+            continue
+        cleaned.append(stripped)
+    while cleaned and cleaned[-1].strip() == "```":
+        cleaned.pop()
+    result = "\n".join(cleaned).strip()
+    if not result:
+        return "_No results found._"
+    return result
+
+
 @app.post("/api/insights/query", tags=["Insights"])
 async def insights_query(request: Request):
-    """Answer a natural-language question about scan findings using LLM."""
+    """Answer a natural-language question about scan findings using LLM.
+
+    Always uses the cheapest available model — this is an analytics query, not a scan.
+    """
     body = await request.json()
     query = body.get("query", "").strip()
     if not query:
@@ -274,17 +438,7 @@ async def insights_query(request: Request):
     all_findings = []
     scans_analyzed = 0
     for sid, s in SCANS.items():
-        findings = s.get("triaged_findings") or s.get("findings") or []
-        if not findings:
-            rf = s.get("result_file", "")
-            if rf:
-                fpath = RAW_DIR / rf
-                try:
-                    if fpath.exists():
-                        rdata = json.loads(fpath.read_text(encoding="utf-8"))
-                        findings = rdata.get("findings", [])
-                except Exception:
-                    pass
+        findings = _ensure_triaged(sid, s)
         if findings:
             scans_analyzed += 1
             for f in findings:
@@ -294,27 +448,43 @@ async def insights_query(request: Request):
                 f_copy["model"] = s.get("model_name", s.get("model", ""))
                 all_findings.append(f_copy)
 
+    if not all_findings:
+        return {
+            "answer": "### No Findings\nNo scan data available yet. Run a scan first, then come back to analyze the results.",
+            "scans_analyzed": 0,
+            "findings_analyzed": 0,
+        }
+
     summary = json.dumps(all_findings[:200], indent=1, default=str)
 
     try:
-        router = LLMRouter()
+        model = _cheapest_model()
+        router = LLMRouter(models=[model])
         prompt = (
-            f"You are a security analyst assistant. The user has {len(all_findings)} findings across "
-            f"{scans_analyzed} scans.\n\nFindings data (up to 200):\n{summary}\n\n"
-            f"User question: {query}\n\n"
-            "Answer concisely in markdown. Include specific counts and details from the data."
+            f"Data: {len(all_findings)} findings across {scans_analyzed} scans.\n\n"
+            f"Findings (up to 200):\n{summary}\n\n"
+            f"Question: {query}"
         )
-        model = body.get("model") or "bedrock/mistral.ministral-3-8b-instruct"
         resp = await asyncio.to_thread(
             router.complete,
             model,
-            [{"role": "user", "content": prompt}],
+            [
+                {"role": "system", "content": _INSIGHTS_SYSTEM_PROMPT},
+                {"role": "user", "content": prompt},
+            ],
         )
-        answer = resp.choices[0].message.content or ""
+        answer = _postprocess_insight(resp.choices[0].message.content or "")
+        cost = None
+        try:
+            cost = router.get_cost_summary().get("total_cost")
+        except Exception:
+            pass
         return {
-            "answer": answer.strip(),
+            "answer": answer,
             "scans_analyzed": scans_analyzed,
             "findings_analyzed": len(all_findings),
+            "model_used": model,
+            "cost": cost,
         }
     except Exception as e:
         logger.exception("Insights query failed")
@@ -323,7 +493,27 @@ async def insights_query(request: Request):
 
 @app.get("/api/models", tags=["System"])
 async def get_models():
-    return MODELS
+    models = _get_models()
+    return [m for m in models if not m.get("ui_hidden")]
+
+
+@app.post("/api/models/refresh", tags=["System"])
+async def refresh_models(creds=Depends(_verify)):
+    """Trigger a model re-discovery (canary-tests all Bedrock models)."""
+    threading.Thread(target=_run_model_discovery_bg, daemon=True).start()
+    return {"status": "discovery_started", "message": "Model discovery running in background. Refresh in ~60s."}
+
+
+@app.get("/api/models/status", tags=["System"])
+async def models_status():
+    """Return model discovery cache metadata."""
+    meta = get_cache_meta()
+    models = _get_models()
+    return {
+        **meta,
+        "ui_models": len([m for m in models if not m.get("ui_hidden")]),
+        "hidden_models": len([m for m in models if m.get("ui_hidden")]),
+    }
 
 
 @app.get("/api/scans", tags=["Scans"])
@@ -413,32 +603,121 @@ async def upload_api_spec(
     return {"filename": safe_name, "size": len(contents)}
 
 
+def _resolve_api_imports(api_imports: dict) -> tuple[dict, dict | None]:
+    """Resolve uploaded API import filenames to parsed endpoint registry + summary.
+
+    Returns (resolved_paths, endpoint_summary_or_None).
+    """
+    resolved: dict[str, str] = {}
+    for key in ("postman", "postman_env", "burp", "openapi"):
+        fname = (api_imports or {}).get(key, "")
+        if fname:
+            fpath = IMPORTS_DIR / fname
+            if fpath.exists():
+                resolved[key] = str(fpath)
+
+    if not resolved:
+        return resolved, None
+
+    registry = EndpointRegistry()
+    try:
+        if "postman" in resolved:
+            eps = parse_postman_collection(resolved["postman"], resolved.get("postman_env"))
+            registry.add(eps)
+        if "openapi" in resolved:
+            eps = parse_openapi_spec(resolved["openapi"])
+            registry.add(eps)
+        if "burp" in resolved:
+            burp_path = Path(resolved["burp"])
+            raw = burp_path.read_text(encoding="utf-8")
+            try:
+                traffic = json.loads(raw)
+                registry.add_from_traffic(traffic)
+            except json.JSONDecodeError:
+                logger.warning("Burp file %s is not valid JSON — skipping", resolved["burp"])
+    except Exception as e:
+        logger.warning("Error parsing API imports: %s", e)
+
+    summary = registry.summary()
+    methods_detail = []
+    for path, methods in list(summary.get("methods_by_path", {}).items())[:30]:
+        methods_detail.append(f"  {','.join(methods)} {path}")
+    summary["methods_detail"] = methods_detail
+    return resolved, summary
+
+
 @app.post("/api/scan/analyze", tags=["Scans"])
 async def analyze_instruction(request: Request):
     """Parse a natural-language scan instruction into a structured scan plan."""
     body = await request.json()
     instruction = body.get("instruction", "").strip()
+    selected_model = body.get("model", "").strip()
+    api_imports = body.get("api_imports", {}) or {}
     if not instruction:
         return JSONResponse({"error": "instruction is required"}, status_code=400)
+
+    _, ep_summary = _resolve_api_imports(api_imports)
+
     try:
-        router = LLMRouter()
+        router = LLMRouter(models=[selected_model]) if selected_model else LLMRouter()
+
+        api_context = ""
+        if ep_summary and ep_summary.get("total", 0) > 0:
+            api_context = (
+                f"\n\nIMPORTANT — The user uploaded API spec files containing {ep_summary['total']} endpoints "
+                f"across {ep_summary['unique_paths']} unique paths.\n"
+                "Imported API endpoints:\n" +
+                "\n".join(ep_summary.get("methods_detail", [])) +
+                "\n\nUse this information to:\n"
+                "- Set scan_mode to 'api' or 'both' (not 'website' — there are API endpoints to test)\n"
+                "- Include relevant paths in focus_urls if the user mentions specific endpoints\n"
+                "- Mention imported API endpoint count in the steps and context\n"
+                "- If the user says 'scan the API' or 'test these endpoints', focus on the imported endpoints\n"
+            )
+
         prompt = (
             "You are a DAST scan planner. Parse this instruction and return a JSON object with these fields:\n"
-            "  target_url (string, required), username (string or null), password (string or null),\n"
-            "  auth_type ('form'|'basic'|'bearer'|'auto'), scan_mode ('quick'|'standard'|'deep'),\n"
-            "  focus_urls (list of specific URLs to test), focus_areas (list like 'XSS', 'SQLi'),\n"
+            "  target_url (string, required — the base URL or specific URL to scan),\n"
+            "  username (string or null), password (string or null),\n"
+            "  auth_type ('form'|'basic'|'bearer'|'auto'),\n"
+            "  scan_mode ('website'|'api'|'both') — 'website' for HTML/browser testing, 'api' for API endpoints, 'both' for everything (default),\n"
+            "  scan_scope ('url_only'|'directory'|'full_site') — IMPORTANT:\n"
+            "    'url_only'   = scan ONLY this exact URL/endpoint, nothing else\n"
+            "    'directory'  = scan this URL and its sub-paths (default for websites)\n"
+            "    'full_site'  = crawl and scan the entire site\n"
+            "  If the user says 'only this URL', 'specific page', 'just this endpoint', 'only scan X' → 'url_only'.\n"
+            "  If no scope hint, default to 'directory'.\n"
+            "  focus_urls (list of specific URLs/endpoints to test — extract ALL URLs from the instruction),\n"
+            "  focus_areas (list like 'XSS', 'SQLi', or empty [] for all — if user doesn't mention specific vuln types, leave EMPTY to scan everything),\n"
+            "  scan_intensity ('light'|'standard'|'deep') — DEFAULTS TO 'deep' ALWAYS unless user explicitly says 'quick'/'fast'/'light'. Rules:\n"
+            "    - No intensity mentioned → 'deep' (full scan, maximum payloads)\n"
+            "    - 'quick', 'fast', 'light' → 'light'\n"
+            "    - 'standard', 'balanced', 'moderate' → 'standard'\n"
+            "    - 'thorough', 'deep', 'full', 'exhaustive' → 'deep'\n"
+            "    - focus_areas non-empty → ALWAYS 'deep' regardless of anything else\n"
+            "  exclude_urls (list of URLs/paths the user wants to SKIP — extract from phrases like 'skip', 'exclude', 'don't scan', 'ignore', 'avoid'),\n"
+            "  extra_domains (list of additional allowed domains mentioned in the instruction),\n"
             "  steps (list of human-readable steps the scan will take),\n"
             "  context (brief summary of intent),\n"
             "  estimated_time (string), estimated_cost (string).\n"
             "Return ONLY valid JSON, no markdown.\n\n"
             f"Instruction: {instruction}"
+            f"{api_context}"
         )
-        resp = await asyncio.to_thread(router.chat, [{"role": "user", "content": prompt}], model="mistral/ministral-8b-latest")
-        text = resp.strip()
+        model = selected_model or (router.models[0] if router.models else "bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0")
+        resp = await asyncio.to_thread(router.complete, model, [{"role": "user", "content": prompt}])
+        text = (resp.choices[0].message.content or "").strip()
         if text.startswith("```"):
             text = text.split("\n", 1)[-1].rsplit("```", 1)[0]
         plan = json.loads(text)
-        return {"plan": plan}
+        if not plan.get("scan_intensity"):
+            plan["scan_intensity"] = "deep"
+        if plan.get("focus_areas"):
+            plan["scan_intensity"] = "deep"
+        result = {"plan": plan, "model_used": model}
+        if ep_summary:
+            result["api_endpoints_summary"] = ep_summary
+        return result
     except json.JSONDecodeError:
         return {"plan": {"target_url": "", "context": "Could not parse AI response", "error": "Invalid JSON from LLM"}}
     except Exception as e:
@@ -452,16 +731,34 @@ async def start_scan(request: Request):
     username = body.get("username", "").strip()
     password = body.get("password", "").strip()
     model = body.get("model", "claude-haiku-4-5-20251001")
-    scan_mode = body.get("scan_mode", "both")
+    scan_mode_raw = body.get("scan_mode", "both")
+    _MODE_MAP = {"standard": "both", "quick": "both", "deep": "both",
+                 "full": "both", "web": "website", "site": "website"}
+    scan_mode = _MODE_MAP.get(scan_mode_raw, scan_mode_raw)
+    if scan_mode not in ("website", "api", "both"):
+        scan_mode = "both"
+
     auth_type = body.get("auth_type", "auto")
     api_imports = body.get("api_imports", {}) or {}
     extra_domains = body.get("extra_domains", []) or []
+    scan_scope = body.get("scan_scope", "directory")
+    focus_urls = body.get("focus_urls", []) or []
+    focus_areas = body.get("focus_areas", []) or []
+    exclude_urls = body.get("exclude_urls", []) or []
+    scan_intensity = body.get("scan_intensity", "deep")
+    if scan_intensity not in ("light", "standard", "deep"):
+        scan_intensity = "deep"
+    if focus_areas:
+        scan_intensity = "deep"
+
+    if scan_scope not in ("url_only", "directory", "full_site"):
+        scan_scope = "directory"
 
     if not target_url:
         return JSONResponse({"error": "Target URL is required"}, status_code=400)
 
     scan_id = f"scan_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
-    model_name = next((m["name"] for m in MODELS if m["id"] == model), model)
+    model_name = next((m["name"] for m in _get_models() if m["id"] == model), model)
 
     cancel_flag = threading.Event()
     pause_flag = threading.Event()
@@ -476,6 +773,11 @@ async def start_scan(request: Request):
         "started": datetime.now().isoformat(),
         "progress": [],
         "scan_mode": scan_mode,
+        "scan_scope": scan_scope,
+        "focus_urls": focus_urls,
+        "focus_areas": focus_areas,
+        "exclude_urls": exclude_urls,
+        "scan_intensity": scan_intensity,
         "auth_type": auth_type,
         "_username": username,
         "_password": password,
@@ -487,19 +789,20 @@ async def start_scan(request: Request):
     thread = threading.Thread(
         target=_run_scan_in_thread,
         args=(scan_id, target_url, username, password, model, scan_mode, auth_type, api_imports, extra_domains, cancel_flag, pause_flag),
+        kwargs={"scan_scope": scan_scope, "focus_urls": focus_urls, "focus_areas": focus_areas, "scan_intensity": scan_intensity, "exclude_urls": exclude_urls},
         daemon=True,
     )
     thread.start()
     return {"scan_id": scan_id, "status": "started"}
 
 
-def _run_scan_in_thread(scan_id, target_url, username, password, model, scan_mode, auth_type, api_imports=None, extra_domains=None, cancel_flag=None, pause_flag=None, start_from_phase=0, initial_findings=None):
+def _run_scan_in_thread(scan_id, target_url, username, password, model, scan_mode, auth_type, api_imports=None, extra_domains=None, cancel_flag=None, pause_flag=None, start_from_phase=0, initial_findings=None, scan_scope="directory", focus_urls=None, focus_areas=None, scan_intensity="deep", exclude_urls=None):
     """Run scan in a separate thread with its own event loop so the main UI stays responsive."""
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     try:
         loop.run_until_complete(
-            _run_scan_task(scan_id, target_url, username, password, model, scan_mode, auth_type, api_imports, extra_domains, cancel_flag, pause_flag, start_from_phase, initial_findings)
+            _run_scan_task(scan_id, target_url, username, password, model, scan_mode, auth_type, api_imports, extra_domains, cancel_flag, pause_flag, start_from_phase, initial_findings, scan_scope=scan_scope, focus_urls=focus_urls, focus_areas=focus_areas, scan_intensity=scan_intensity, exclude_urls=exclude_urls)
         )
     finally:
         loop.close()
@@ -507,7 +810,7 @@ def _run_scan_in_thread(scan_id, target_url, username, password, model, scan_mod
         PAUSE_FLAGS.pop(scan_id, None)
 
 
-async def _run_scan_task(scan_id, target_url, username, password, model, scan_mode, auth_type, api_imports=None, extra_domains=None, cancel_flag=None, pause_flag=None, start_from_phase=0, initial_findings=None):
+async def _run_scan_task(scan_id, target_url, username, password, model, scan_mode, auth_type, api_imports=None, extra_domains=None, cancel_flag=None, pause_flag=None, start_from_phase=0, initial_findings=None, scan_scope="directory", focus_urls=None, focus_areas=None, scan_intensity="deep", exclude_urls=None):
     try:
         scan = SCANS[scan_id]
         scan["progress"].append("Initializing LLM router...")
@@ -607,6 +910,11 @@ async def _run_scan_task(scan_id, target_url, username, password, model, scan_mo
             "scan_mode": scan_mode,
             "auth": {"type": auth_type, "username": username, "password": password},
             "api_imports": resolved_imports,
+            "scan_scope": scan_scope,
+            "focus_urls": focus_urls or [],
+            "focus_areas": focus_areas or [],
+            "exclude_urls": exclude_urls or [],
+            "scan_intensity": scan_intensity,
         }
         target = load_targets_from_dict(target_dict)
 
@@ -690,6 +998,11 @@ async def get_scan_status(scan_id: str):
             "target": s.get("target_url", s.get("target", "")),
             "model": s.get("model"),
             "scan_mode": s.get("scan_mode", ""),
+            "scan_scope": s.get("scan_scope", "directory"),
+            "focus_urls": s.get("focus_urls", []),
+            "focus_areas": s.get("focus_areas", []),
+            "exclude_urls": s.get("exclude_urls", []),
+            "scan_intensity": s.get("scan_intensity", "deep"),
             "started": s.get("started"),
             "progress": s.get("progress", []),
             "current_phase": s.get("current_phase", ""),
@@ -822,6 +1135,11 @@ def _extract_scan_params(old: dict) -> dict:
         "password": old.get("_password", ""),
         "api_imports": old.get("_api_imports", {}) or {},
         "extra_domains": old.get("_extra_domains", []) or [],
+        "scan_scope": old.get("scan_scope", "directory"),
+        "focus_urls": old.get("focus_urls", []) or [],
+        "focus_areas": old.get("focus_areas", []) or [],
+        "exclude_urls": old.get("exclude_urls", []) or [],
+        "scan_intensity": old.get("scan_intensity", "deep"),
     }
 
 
@@ -886,6 +1204,7 @@ async def retry_scan(scan_id: str, request: Request):
         args=(scan_id, params["target_url"], params["username"], params["password"],
               model, scan_mode, params["auth_type"], params["api_imports"],
               params["extra_domains"], cancel_flag, pause_flag, start_from, prior_findings),
+        kwargs={"scan_scope": params["scan_scope"], "focus_urls": params["focus_urls"], "focus_areas": params["focus_areas"], "scan_intensity": params["scan_intensity"], "exclude_urls": params.get("exclude_urls", [])},
         daemon=True,
     )
     thread.start()
@@ -935,6 +1254,11 @@ async def rescan(scan_id: str, request: Request):
         "started": datetime.now().isoformat(),
         "progress": [f"Re-scan of {scan_id} (mode: {scan_mode})..."],
         "scan_mode": scan_mode,
+        "scan_scope": params["scan_scope"],
+        "focus_urls": params["focus_urls"],
+        "focus_areas": params["focus_areas"],
+        "exclude_urls": params.get("exclude_urls", []),
+        "scan_intensity": params["scan_intensity"],
         "auth_type": params["auth_type"],
         "_username": params["username"],
         "_password": params["password"],
@@ -948,6 +1272,7 @@ async def rescan(scan_id: str, request: Request):
         args=(new_id, params["target_url"], params["username"], params["password"],
               model, scan_mode, params["auth_type"], params["api_imports"],
               params["extra_domains"], cancel_flag, pause_flag),
+        kwargs={"scan_scope": params["scan_scope"], "focus_urls": params["focus_urls"], "focus_areas": params["focus_areas"], "scan_intensity": params["scan_intensity"], "exclude_urls": params.get("exclude_urls", [])},
         daemon=True,
     )
     thread.start()
@@ -1172,7 +1497,7 @@ async def generate_report(scan_id: str):
 
         orig_out = rg.OUT_DIR
         rg.OUT_DIR = str(REPORTS_DIR)
-        result = rg.gen_report(model_key, classified, data)
+        result = rg.gen_report(model_key, classified, data, scan_id=scan_id)
         rg.OUT_DIR = orig_out
 
         if result:
@@ -1185,6 +1510,43 @@ async def generate_report(scan_id: str):
         return JSONResponse({"error": f"Report generation failed: {str(e)}"}, status_code=500)
 
 
+_SCAN_ID_RE = re.compile(r"(scan_\d{8}_\d{6}_[0-9a-f]{6})")
+
+
+def _extract_scan_id_from_filename(stem: str) -> str | None:
+    """Try to pull a scan_YYYYMMDD_HHMMSS_hex6 ID from a report filename."""
+    m = _SCAN_ID_RE.search(stem)
+    if m:
+        return m.group(1)
+    return None
+
+
+def _find_scan_for_report(filename: str) -> tuple[str, dict]:
+    """Match a report file to its scan record. Returns (scan_id, scan_info)."""
+    stem = Path(filename).stem
+    sid = _extract_scan_id_from_filename(stem)
+    if sid and sid in SCANS:
+        return sid, SCANS[sid]
+    for s_id, info in SCANS.items():
+        rf = info.get("result_file", "")
+        if rf and stem in rf:
+            return s_id, info
+    if sid:
+        return sid, {}
+    slug = stem.replace("scan_", "", 1).replace("report_", "")
+    slug_norm = slug.replace("_", "-").replace(".", "-").lower()
+    best_sid, best_time = "", ""
+    for s_id, info in SCANS.items():
+        model = (info.get("model", "") or "").lower().replace("/", "-").replace(".", "-").replace(":", "-")
+        if slug_norm and slug_norm in model or model in slug_norm:
+            started = info.get("started", "")
+            if started > best_time:
+                best_sid, best_time = s_id, started
+    if best_sid:
+        return best_sid, SCANS[best_sid]
+    return stem, {}
+
+
 @app.get("/api/reports", tags=["Results"])
 async def list_reports():
     """List all generated PDF and Excel reports grouped by target."""
@@ -1192,9 +1554,17 @@ async def list_reports():
     for f in sorted(REPORTS_DIR.iterdir(), reverse=True) if REPORTS_DIR.exists() else []:
         if f.suffix not in (".pdf", ".xlsx"):
             continue
-        scan_id = f.stem.replace("report_", "").replace("excel_", "")
-        scan_info = SCANS.get(scan_id, {})
-        target = scan_info.get("target_url", "Unknown Target")
+        scan_id, scan_info = _find_scan_for_report(f.name)
+        target = scan_info.get("target_url", "")
+        if not target:
+            try:
+                raw_match = list(RAW_DIR.glob(f"*{scan_id}*")) if scan_id else []
+                if raw_match:
+                    rd = json.loads(raw_match[0].read_text(encoding="utf-8"))
+                    target = rd.get("target", {}).get("url", "") or rd.get("metadata", {}).get("target_url", "")
+            except Exception:
+                pass
+        target = target or "Unknown Target"
         reports.append({
             "filename": f.name, "size": f.stat().st_size,
             "modified": datetime.fromtimestamp(f.stat().st_mtime).isoformat(),

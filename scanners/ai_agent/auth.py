@@ -57,6 +57,12 @@ class ScanTarget:
     postman_file: str | None = None
     postman_env: str | None = None
     openapi_file: str | None = None
+    burp_file: str | None = None
+    scan_scope: str = "directory"       # url_only | directory | full_site
+    focus_urls: list[str] | None = None  # specific URLs/endpoints to test
+    focus_areas: list[str] | None = None # e.g. ["XSS"], ["SQLi","XSS"] — empty = all
+    scan_intensity: str = "deep"         # light | standard | deep
+    exclude_urls: list[str] | None = None  # URLs/paths to skip during crawl and scan
 
 
 def _resolve_env_vars(obj: Any) -> Any:
@@ -521,6 +527,7 @@ def load_targets(config_path: str) -> list[ScanTarget]:
                 postman_file=api_imports.get("postman"),
                 postman_env=api_imports.get("postman_env"),
                 openapi_file=api_imports.get("openapi"),
+                burp_file=api_imports.get("burp"),
             )
         )
 
@@ -549,4 +556,10 @@ def load_targets_from_dict(t: dict) -> ScanTarget:
         postman_file=api_imports.get("postman"),
         postman_env=api_imports.get("postman_env"),
         openapi_file=api_imports.get("openapi"),
+        burp_file=api_imports.get("burp"),
+        scan_scope=t.get("scan_scope", "directory"),
+        focus_urls=t.get("focus_urls") or None,
+        focus_areas=t.get("focus_areas") or None,
+        scan_intensity=t.get("scan_intensity", "deep"),
+        exclude_urls=t.get("exclude_urls") or None,
     )

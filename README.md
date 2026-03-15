@@ -131,6 +131,10 @@ The router auto-selects the path: `bedrock/` prefixed models always go direct to
 ## Web UI Features
 
 - **New Scan** — enter target URL, optional credentials, pick model and scan mode (web/API/both)
+- **AI Scan Planner** — type a natural-language instruction (e.g. "scan example.com for XSS with user@mail.com / pass123") and the LLM generates a structured scan plan you can review, edit, or confirm
+- **Vulnerability Focus** — select specific vuln types to test (XSS, SQLi, CMDI, SSTI, SSRF, IDOR, Auth, CSRF, Misconfig, Upload, Business Logic, GraphQL) or "Full Scan" for all. Multiple selections supported. Both manual and AI scans.
+- **Scan Intensity** — Light (quick recon, 3-5 payloads/input), Standard (balanced, 8-15 payloads), or Deep (exhaustive, 20-40+ payloads with WAF bypass, encoding variations, polyglots). Default: Deep. Selecting specific vuln types automatically forces Deep for maximum coverage.
+- **Scan Scope** — control what gets scanned: "This URL Only" (single page), "URL + Sub-paths" (directory, default), or "Full Site Crawl"
 - **API Imports** — upload Postman Collection (v2.0/v2.1) or Swagger/OpenAPI spec (2.0, 3.0, 3.1 in JSON/YAML)
 - **Live Scan Progress** — real-time view of tool calls, payloads tested, responses, pages crawled, and findings detected as the scan runs
 - **AI vs Triage** — side-by-side comparison of AI severity vs evidence-based triage verdict
@@ -148,6 +152,22 @@ The router auto-selects the path: `bedrock/` prefixed models always go direct to
 - **Scan Mode Badge** — each scan shows its mode (`api`, `website`, `both`) in the scan list and error view
 - **Error Details** — view error messages, scan mode, and progress log for failed scans
 - **Basic Auth** — password-protected (configurable via `DAST_AUTH_USER` / `DAST_AUTH_PASS` env vars)
+
+### Scan Configuration Reference
+
+| Setting | Options | Default | Notes |
+|---------|---------|---------|-------|
+| **Scan Mode** | `website`, `api`, `both` | `both` | What to test — browser pages, API endpoints, or everything |
+| **Scan Scope** | `url_only`, `directory`, `full_site` | `directory` | How far to crawl from the target URL |
+| **Vulnerability Focus** | `Full Scan`, or any combination of: XSS, SQLi, CMDI, SSTI, SSRF, IDOR, Auth, CSRF, Misconfig, Upload, Business Logic, GraphQL | Full Scan | Limits the scan to specific vulnerability classes. Only matching phases run. |
+| **Scan Intensity** | `light`, `standard`, `deep` | `deep` | Controls payload count and thoroughness per input. Auto-locked to `deep` when specific vuln types are selected. |
+| **Focus URLs** | List of URLs | (empty) | Specific pages/endpoints to prioritize or exclusively test |
+
+**Auto-Deep rule:** When you select specific vulnerability types (e.g. XSS + SQLi), the scanner automatically forces Deep intensity. This ensures maximum payload coverage for targeted testing. When scanning everything ("Full Scan"), you can freely choose Light/Standard/Deep.
+
+**Scan flow — Manual vs AI:**
+- **Manual form** — you configure all settings directly. "Full Scan" with Deep intensity by default.
+- **AI Planner** — type an instruction in natural language (e.g. "quick XSS scan on example.com/login"). The LLM parses it into a structured plan with target, scope, focus areas, and intensity. You review and confirm before the scan starts.
 
 ## Docker Deployment (EC2)
 
@@ -558,7 +578,8 @@ imports/                    # Uploaded API definitions (Postman/OpenAPI)
 - **Websites**: Traditional multi-page sites, SPAs (React/Angular/Vue), authenticated flows
 - **APIs**: REST, GraphQL, WebSocket — with Postman (v2.0/v2.1) and OpenAPI (2.0/3.0/3.1) import support
 - **Authentication**: Form login, SSO (SAML), OAuth 2.0/OIDC, MFA (TOTP), session refresh, or unauthenticated scanning
-- **Payloads**: LLM-generated per context — the agent reasons about what it sees and crafts payloads accordingly
+- **Session Protection**: Multi-layer logout protection — LLM prompt instructions, programmatic URL/selector blocking, post-click recovery, and automatic re-authentication if session is lost
+- **Payloads**: LLM-generated per context — the agent reasons about what it sees and crafts payloads accordingly. Intensity controls depth: 3-5 payloads (Light) to 40+ (Deep) per input.
 - **Business Logic**: IDOR, nonce reuse, race conditions, payment flow abuse, privilege escalation
 
 ---
@@ -808,6 +829,8 @@ The scanner restricts activity to the target domain and its subdomains. Gen Digi
 ---
 
 ## Triage Engine (Detailed)
+
+> **Full technical reference:** See [`docs/Triage-Engine-Technical-Guide.md`](docs/Triage-Engine-Technical-Guide.md) for the complete specification including all 17 runtime verifiers, 30+ pattern rules, confidence scoring algebra, CVSS adjustment logic, and the data flow from scan to dashboard.
 
 The triage engine classifies every finding **offline** (no LLM calls, $0 cost). It answers: "Is this finding real, and how severe is it?"
 

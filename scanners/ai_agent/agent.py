@@ -73,6 +73,55 @@ def _is_in_scope(url: str, allowed_domains: set) -> bool:
 
 _VALID_TOOL_NAME = re.compile(r"[^a-zA-Z0-9_\-]")
 
+_LOGIN_PAGE_INDICATORS = (
+    "login", "log in", "sign in", "signin", "authenticate",
+    "sso", "password", "credentials", "username",
+)
+
+
+async def _check_session_lost(page, auth_session, target, original_url: str) -> bool:
+    """Detect if the session was lost (redirected to login page).
+
+    Returns True if re-authentication was performed.
+    """
+    if not auth_session or auth_session._auth_type in ("none", "bearer", "api_key"):
+        return False
+    try:
+        current_url = page.url.lower()
+        title = (await page.title() or "").lower()
+    except Exception:
+        return False
+
+    is_login_page = any(kw in current_url for kw in _LOGIN_PAGE_INDICATORS)
+    if not is_login_page:
+        is_login_page = any(kw in title for kw in _LOGIN_PAGE_INDICATORS)
+    if not is_login_page:
+        try:
+            has_pw_field = await page.evaluate(
+                "() => !!document.querySelector('input[type=password]')"
+            )
+            if has_pw_field:
+                is_login_page = True
+        except Exception:
+            pass
+
+    if not is_login_page:
+        return False
+
+    logger.warning("Session lost — detected login page at %s. Re-authenticating...", page.url)
+    try:
+        from .auth import authenticate as _reauth
+        browser = page.context.browser
+        new_session = await _reauth(browser, target, None, None)
+        new_cookies = await new_session.page.context.cookies()
+        await page.context.add_cookies(new_cookies)
+        await page.goto(original_url, wait_until="domcontentloaded", timeout=15000)
+        logger.info("Re-authentication successful, resumed at %s", original_url)
+        return True
+    except Exception as e:
+        logger.error("Re-authentication failed: %s", e)
+        return False
+
 def _sanitize_tool_name(name: str) -> str:
     """Bedrock requires tool names matching [a-zA-Z0-9_-]+ and <= 64 chars."""
     cleaned = _VALID_TOOL_NAME.sub("_", name) if name else "unknown"
@@ -295,6 +344,15 @@ async def run_scan(
             openapi_path = _resolve_import_path(config_dir, target.openapi_file)
             if openapi_path:
                 registry.add(parse_openapi_spec(openapi_path))
+            burp_path = _resolve_import_path(config_dir, getattr(target, "burp_file", None))
+            if burp_path:
+                try:
+                    import json as _json
+                    burp_data = _json.loads(Path(burp_path).read_text(encoding="utf-8"))
+                    registry.add_from_traffic(burp_data)
+                    print(f"  [IMPORT] Loaded Burp traffic from {burp_path}")
+                except Exception as e:
+                    print(f"  [IMPORT] Could not parse Burp file {burp_path}: {e}")
 
         allowed_domains = _build_allowed_domains(target.url)
         if extra_domains:
@@ -309,6 +367,7 @@ async def run_scan(
             auth_session=auth_session,
             allowed_domains=allowed_domains,
             cancel_flag=cancel_flag,
+            exclude_urls=getattr(target, "exclude_urls", None) or [],
         )
 
         app_info = await detect_app_type(page)
@@ -429,7 +488,7 @@ async def run_scan(
                 })
                 metrics["total_tool_calls"] += len(all_fuzz_results)
 
-        phases = get_phases(target.scan_mode, app_info)
+        phases = get_phases(target.scan_mode, app_info, scan_scope=getattr(target, "scan_scope", "directory"), focus_areas=getattr(target, "focus_areas", None))
         system_prompt = build_system_prompt(target, registry, app_info, extra_domains=extra_domains)
         if baseline_context:
             system_prompt += "\n\n" + baseline_context
@@ -555,6 +614,20 @@ async def run_scan(
                             parsed_blocked = urlparse(blocked_url) if blocked_url else None
                             if parsed_blocked and parsed_blocked.scheme and parsed_blocked.hostname:
                                 _cb("out_of_scope", {"url": blocked_url, "tool": fn_name, "phase": phase.name})
+
+                        if fn_name in ("navigate", "click") and page:
+                            original = args_parsed.get("url") or target.url
+                            reauthed = await _check_session_lost(page, auth_session, target, original)
+                            if reauthed:
+                                _cb("auth", {"status": "re-authenticated", "reason": "session_lost"})
+                                cookies = await page.context.cookies()
+                                cookie_dict = {c["name"]: c["value"] for c in cookies}
+                                http_client = httpx.AsyncClient(
+                                    headers=auth_session.get_auth_header(),
+                                    cookies=cookie_dict,
+                                    timeout=30.0,
+                                )
+                                tools._http_client = http_client
 
                         crawl_url = None
                         if fn_name == "navigate" and result.get("url"):
@@ -934,6 +1007,14 @@ async def run_dry_scan(
             openapi_path = _resolve_import_path(config_dir, target.openapi_file)
             if openapi_path:
                 registry.add(parse_openapi_spec(openapi_path))
+            burp_path = _resolve_import_path(config_dir, getattr(target, "burp_file", None))
+            if burp_path:
+                try:
+                    import json as _json
+                    burp_data = _json.loads(Path(burp_path).read_text(encoding="utf-8"))
+                    registry.add_from_traffic(burp_data)
+                except Exception:
+                    pass
 
         tools = DryRunScanTools(
             page=page,
@@ -943,7 +1024,7 @@ async def run_dry_scan(
         )
 
         app_info = await detect_app_type(page)
-        phases = get_phases(target.scan_mode, app_info)
+        phases = get_phases(target.scan_mode, app_info, scan_scope=getattr(target, "scan_scope", "directory"), focus_areas=getattr(target, "focus_areas", None))
         recon_phases = [ph for ph in phases if "recon" in ph.id.lower()]
         if not recon_phases:
             recon_phases = phases[:1]
