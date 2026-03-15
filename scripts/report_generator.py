@@ -342,7 +342,7 @@ def _build_repro_steps(f):
 
     # -- Prerequisites --
     steps.append(f"{s}. Prerequisites:")
-    steps.append("   - Tool: curl (terminal), Burp Suite, or Postman")
+    steps.append("   - Tool: curl (terminal) or Postman")
     if url:
         steps.append(f"   - Target URL: {url}")
     if param:
@@ -737,9 +737,18 @@ def render(pdf, idx, f, link_id=None):
     pdf.ln(2)
 
 
+SOURCE_BADGE_COLORS = {"ai": (139, 92, 246)}
+
+
 def _render_summary_table(pdf, all_findings, link_ids):
     """Render a clickable summary table. Each row links to the detail via link_ids."""
-    col_w = [8, 14, 14, 62, 48, 44]  # #, AI Sev, Triage Sev, Finding, Impact, Remediation
+    has_sources = any(f.get("source") and f.get("source") != "ai" for f in all_findings)
+    if has_sources:
+        col_w = [7, 12, 12, 14, 55, 44, 46]
+        headers = ["#", "AI Sev", "Triage", "Source", "Finding", "Impact", "Remediation"]
+    else:
+        col_w = [8, 14, 14, 62, 48, 44]
+        headers = ["#", "AI Sev", "Triage", "Finding", "Impact", "Remediation"]
     row_h = 5.5
     hdr_h = 7
 
@@ -747,7 +756,7 @@ def _render_summary_table(pdf, all_findings, link_ids):
         pdf.set_font("Helvetica", "B", 7)
         pdf.set_fill_color(30, 60, 120)
         pdf.set_text_color(255, 255, 255)
-        for w, label in zip(col_w, ["#", "AI Sev", "Triage", "Finding", "Impact", "Remediation"]):
+        for w, label in zip(col_w, headers):
             pdf.cell(w, hdr_h, _safe(label), border=1, fill=True, align="C")
         pdf.ln(hdr_h)
 
@@ -755,12 +764,12 @@ def _render_summary_table(pdf, all_findings, link_ids):
 
     pdf.set_font("Helvetica", "", 6.5)
     for i, f in enumerate(all_findings, 1):
-        ai_sev = f.get("ai_severity", "") or ""
+        ai_sev = f.get("ai_severity", "") or f.get("scanner_severity", "") or ""
         triage_sev = f["final_severity"]
         ai_sc = SEV_COLORS.get(ai_sev, (100, 100, 100))
         tr_sc = SEV_COLORS.get(triage_sev, (100, 100, 100))
-        title_short = (f["title"] or "")[:42]
-        impact = _impact_oneliner(f)[:38]
+        title_short = (f["title"] or "")[:38 if has_sources else 42]
+        impact = _impact_oneliner(f)[:34 if has_sources else 38]
         remed = _remediation_oneliner(f)[:34]
         lid = link_ids[i - 1] if i - 1 < len(link_ids) else None
 
@@ -785,19 +794,28 @@ def _render_summary_table(pdf, all_findings, link_ids):
         pdf.set_font("Helvetica", "B", 6)
         pdf.cell(col_w[2], row_h, _safe(triage_sev[:4]), border="TB", fill=True, align="C")
 
+        if has_sources:
+            src = f.get("source", "ai")
+            src_color = SOURCE_BADGE_COLORS.get(src, (100, 100, 100))
+            pdf.set_fill_color(*src_color)
+            pdf.set_text_color(255, 255, 255)
+            pdf.set_font("Helvetica", "B", 5.5)
+            pdf.cell(col_w[3], row_h, _safe(src.upper()), border="TB", fill=True, align="C")
+
+        find_col = 4 if has_sources else 3
         pdf.set_fill_color(*bg)
         pdf.set_text_color(30, 60, 180)
         pdf.set_font("Helvetica", "U", 6.5)
-        pdf.cell(col_w[3], row_h, _safe(title_short), border="TB", fill=True,
+        pdf.cell(col_w[find_col], row_h, _safe(title_short), border="TB", fill=True,
                  link=lid)
 
         pdf.set_text_color(60, 60, 60)
         pdf.set_font("Helvetica", "", 6)
-        pdf.cell(col_w[4], row_h, _safe(impact), border="TB", fill=True)
+        pdf.cell(col_w[find_col + 1], row_h, _safe(impact), border="TB", fill=True)
 
         pdf.set_text_color(30, 100, 30)
         pdf.set_font("Helvetica", "I", 6)
-        pdf.cell(col_w[5], row_h, _safe(remed), border="RTB", fill=True)
+        pdf.cell(col_w[find_col + 2], row_h, _safe(remed), border="RTB", fill=True)
         pdf.ln(row_h)
 
 
@@ -1003,9 +1021,14 @@ def gen_report(model_key, classified, raw):
     apis = summary.get("api_endpoints_found")
     test_count = len(summary.get("test_log", []))
 
+    scanner_type = meta.get("scanner") or raw.get("scanner", "ai") if raw else "ai"
+    scanner_label = "AI Agent"
+    ai_fc = meta.get("ai_findings_count")
+
     pdf.section("Scan Overview")
-    for lbl, val in [
+    overview_items = [
         ("Model:", display),
+        ("Scanner:", scanner_label),
         ("Duration:", f"{dur_s/60:.1f} min ({dur_s:.0f}s)" if dur_s else "N/A"),
         ("LLM Cost:", f"${cost_usd:.4f}" if cost_usd is not None else "N/A"),
         ("Total Tokens:", f"{total_tokens:,}" if total_tokens else "N/A"),
@@ -1014,7 +1037,10 @@ def gen_report(model_key, classified, raw):
         ("Forms Found:", str(forms) if forms else "N/A"),
         ("API Endpoints:", str(apis) if apis else "N/A"),
         ("Tests Executed:", str(test_count)),
-    ]:
+    ]
+    if ai_fc is not None:
+        overview_items.append(("AI Findings:", str(ai_fc)))
+    for lbl, val in overview_items:
         pdf.kv(lbl, val)
     pdf.ln(3)
 
@@ -1078,7 +1104,7 @@ def gen_report(model_key, classified, raw):
         pdf.set_text_color(80, 80, 80)
         pdf.multi_cell(0, 4, _safe(
             "Triage engine could not confidently classify these as TP or FP. "
-            "Human review with Burp Suite or authenticated re-scan required."))
+            "Human review or authenticated re-scan required."))
         pdf.ln(2)
         _render_summary_table(pdf, mr_sorted, mr_links)
 
@@ -1090,7 +1116,7 @@ def gen_report(model_key, classified, raw):
         pdf.set_font("Helvetica", "I", 8)
         pdf.set_text_color(80, 80, 80)
         pdf.multi_cell(0, 4, _safe(
-            "These need manual testing with Burp Suite. "
+            "These need manual testing. "
             "Click any title to see test steps."))
         pdf.ln(2)
         _render_summary_table(pdf, nv_sorted, nv_links)
@@ -1136,7 +1162,7 @@ def gen_report(model_key, classified, raw):
         pdf.set_text_color(80, 80, 80)
         pdf.multi_cell(0, 5, _safe(
             "Insufficient evidence to auto-classify. These need human review "
-            "with Burp Suite or authenticated re-scan to determine if they are real vulnerabilities."))
+            "or authenticated re-scan to determine if they are real vulnerabilities."))
         pdf.ln(2)
         for i, f in enumerate(mr_sorted, 1):
             render(pdf, i, f, link_id=mr_links[i - 1])
@@ -1149,7 +1175,7 @@ def gen_report(model_key, classified, raw):
         pdf.set_font("Helvetica", "I", 9)
         pdf.set_text_color(80, 80, 80)
         pdf.multi_cell(0, 5, _safe(
-            "Manual testing with Burp Suite needed. "
+            "Manual testing needed. "
             "Each finding shows the AI agent's test, verification replay result, and triage reasoning."))
         pdf.ln(2)
         for i, f in enumerate(nv_sorted, 1):

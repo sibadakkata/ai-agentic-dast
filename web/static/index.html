@@ -3,226 +3,430 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Agentic Web Scanner - AI Security Scanner</title>
+<title>Agentic Web Scanner - AI DAST Platform</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
 <style>
 :root {
-  --bg: #f0f2f7; --surface: #ffffff; --surface2: #f5f6fa; --border: #e2e5ef;
-  --text: #1a1d2e; --text2: #6b7280; --accent: #4f46e5; --accent2: #6366f1;
-  --green: #16a34a; --red: #dc2626; --yellow: #ca8a04; --orange: #ea580c; --blue: #2563eb;
+  --bg: #f4f6fb; --surface: #ffffff; --surface2: #f8f9fc; --border: #e5e7ee;
+  --text: #111827; --text2: #6b7280; --accent: #4f46e5; --accent2: #6366f1;
+  --green: #059669; --red: #dc2626; --yellow: #d97706; --orange: #ea580c; --blue: #2563eb;
+  --sidebar-bg: #1e1b4b; --sidebar-text: rgba(255,255,255,0.7); --sidebar-active: rgba(99,102,241,0.2);
+  --radius: 10px; --shadow-sm: 0 1px 2px rgba(0,0,0,0.05); --shadow: 0 1px 3px rgba(0,0,0,0.08), 0 1px 2px rgba(0,0,0,0.04);
 }
 * { margin: 0; padding: 0; box-sizing: border-box; }
-body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: var(--bg); color: var(--text); min-height: 100vh; }
+body { font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: var(--bg); color: var(--text); min-height: 100vh; font-size: 14px; -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale; }
+svg text, svg tspan { font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif; }
 
-header { background: linear-gradient(135deg, #1e1b4b 0%, #312e81 40%, #4338ca 70%, #6366f1 100%); padding: 24px 32px; border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; align-items: center; box-shadow: 0 2px 12px rgba(99,102,241,0.15); }
-header h1 { font-size: 26px; font-weight: 800; letter-spacing: -0.5px; }
-header h1 .logo-icon { display: inline-block; width: 32px; height: 32px; background: linear-gradient(135deg, #6366f1, #a78bfa); border-radius: 8px; text-align: center; line-height: 32px; font-size: 18px; margin-right: 10px; vertical-align: middle; }
-header h1 .highlight { background: linear-gradient(90deg, #818cf8, #c084fc); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
-header h1 { color: #fff; }
-header .subtitle { color: rgba(255,255,255,0.7); font-size: 13px; margin-top: 4px; letter-spacing: 0.3px; }
+/* ===== SIDEBAR ===== */
+.sidebar { position:fixed; top:0; left:0; width:250px; height:100vh; background:linear-gradient(180deg,#1e1b4b 0%,#312e81 100%); display:flex; flex-direction:column; z-index:100; }
+.sidebar-logo { padding:20px 22px; display:flex; align-items:center; gap:14px; border-bottom:1px solid rgba(255,255,255,0.08); }
+.sidebar-logo .logo-icon { font-size:22px; width:40px; height:40px; background:linear-gradient(135deg,#6366f1,#a78bfa); border-radius:12px; display:flex; align-items:center; justify-content:center; box-shadow:0 2px 8px rgba(99,102,241,0.4); }
+.sidebar-logo .logo-title { color:#fff; font-size:16px; font-weight:700; letter-spacing:-0.3px; }
+.sidebar-logo .logo-subtitle { color:rgba(255,255,255,0.45); font-size:11px; font-weight:500; letter-spacing:0.5px; }
+.sidebar-section { padding:24px 22px 8px; font-size:10px; font-weight:700; letter-spacing:1.5px; color:rgba(255,255,255,0.25); text-transform:uppercase; }
+.sidebar nav { padding:0 12px; flex:1; }
+.nav-item { display:flex; align-items:center; gap:12px; padding:11px 16px; margin:2px 0; border-radius:var(--radius); color:rgba(255,255,255,0.6); font-size:14px; font-weight:500; cursor:pointer; transition:all 0.15s; text-decoration:none; position:relative; }
+.nav-item:hover { background:rgba(255,255,255,0.06); color:rgba(255,255,255,0.9); }
+.nav-item.active { background:rgba(99,102,241,0.2); color:#fff; font-weight:600; }
+.nav-item svg { opacity:0.6; flex-shrink:0; }
+.nav-item.active svg { opacity:1; }
+.nav-badge { position:absolute; right:12px; background:#dc2626; color:#fff; font-size:10px; font-weight:700; padding:2px 7px; border-radius:10px; min-width:20px; text-align:center; }
+.sidebar-footer { padding:18px 22px; border-top:1px solid rgba(255,255,255,0.06); }
 
-.container { max-width: 1280px; margin: 0 auto; padding: 24px; }
+/* ===== MAIN LAYOUT ===== */
+.main-content { margin-left:250px; min-height:100vh; }
+.top-bar { height:64px; background:var(--surface); border-bottom:1px solid var(--border); display:flex; align-items:center; justify-content:space-between; padding:0 32px; position:sticky; top:0; z-index:50; box-shadow:var(--shadow-sm); }
+.top-bar h2 { font-size:20px; font-weight:700; color:var(--text); letter-spacing:-0.4px; }
+.content-area { padding:28px 32px; max-width:1400px; }
+.page { display:none; }
 
-.card { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 24px; margin-bottom: 20px; box-shadow: 0 1px 3px rgba(0,0,0,0.06); }
-.card h2 { font-size: 16px; font-weight: 600; margin-bottom: 16px; display: flex; align-items: center; gap: 8px; }
-.card h2 .icon { font-size: 18px; }
+/* ===== DASHBOARD STAT CARDS ===== */
+.dash-grid { display:grid; grid-template-columns:repeat(auto-fit, minmax(180px, 1fr)); gap:16px; }
+.dash-stat { background:var(--surface); border:1px solid var(--border); border-radius:var(--radius); padding:22px 18px; text-align:center; box-shadow:var(--shadow-sm); transition:box-shadow 0.2s, transform 0.2s; }
+.dash-stat:hover { box-shadow:var(--shadow); transform:translateY(-1px); }
+.dash-stat-val { font-size:28px; font-weight:800; line-height:1.2; letter-spacing:-0.5px; }
+.dash-stat-label { font-size:11px; font-weight:600; color:var(--text2); margin-top:8px; text-transform:uppercase; letter-spacing:0.8px; }
 
-.form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
-.form-group { display: flex; flex-direction: column; gap: 6px; }
-.form-group.full { grid-column: 1 / -1; }
-label { font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; color: var(--text2); }
-input, select { background: var(--surface2); border: 1px solid var(--border); border-radius: 8px; padding: 10px 14px; color: var(--text); font-size: 14px; outline: none; transition: border-color 0.2s; }
-input:focus, select:focus { border-color: var(--accent); }
-input::placeholder { color: #9ca3af; }
+/* ===== CARDS ===== */
+.container { max-width:1280px; margin:0 auto; padding:24px; }
+.card { background:var(--surface); border:1px solid var(--border); border-radius:12px; padding:24px 28px; margin-bottom:20px; box-shadow:var(--shadow-sm); }
+.card h2 { font-size:17px; font-weight:700; margin-bottom:18px; display:flex; align-items:center; gap:10px; color:var(--text); letter-spacing:-0.2px; }
+.card h2 .icon { font-size:20px; }
 
-.btn { padding: 10px 24px; border-radius: 8px; border: none; font-size: 14px; font-weight: 600; cursor: pointer; transition: all 0.2s; }
-.btn-primary { background: var(--accent); color: white; }
-.btn-primary:hover { background: var(--accent2); }
-.btn-primary:disabled, .btn:disabled { opacity: 0.5; cursor: not-allowed; }
-.btn-danger { background: #dc2626; color: white; }
-.btn-danger:hover { background: #b91c1c; }
-.btn-warning { background: #ca8a04; color: white; }
-.btn-warning:hover { background: #a16207; }
-.btn-success { background: var(--green); color: white; }
-.btn-success:hover { background: #15803d; }
-.btn-sm { padding: 6px 14px; font-size: 12px; }
-.btn-outline { background: transparent; border: 1px solid var(--border); color: var(--text2); }
-.btn-outline:hover { border-color: var(--accent); color: var(--text); }
+/* ===== FORMS ===== */
+.form-grid { display:grid; grid-template-columns:1fr 1fr; gap:18px; }
+.form-group { display:flex; flex-direction:column; gap:7px; }
+.form-group.full { grid-column:1 / -1; }
+label { font-size:12px; font-weight:600; text-transform:uppercase; letter-spacing:0.6px; color:var(--text2); }
+input, select { background:var(--surface2); border:1px solid var(--border); border-radius:8px; padding:11px 14px; color:var(--text); font-size:14px; font-family:inherit; outline:none; transition:border-color 0.2s, box-shadow 0.2s; }
+input:focus, select:focus { border-color:var(--accent); box-shadow:0 0 0 3px rgba(79,70,229,0.08); }
+input::placeholder { color:#9ca3af; }
 
-.actions { display: flex; gap: 12px; margin-top: 20px; align-items: center; }
+/* ===== BUTTONS ===== */
+.btn { padding:10px 24px; border-radius:8px; border:none; font-size:14px; font-weight:600; font-family:inherit; cursor:pointer; transition:all 0.15s; }
+.btn-primary { background:var(--accent); color:white; box-shadow:0 1px 2px rgba(79,70,229,0.3); }
+.btn-primary:hover { background:#4338ca; box-shadow:0 2px 6px rgba(79,70,229,0.35); }
+.btn-primary:disabled, .btn:disabled { opacity:0.5; cursor:not-allowed; box-shadow:none; }
+.btn-danger { background:#dc2626; color:white; }
+.btn-danger:hover { background:#b91c1c; }
+.btn-warning { background:#d97706; color:white; }
+.btn-warning:hover { background:#b45309; }
+.btn-success { background:var(--green); color:white; }
+.btn-success:hover { background:#047857; }
+.btn-sm { padding:7px 16px; font-size:13px; }
+.btn-outline { background:transparent; border:1px solid var(--border); color:var(--text2); }
+.btn-outline:hover { border-color:var(--accent); color:var(--accent); background:rgba(79,70,229,0.04); }
 
-.scan-toolbar { display: flex; gap: 8px; align-items: center; margin-bottom: 10px; padding: 8px 12px; background: var(--surface2); border-radius: 8px; display: none; }
-.scan-toolbar.visible { display: flex; }
-.scan-toolbar .sel-count { font-size: 12px; font-weight: 600; color: var(--text2); margin-right: 4px; }
-.scan-controls-bar { display:flex; align-items:center; gap:10px; margin-bottom:10px; flex-wrap:wrap; }
-.scan-search { padding:7px 12px; border:1px solid var(--border); border-radius:6px; font-size:13px; width:260px; background:var(--surface2); color:var(--text); outline:none; transition:border-color 0.15s; }
-.scan-search:focus { border-color:var(--accent); box-shadow:0 0 0 2px rgba(79,70,229,0.12); }
-.scan-page-size { padding:6px 8px; border:1px solid var(--border); border-radius:6px; font-size:12px; background:var(--surface2); color:var(--text); cursor:pointer; }
-.scan-pagination { display:flex; align-items:center; gap:4px; margin-top:12px; justify-content:center; }
-.scan-pagination button { padding:5px 10px; border:1px solid var(--border); border-radius:5px; background:var(--surface2); color:var(--text); font-size:12px; cursor:pointer; transition:all 0.15s; }
+.actions { display:flex; gap:12px; margin-top:20px; align-items:center; flex-wrap:wrap; }
+
+/* ===== SCAN LIST ===== */
+.scan-toolbar { display:flex; gap:8px; align-items:center; margin-bottom:10px; padding:10px 14px; background:var(--surface2); border:1px solid var(--border); border-radius:var(--radius); display:none; }
+.scan-toolbar.visible { display:flex; }
+.scan-toolbar .sel-count { font-size:13px; font-weight:600; color:var(--text2); margin-right:4px; }
+.scan-controls-bar { display:flex; align-items:center; gap:12px; margin-bottom:12px; flex-wrap:wrap; }
+.scan-search { padding:9px 14px; border:1px solid var(--border); border-radius:8px; font-size:14px; font-family:inherit; width:280px; background:var(--surface2); color:var(--text); outline:none; transition:all 0.2s; }
+.scan-search:focus { border-color:var(--accent); box-shadow:0 0 0 3px rgba(79,70,229,0.08); }
+.scan-page-size { padding:8px 10px; border:1px solid var(--border); border-radius:8px; font-size:13px; font-family:inherit; background:var(--surface2); color:var(--text); cursor:pointer; }
+.scan-pagination { display:flex; align-items:center; gap:6px; margin-top:16px; justify-content:center; }
+.scan-pagination button { padding:7px 12px; border:1px solid var(--border); border-radius:6px; background:var(--surface); color:var(--text); font-size:13px; font-family:inherit; cursor:pointer; transition:all 0.15s; }
 .scan-pagination button:hover:not(:disabled) { background:var(--accent); color:#fff; border-color:var(--accent); }
-.scan-pagination button:disabled { opacity:0.4; cursor:default; }
+.scan-pagination button:disabled { opacity:0.35; cursor:default; }
 .scan-pagination button.active { background:var(--accent); color:#fff; border-color:var(--accent); font-weight:600; }
-.scan-pagination .page-info { font-size:12px; color:var(--text2); margin:0 8px; }
-.scan-list { display: flex; flex-direction: column; gap: 8px; }
-.scan-item { display: grid; grid-template-columns: 28px 2fr 1.5fr 1fr 1fr 1fr auto; gap: 12px; align-items: center; padding: 12px 16px; background: var(--surface2); border-radius: 8px; font-size: 13px; cursor: pointer; transition: background 0.15s; }
-.scan-item:hover { background: #ebedf5; }
-.scan-item .target { font-weight: 600; color: var(--accent2); word-break: break-all; }
-.scan-item .model { color: var(--text2); }
-.scan-item input[type="checkbox"] { width: 16px; height: 16px; accent-color: var(--accent); cursor: pointer; }
+.scan-pagination .page-info { font-size:13px; color:var(--text2); margin:0 8px; }
+.ai-instruct-area { width:100%; min-height:80px; max-height:200px; resize:vertical; padding:12px 16px; border:1px solid var(--border); border-radius:8px; background:var(--surface2); color:var(--text); font-family:inherit; font-size:14px; line-height:1.6; outline:none; transition:all 0.2s; }
+.ai-instruct-area:focus { border-color:var(--accent); box-shadow:0 0 0 3px rgba(79,70,229,0.08); }
+.ai-instruct-area::placeholder { color:#9ca3af; }
+.ai-plan-card { background:var(--surface2); border:1px solid var(--border); border-radius:var(--radius); padding:22px 26px; margin-top:16px; }
+.ai-plan-card h3 { font-size:16px; font-weight:700; margin-bottom:16px; color:var(--text); display:flex; align-items:center; gap:8px; }
+.ai-plan-grid { display:grid; grid-template-columns:1fr 1fr; gap:12px 28px; font-size:14px; margin-bottom:18px; }
+.ai-plan-grid .plan-label { font-weight:600; color:var(--text2); text-transform:uppercase; font-size:11px; letter-spacing:0.5px; }
+.ai-plan-grid .plan-value { color:var(--text); word-break:break-all; }
+.ai-plan-steps { list-style:none; padding:0; margin:0 0 18px 0; counter-reset:step; }
+.ai-plan-steps li { position:relative; padding:7px 0 7px 34px; font-size:14px; color:var(--text); border-left:2px solid var(--border); margin-left:10px; }
+.ai-plan-steps li:last-child { border-left-color:transparent; }
+.ai-plan-steps li::before { counter-increment:step; content:counter(step); position:absolute; left:-11px; top:5px; width:20px; height:20px; border-radius:50%; background:var(--accent); color:#fff; font-size:11px; font-weight:700; display:flex; align-items:center; justify-content:center; }
+.ai-plan-tags { display:flex; flex-wrap:wrap; gap:6px; margin-top:6px; }
+.ai-plan-tag { display:inline-block; padding:4px 12px; border-radius:12px; font-size:12px; font-weight:600; background:rgba(79,70,229,0.08); color:var(--accent); }
+.ai-plan-tag.focus-url { background:rgba(37,99,235,0.08); color:var(--blue); }
+.mode-toggle { display:flex; border:1px solid var(--border); border-radius:var(--radius); overflow:hidden; margin-bottom:18px; }
+.mode-toggle button { flex:1; padding:11px 18px; border:none; background:var(--surface2); color:var(--text2); font-size:14px; font-weight:600; font-family:inherit; cursor:pointer; transition:all 0.2s; }
+.mode-toggle button.active { background:var(--accent); color:#fff; }
+.mode-toggle button:hover:not(.active) { background:#ebedf5; color:var(--text); }
 
-.badge { display: inline-block; padding: 2px 10px; border-radius: 12px; font-size: 11px; font-weight: 600; }
-.badge-running { background: rgba(79,70,229,0.1); color: var(--accent); }
-.badge-completed { background: rgba(22,163,74,0.1); color: var(--green); }
-.badge-error { background: rgba(220,38,38,0.1); color: var(--red); }
-.badge-cancelled { background: rgba(202,138,4,0.1); color: var(--yellow); }
-.badge-stopping { background: rgba(202,138,4,0.1); color: var(--yellow); }
-.badge-pausing { background: rgba(202,138,4,0.1); color: var(--yellow); }
-.badge-paused { background: rgba(202,138,4,0.1); color: var(--yellow); }
+.scan-list { display:flex; flex-direction:column; gap:6px; }
+.scan-item { display:grid; grid-template-columns:28px 2fr 1.2fr 1fr 110px 80px 70px auto; gap:12px; align-items:center; padding:14px 18px; background:var(--surface); border:1px solid var(--border); border-radius:var(--radius); font-size:14px; cursor:pointer; transition:all 0.15s; }
+.scan-item:hover { background:var(--surface2); box-shadow:var(--shadow-sm); }
+.scan-item .target { font-weight:600; color:var(--accent2); word-break:break-all; }
+.scan-item .model { color:var(--text2); font-size:13px; }
+.scan-item input[type="checkbox"] { width:16px; height:16px; accent-color:var(--accent); cursor:pointer; }
 
-.severity { font-weight: 700; font-size: 11px; }
-.sev-critical { color: #ff4444; } .sev-high { color: var(--orange); } .sev-medium { color: var(--yellow); }
-.sev-low { color: var(--blue); } .sev-info { color: var(--text2); }
-.sev-notexploitable { color: var(--green); } .sev-tbd { color: #d97706; }
+/* ===== BADGES ===== */
+.badge { display:inline-block; padding:3px 10px; border-radius:6px; font-size:12px; font-weight:600; }
+.badge-running { background:rgba(79,70,229,0.1); color:var(--accent); }
+.badge-completed { background:rgba(5,150,105,0.1); color:var(--green); }
+.badge-error { background:rgba(220,38,38,0.1); color:var(--red); }
+.badge-cancelled { background:rgba(217,119,6,0.1); color:var(--yellow); }
+.badge-stopping { background:rgba(217,119,6,0.1); color:var(--yellow); }
+.badge-pausing { background:rgba(217,119,6,0.1); color:var(--yellow); }
+.badge-paused { background:rgba(217,119,6,0.1); color:var(--yellow); }
 
-.verdict { font-weight: 600; font-size: 11px; }
-.v-true_positive { color: var(--red); } .v-false_positive { color: var(--green); }
-.v-needs_verification { color: var(--yellow); } .v-not_a_finding { color: var(--text2); }
-.v-manual_review { color: #d97706; font-weight: 700; }
+.severity { font-weight:700; font-size:12px; text-transform:uppercase; letter-spacing:0.3px; }
+.sev-critical { color:#dc2626; } .sev-high { color:var(--orange); } .sev-medium { color:var(--yellow); }
+.sev-low { color:var(--blue); } .sev-info { color:var(--text2); }
+.sev-notexploitable { color:var(--green); } .sev-tbd { color:#92400e; }
 
-.tabs { display: flex; gap: 4px; margin-bottom: 20px; border-bottom: 1px solid var(--border); padding-bottom: 0; }
-.tab { padding: 10px 20px; font-size: 13px; font-weight: 600; cursor: pointer; color: var(--text2); border-bottom: 2px solid transparent; transition: all 0.2s; }
-.tab:hover { color: var(--text); }
-.tab.active { color: var(--accent2); border-color: var(--accent2); }
-.tab-content { display: none; }
-.tab-content.active { display: block; }
+.verdict { font-weight:600; font-size:12px; }
+.v-true_positive { color:var(--red); } .v-false_positive { color:var(--green); }
+.v-needs_verification { color:var(--yellow); } .v-not_a_finding { color:var(--text2); }
+.v-manual_review { color:#92400e; font-weight:700; }
+.v-unverified { color:var(--yellow); } .v-inconclusive { color:#6366f1; }
 
-table { width: 100%; border-collapse: collapse; font-size: 13px; }
-th { text-align: left; padding: 10px 12px; background: var(--surface2); color: var(--text2); font-weight: 600; font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; border-bottom: 1px solid var(--border); }
-td { padding: 10px 12px; border-bottom: 1px solid var(--border); vertical-align: top; }
-tr:hover td { background: rgba(79,70,229,0.04); }
+/* ===== TABS ===== */
+.tabs { display:flex; gap:0; margin-bottom:20px; border-bottom:2px solid var(--border); padding-bottom:0; }
+.tab { padding:12px 22px; font-size:14px; font-weight:600; cursor:pointer; color:var(--text2); border-bottom:2px solid transparent; margin-bottom:-2px; transition:all 0.15s; }
+.tab:hover { color:var(--text); }
+.tab.active { color:var(--accent); border-color:var(--accent); }
+.tab-content { display:none; }
+.tab-content.active { display:block; }
+.tab-badge { display:inline-block; font-size:10px; font-weight:700; color:#fff; border-radius:10px; padding:1px 7px; margin-left:5px; min-width:16px; text-align:center; }
 
-.stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; margin-bottom: 20px; }
-.stat { background: var(--surface2); border-radius: 8px; padding: 14px; text-align: center; }
-.stat .value { font-size: 22px; font-weight: 700; color: var(--accent2); }
-.stat .label { font-size: 11px; color: var(--text2); margin-top: 4px; text-transform: uppercase; letter-spacing: 0.5px; }
+/* ===== TABLES ===== */
+table { width:100%; border-collapse:collapse; font-size:13px; }
+th { text-align:left; padding:12px 14px; background:var(--surface2); color:var(--text2); font-weight:600; font-size:11px; text-transform:uppercase; letter-spacing:0.6px; border-bottom:2px solid var(--border); }
+td { padding:12px 14px; border-bottom:1px solid var(--border); vertical-align:top; }
+tr:hover td { background:rgba(79,70,229,0.03); }
 
-.progress-log { background: var(--surface2); border-radius: 8px; padding: 12px 16px; font-family: monospace; font-size: 12px; color: var(--text); max-height: 120px; overflow-y: auto; line-height: 1.6; }
+/* ===== STAT CARDS (live view, results, error) ===== */
+.stats { display:grid; grid-template-columns:repeat(auto-fit, minmax(150px, 1fr)); gap:14px; margin-bottom:24px; }
+.stat { background:var(--surface2); border:1px solid var(--border); border-radius:var(--radius); padding:18px 16px; text-align:center; overflow:hidden; }
+.stat .value { font-size:22px; font-weight:700; color:var(--accent2); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; line-height:1.3; letter-spacing:-0.3px; }
+.stat .value-sm { font-size:14px; font-weight:600; color:var(--accent2); word-break:break-word; line-height:1.4; }
+.stat .label { font-size:11px; font-weight:600; color:var(--text2); margin-top:8px; text-transform:uppercase; letter-spacing:0.7px; }
 
-.empty { color: var(--text2); text-align: center; padding: 40px; font-size: 14px; }
+/* ===== PROGRESS LOG ===== */
+.progress-log { background:var(--surface2); border:1px solid var(--border); border-radius:var(--radius); padding:16px 20px; font-family:'SF Mono','Cascadia Code','Consolas',monospace; font-size:12px; color:var(--text); max-height:160px; overflow-y:auto; line-height:1.8; }
 
-/* Live activity panel */
-.live-panel { margin-top: 16px; border: 1px solid var(--border); border-radius: 12px; overflow: hidden; }
-.live-header { background: var(--surface2); padding: 12px 16px; display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid var(--border); }
-.live-header .phase-name { font-weight: 600; font-size: 13px; color: var(--accent2); }
-.live-header .counters { display: flex; gap: 16px; font-size: 12px; color: var(--text2); }
-.live-header .counters span strong { color: var(--text); }
+.empty { color:var(--text2); text-align:center; padding:48px 24px; font-size:15px; line-height:1.6; }
 
-.live-tabs { display: flex; border-bottom: 1px solid var(--border); background: var(--surface); }
-.live-tab { padding: 8px 16px; font-size: 12px; font-weight: 600; cursor: pointer; color: var(--text2); border-bottom: 2px solid transparent; transition: all 0.2s; }
-.live-tab:hover { color: var(--text); }
-.live-tab.active { color: var(--accent); border-color: var(--accent); background: rgba(79,70,229,0.06); }
+/* ===== LIVE ACTIVITY PANEL ===== */
+.live-panel { margin-top:18px; border:1px solid var(--border); border-radius:12px; overflow:hidden; box-shadow:var(--shadow-sm); }
+.live-header { background:var(--surface2); padding:16px 20px; display:flex; justify-content:space-between; align-items:center; border-bottom:1px solid var(--border); }
+.live-header .phase-name { font-weight:600; font-size:15px; color:var(--text); letter-spacing:-0.2px; }
+.live-header .counters { display:flex; gap:24px; font-size:13px; color:var(--text2); }
+.live-header .counters span strong { color:var(--text); font-weight:700; }
 
-.live-body { max-height: 400px; overflow-y: auto; background: var(--surface); }
+.live-tabs { display:flex; border-bottom:1px solid var(--border); background:var(--surface); }
+.live-tab { padding:12px 20px; font-size:13px; font-weight:600; cursor:pointer; color:var(--text2); border-bottom:2px solid transparent; margin-bottom:-1px; transition:all 0.15s; }
+.live-tab:hover { color:var(--text); background:rgba(79,70,229,0.03); }
+.live-tab.active { color:var(--accent); border-color:var(--accent); background:rgba(79,70,229,0.05); }
 
-.crawl-tree { font-family: monospace; font-size: 12px; line-height: 1.8; }
-.crawl-dir { cursor: pointer; color: var(--accent2); font-weight: 600; padding: 2px 0; }
-.crawl-dir:hover { text-decoration: underline; }
-.crawl-dir::before { content: '▾ '; font-size: 10px; }
-.crawl-dir.collapsed::before { content: '▸ '; }
-.crawl-dir.collapsed + .crawl-children { display: none; }
-.crawl-children { padding-left: 18px; border-left: 1px solid var(--border); margin-left: 6px; }
-.crawl-page { color: var(--text); padding: 1px 0; display: flex; align-items: center; gap: 6px; }
-.crawl-page a { color: var(--text); text-decoration: none; word-break: break-all; }
-.crawl-page a:hover { color: var(--accent2); text-decoration: underline; }
-.crawl-icon { font-size: 10px; opacity: 0.5; }
-.crawl-badge { font-size: 9px; padding: 1px 5px; border-radius: 3px; font-weight: 600; }
-.crawl-badge-page { background: rgba(79,70,229,0.1); color: var(--accent); }
-.crawl-badge-api { background: rgba(22,163,74,0.1); color: var(--green); }
+.live-body { max-height:420px; overflow-y:auto; background:var(--surface); }
 
-.phase-card { border: 1px solid var(--border); border-radius: 6px; margin: 6px 8px; overflow: hidden; }
-.phase-header { display: flex; justify-content: space-between; align-items: center; padding: 10px 14px; background: var(--surface); cursor: pointer; user-select: none; }
-.phase-header:hover { background: var(--surface2); }
-.phase-header .phase-num { font-weight: 700; color: var(--accent2); min-width: 28px; }
-.phase-header .phase-name { flex: 1; font-weight: 600; font-size: 13px; }
-.phase-header .phase-stats { display: flex; gap: 12px; font-size: 11px; color: var(--text2); }
-.phase-header .phase-stats .count-badge { background: rgba(79,70,229,0.1); color: var(--accent); padding: 2px 8px; border-radius: 10px; font-weight: 600; }
-.phase-header .phase-stats .findings-badge { background: rgba(22,163,74,0.1); color: var(--green); padding: 2px 8px; border-radius: 10px; font-weight: 600; }
-.phase-header .phase-arrow { transition: transform 0.2s; font-size: 10px; color: var(--text2); margin-left: 8px; }
-.phase-header.expanded .phase-arrow { transform: rotate(90deg); }
-.phase-detail { display: none; border-top: 1px solid var(--border); }
-.phase-detail.open { display: block; }
-.tool-group { border-bottom: 1px solid var(--border); }
-.tool-group-header { display: flex; align-items: center; gap: 8px; padding: 6px 14px; background: var(--surface2); cursor: pointer; font-size: 12px; }
-.tool-group-header:hover { background: #e8eaf0; }
-.tool-group-header .tool-name { color: var(--accent2); font-weight: 700; text-transform: uppercase; font-size: 10px; }
-.tool-group-header .tool-count { color: var(--text2); font-size: 11px; }
-.tool-group-header .tg-arrow { transition: transform 0.2s; font-size: 9px; color: var(--text2); }
-.tool-group-header.expanded .tg-arrow { transform: rotate(90deg); }
-.tool-group-payloads { display: none; max-height: 300px; overflow-y: auto; }
-.tool-group-payloads.open { display: block; }
-.payload-row { display: grid; grid-template-columns: 1fr 1fr; gap: 1px; font-size: 11px; font-family: monospace; border-bottom: 1px solid var(--border); padding: 4px 14px 4px 28px; }
-.payload-row:nth-child(even) { background: var(--surface2); }
-.payload-req { color: #92400e; font-weight: 600; word-break: break-all; }
-.payload-resp { color: var(--text); word-break: break-all; }
+.crawl-tree { font-family:'SF Mono','Cascadia Code','Consolas',monospace; font-size:12px; line-height:1.8; }
+.crawl-dir { cursor:pointer; color:var(--accent2); font-weight:600; padding:3px 0; }
+.crawl-dir:hover { text-decoration:underline; }
+.crawl-dir::before { content:'▾ '; font-size:10px; }
+.crawl-dir.collapsed::before { content:'▸ '; }
+.crawl-dir.collapsed + .crawl-children { display:none; }
+.crawl-children { padding-left:20px; border-left:1px solid var(--border); margin-left:8px; }
+.crawl-page { color:var(--text); padding:2px 0; display:flex; align-items:center; gap:8px; }
+.crawl-page a { color:var(--text); text-decoration:none; word-break:break-all; }
+.crawl-page a:hover { color:var(--accent2); text-decoration:underline; }
+.crawl-icon { font-size:10px; opacity:0.5; }
+.crawl-badge { font-size:9px; padding:2px 6px; border-radius:4px; font-weight:600; }
+.crawl-badge-page { background:rgba(79,70,229,0.08); color:var(--accent); }
+.crawl-badge-api { background:rgba(5,150,105,0.08); color:var(--green); }
 
-.live-test-row { display: grid; grid-template-columns: 100px 1fr 1fr; gap: 1px; font-size: 11px; border-bottom: 1px solid var(--border); animation: fadeIn 0.3s; }
-.live-test-row:nth-child(even) { background: var(--surface2); }
-.live-test-cell { padding: 6px 10px; font-family: monospace; word-break: break-all; }
-.live-test-tool { color: var(--accent); font-weight: 700; font-size: 10px; text-transform: uppercase; display: flex; align-items: center; }
-.live-test-req { color: #92400e; font-weight: 600; }
-.live-test-resp { color: var(--text); }
-.live-test-resp .status-ok { color: #15803d; font-weight: 600; }
-.live-test-resp .status-err { color: #b91c1c; font-weight: 600; }
-.live-test-resp .anomaly { color: #b91c1c; font-weight: 700; }
+.phase-card { border:1px solid var(--border); border-radius:8px; margin:8px 10px; overflow:hidden; }
+.phase-header { display:flex; justify-content:space-between; align-items:center; padding:12px 16px; background:var(--surface); cursor:pointer; user-select:none; transition:background 0.1s; }
+.phase-header:hover { background:var(--surface2); }
+.phase-header .phase-num { font-weight:700; color:var(--accent2); min-width:28px; }
+.phase-header .phase-name { flex:1; font-weight:600; font-size:14px; }
+.phase-header .phase-stats { display:flex; gap:12px; font-size:12px; color:var(--text2); }
+.phase-header .phase-stats .count-badge { background:rgba(79,70,229,0.1); color:var(--accent); padding:2px 10px; border-radius:10px; font-weight:600; }
+.phase-header .phase-stats .findings-badge { background:rgba(5,150,105,0.1); color:var(--green); padding:2px 10px; border-radius:10px; font-weight:600; }
+.phase-header .phase-arrow { transition:transform 0.2s; font-size:10px; color:var(--text2); margin-left:8px; }
+.phase-header.expanded .phase-arrow { transform:rotate(90deg); }
+.phase-detail { display:none; border-top:1px solid var(--border); }
+.phase-detail.open { display:block; }
+.tool-group { border-bottom:1px solid var(--border); }
+.tool-group-header { display:flex; align-items:center; gap:8px; padding:8px 16px; background:var(--surface2); cursor:pointer; font-size:12px; transition:background 0.1s; }
+.tool-group-header:hover { background:#eceef3; }
+.tool-group-header .tool-name { color:var(--accent2); font-weight:700; text-transform:uppercase; font-size:10px; letter-spacing:0.3px; }
+.tool-group-header .tool-count { color:var(--text2); font-size:11px; }
+.tool-group-header .tg-arrow { transition:transform 0.2s; font-size:9px; color:var(--text2); }
+.tool-group-header.expanded .tg-arrow { transform:rotate(90deg); }
+.tool-group-payloads { display:none; max-height:300px; overflow-y:auto; }
+.tool-group-payloads.open { display:block; }
+.payload-row { display:grid; grid-template-columns:1fr 1fr; gap:1px; font-size:11px; font-family:'SF Mono','Cascadia Code','Consolas',monospace; border-bottom:1px solid var(--border); padding:5px 16px 5px 30px; }
+.payload-row:nth-child(even) { background:var(--surface2); }
+.payload-req { color:#92400e; font-weight:600; word-break:break-all; }
+.payload-resp { color:var(--text); word-break:break-all; }
 
-.live-finding-row { display: flex; align-items: center; gap: 12px; padding: 8px 14px; border-bottom: 1px solid var(--border); animation: fadeIn 0.3s; }
-.live-finding-sev { min-width: 60px; text-align: center; }
-.live-finding-title { font-weight: 600; font-size: 12px; flex: 1; }
-.live-finding-phase { font-size: 11px; color: var(--text2); }
-.live-finding-url { font-size: 11px; color: var(--text2); max-width: 300px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.live-test-row { display:grid; grid-template-columns:100px 1fr 1fr; gap:1px; font-size:12px; border-bottom:1px solid var(--border); animation:fadeIn 0.3s; }
+.live-test-row:nth-child(even) { background:var(--surface2); }
+.live-test-cell { padding:8px 12px; font-family:'SF Mono','Cascadia Code','Consolas',monospace; word-break:break-all; }
+.live-test-tool { color:var(--accent); font-weight:700; font-size:10px; text-transform:uppercase; display:flex; align-items:center; letter-spacing:0.3px; }
+.live-test-req { color:#92400e; font-weight:600; }
+.live-test-resp { color:var(--text); }
+.live-test-resp .status-ok { color:#059669; font-weight:600; }
+.live-test-resp .status-err { color:#b91c1c; font-weight:600; }
+.live-test-resp .anomaly { color:#b91c1c; font-weight:700; }
 
-.live-phase-row { display: grid; grid-template-columns: 40px 1fr 80px 80px; gap: 8px; padding: 8px 14px; border-bottom: 1px solid var(--border); font-size: 12px; align-items: center; }
-.live-phase-num { font-weight: 700; color: var(--accent2); }
-.live-phase-bar { height: 4px; background: var(--border); border-radius: 2px; overflow: hidden; margin-top: 4px; }
-.live-phase-bar-fill { height: 100%; background: var(--accent); border-radius: 2px; transition: width 0.3s; }
+.live-finding-row { display:flex; align-items:center; gap:14px; padding:10px 16px; border-bottom:1px solid var(--border); animation:fadeIn 0.3s; transition:background 0.1s; }
+.live-finding-row:hover { background:rgba(79,70,229,0.03); }
+.live-finding-sev { min-width:64px; text-align:center; }
+.live-finding-title { font-weight:600; font-size:13px; flex:1; color:var(--text); }
+.live-finding-phase { font-size:12px; color:var(--text2); }
+.live-finding-url { font-size:12px; color:var(--text2); max-width:300px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 
-@keyframes fadeIn { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: translateY(0); } }
-@keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
-.scanning-indicator { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--accent); animation: pulse 1.5s ease-in-out infinite; margin-right: 6px; }
+.live-phase-row { display:grid; grid-template-columns:44px 1fr 80px 80px; gap:10px; padding:10px 16px; border-bottom:1px solid var(--border); font-size:13px; align-items:center; }
+.live-phase-num { font-weight:700; color:var(--accent2); }
+.live-phase-bar { height:5px; background:var(--border); border-radius:3px; overflow:hidden; margin-top:4px; }
+.live-phase-bar-fill { height:100%; background:linear-gradient(90deg,var(--accent),var(--accent2)); border-radius:3px; transition:width 0.3s; }
 
-.expandable { cursor: pointer; }
-.expandable::before { content: "▸ "; color: var(--text2); }
-.expandable.open::before { content: "▾ "; }
-.expand-content { display: none; margin-top: 8px; padding: 12px; background: var(--bg); border-radius: 8px; }
-.expand-content.open { display: block; }
+@keyframes fadeIn { from { opacity:0; transform:translateY(-4px); } to { opacity:1; transform:translateY(0); } }
+@keyframes pulse { 0%,100% { opacity:1; } 50% { opacity:0.4; } }
+.scanning-indicator { display:inline-block; width:8px; height:8px; border-radius:50%; background:var(--accent); animation:pulse 1.5s ease-in-out infinite; margin-right:8px; }
 
-.payload-item { font-family: monospace; font-size: 11px; padding: 4px 8px; margin: 2px 0; background: var(--bg); border-radius: 4px; word-break: break-all; }
+.expandable { cursor:pointer; }
+.expandable::before { content:"▸ "; color:var(--text2); }
+.expandable.open::before { content:"▾ "; }
+.expand-content { display:none; margin-top:8px; padding:14px; background:var(--bg); border-radius:8px; border:1px solid var(--border); }
+.expand-content.open { display:block; }
 
-#results-view { display: none; }
-.back-btn { color: var(--text2); cursor: pointer; font-size: 13px; margin-bottom: 16px; display: inline-block; }
-.back-btn:hover { color: var(--text); }
+.payload-item { font-family:'SF Mono','Cascadia Code','Consolas',monospace; font-size:11px; padding:5px 10px; margin:2px 0; background:var(--bg); border-radius:5px; word-break:break-all; }
 
-.model-cost { font-size: 11px; color: var(--text2); font-weight: normal; margin-left: 4px; }
+#results-view { display:none; }
+.back-btn { color:var(--text2); cursor:pointer; font-size:14px; margin-bottom:18px; display:inline-flex; align-items:center; gap:6px; font-weight:500; transition:color 0.15s; }
+.back-btn:hover { color:var(--accent); }
+
+.model-cost { font-size:12px; color:var(--text2); font-weight:normal; margin-left:6px; }
+
+/* ===== INSIGHTS / CHAT ===== */
+.insight-welcome {
+  text-align:center; color:var(--text2); padding:32px 20px;
+  font-size:14px; line-height:1.7;
+}
+.insight-welcome .examples { text-align:left; margin-top:16px; }
+.insight-welcome .example-q {
+  display:block; padding:10px 14px; margin:6px 0;
+  background:var(--surface); border:1px solid var(--border);
+  border-radius:var(--radius); font-size:13px; color:var(--accent);
+  cursor:pointer; transition:all 0.15s; font-weight:500;
+}
+.insight-welcome .example-q:hover { border-color:var(--accent); background:rgba(79,70,229,0.04); box-shadow:var(--shadow-sm); transform:translateY(-1px); }
+
+.insight-msg {
+  padding:12px 16px; border-radius:14px; font-size:14px; line-height:1.7;
+  max-width:88%; word-wrap:break-word;
+}
+.insight-msg.user {
+  background:linear-gradient(135deg,var(--accent),var(--accent2)); color:#fff; align-self:flex-end;
+  border-bottom-right-radius:4px; box-shadow:0 1px 4px rgba(79,70,229,0.25);
+}
+.insight-msg.assistant {
+  background:var(--surface); color:var(--text); align-self:flex-start;
+  border:1px solid var(--border); border-bottom-left-radius:4px; box-shadow:var(--shadow-sm);
+}
+.insight-msg.assistant table { font-size:12px; margin:10px 0; border-collapse:collapse; width:100%; }
+.insight-msg.assistant table th,
+.insight-msg.assistant table td { padding:6px 10px; border:1px solid var(--border); text-align:left; }
+.insight-msg.assistant table th { background:var(--surface2); font-weight:600; font-size:11px; text-transform:uppercase; letter-spacing:0.3px; }
+.insight-msg.assistant strong { color:var(--accent); }
+.insight-msg.assistant code { background:rgba(0,0,0,0.05); padding:2px 6px; border-radius:4px; font-size:12px; font-family:'SF Mono','Cascadia Code','Consolas',monospace; }
+.insight-msg .meta { font-size:10px; color:rgba(255,255,255,0.6); margin-top:6px; }
+.insight-msg.assistant .meta { color:var(--text2); }
+
+.insight-typing {
+  display:flex; gap:5px; align-items:center; padding:14px 18px; align-self:flex-start;
+}
+.insight-typing span {
+  width:8px; height:8px; border-radius:50%; background:var(--accent);
+  animation:typingBounce 1.2s infinite;
+}
+.insight-typing span:nth-child(2) { animation-delay:0.2s; }
+.insight-typing span:nth-child(3) { animation-delay:0.4s; }
+@keyframes typingBounce { 0%,80%,100% { opacity:0.3; transform:scale(0.8); } 40% { opacity:1; transform:scale(1); } }
+
+.insight-input {
+  flex:1; padding:12px 16px; border:1px solid var(--border); border-radius:var(--radius);
+  background:var(--surface2); color:var(--text); font-size:14px; font-family:inherit; outline:none;
+  transition:all 0.2s;
+}
+.insight-input:focus { border-color:var(--accent); box-shadow:0 0 0 3px rgba(79,70,229,0.08); }
+.insight-input::placeholder { color:#9ca3af; }
+
+/* ===== SCROLL STYLING ===== */
+::-webkit-scrollbar { width:6px; height:6px; }
+::-webkit-scrollbar-track { background:transparent; }
+::-webkit-scrollbar-thumb { background:rgba(0,0,0,0.12); border-radius:3px; }
+::-webkit-scrollbar-thumb:hover { background:rgba(0,0,0,0.2); }
+
+/* ===== RESPONSIVE ===== */
+@media (max-width:1024px) {
+  .sidebar { width:60px; overflow:hidden; }
+  .sidebar-logo .logo-title, .sidebar-logo .logo-subtitle,
+  .sidebar-section, .sidebar-footer div, .nav-item span { display:none; }
+  .nav-item { justify-content:center; padding:12px; }
+  .main-content { margin-left:60px; }
+}
 </style>
 </head>
 <body>
 
-<header>
-  <div>
-    <h1><span class="logo-icon">&#9889;</span><span class="highlight">Agentic Web</span> Scanner</h1>
-    <div class="subtitle">AI-Powered Security Testing &mdash; Websites &bull; APIs &bull; SPAs</div>
-  </div>
-  <div style="display:flex;align-items:center;gap:20px;">
-    <div style="text-align:right;">
-      <div style="color:var(--text2); font-size:11px; text-transform:uppercase; letter-spacing:1px;">Status</div>
-      <div id="connectivity-status" style="color:var(--green); font-size:13px; font-weight:600;">Checking...</div>
+<aside class="sidebar">
+  <div class="sidebar-logo">
+    <span class="logo-icon">&#9889;</span>
+    <div>
+      <div class="logo-title">Agentic Scanner</div>
+      <div class="logo-subtitle">AI DAST Platform</div>
     </div>
-    <button onclick="doLogout()" style="background:rgba(255,255,255,0.15);border:1px solid rgba(255,255,255,0.3);color:#fff;padding:8px 16px;border-radius:8px;cursor:pointer;font-size:12px;font-weight:600;letter-spacing:0.5px;transition:all 0.2s;" onmouseover="this.style.background='rgba(255,255,255,0.25)'" onmouseout="this.style.background='rgba(255,255,255,0.15)'">Logout</button>
   </div>
-</header>
+  <div class="sidebar-section">MAIN</div>
+  <nav>
+    <a class="nav-item active" data-page="dashboard" onclick="navigateTo('dashboard')">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
+      <span>Dashboard</span>
+    </a>
+    <a class="nav-item" data-page="new-scan" onclick="navigateTo('new-scan')">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg>
+      <span>New Scan</span>
+    </a>
+    <a class="nav-item" data-page="scans" onclick="navigateTo('scans')">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
+      <span>Scans</span>
+      <span class="nav-badge" id="nav-running-badge" style="display:none;">0</span>
+    </a>
+    <a class="nav-item" data-page="reports" onclick="navigateTo('reports')">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><path d="M12 18v-6"/><path d="m9 15 3 3 3-3"/></svg>
+      <span>Reports</span>
+    </a>
+    <a class="nav-item" data-page="insights" onclick="navigateTo('insights')">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+      <span>Insights</span>
+    </a>
+  </nav>
+  <div class="sidebar-section">SYSTEM</div>
+  <nav>
+    <a class="nav-item" data-page="settings" onclick="navigateTo('settings')">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+      <span>Settings</span>
+    </a>
+  </nav>
+  <div class="sidebar-footer">
+    <div style="font-size:10px;font-weight:600;letter-spacing:1px;color:rgba(255,255,255,0.3);text-transform:uppercase;margin-bottom:10px;">Built by <span style="color:rgba(239,68,68,0.8);">Gen Digital Red Team</span></div>
+    <div id="sidebar-status" style="font-size:11px;color:rgba(255,255,255,0.4);display:flex;align-items:center;gap:6px;">
+      <span style="width:6px;height:6px;border-radius:50%;background:rgba(255,255,255,0.3);display:inline-block;"></span>
+      Connecting...
+    </div>
+  </div>
+</aside>
 
-<div class="container">
+<div class="main-content">
+  <div class="top-bar">
+    <h2 id="page-title">Dashboard</h2>
+    <div style="display:flex;align-items:center;gap:16px;">
+      <span id="connectivity-status" style="font-size:12px;color:var(--green);font-weight:600;display:flex;align-items:center;gap:6px;">
+        <span style="width:7px;height:7px;border-radius:50%;background:var(--green);display:inline-block;"></span>
+        Connected
+      </span>
+      <button onclick="doLogout()" class="btn btn-sm btn-outline">Logout</button>
+    </div>
+  </div>
+  <div class="content-area">
 
+<!-- PAGE: Dashboard -->
+<div class="page" id="page-dashboard" style="display:block;">
+  <div class="dash-grid" id="dash-stats"></div>
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:20px;margin-top:24px;">
+    <div class="card">
+      <h2>
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2"><path d="M12 20V10"/><path d="M18 20V4"/><path d="M6 20v-4"/></svg>
+        Severity Breakdown
+      </h2>
+      <div id="dash-severity" style="min-height:60px;">Loading...</div>
+    </div>
+    <div class="card">
+      <h2>
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
+        Verdict Breakdown
+      </h2>
+      <div id="dash-verdicts" style="min-height:60px;">Loading...</div>
+    </div>
+  </div>
+  <div class="card" style="margin-top:24px;">
+    <h2>
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+      Recent Scans
+    </h2>
+    <div id="dash-recent" style="min-height:60px;">Loading...</div>
+  </div>
+</div>
+
+<!-- PAGE: New Scan -->
+<div class="page" id="page-new-scan" style="display:none;">
   <div style="background:linear-gradient(135deg,rgba(180,30,30,0.10) 0%,rgba(120,20,20,0.06) 100%);border:1px solid rgba(180,40,40,0.25);border-left:4px solid #b91c1c;border-radius:10px;padding:16px 20px;margin-bottom:24px;display:flex;align-items:flex-start;gap:16px;">
     <div style="flex-shrink:0;display:flex;flex-direction:column;align-items:center;gap:6px;">
       <div style="width:44px;height:44px;border-radius:50%;border:2px solid #991b1b;background:rgba(153,27,27,0.15);display:flex;align-items:center;justify-content:center;">
@@ -234,7 +438,7 @@ tr:hover td { background: rgba(79,70,229,0.04); }
         <span style="display:inline-block;background:#991b1b;color:#fecaca;font-size:10px;font-weight:800;letter-spacing:2.5px;text-transform:uppercase;padding:3px 10px;border-radius:4px;">Red Team</span>
         <span style="font-size:13px;font-weight:600;color:#b91c1c;letter-spacing:0.3px;">Authorized Offensive Security Testing</span>
       </div>
-      <div style="font-size:12px;color:var(--text);line-height:1.8;font-family:'Segoe UI',system-ui,-apple-system,sans-serif;">
+      <div style="font-size:12px;color:var(--text);line-height:1.8;">
         <div style="display:flex;align-items:center;gap:8px;margin-bottom:2px;">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#dc2626" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
           <span>This tool is restricted to <strong style="color:#b91c1c;">authorized penetration testers</strong> with explicit written approval.</span>
@@ -250,10 +454,32 @@ tr:hover td { background: rgba(79,70,229,0.04); }
       </div>
     </div>
   </div>
-
-  <!-- NEW SCAN -->
   <div class="card" id="scan-form-card">
     <h2><span class="icon">🔍</span> New Scan</h2>
+    <div class="mode-toggle">
+      <button id="mode-ai-btn" class="active" onclick="setScanMode('ai')">AI Instructions</button>
+      <button id="mode-form-btn" onclick="setScanMode('form')">Manual Form</button>
+    </div>
+
+    <!-- AI INSTRUCTION MODE -->
+    <div id="ai-instruct-mode">
+      <div class="form-group full">
+        <label style="text-transform:none;font-size:13px;font-weight:500;color:var(--text2);letter-spacing:0;">Describe what you want to scan — the AI will build a plan for your approval</label>
+        <textarea id="ai-instruction" class="ai-instruct-area" placeholder="Example: Scan https://my-int.norton.com using user@email.com / MyP@ss123. Focus only on /extspa/backup page and look for XSS vulnerabilities — we found one during manual pen-testing."></textarea>
+      </div>
+      <div style="display:flex;gap:12px;align-items:flex-end;margin-top:12px;flex-wrap:wrap;">
+        <div class="form-group" style="min-width:220px;">
+          <label>Model</label>
+          <select id="ai-model-select" style="padding:8px 12px;font-size:13px;"></select>
+        </div>
+        <button type="button" class="btn btn-sm btn-primary" id="analyze-btn" onclick="analyzeInstruction()" style="height:38px;">Analyze & Plan</button>
+        <span id="analyze-status" style="font-size:13px;color:var(--text2);"></span>
+      </div>
+      <div id="ai-plan-container" style="display:none;"></div>
+    </div>
+
+    <!-- MANUAL FORM MODE -->
+    <div id="manual-form-mode" style="display:none;">
     <div class="form-grid">
       <div class="form-group full">
         <label>Target URL</label>
@@ -313,11 +539,6 @@ tr:hover td { background: rgba(79,70,229,0.04); }
               <span id="file-postman-env-status" style="font-size:11px;color:var(--text2);"></span>
             </div>
             <div class="form-group">
-              <label>Burp Proxy Export</label>
-              <input type="file" id="file-burp" accept=".xml,.json" style="font-size:12px;">
-              <span id="file-burp-status" style="font-size:11px;color:var(--text2);"></span>
-            </div>
-            <div class="form-group">
               <label>Swagger / OpenAPI Spec</label>
               <input type="file" id="file-openapi" accept=".json,.yaml,.yml" style="font-size:12px;">
               <span id="file-openapi-status" style="font-size:11px;color:var(--text2);"></span>
@@ -330,23 +551,31 @@ tr:hover td { background: rgba(79,70,229,0.04); }
       <button type="button" class="btn btn-sm btn-primary" id="start-scan-btn" onclick="startScan()">Start Scan</button>
       <button type="button" class="btn btn-sm btn-outline" onclick="testConnectivity()">Test Connectivity</button>
     </div>
+    </div><!-- /manual-form-mode -->
   </div>
+</div><!-- /page-new-scan -->
 
-  <!-- SCAN LIST -->
+<!-- PAGE: Scans -->
+<div class="page" id="page-scans" style="display:none;">
   <div class="card" id="scans-card">
     <h2><span style="display:flex;align-items:center;gap:8px;"><span class="icon">📋</span> Scan History</span></h2>
     <div class="scan-controls-bar">
       <input type="text" id="scan-search" class="scan-search" placeholder="Search by target, model, status..." oninput="onScanSearchInput()">
-      <label style="font-size:12px;color:var(--text2);display:flex;align-items:center;gap:4px;">Show
+      <label style="font-size:13px;color:var(--text2);display:flex;align-items:center;gap:6px;text-transform:none;letter-spacing:0;font-weight:500;">Show
         <select id="scan-page-size" class="scan-page-size" onchange="onPageSizeChange()">
           <option value="10">10</option>
           <option value="25" selected>25</option>
           <option value="50">50</option>
         </select>
-        per page
+        Per Page
       </label>
-      <button type="button" class="btn btn-sm btn-outline" onclick="exportScansToExcel()" style="font-size:11px;padding:5px 12px;color:var(--green);border-color:rgba(16,185,129,0.4);" title="Export scan history to Excel">Export Excel</button>
-      <span id="scan-total-count" style="font-size:12px;color:var(--text2);margin-left:auto;"></span>
+      <button type="button" class="btn btn-sm btn-outline" onclick="exportScansToExcel()" style="font-size:11px;padding:4px 10px;color:var(--green);border-color:rgba(16,185,129,0.4);" title="Export scan history to Excel">Export Excel</button>
+      <span id="scan-total-count" style="font-size:13px;color:var(--text2);margin-left:auto;"></span>
+      <button type="button" id="ar-toggle" onclick="toggleAutoRefresh()" style="display:inline-flex;align-items:center;gap:5px;padding:5px 10px;border:1px solid var(--border);border-radius:6px;background:var(--surface2);cursor:pointer;font-size:11px;font-family:inherit;font-weight:600;color:var(--text2);transition:all 0.15s;" title="Auto-refresh ON (10s) — click to pause">
+        <span id="ar-dot" style="width:7px;height:7px;border-radius:50%;background:var(--green);animation:pulse 1.5s ease-in-out infinite;"></span>
+        <span id="ar-label">Auto</span>
+        <span id="ar-countdown" style="font-size:10px;opacity:0.7;min-width:16px;">10s</span>
+      </button>
     </div>
     <div class="scan-toolbar" id="scan-toolbar">
       <span class="sel-count"><span id="sel-count-num">0</span> selected</span>
@@ -373,9 +602,14 @@ tr:hover td { background: rgba(79,70,229,0.04); }
         <span id="scan-status-msg" style="font-size:13px;color:var(--text2);"></span>
       </div>
       <div class="progress-log" id="live-scan-log" style="margin-bottom:16px;"></div>
-      <div class="live-panel" style="display:block;">
-        <div class="live-header">
-          <div class="phase-name"><span class="scanning-indicator"></span><span id="lv-phase-text">Loading...</span></div>
+      <!-- AI AGENT PANEL -->
+      <div id="lv-ai-panel" class="live-panel" style="display:block;">
+        <div class="live-header" style="background:rgba(99,102,241,0.04);border-left:3px solid #6366f1;">
+          <div style="display:flex;align-items:center;gap:10px;">
+            <span style="width:8px;height:8px;border-radius:50%;background:#6366f1;display:inline-block;" id="lv-ai-dot"></span>
+            <span style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.8px;color:#6366f1;">AI Agent</span>
+            <span class="phase-name" id="lv-phase-text" style="color:var(--text);font-size:14px;">Loading...</span>
+          </div>
           <div class="counters">
             <span>Tests: <strong id="lv-tests-count">0</strong></span>
             <span>Findings: <strong id="lv-findings-count">0</strong></span>
@@ -383,10 +617,10 @@ tr:hover td { background: rgba(79,70,229,0.04); }
           </div>
         </div>
         <div class="live-tabs">
-          <div class="live-tab active" onclick="switchLiveTab2('tests')">Live Activity (Payloads &amp; Responses)</div>
-          <div class="live-tab" onclick="switchLiveTab2('crawled')">Crawled Pages / Endpoints</div>
-          <div class="live-tab" onclick="switchLiveTab2('findings')">Findings Detected</div>
-          <div class="live-tab" onclick="switchLiveTab2('phases')">Phase Progress</div>
+          <div class="live-tab active" onclick="switchLiveTab2('tests')">Live Activity</div>
+          <div class="live-tab" onclick="switchLiveTab2('crawled')">Crawled Pages</div>
+          <div class="live-tab" onclick="switchLiveTab2('findings')">Findings <span id="lv-ai-findings-badge" class="badge" style="background:#6366f1;color:#fff;margin-left:4px;font-size:9px;padding:1px 5px;border-radius:8px;display:none;">0</span></div>
+          <div class="live-tab" onclick="switchLiveTab2('phases')">Phases</div>
           <div class="live-tab" onclick="switchLiveTab2('out-of-scope')">Out of Scope <span id="lv-oos-badge" class="badge" style="background:var(--red);color:#fff;margin-left:4px;font-size:9px;padding:1px 5px;border-radius:8px;display:none;">0</span></div>
         </div>
         <div class="live-body" id="lv-body-tests">
@@ -443,7 +677,7 @@ tr:hover td { background: rgba(79,70,229,0.04); }
     <div class="back-btn" onclick="showList()">← Back to Scan List</div>
     <div class="card">
       <h2 id="result-title">Scan Results</h2>
-      <div class="stats" id="result-stats"></div>
+      <div id="result-stats"></div>
 
       <div class="tabs">
         <div class="tab active" onclick="switchTab('comparison')">AI vs Triage</div>
@@ -461,33 +695,443 @@ tr:hover td { background: rgba(79,70,229,0.04); }
       <div class="tab-content" id="tab-phase-log"></div>
       <div class="tab-content" id="tab-out-of-scope"></div>
     </div>
-    <div class="actions" style="margin-bottom:40px;">
+    <div class="actions" style="margin-bottom:40px;flex-wrap:wrap;gap:6px;">
       <button type="button" class="btn btn-primary btn-sm" id="gen-report-btn" onclick="generateReport()">Generate PDF Report</button>
-      <button type="button" class="btn btn-outline btn-sm" id="dl-json-btn" onclick="downloadJSON()">Download Raw JSON</button>
+      <button type="button" class="btn btn-outline btn-sm" id="dl-json-btn" onclick="downloadJSON()">Download Merged JSON</button>
+      <button type="button" class="btn btn-outline btn-sm" id="dl-ai-raw-btn" onclick="downloadRawAI()" style="border-color:#8b5cf6;color:#8b5cf6;display:none;">Download AI Raw</button>
+      <button type="button" class="btn btn-outline btn-sm" id="dl-excel-btn" onclick="downloadExcel()" style="border-color:#059669;color:#059669;">Download Excel Report</button>
       <button type="button" class="btn btn-outline btn-sm" id="dl-payloads-btn" onclick="downloadPayloads()" style="border-color:var(--accent2);color:var(--accent2);">Download All Payloads (by Phase)</button>
       <button type="button" class="btn btn-outline btn-sm" id="rescan-btn" onclick="rescanCurrent()" style="border-color:var(--accent);color:var(--accent);">↻ Re-scan (New Entry)</button>
       <span id="report-msg" style="font-size:13px; color:var(--text2);"></span>
     </div>
   </div>
+</div><!-- /page-scans -->
 
+<!-- PAGE: Reports -->
+<div class="page" id="page-reports" style="display:none;">
+  <div id="reports-container" style="min-height:120px;">
+    <div class="empty" style="padding:60px 24px;">
+      <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="var(--border)" stroke-width="1.5" style="margin-bottom:16px;"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+      <div style="font-size:16px;font-weight:600;color:var(--text);margin-bottom:4px;">Loading reports...</div>
+    </div>
+  </div>
 </div>
 
+<!-- PAGE: Insights -->
+<div class="page" id="page-insights" style="display:none;">
+  <div style="max-width:920px;">
+    <div class="card" style="min-height:620px;display:flex;flex-direction:column;">
+      <h2 style="margin-bottom:4px;">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+        AI Findings Insight
+      </h2>
+      <p style="color:var(--text2);font-size:13px;margin-bottom:18px;line-height:1.5;">Ask questions about your scan findings in plain English. The AI analyzes all scans and triaged results.</p>
+      <div id="insight-body-full" style="flex:1;overflow-y:auto;padding:12px 0;display:flex;flex-direction:column;gap:14px;min-height:300px;max-height:500px;">
+        <div id="insight-welcome-full" class="insight-welcome">
+          <div style="font-size:40px;margin-bottom:16px;">&#128269;</div>
+          <div style="font-weight:700;color:var(--text);font-size:17px;margin-bottom:6px;letter-spacing:-0.3px;">AI-Powered Findings Search</div>
+          <div style="margin-bottom:20px;font-size:14px;">Ask questions across all your scans. Examples:</div>
+          <div class="examples" style="max-width:540px;margin:0 auto;">
+            <span class="example-q" onclick="insightAskFull(this.textContent)">How many high severity findings across all scans?</span>
+            <span class="example-q" onclick="insightAskFull(this.textContent)">Show me all real (true positive) findings</span>
+            <span class="example-q" onclick="insightAskFull(this.textContent)">Which targets have the most critical vulnerabilities?</span>
+            <span class="example-q" onclick="insightAskFull(this.textContent)">Summarize all SQL injection and XSS findings</span>
+            <span class="example-q" onclick="insightAskFull(this.textContent)">Compare AI scanner detection rates across scans</span>
+            <span class="example-q" onclick="insightAskFull(this.textContent)">Which model gave the best results? Compare cost vs findings</span>
+          </div>
+        </div>
+      </div>
+      <div style="display:flex;gap:12px;padding-top:18px;border-top:1px solid var(--border);">
+        <input type="text" class="insight-input" id="insight-input-full" placeholder="Ask about your findings..." onkeydown="if(event.key==='Enter')sendInsightFull()">
+        <button class="btn btn-primary" id="insight-send-full" onclick="sendInsightFull()" style="padding:12px 28px;white-space:nowrap;">Ask AI</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- PAGE: Settings -->
+<div class="page" id="page-settings" style="display:none;">
+  <div style="display:grid;grid-template-columns:1fr;gap:20px;">
+    <div class="card">
+      <h2>
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--green)" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
+        System Status
+      </h2>
+      <div id="settings-system" style="min-height:60px;">Loading...</div>
+    </div>
+  </div>
+</div>
+
+</div><!-- /content-area -->
+</div><!-- /main-content -->
+
+
+
+
 <script>
+
+function esc(s) { if (!s) return ''; var d = document.createElement('div'); d.textContent = String(s); return d.innerHTML; }
+
 let currentScanId = null;
 let currentTriagedFindings = [];
+let currentPage = 'dashboard';
+
+function navigateTo(page) {
+  currentPage = page;
+  document.querySelectorAll('.page').forEach(p => p.style.display = 'none');
+  const el = document.getElementById('page-' + page);
+  if (el) el.style.display = 'block';
+
+  document.querySelectorAll('.nav-item').forEach(a => a.classList.remove('active'));
+  const active = document.querySelector('.nav-item[data-page="' + page + '"]');
+  if (active) active.classList.add('active');
+
+  const titles = {dashboard:'Dashboard','new-scan':'New Scan',scans:'Scan History',reports:'Reports',insights:'Findings Insight',settings:'Settings'};
+  const titleEl = document.getElementById('page-title');
+  if (titleEl) titleEl.textContent = titles[page] || page;
+
+  if (page === 'dashboard') loadDashboard();
+  if (page === 'scans') { loadScans(); const sc = document.getElementById('scans-card'); if (sc) sc.style.display = 'block'; }
+  if (page === 'reports') loadReports();
+  if (page === 'settings') loadSettings();
+}
+
+async function loadDashboard() {
+  try {
+    const resp = await fetch('/api/dashboard');
+    if (!resp.ok) { document.getElementById('dash-stats').innerHTML = '<div class="empty">Dashboard API returned ' + resp.status + '</div>'; return; }
+    const d = await resp.json();
+    document.getElementById('dash-stats').innerHTML =
+      dstat(d.total_scans, 'Total Scans', 'var(--accent2)', '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>') +
+      dstat(d.running, 'Running', 'var(--yellow)', '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/></svg>') +
+      dstat(d.completed, 'Completed', 'var(--green)', '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>') +
+      dstat(d.errored, 'Errors', 'var(--red)', '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg>') +
+      dstat(d.total_findings, 'Total Findings', 'var(--orange)', '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>') +
+      dstat('$' + (d.total_cost || 0).toFixed(2), 'Total Cost', 'var(--blue)', '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="1" x2="12" y2="23"/><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>');
+
+    const sevOrder = ['Critical','High','Medium','Low','Not Exploitable','Info','TBD'];
+    const sevColors = {Critical:'#dc2626',High:'#ea580c',Medium:'#d97706',Low:'#2563eb',Info:'#6b7280','Not Exploitable':'#059669',TBD:'#92400e'};
+    const sevBreakdown = d.severity_breakdown || {};
+    var sevTotal = 0;
+    sevOrder.forEach(function(s) { sevTotal += (sevBreakdown[s] || 0); });
+    var sevHtml = '';
+    if (sevTotal > 0) {
+      var donutSegs = '', offset = 0;
+      var legendItems = '';
+      sevOrder.forEach(function(s) {
+        var count = sevBreakdown[s] || 0;
+        if (!count) return;
+        var pct = count / sevTotal * 100;
+        var dashLen = pct * 3.14159 * 40 / 100;
+        var gapLen = 3.14159 * 40 * (100 - pct) / 100;
+        donutSegs += '<circle cx="50" cy="50" r="40" fill="none" stroke="' + sevColors[s] + '" stroke-width="18" stroke-dasharray="' + dashLen.toFixed(2) + ' ' + gapLen.toFixed(2) + '" stroke-dashoffset="-' + (offset * 3.14159 * 40 / 100).toFixed(2) + '" opacity="0.85"/>';
+        offset += pct;
+        legendItems += '<div style="display:flex;align-items:center;gap:8px;"><span style="width:10px;height:10px;border-radius:2px;background:' + sevColors[s] + ';flex-shrink:0;"></span><span style="font-size:13px;color:var(--text);">' + s + '</span><span style="font-size:14px;font-weight:700;margin-left:auto;">' + count + '</span></div>';
+      });
+      sevHtml = '<div style="display:flex;align-items:center;gap:24px;">' +
+        '<div style="position:relative;width:130px;height:130px;flex-shrink:0;">' +
+        '<svg viewBox="0 0 100 100" style="transform:rotate(-90deg);width:100%;height:100%;">' + donutSegs + '</svg>' +
+        '<div style="position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;">' +
+        '<div style="font-size:24px;font-weight:800;color:var(--text);line-height:1;">' + sevTotal + '</div>' +
+        '<div style="font-size:10px;font-weight:600;color:var(--text2);text-transform:uppercase;letter-spacing:0.5px;">findings</div></div></div>' +
+        '<div style="flex:1;display:flex;flex-direction:column;gap:8px;">' + legendItems + '</div></div>';
+    }
+    document.getElementById('dash-severity').innerHTML = sevHtml || '<div class="empty" style="padding:20px;">No findings yet</div>';
+
+    var vColors = {TRUE_POSITIVE:'#dc2626',FALSE_POSITIVE:'#059669',MANUAL_REVIEW:'#92400e',NEEDS_VERIFICATION:'#d97706',NOT_A_FINDING:'#6b7280',UNVERIFIED:'#d97706',INCONCLUSIVE:'#6366f1'};
+    var vLabels = {TRUE_POSITIVE:'True Positive',FALSE_POSITIVE:'False Positive',MANUAL_REVIEW:'Manual Review',NEEDS_VERIFICATION:'Needs Verification',NOT_A_FINDING:'Not a Finding',UNVERIFIED:'Unverified',INCONCLUSIVE:'Inconclusive'};
+    var vBreakdown = d.verdict_breakdown || {};
+    var maxV = Math.max.apply(null, Object.values(vBreakdown).concat([1]));
+    var vHtml = '';
+    Object.entries(vBreakdown).sort(function(a,b){return b[1]-a[1];}).forEach(function(entry) {
+      var v = entry[0], count = entry[1];
+      var pct = Math.max(Math.round(count / maxV * 100), 4);
+      vHtml += '<div style="display:flex;align-items:center;gap:12px;margin:8px 0;">' +
+        '<span style="width:150px;font-size:13px;font-weight:600;color:' + (vColors[v] || '#6b7280') + ';">' + (vLabels[v] || v) + '</span>' +
+        '<div style="flex:1;height:24px;background:var(--surface2);border-radius:6px;overflow:hidden;">' +
+        '<div style="height:100%;width:' + pct + '%;background:' + (vColors[v] || '#6b7280') + ';border-radius:6px;opacity:0.75;transition:width 0.5s;"></div></div>' +
+        '<span style="width:44px;text-align:right;font-size:14px;font-weight:700;">' + count + '</span></div>';
+    });
+    document.getElementById('dash-verdicts').innerHTML = vHtml || '<div class="empty" style="padding:20px;">No findings yet</div>';
+
+    var recent = d.recent_scans || [];
+    if (!recent.length) {
+      document.getElementById('dash-recent').innerHTML = '<div class="empty"><svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="var(--border)" stroke-width="1.5" style="margin-bottom:12px;"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg><div>No scans yet</div><div style="font-size:13px;margin-top:4px;">Start your first scan from the New Scan page.</div></div>';
+    } else {
+      document.getElementById('dash-recent').innerHTML = '<table><thead><tr><th>Target</th><th>Model</th><th>Status</th><th>Findings</th><th>Cost</th><th>Started</th></tr></thead><tbody>' +
+        recent.map(function(s) {
+          var fcStyle = (s.findings > 0) ? 'font-weight:700;color:' + (s.findings >= 10 ? 'var(--red)' : s.findings >= 3 ? 'var(--orange)' : 'var(--text)') : 'color:var(--text2)';
+          return '<tr style="cursor:pointer;" onclick="navigateTo(\'scans\');viewScan(\'' + s.id + '\')">' +
+            '<td style="font-weight:600;color:var(--accent2);max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + esc(s.target) + '</td>' +
+            '<td style="font-size:12px;color:var(--text2);">' + esc(s.model) + '</td>' +
+            '<td><span class="badge badge-' + (s.status || 'unknown') + '">' + ((s.status || '-').charAt(0).toUpperCase() + (s.status || '-').slice(1)) + '</span></td>' +
+            '<td style="' + fcStyle + ';">' + (s.findings != null ? s.findings : '-') + '</td>' +
+            '<td style="font-size:12px;color:var(--text2);">' + (s.cost != null ? '$' + Number(s.cost).toFixed(2) : '-') + '</td>' +
+            '<td style="font-size:12px;color:var(--text2);">' + (s.started ? _fmtTime(s.started) : '-') + '</td></tr>';
+        }).join('') + '</tbody></table>';
+    }
+  } catch(e) {
+    console.error('loadDashboard error:', e);
+    try { document.getElementById('dash-stats').innerHTML = '<div class="empty">Failed to load dashboard: ' + esc(String(e.message || e)) + '</div>'; } catch(e2) { document.getElementById('dash-stats').textContent = 'Dashboard error: ' + e.message; }
+  }
+}
+
+function dstat(val, label, color, icon) {
+  return '<div class="dash-stat"><div style="color:' + color + ';opacity:0.5;margin-bottom:8px;">' + (icon||'') + '</div><div class="dash-stat-val" style="color:' + color + '">' + val + '</div><div class="dash-stat-label">' + label + '</div></div>';
+}
+
+async function loadReports() {
+  const container = document.getElementById('reports-container');
+  try {
+    const resp = await fetch('/api/reports');
+    const data = await resp.json();
+    const reports = data.reports || [];
+    if (!reports.length) {
+      container.innerHTML = `<div class="empty" style="padding:60px 24px;">
+        <svg width="52" height="52" viewBox="0 0 24 24" fill="none" stroke="var(--border)" stroke-width="1.5" style="margin-bottom:16px;"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+        <div style="font-size:16px;font-weight:600;color:var(--text);margin-bottom:6px;">No reports generated yet</div>
+        <div style="font-size:14px;color:var(--text2);">Reports are created automatically when scans complete.<br>You can also generate them from the scan results page.</div>
+      </div>`;
+      return;
+    }
+
+    const byTarget = {};
+    reports.forEach(function(r) {
+      const key = r.target || 'Unknown Target';
+      if (!byTarget[key]) byTarget[key] = [];
+      byTarget[key].push(r);
+    });
+
+    let html = '';
+    const targetKeys = Object.keys(byTarget);
+
+    html += `<div style="display:flex;gap:16px;flex-wrap:wrap;margin-bottom:24px;">
+      <div style="padding:16px 22px;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);min-width:140px;text-align:center;">
+        <div style="font-size:28px;font-weight:800;color:var(--accent2);">${reports.length}</div>
+        <div style="font-size:11px;font-weight:600;color:var(--text2);text-transform:uppercase;letter-spacing:0.8px;margin-top:4px;">Total Reports</div>
+      </div>
+      <div style="padding:16px 22px;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);min-width:140px;text-align:center;">
+        <div style="font-size:28px;font-weight:800;color:var(--text);">${targetKeys.length}</div>
+        <div style="font-size:11px;font-weight:600;color:var(--text2);text-transform:uppercase;letter-spacing:0.8px;margin-top:4px;">Targets Scanned</div>
+      </div>
+      <div style="padding:16px 22px;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);min-width:140px;text-align:center;">
+        <div style="font-size:28px;font-weight:800;color:#dc2626;">${reports.filter(r=>r.type==='pdf').length}</div>
+        <div style="font-size:11px;font-weight:600;color:var(--text2);text-transform:uppercase;letter-spacing:0.8px;margin-top:4px;">PDF Reports</div>
+      </div>
+      <div style="padding:16px 22px;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);min-width:140px;text-align:center;">
+        <div style="font-size:28px;font-weight:800;color:#059669;">${reports.filter(r=>r.type==='xlsx').length}</div>
+        <div style="font-size:11px;font-weight:600;color:var(--text2);text-transform:uppercase;letter-spacing:0.8px;margin-top:4px;">Excel Reports</div>
+      </div>
+    </div>`;
+
+    targetKeys.forEach(function(target) {
+      const reps = byTarget[target];
+      const pdfs = reps.filter(r => r.type === 'pdf');
+      const xlsxs = reps.filter(r => r.type === 'xlsx');
+      const models = [...new Set(reps.map(r => r.model).filter(Boolean))];
+
+      const isOrphan = target === 'Unknown Target';
+      const deleteTargetParam = isOrphan ? 'orphan' : target;
+
+      html += `<div class="card" style="margin-bottom:16px;">
+        <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:16px;gap:12px;flex-wrap:wrap;">
+          <div>
+            <div style="display:flex;align-items:center;gap:10px;margin-bottom:6px;">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M2 12h20"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
+              <a href="${esc(target)}" target="_blank" style="font-size:16px;font-weight:700;color:var(--text);text-decoration:none;word-break:break-all;">${esc(target)}</a>
+            </div>
+            <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+              ${models.map(m => '<span style="font-size:12px;color:var(--text2);">' + esc(m) + '</span>').join(' · ')}
+              <span style="font-size:12px;color:var(--text2);">${reps.length} report${reps.length !== 1 ? 's' : ''}</span>
+            </div>
+          </div>
+          <div style="display:flex;gap:8px;align-items:center;">
+            <span style="font-size:13px;font-weight:600;color:#dc2626;">${pdfs.length} PDF</span>
+            <span style="font-size:13px;font-weight:600;color:#059669;">${xlsxs.length} Excel</span>
+            <button onclick="deleteTargetReports('${esc(deleteTargetParam)}')" class="btn btn-sm" style="padding:5px 12px;font-size:12px;background:rgba(220,38,38,0.08);color:#dc2626;border:1px solid rgba(220,38,38,0.25);border-radius:6px;cursor:pointer;" title="Delete all reports & scan data for this target">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:-2px;margin-right:3px;"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+              Delete All
+            </button>
+          </div>
+        </div>
+        <div style="display:flex;flex-direction:column;gap:6px;">`;
+
+      reps.forEach(function(r) {
+        const isPdf = r.type === 'pdf';
+        const typeColor = isPdf ? '#dc2626' : '#059669';
+        const typeBg = isPdf ? 'rgba(220,38,38,0.06)' : 'rgba(5,150,105,0.06)';
+        const typeIcon = isPdf
+          ? '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#dc2626" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>'
+          : '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#059669" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>';
+        const sizeKb = ((r.size || 0) / 1024).toFixed(1);
+        const dateStr = r.modified ? new Date(r.modified).toLocaleDateString(undefined, {year:'numeric', month:'short', day:'numeric', hour:'2-digit', minute:'2-digit'}) : '-';
+        const findings = r.findings_count || 0;
+
+        html += `<div style="display:flex;align-items:center;gap:14px;padding:12px 16px;background:${typeBg};border:1px solid var(--border);border-radius:8px;transition:all 0.15s;">
+          <div style="flex-shrink:0;">${typeIcon}</div>
+          <div style="flex:1;min-width:0;">
+            <div style="font-size:14px;font-weight:600;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;" title="${esc(r.filename)}">${esc(r.filename)}</div>
+            <div style="display:flex;gap:12px;margin-top:3px;font-size:12px;color:var(--text2);flex-wrap:wrap;">
+              <span>${(r.type || '').toUpperCase()}</span>
+              <span>${sizeKb} KB</span>
+              ${r.model ? '<span>' + esc(r.model) + '</span>' : ''}
+              ${findings ? '<span style="font-weight:600;color:var(--text);">' + findings + ' findings</span>' : ''}
+            </div>
+          </div>
+          <div style="font-size:12px;color:var(--text2);white-space:nowrap;min-width:120px;text-align:right;">${dateStr}</div>
+          <div style="display:flex;gap:6px;flex-shrink:0;">
+            <a href="${r.url || ''}" target="_blank" class="btn btn-sm btn-outline" style="padding:6px 16px;font-size:13px;border-color:${typeColor};color:${typeColor};">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:-2px;margin-right:4px;"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+              Download
+            </a>
+            <button onclick="deleteReport('${esc(r.filename)}')" class="btn btn-sm" style="padding:6px 10px;font-size:12px;background:rgba(220,38,38,0.06);color:#dc2626;border:1px solid rgba(220,38,38,0.2);border-radius:6px;cursor:pointer;" title="Delete this report">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+            </button>
+          </div>
+        </div>`;
+      });
+
+      html += `</div></div>`;
+    });
+
+    container.innerHTML = html;
+  } catch(e) {
+    container.innerHTML = '<div class="empty" style="padding:40px;">Failed to load reports: ' + esc(e.message) + '</div>';
+  }
+}
+
+async function deleteReport(filename) {
+  if (!confirm('Delete report "' + filename + '"?')) return;
+  try {
+    const resp = await fetch('/api/reports/' + encodeURIComponent(filename), { method: 'DELETE' });
+    if (resp.ok) {
+      loadReports();
+    } else {
+      const d = await resp.json().catch(() => ({}));
+      alert('Failed to delete: ' + (d.error || resp.statusText));
+    }
+  } catch(e) { alert('Error: ' + e.message); }
+}
+
+async function deleteTargetReports(target) {
+  const label = target === 'orphan' ? 'orphaned reports (Unknown Target)' : 'all reports & scan data for ' + target;
+  if (!confirm('Delete ' + label + '?\n\nThis will permanently remove all reports, raw results, and scan records.')) return;
+  try {
+    const resp = await fetch('/api/reports?target=' + encodeURIComponent(target), { method: 'DELETE' });
+    if (resp.ok) {
+      loadReports();
+      loadDashboard();
+    } else {
+      const d = await resp.json().catch(() => ({}));
+      alert('Failed to delete: ' + (d.error || resp.statusText));
+    }
+  } catch(e) { alert('Error: ' + e.message); }
+}
+
+async function loadSettings() {
+  function settingRow(label, valueHtml) {
+    return '<div style="display:flex;align-items:center;padding:12px 0;border-bottom:1px solid var(--border);">' +
+      '<span style="min-width:140px;font-size:13px;font-weight:600;color:var(--text2);">' + label + '</span>' +
+      '<span style="font-size:14px;">' + valueHtml + '</span></div>';
+  }
+  function statusDot(ok, yesText, noText) {
+    return ok
+      ? '<span style="display:inline-flex;align-items:center;gap:6px;color:#059669;font-weight:600;"><span style="width:8px;height:8px;border-radius:50%;background:#059669;display:inline-block;"></span>' + (yesText||'Yes') + '</span>'
+      : '<span style="display:inline-flex;align-items:center;gap:6px;color:#dc2626;font-weight:600;"><span style="width:8px;height:8px;border-radius:50%;background:#dc2626;display:inline-block;"></span>' + (noText||'No') + '</span>';
+  }
+  try {
+    const resp = await fetch('/health');
+    const data = await resp.json();
+    let html = '<div>';
+    html += settingRow('Status', statusDot(data.status === 'ok', 'Healthy', 'Unhealthy'));
+    html += settingRow('Running Scans', '<span style="font-weight:700;color:var(--accent2);">' + (data.scans_running || 0) + '</span>');
+    html += settingRow('Total Scans', '<span style="font-weight:700;">' + (data.total_scans || 0) + '</span>');
+    html += '</div>';
+    document.getElementById('settings-system').innerHTML = html;
+  } catch(e) {
+    document.getElementById('settings-system').innerHTML = '<div class="empty" style="padding:20px;"><span style="color:#dc2626;">Failed to check system status</span></div>';
+  }
+}
+
+function insightAskFull(text) {
+  document.getElementById('insight-input-full').value = text;
+  sendInsightFull();
+}
+
+function _insightAddMsgFull(role, html, meta) {
+  const welcome = document.getElementById('insight-welcome-full');
+  if (welcome) welcome.style.display = 'none';
+  const body = document.getElementById('insight-body-full');
+  const div = document.createElement('div');
+  div.className = 'insight-msg ' + role;
+  div.innerHTML = html + (meta ? '<div class="meta">' + esc(meta) + '</div>' : '');
+  body.appendChild(div);
+  body.scrollTop = body.scrollHeight;
+  return div;
+}
+
+async function sendInsightFull() {
+  const input = document.getElementById('insight-input-full');
+  const query = (input && input.value || '').trim();
+  if (!query) return;
+  input.value = '';
+  const sendBtn = document.getElementById('insight-send-full');
+  sendBtn.disabled = true;
+  sendBtn.textContent = 'Analyzing...';
+  _insightAddMsgFull('user', esc(query));
+  const body = document.getElementById('insight-body-full');
+  const typing = document.createElement('div');
+  typing.className = 'insight-typing';
+  typing.id = 'insight-typing-full';
+  typing.innerHTML = '<span></span><span></span><span></span>';
+  body.appendChild(typing);
+  body.scrollTop = body.scrollHeight;
+  try {
+    const resp = await fetch('/api/insights/query', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ query: query }),
+    });
+    const data = await resp.json();
+    const el = document.getElementById('insight-typing-full');
+    if (el) el.remove();
+    if (data.error) {
+      _insightAddMsgFull('assistant', '<span style="color:var(--red);">Error: ' + esc(data.error) + '</span>');
+    } else {
+      const metaInfo = (data.scans_analyzed || 0) + ' scans, ' + (data.findings_analyzed || 0) + ' findings analyzed' + (data.cost ? ' · ~$' + Number(data.cost).toFixed(3) : '');
+      _insightAddMsgFull('assistant', _insightRenderMd(data.answer), metaInfo);
+    }
+  } catch (e) {
+    const el = document.getElementById('insight-typing-full');
+    if (el) el.remove();
+    _insightAddMsgFull('assistant', '<span style="color:var(--red);">Error: ' + esc(e.message) + '</span>');
+  }
+  sendBtn.disabled = false;
+  sendBtn.textContent = 'Ask AI';
+  input.focus();
+}
 
 async function init() {
-  const models = await (await fetch('/api/models')).json();
-  const sel = document.getElementById('model-select');
-  models.forEach(m => {
-    const opt = document.createElement('option');
-    opt.value = m.id;
-    const provider = m.provider ? ` [${m.provider}]` : '';
-    const cost = m.cost ? ` — ${m.cost}` : '';
-    opt.textContent = `${m.name}${provider}${cost}`;
-    sel.appendChild(opt);
-  });
+  try {
+    const resp = await fetch('/api/models');
+    if (resp.ok) {
+      const models = await resp.json();
+      const selectors = [document.getElementById('model-select'), document.getElementById('ai-model-select')];
+      selectors.forEach(sel => {
+        if (!sel) return;
+        models.forEach(m => {
+          const opt = document.createElement('option');
+          opt.value = m.id;
+          const provider = m.provider ? ` [${m.provider}]` : '';
+          const cost = m.cost ? ` — ${m.cost}` : '';
+          opt.textContent = `${m.name}${provider}${cost}`;
+          sel.appendChild(opt);
+        });
+      });
+    }
+  } catch(e) { console.error('init models error:', e); }
   loadScans();
+  navigateTo('dashboard');
 }
 
 function doLogout() {
@@ -503,14 +1147,159 @@ function doLogout() {
 }
 
 async function testConnectivity() {
-  document.getElementById('connectivity-status').textContent = 'Testing...';
+  const statusEl = document.getElementById('connectivity-status');
+  const sidebarEl = document.getElementById('sidebar-status');
   try {
     const resp = await fetch('/api/models');
-    if (resp.ok) document.getElementById('connectivity-status').textContent = 'Connected';
-    else document.getElementById('connectivity-status').textContent = 'Connection issue';
+    if (resp.ok) {
+      if (statusEl) statusEl.innerHTML = '<span style="width:7px;height:7px;border-radius:50%;background:#059669;display:inline-block;"></span> Connected';
+      if (statusEl) statusEl.style.color = '#059669';
+      if (sidebarEl) sidebarEl.innerHTML = '<span style="width:6px;height:6px;border-radius:50%;background:#34d399;display:inline-block;"></span> Online';
+      if (sidebarEl) sidebarEl.style.color = 'rgba(52,211,153,0.8)';
+    } else {
+      if (statusEl) { statusEl.innerHTML = '<span style="width:7px;height:7px;border-radius:50%;background:#d97706;display:inline-block;"></span> Issue'; statusEl.style.color = '#d97706'; }
+      if (sidebarEl) { sidebarEl.innerHTML = '<span style="width:6px;height:6px;border-radius:50%;background:#fbbf24;display:inline-block;"></span> Issue'; sidebarEl.style.color = 'rgba(251,191,36,0.8)'; }
+    }
   } catch(e) {
-    document.getElementById('connectivity-status').textContent = 'Offline';
+    if (statusEl) { statusEl.innerHTML = '<span style="width:7px;height:7px;border-radius:50%;background:#dc2626;display:inline-block;"></span> Offline'; statusEl.style.color = '#dc2626'; }
+    if (sidebarEl) { sidebarEl.innerHTML = '<span style="width:6px;height:6px;border-radius:50%;background:#f87171;display:inline-block;"></span> Offline'; sidebarEl.style.color = 'rgba(248,113,113,0.8)'; }
   }
+}
+
+function setScanMode(mode) {
+  const aiBtn = document.getElementById('mode-ai-btn');
+  const formBtn = document.getElementById('mode-form-btn');
+  const aiMode = document.getElementById('ai-instruct-mode');
+  const formMode = document.getElementById('manual-form-mode');
+  if (mode === 'ai') {
+    aiBtn.classList.add('active'); formBtn.classList.remove('active');
+    aiMode.style.display = ''; formMode.style.display = 'none';
+  } else {
+    formBtn.classList.add('active'); aiBtn.classList.remove('active');
+    formMode.style.display = ''; aiMode.style.display = 'none';
+  }
+}
+
+let _currentPlan = null;
+
+async function analyzeInstruction() {
+  const text = document.getElementById('ai-instruction').value.trim();
+  if (!text) { alert('Please describe what you want to scan.'); return; }
+  const btn = document.getElementById('analyze-btn');
+  const status = document.getElementById('analyze-status');
+  btn.disabled = true; btn.textContent = 'Analyzing...';
+  status.textContent = 'Sending to AI...';
+  try {
+    const resp = await fetch('/api/scan/analyze', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({instruction: text}),
+    });
+    const data = await resp.json();
+    if (data.error) { status.textContent = data.error; btn.disabled = false; btn.textContent = 'Analyze & Plan'; return; }
+    _currentPlan = data.plan;
+    renderPlan(data.plan);
+    status.textContent = '';
+  } catch(e) {
+    status.textContent = 'Error: ' + e.message;
+  }
+  btn.disabled = false; btn.textContent = 'Analyze & Plan';
+}
+
+function renderPlan(plan) {
+  const container = document.getElementById('ai-plan-container');
+  const maskPw = (s) => s ? s.substring(0, 2) + '•'.repeat(Math.max(0, s.length - 2)) : '';
+  const focusUrls = (plan.focus_urls || []).filter(Boolean);
+  const focusAreas = (plan.focus_areas || []).filter(Boolean);
+  const steps = (plan.steps || []).filter(Boolean);
+  const ctx = plan.context || '';
+
+  let html = `<div class="ai-plan-card">
+    <h3><span style="font-size:18px;">🤖</span> Scan Plan</h3>
+    <div class="ai-plan-grid">
+      <div><span class="plan-label">Target</span><div class="plan-value">${esc(plan.target_url || '')}</div></div>
+      <div><span class="plan-label">Auth</span><div class="plan-value">${plan.username ? esc(plan.username) + ' / ' + maskPw(plan.password) : '<span style="color:var(--text2)">No credentials</span>'}</div></div>
+      <div><span class="plan-label">Scan Mode</span><div class="plan-value" style="text-transform:capitalize;">${esc(plan.scan_mode || 'both')}</div></div>
+      <div><span class="plan-label">Auth Type</span><div class="plan-value" style="text-transform:capitalize;">${esc(plan.auth_type || 'auto')}</div></div>
+      <div><span class="plan-label">Est. Time</span><div class="plan-value">${esc(plan.estimated_time || '5-15 min')}</div></div>
+      <div><span class="plan-label">Est. Cost</span><div class="plan-value">${esc(plan.estimated_cost || '$0.50-2.00')}</div></div>
+    </div>`;
+
+  if (focusUrls.length) {
+    html += `<div style="margin-bottom:12px;"><span class="plan-label" style="display:block;margin-bottom:6px;">Focus URLs</span><div class="ai-plan-tags">${focusUrls.map(u => `<span class="ai-plan-tag focus-url">${esc(u)}</span>`).join('')}</div></div>`;
+  }
+  if (focusAreas.length) {
+    html += `<div style="margin-bottom:12px;"><span class="plan-label" style="display:block;margin-bottom:6px;">Focus Areas</span><div class="ai-plan-tags">${focusAreas.map(a => `<span class="ai-plan-tag">${esc(a)}</span>`).join('')}</div></div>`;
+  }
+  if (ctx) {
+    html += `<div style="margin-bottom:14px;padding:10px 14px;background:rgba(79,70,229,0.05);border-radius:8px;font-size:13px;color:var(--text2);"><strong style="color:var(--text);">Context:</strong> ${esc(ctx)}</div>`;
+  }
+  if (steps.length) {
+    html += `<div style="margin-bottom:14px;"><span class="plan-label" style="display:block;margin-bottom:10px;">What the AI will do</span><ol class="ai-plan-steps">${steps.map(s => `<li>${esc(s)}</li>`).join('')}</ol></div>`;
+  }
+  html += `<div style="display:flex;gap:10px;align-items:center;padding-top:8px;border-top:1px solid var(--border);">
+    <button type="button" class="btn btn-sm btn-primary" onclick="confirmPlan()" style="padding:8px 24px;">Continue & Scan</button>
+    <button type="button" class="btn btn-sm btn-outline" onclick="editPlan()">Edit in Form</button>
+    <button type="button" class="btn btn-sm btn-outline" onclick="discardPlan()" style="color:var(--text2);">Discard</button>
+  </div></div>`;
+
+  container.innerHTML = html;
+  container.style.display = '';
+  container.scrollIntoView({behavior:'smooth', block:'nearest'});
+}
+
+async function confirmPlan() {
+  if (!_currentPlan) return;
+  const p = _currentPlan;
+  const model = document.getElementById('ai-model-select').value || document.getElementById('model-select').value;
+  const body = {
+    target_url: p.target_url || '',
+    username: p.username || '',
+    password: p.password || '',
+    model: model,
+    scan_mode: p.scan_mode || 'both',
+    auth_type: p.auth_type || 'auto',
+    scanner: 'ai',
+    api_imports: {},
+    extra_domains: [],
+  };
+  const planCard = document.querySelector('#ai-plan-container .ai-plan-card');
+  if (planCard) {
+    const btns = planCard.querySelectorAll('button');
+    btns.forEach(b => { b.disabled = true; });
+    btns[0].textContent = 'Starting...';
+  }
+  try {
+    const resp = await fetch('/api/scan', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)});
+    const data = await resp.json();
+    if (data.error) { alert(data.error); return; }
+    _currentPlan = null;
+    document.getElementById('ai-plan-container').style.display = 'none';
+    document.getElementById('ai-instruction').value = '';
+    openLiveView(data.scan_id);
+    loadScans();
+  } catch(e) {
+    alert('Error starting scan: ' + e.message);
+  }
+}
+
+function editPlan() {
+  if (!_currentPlan) return;
+  const p = _currentPlan;
+  document.getElementById('target-url').value = p.target_url || '';
+  document.getElementById('username').value = p.username || '';
+  document.getElementById('password').value = p.password || '';
+  if (p.scan_mode) document.getElementById('scan-mode').value = p.scan_mode;
+  if (p.auth_type) document.getElementById('auth-type').value = p.auth_type;
+  setScanMode('form');
+  _currentPlan = null;
+  document.getElementById('ai-plan-container').style.display = 'none';
+}
+
+function discardPlan() {
+  _currentPlan = null;
+  document.getElementById('ai-plan-container').style.display = 'none';
+  document.getElementById('ai-instruction').value = '';
 }
 
 let _scanPage = 1;
@@ -540,70 +1329,130 @@ function goToScanPage(p) {
 }
 
 async function loadScans() {
-  const params = new URLSearchParams({ page: _scanPage, per_page: _scanPerPage });
-  if (_scanSearch) params.set('search', _scanSearch);
-  const resp = await fetch('/api/scans?' + params.toString());
-  const result = await resp.json();
-  const scans = result.items || result;
-  const total = result.total || scans.length;
-  const totalPages = result.total_pages || 1;
-  const curPage = result.page || 1;
-  _loadedScans = scans;
-
   const el = document.getElementById('scans-list');
   const countEl = document.getElementById('scan-total-count');
-  countEl.textContent = total + ' scan' + (total !== 1 ? 's' : '') + (_scanSearch ? ' matching "' + _scanSearch + '"' : ' total');
-
-  if (!scans.length) {
-    el.innerHTML = '<div class="empty">' + (_scanSearch ? 'No scans match "' + esc(_scanSearch) + '".' : 'No scans yet.') + '</div>';
-    document.getElementById('scan-pagination').style.display = 'none';
-    updateToolbar();
-    return;
-  }
-
-  el.innerHTML = '<div class="scan-list"><div class="scan-item" style="background:transparent;padding:6px 16px;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:0.5px;color:var(--text2);cursor:default;">' +
-    '<div onclick="event.stopPropagation()"><input type="checkbox" id="select-all-scans" onchange="toggleSelectAll(this)" style="width:16px;height:16px;accent-color:var(--accent);cursor:pointer;" title="Select all"></div>' +
-    '<div>Target</div><div>Model</div><div>Status</div><div>Duration</div><div>Cost</div><div>Findings</div></div>' +
-  scans.map(s => `
-    <div class="scan-item" data-scan-id="${s.id}" style="cursor:pointer" onclick="viewScan('${s.id}')">
-      <div onclick="event.stopPropagation()"><input type="checkbox" class="scan-check" data-id="${s.id}" onchange="updateToolbar()" style="width:16px;height:16px;accent-color:var(--accent);cursor:pointer;"></div>
-      <div class="target">${esc(s.target)}</div>
-      <div class="model">${esc(s.model)}</div>
-      <div><span class="badge badge-${s.status}">${s.status.charAt(0).toUpperCase()+s.status.slice(1)}</span>${s.scan_mode ? ` <span class="badge badge-mode" style="font-size:9px;padding:1px 5px;background:var(--accent2);color:#fff;">${s.scan_mode}</span>` : ''}</div>
-      <div>${s.duration ? Math.round(s.duration) + 's' : '-'}</div>
-      <div>${s.cost != null ? '$' + s.cost.toFixed(4) : '-'}</div>
-      <div style="display:flex;align-items:center;gap:6px;">
-        <span>${s.findings_count != null ? s.findings_count + ' findings' : '-'}</span>
-        ${s.status === 'running' ? `<button class="btn btn-outline btn-sm" onclick="event.stopPropagation();pauseScanById('${s.id}',this)" style="padding:3px 8px;font-size:10px;color:var(--yellow);border-color:rgba(202,138,4,0.3);" title="Pause scan">⏸ Pause</button>` : ''}
-        ${s.status === 'running' ? `<button class="btn btn-outline btn-sm" onclick="event.stopPropagation();stopScanById('${s.id}',this)" style="padding:3px 8px;font-size:10px;color:var(--red);border-color:rgba(220,38,38,0.3);" title="Stop scan">■ Stop</button>` : ''}
-        ${s.status === 'pausing' ? `<span style="font-size:10px;color:var(--yellow);font-weight:600;">Pausing...</span>` : ''}
-        ${s.status === 'paused' ? `<button class="btn btn-outline btn-sm" onclick="event.stopPropagation();resumeScanById('${s.id}',this)" style="padding:3px 8px;font-size:10px;color:var(--green);border-color:rgba(22,163,74,0.3);" title="Resume scan">▶ Resume</button>` : ''}
-        ${(s.status === 'paused' || s.status === 'pausing') ? `<button class="btn btn-outline btn-sm" onclick="event.stopPropagation();stopScanById('${s.id}',this)" style="padding:3px 8px;font-size:10px;color:var(--red);border-color:rgba(220,38,38,0.3);" title="Stop scan">■ Stop</button>` : ''}
-        ${s.status === 'stopping' ? `<span style="font-size:10px;color:var(--yellow);font-weight:600;">Stopping...</span>` : ''}
-        ${s.status === 'completed' ? `<button class="btn btn-outline btn-sm" onclick="event.stopPropagation();rescanById('${s.id}')" style="padding:3px 8px;font-size:10px;color:var(--accent);border-color:var(--accent);" title="Re-scan (new entry)">↻ Re-scan</button>` : ''}
-        ${(s.status === 'error' || s.status === 'cancelled') ? `<button class="btn btn-outline btn-sm" onclick="event.stopPropagation();retryScanById('${s.id}')" style="padding:3px 8px;font-size:10px;color:var(--accent);border-color:var(--accent);" title="${s.phases_completed > 0 ? 'Continue from phase ' + (s.phases_completed+1) : 'Re-run scan'}">↻${s.phases_completed > 0 ? ' Continue' : ' Re-run'}</button>` : ''}
-        <button class="btn btn-outline btn-sm" onclick="event.stopPropagation();deleteScan('${s.id}')" style="padding:3px 8px;font-size:10px;color:var(--red);border-color:rgba(220,38,38,0.3);" title="Delete scan">✕</button>
-      </div>
-    </div>`).join('') + '</div>';
-  updateToolbar();
-
   const pagEl = document.getElementById('scan-pagination');
-  if (totalPages <= 1) { pagEl.style.display = 'none'; return; }
-  pagEl.style.display = 'flex';
-  let pagHtml = '';
-  pagHtml += `<button ${curPage <= 1 ? 'disabled' : ''} onclick="goToScanPage(${curPage - 1})">Prev</button>`;
-  const maxBtns = 7;
-  let startP = Math.max(1, curPage - Math.floor(maxBtns / 2));
-  let endP = Math.min(totalPages, startP + maxBtns - 1);
-  if (endP - startP < maxBtns - 1) startP = Math.max(1, endP - maxBtns + 1);
-  if (startP > 1) { pagHtml += `<button onclick="goToScanPage(1)">1</button>`; if (startP > 2) pagHtml += `<span class="page-info">...</span>`; }
-  for (let p = startP; p <= endP; p++) {
-    pagHtml += `<button class="${p === curPage ? 'active' : ''}" onclick="goToScanPage(${p})">${p}</button>`;
+  try {
+    const params = new URLSearchParams({ page: _scanPage, per_page: _scanPerPage });
+    if (_scanSearch) params.set('search', _scanSearch);
+    const resp = await fetch('/api/scans?' + params.toString());
+    if (!resp.ok) {
+      el.innerHTML = '<div class="empty" style="color:var(--red);">Failed to load scans (HTTP ' + resp.status + '). <button class="btn btn-sm btn-outline" onclick="loadScans()" style="margin-left:8px;">Retry</button></div>';
+      return;
+    }
+    const result = await resp.json();
+    const scans = Array.isArray(result.items) ? result.items : (Array.isArray(result) ? result : []);
+    const total = result.total || scans.length;
+    const totalPages = result.total_pages || 1;
+    const curPage = result.page || 1;
+    _loadedScans = scans;
+
+    countEl.textContent = total + ' scan' + (total !== 1 ? 's' : '') + (_scanSearch ? ' matching "' + _scanSearch + '"' : ' total');
+
+    if (!scans.length) {
+      el.innerHTML = '<div class="empty">' + (_scanSearch ? 'No scans match "' + esc(_scanSearch) + '".' : 'No scans yet. Configure a target above and click Start Scan.') + '</div>';
+      pagEl.style.display = 'none';
+      updateToolbar();
+      return;
+    }
+
+    function _renderRow(s) {
+      var id = s.id || '';
+      var target = s.target || '';
+      var model = s.model || '';
+      var st = s.status || 'unknown';
+      var stLabel = st.charAt(0).toUpperCase() + st.slice(1);
+      var dur = (typeof s.duration === 'number') ? _fmtDur(s.duration) : '-';
+      var cost = (typeof s.cost === 'number') ? '$' + s.cost.toFixed(4) : '-';
+      var fc = (s.findings_count != null) ? s.findings_count : '-';
+      var mode = s.scan_mode || '';
+      var modeLabel = {web:'Web',api:'API',both:'Full',quick:'Quick',standard:'Std',deep:'Deep'}[mode] || mode;
+      var modeColor = {web:'#6366f1',api:'#2563eb',both:'#059669',quick:'#d97706',standard:'#6366f1',deep:'#dc2626'}[mode] || '#6b7280';
+      var started = s.started ? _fmtTime(s.started) : '-';
+      var phaseInfo = s.current_phase ? '<div style="font-size:11px;color:var(--text2);margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:200px;" title="' + esc(s.current_phase) + '">' + esc(s.current_phase) + '</div>' : '';
+      var fcColor = (typeof fc === 'number' && fc > 0) ? (fc >= 10 ? 'var(--red)' : fc >= 3 ? 'var(--orange)' : 'var(--text)') : 'var(--text2)';
+
+      var actions = '';
+      if (st === 'running') actions += '<button class="btn btn-outline btn-sm" onclick="event.stopPropagation();pauseScanById(\'' + id + '\',this)" style="padding:4px 10px;font-size:11px;color:var(--yellow);border-color:rgba(217,119,6,0.3);" title="Pause">&#9208;</button>';
+      if (st === 'running') actions += '<button class="btn btn-outline btn-sm" onclick="event.stopPropagation();stopScanById(\'' + id + '\',this)" style="padding:4px 10px;font-size:11px;color:var(--red);border-color:rgba(220,38,38,0.3);" title="Stop">&#9632;</button>';
+      if (st === 'pausing') actions += '<span style="font-size:11px;color:var(--yellow);font-weight:600;">Pausing...</span>';
+      if (st === 'paused') actions += '<button class="btn btn-outline btn-sm" onclick="event.stopPropagation();resumeScanById(\'' + id + '\',this)" style="padding:4px 10px;font-size:11px;color:var(--green);border-color:rgba(5,150,105,0.3);" title="Resume">&#9654;</button>';
+      if (st === 'paused' || st === 'pausing') actions += '<button class="btn btn-outline btn-sm" onclick="event.stopPropagation();stopScanById(\'' + id + '\',this)" style="padding:4px 10px;font-size:11px;color:var(--red);border-color:rgba(220,38,38,0.3);" title="Stop">&#9632;</button>';
+      if (st === 'stopping') actions += '<span style="font-size:11px;color:var(--yellow);font-weight:600;">Stopping...</span>';
+      if (st === 'completed') actions += '<button class="btn btn-outline btn-sm" onclick="event.stopPropagation();rescanById(\'' + id + '\')" style="padding:4px 10px;font-size:11px;color:var(--accent);" title="Re-scan">&#8635;</button>';
+      if (st === 'error' || st === 'cancelled') actions += '<button class="btn btn-outline btn-sm" onclick="event.stopPropagation();retryScanById(\'' + id + '\')" style="padding:4px 10px;font-size:11px;color:var(--accent);" title="' + ((s.phases_completed || 0) > 0 ? 'Continue' : 'Re-run') + '">&#8635;</button>';
+      actions += '<button class="btn btn-outline btn-sm" onclick="event.stopPropagation();deleteScan(\'' + id + '\')" style="padding:4px 10px;font-size:11px;color:var(--red);border-color:rgba(220,38,38,0.2);" title="Delete">&#10005;</button>';
+
+      return '<div class="scan-item" data-scan-id="' + id + '" onclick="viewScan(\'' + id + '\')">' +
+        '<div onclick="event.stopPropagation()"><input type="checkbox" class="scan-check" data-id="' + id + '" onchange="updateToolbar()" style="width:15px;height:15px;accent-color:var(--accent);cursor:pointer;"></div>' +
+        '<div class="target">' + esc(target) + '</div>' +
+        '<div class="model">' + esc(model) + '</div>' +
+        '<div>' +
+          '<span class="badge badge-' + st + '">' + stLabel + '</span>' +
+          (modeLabel ? ' <span class="badge" style="font-size:10px;padding:2px 7px;background:' + modeColor + '18;color:' + modeColor + ';margin-left:3px;">' + modeLabel + '</span>' : '') +
+          (st === 'running' ? phaseInfo : '') +
+        '</div>' +
+        '<div style="font-size:13px;color:var(--text2);">' + started + '</div>' +
+        '<div style="font-size:13px;color:var(--text2);">' + dur + '</div>' +
+        '<div style="font-size:13px;color:var(--text2);">' + cost + '</div>' +
+        '<div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">' +
+          '<span style="font-size:13px;font-weight:600;color:' + fcColor + ';min-width:36px;">' + fc + ' <span style="font-size:10px;font-weight:500;color:var(--text2);">findings</span></span>' +
+          actions +
+        '</div>' +
+      '</div>';
+    }
+
+    var headerHtml = '<div class="scan-item" style="background:transparent;border:none;box-shadow:none;padding:4px 18px;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:0.8px;color:var(--text2);cursor:default;">' +
+      '<div onclick="event.stopPropagation()"><input type="checkbox" id="select-all-scans" onchange="toggleSelectAll(this)" style="width:15px;height:15px;accent-color:var(--accent);cursor:pointer;" title="Select all"></div>' +
+      '<div>Target</div><div>Model</div><div>Status</div><div>Started</div><div>Duration</div><div>Cost</div><div>Findings</div></div>';
+
+    var rowsHtml = '';
+    for (var i = 0; i < scans.length; i++) {
+      try { rowsHtml += _renderRow(scans[i]); }
+      catch (rowErr) { rowsHtml += '<div class="scan-item" style="color:var(--red);grid-column:1/-1;justify-content:center;">Row render error: ' + esc(String(rowErr)) + '</div>'; }
+    }
+
+    el.innerHTML = '<div class="scan-list">' + headerHtml + rowsHtml + '</div>';
+    updateToolbar();
+
+    if (totalPages <= 1) { pagEl.style.display = 'none'; return; }
+    pagEl.style.display = 'flex';
+    var pagHtml = '';
+    pagHtml += '<button ' + (curPage <= 1 ? 'disabled' : '') + ' onclick="goToScanPage(' + (curPage - 1) + ')">Prev</button>';
+    var maxBtns = 7;
+    var startP = Math.max(1, curPage - Math.floor(maxBtns / 2));
+    var endP = Math.min(totalPages, startP + maxBtns - 1);
+    if (endP - startP < maxBtns - 1) startP = Math.max(1, endP - maxBtns + 1);
+    if (startP > 1) { pagHtml += '<button onclick="goToScanPage(1)">1</button>'; if (startP > 2) pagHtml += '<span class="page-info">...</span>'; }
+    for (var p = startP; p <= endP; p++) {
+      pagHtml += '<button class="' + (p === curPage ? 'active' : '') + '" onclick="goToScanPage(' + p + ')">' + p + '</button>';
+    }
+    if (endP < totalPages) { if (endP < totalPages - 1) pagHtml += '<span class="page-info">...</span>'; pagHtml += '<button onclick="goToScanPage(' + totalPages + ')">' + totalPages + '</button>'; }
+    pagHtml += '<button ' + (curPage >= totalPages ? 'disabled' : '') + ' onclick="goToScanPage(' + (curPage + 1) + ')">Next</button>';
+    pagHtml += '<span class="page-info">Page ' + curPage + ' of ' + totalPages + '</span>';
+    pagEl.innerHTML = pagHtml;
+  } catch(e) {
+    console.error('loadScans error:', e);
+    if (el) el.innerHTML = '<div class="empty" style="color:var(--red);">Error loading scans: ' + esc(String(e.message || e)) + ' <button class="btn btn-sm btn-outline" onclick="loadScans()" style="margin-left:8px;">Retry</button></div>';
   }
-  if (endP < totalPages) { if (endP < totalPages - 1) pagHtml += `<span class="page-info">...</span>`; pagHtml += `<button onclick="goToScanPage(${totalPages})">${totalPages}</button>`; }
-  pagHtml += `<button ${curPage >= totalPages ? 'disabled' : ''} onclick="goToScanPage(${curPage + 1})">Next</button>`;
-  pagHtml += `<span class="page-info">Page ${curPage} of ${totalPages}</span>`;
-  pagEl.innerHTML = pagHtml;
+}
+
+function _fmtDur(sec) {
+  if (sec < 60) return Math.round(sec) + 's';
+  if (sec < 3600) return Math.floor(sec / 60) + 'm ' + Math.round(sec % 60) + 's';
+  return Math.floor(sec / 3600) + 'h ' + Math.floor((sec % 3600) / 60) + 'm';
+}
+
+function _fmtTime(iso) {
+  try {
+    var d = new Date(iso);
+    if (isNaN(d.getTime())) return '-';
+    var now = new Date();
+    var diff = now - d;
+    if (diff < 86400000 && d.getDate() === now.getDate()) return d.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'});
+    if (diff < 604800000) return d.toLocaleDateString([], {weekday:'short', hour:'2-digit', minute:'2-digit'});
+    return d.toLocaleDateString([], {month:'short', day:'numeric', hour:'2-digit', minute:'2-digit'});
+  } catch(e) { return '-'; }
 }
 
 async function uploadFile(inputId) {
@@ -646,8 +1495,6 @@ function _extractBaseUrl(text, type) {
     } else if (type === 'openapi') {
       if (data.servers) data.servers.forEach(s => { if (s.url) urls.push(s.url); });
       if (data.host) urls.push((data.schemes ? data.schemes[0] : 'https') + '://' + data.host + (data.basePath || ''));
-    } else if (type === 'burp') {
-      return null;
     }
     for (const u of urls) {
       try { const p = new URL(u.startsWith('http') ? u : 'https://' + u); return p.origin; } catch(e) {}
@@ -657,7 +1504,7 @@ function _extractBaseUrl(text, type) {
 }
 
 (function _initAutoFill() {
-  var ids = ['file-postman', 'file-openapi', 'file-burp'];
+  var ids = ['file-postman', 'file-openapi'];
   for (var i = 0; i < ids.length; i++) {
     (function(inputId) {
       var type = inputId.replace('file-', '');
@@ -686,7 +1533,7 @@ function _extractBaseUrl(text, type) {
 
 async function startScan() {
   const url = document.getElementById('target-url').value.trim();
-  if (!url) { alert('Enter a target URL or upload a Postman/OpenAPI/Burp file'); return; }
+  if (!url) { alert('Enter a target URL or upload a Postman/OpenAPI file'); return; }
   const btn = document.getElementById('start-scan-btn');
   btn.disabled = true;
   btn.textContent = 'Uploading files...';
@@ -696,8 +1543,6 @@ async function startScan() {
   if (postman) api_imports.postman = postman;
   const postmanEnv = await uploadFile('file-postman-env');
   if (postmanEnv) api_imports.postman_env = postmanEnv;
-  const burp = await uploadFile('file-burp');
-  if (burp) api_imports.burp = burp;
   const openapi = await uploadFile('file-openapi');
   if (openapi) api_imports.openapi = openapi;
 
@@ -713,6 +1558,7 @@ async function startScan() {
     model: document.getElementById('model-select').value,
     scan_mode: document.getElementById('scan-mode').value,
     auth_type: document.getElementById('auth-type').value,
+    scanner: 'ai',
     api_imports: api_imports,
     extra_domains: extraDomains,
   };
@@ -863,10 +1709,11 @@ async function exportScansToExcel() {
 
   if (!dataToExport.length) { alert('No scans to export.'); return; }
 
-  const headers = ['Target', 'Model', 'Scan Mode', 'Status', 'Started', 'Duration (s)', 'Cost (USD)', 'Findings', 'Scan ID'];
+  const headers = ['Target', 'Model', 'Scanner', 'Scan Mode', 'Status', 'Started', 'Duration (s)', 'Cost (USD)', 'Findings', 'Scan ID'];
   const rows = dataToExport.map(s => [
     s.target || '',
     s.model || '',
+    s.scanner || 'ai',
     s.scan_mode || '',
     s.status || '',
     s.started || '',
@@ -994,9 +1841,9 @@ async function rescanCurrent() {
 }
 
 function switchLiveTab2(tab) {
-  const panel = document.getElementById('live-scan-view');
-  panel.querySelectorAll('.live-tab').forEach(t => t.classList.remove('active'));
-  panel.querySelectorAll('.live-body').forEach(b => b.style.display = 'none');
+  const aiPanel = document.getElementById('lv-ai-panel');
+  aiPanel.querySelectorAll('.live-tab').forEach(t => t.classList.remove('active'));
+  aiPanel.querySelectorAll('.live-body').forEach(b => b.style.display = 'none');
   event.target.classList.add('active');
   document.getElementById('lv-body-' + tab).style.display = 'block';
 }
@@ -1007,6 +1854,7 @@ let lvPollInterval = null;
 let _allLiveTests = [];
 
 function openLiveView(scanId) {
+  navigateTo('scans');
   currentScanId = scanId;
   lvTestOffset = 0;
   lvFindingOffset = 0;
@@ -1080,16 +1928,25 @@ async function pollLiveView(scanId) {
       pausingLabel = `Pausing (${elapsed}s) — waiting for current step`;
     }
 
+    const scannerBadge = '<span class="badge" style="margin-left:10px;background:rgba(99,102,241,0.1);color:#6366f1;font-size:11px;">AI Agent</span>';
+    const phase = data.current_phase || '';
+    const isAiPhase = phase.startsWith('[AI');
+    const aiSt = data.ai_status || '';
+    let engineIndicator = '';
+    if ((data.status === 'running' || data.status === 'stopping' || data.status === 'pausing') && isAiPhase) {
+      engineIndicator = `<span class="badge" style="margin-left:6px;background:rgba(99,102,241,0.1);color:#6366f1;font-size:11px;">&#9654; AI</span>`;
+    }
+
     document.getElementById('live-scan-title').innerHTML =
       data.status === 'running' || data.status === 'stopping' || data.status === 'pausing'
-        ? `<span class="scanning-indicator"></span>${data.status === 'stopping' ? stoppingLabel : data.status === 'pausing' ? pausingLabel : 'Scan In Progress'} — ${esc(data.model || '')}${targetLine}`
+        ? `<span class="scanning-indicator"></span>${data.status === 'stopping' ? stoppingLabel : data.status === 'pausing' ? pausingLabel : 'Scan In Progress'} — ${esc(data.model || '')}${scannerBadge}${engineIndicator}${targetLine}`
         : data.status === 'paused'
-          ? `<span style="color:var(--yellow);">⏸</span> Scan Paused — ${esc(data.model || '')}${targetLine}`
+          ? `<span style="color:var(--yellow);">⏸</span> Scan Paused — ${esc(data.model || '')}${scannerBadge}${targetLine}`
           : data.status === 'completed'
-            ? `<span style="color:var(--green);">&#10003;</span> Scan Complete — ${esc(data.model || '')}${targetLine}`
+            ? `<span style="color:var(--green);">&#10003;</span> Scan Complete — ${esc(data.model || '')}${scannerBadge}${targetLine}`
             : data.status === 'cancelled'
-              ? `<span style="color:#f59e0b;">&#9632;</span> Scan Cancelled — ${esc(data.model || '')}${targetLine}`
-              : `<span style="color:var(--red);">&#10005;</span> Scan Error — ${esc(data.model || '')}${targetLine}`;
+              ? `<span style="color:#f59e0b;">&#9632;</span> Scan Cancelled — ${esc(data.model || '')}${scannerBadge}${targetLine}`
+              : `<span style="color:var(--red);">&#10005;</span> Scan Error — ${esc(data.model || '')}${scannerBadge}${targetLine}`;
 
     const log = document.getElementById('live-scan-log');
     if (data.progress && data.progress.length) {
@@ -1099,13 +1956,45 @@ async function pollLiveView(scanId) {
     }
     log.scrollTop = log.scrollHeight;
 
-    document.getElementById('live-scan-stats').innerHTML = [
-      stat(live.tool_calls || 0, 'Tool Calls'),
-      stat(live.pages_crawled || 0, 'Pages Crawled'),
-      stat(live.findings_total || 0, 'Findings'),
-      stat((live.phases || []).length, 'Phases Done'),
-      stat(data.current_phase || data.status || '-', 'Current Phase'),
-    ].join('');
+    const aiStatus = data.ai_status || '';
+
+    function engineStatusHtml(status) {
+      if (!status) return '<span style="color:var(--text2);">—</span>';
+      const colors = {running:'#059669',completed:'var(--accent2)',error:'#dc2626',cancelled:'#d97706'};
+      const icons = {running:'●',completed:'✓',error:'✕',cancelled:'■'};
+      const c = colors[status] || 'var(--text2)';
+      return `<span style="color:${c};font-weight:700;">${icons[status]||'?'} ${status.charAt(0).toUpperCase()+status.slice(1)}</span>`;
+    }
+
+    const phaseDisplay = (phase.match(/^\[AI \d+\/\d+\] .+/) || [phase])[0];
+
+    let statsHtml = `<div style="grid-column:1/-1;padding:10px 14px;background:rgba(99,102,241,0.04);border:1px solid rgba(99,102,241,0.12);border-radius:var(--radius);margin-bottom:4px;">
+        <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.8px;color:#6366f1;margin-bottom:10px;display:flex;align-items:center;gap:6px;">
+          <span style="width:8px;height:8px;border-radius:50%;background:#6366f1;${aiStatus==='running'?'animation:pulse 1.5s infinite;':''}display:inline-block;"></span>
+          AI Agent Engine
+        </div>
+        <div class="stats" style="margin-bottom:0;">
+          ${stat(engineStatusHtml(aiStatus) || '⏳ Waiting', 'Status')}
+          ${stat(phaseDisplay || data.status || '-', 'Current Phase')}
+          ${stat(live.tool_calls || 0, 'Tool Calls')}
+          ${stat(live.pages_crawled || 0, 'Pages Crawled')}
+          ${stat(live.findings_total || 0, 'AI Findings')}
+          ${stat((live.phases || []).length, 'Phases')}
+        </div>
+      </div>`;
+
+    document.getElementById('live-scan-stats').innerHTML = statsHtml;
+
+    const aiPanel = document.getElementById('lv-ai-panel');
+    if (aiPanel) aiPanel.style.display = 'block';
+
+    {
+      const aiDot = document.getElementById('lv-ai-dot');
+      if (aiDot) {
+        aiDot.style.background = aiSt === 'running' ? '#6366f1' : aiSt === 'completed' ? '#059669' : aiSt === 'error' ? '#dc2626' : '#9ca3af';
+        aiDot.style.animation = aiSt === 'running' ? 'pulse 1.5s infinite' : 'none';
+      }
+    }
 
     renderLiveView(live);
 
@@ -1172,6 +2061,13 @@ function renderLiveView(live) {
     });
     lvFindingOffset += live.findings.length;
     findingsBody.parentElement.scrollTop = findingsBody.parentElement.scrollHeight;
+  }
+
+  const aiFindBadge = document.getElementById('lv-ai-findings-badge');
+  if (aiFindBadge) {
+    const aiCount = live.findings_total || 0;
+    aiFindBadge.textContent = aiCount;
+    aiFindBadge.style.display = aiCount > 0 ? 'inline' : 'none';
   }
 
   const phasesBody = document.getElementById('lv-phases-body');
@@ -1435,38 +2331,49 @@ function renderCrawledTree(urls) {
 function closeLiveView() {
   _prevCrawledCount = 0;
   if (lvPollInterval) { clearInterval(lvPollInterval); lvPollInterval = null; }
-  document.getElementById('live-scan-view').style.display = 'none';
-  document.getElementById('scans-card').style.display = 'block';
-  document.getElementById('scan-form-card').style.display = 'block';
+  const lv = document.getElementById('live-scan-view');
+  const sc = document.getElementById('scans-card');
+  if (lv) lv.style.display = 'none';
+  if (sc) sc.style.display = 'block';
   loadScans();
 }
 
 async function viewScan(scanId) {
+  if (currentPage !== 'scans') navigateTo('scans');
   currentScanId = scanId;
+
+  hideAllViews();
+  const rv = document.getElementById('results-view');
+  rv.style.display = 'block';
+  document.getElementById('result-title').innerHTML = '<span class="scanning-indicator"></span> Loading scan data...';
+  document.getElementById('result-stats').innerHTML = '';
+  document.getElementById('tab-comparison').innerHTML = '<div class="empty">Loading...</div>';
+
   try {
     const statusResp = await fetch(`/api/scan/${scanId}`);
-    if (!statusResp.ok) { alert('Scan not found'); return; }
+    if (!statusResp.ok) { alert('Scan not found'); showList(); return; }
     const statusData = await statusResp.json();
 
     if (statusData.status === 'running' || statusData.status === 'paused' || statusData.status === 'pausing' || statusData.status === 'stopping') {
+      rv.style.display = 'none';
       openLiveView(scanId);
       showScanControls(statusData.status === 'paused' ? 'paused' : 'running');
       return;
     }
 
     if (statusData.status === 'error' || statusData.status === 'cancelled') {
+      rv.style.display = 'none';
       showErrorView(scanId, statusData);
       return;
     }
 
     const resp = await fetch(`/api/results/${scanId}`);
-    if (!resp.ok) { alert('Results not available yet — scan may still be processing.'); return; }
+    if (!resp.ok) { alert('Results not available yet — scan may still be processing.'); showList(); return; }
     const data = await resp.json();
     renderResults(data);
-    hideAllViews();
-    document.getElementById('results-view').style.display = 'block';
   } catch(e) {
     alert('Could not load scan: ' + e.message);
+    showList();
   }
 }
 
@@ -1496,7 +2403,10 @@ function showErrorView(scanId, data) {
     contBtn.style.display = 'none';
   }
 
-  document.getElementById('error-stats').innerHTML = [
+  const errShowAi = true;
+  const errAiStatus = data.ai_status || '';
+
+  let errStatsHtml = [
     stat(data.model || '-', 'Model'),
     stat(data.scan_mode || '-', 'Scan Mode'),
     stat(data.started ? new Date(data.started).toLocaleString() : '-', 'Started'),
@@ -1507,75 +2417,127 @@ function showErrorView(scanId, data) {
     stat(data.cost != null ? '$' + data.cost.toFixed(4) : '-', 'Cost So Far'),
   ].join('');
 
+  if (errShowAi && errAiStatus) {
+    const aiC = errAiStatus === 'error' ? '#dc2626' : errAiStatus === 'completed' ? '#059669' : '#6366f1';
+    errStatsHtml += `<div style="grid-column:1/-1;padding:12px 16px;background:rgba(99,102,241,0.04);border:1px solid rgba(99,102,241,0.12);border-radius:var(--radius);margin-top:8px;">
+      <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.8px;color:#6366f1;margin-bottom:6px;">AI Agent Engine</div>
+      <span style="color:${aiC};font-weight:700;font-size:14px;">${errAiStatus === 'error' ? '✕' : errAiStatus === 'completed' ? '✓' : '●'} ${errAiStatus.charAt(0).toUpperCase() + errAiStatus.slice(1)}</span>
+    </div>`;
+  }
+
+  document.getElementById('error-stats').innerHTML = errStatsHtml;
+
   const log = data.progress || [];
   document.getElementById('error-log').textContent = log.length ? log.join('\n') : 'No progress log available.';
 }
 
 function hideAllViews() {
-  document.getElementById('scans-card').style.display = 'none';
-  document.getElementById('scan-form-card').style.display = 'none';
-  document.getElementById('results-view').style.display = 'none';
-  document.getElementById('live-scan-view').style.display = 'none';
-  document.getElementById('error-view').style.display = 'none';
+  const sc = document.getElementById('scans-card');
+  const rv = document.getElementById('results-view');
+  const lv = document.getElementById('live-scan-view');
+  const ev = document.getElementById('error-view');
+  if (sc) sc.style.display = 'none';
+  if (rv) rv.style.display = 'none';
+  if (lv) lv.style.display = 'none';
+  if (ev) ev.style.display = 'none';
 }
 
 function showList() {
+  navigateTo('scans');
   hideAllViews();
-  document.getElementById('scans-card').style.display = 'block';
-  document.getElementById('scan-form-card').style.display = 'block';
+  const sc = document.getElementById('scans-card');
+  if (sc) sc.style.display = 'block';
   if (lvPollInterval) { clearInterval(lvPollInterval); lvPollInterval = null; }
   loadScans();
 }
 
 function renderResults(data) {
-  const m = data.metadata;
-  const c = data.coverage;
-  const tp = data.triaged_findings.filter(f=>f.verdict==='TRUE_POSITIVE').length;
-  const fp = data.triaged_findings.filter(f=>f.verdict==='FALSE_POSITIVE').length;
-  const mr = data.triaged_findings.filter(f=>f.verdict==='MANUAL_REVIEW').length;
+  const m = data.metadata || {};
+  const c = data.coverage || {};
+  const triaged = data.triaged_findings || [];
+  const tp = triaged.filter(f=>f.verdict==='TRUE_POSITIVE').length;
+  const fp = triaged.filter(f=>f.verdict==='FALSE_POSITIVE').length;
+  const mr = triaged.filter(f=>f.verdict==='MANUAL_REVIEW').length;
+  const nv = triaged.filter(f=>f.verdict==='NEEDS_VERIFICATION' || f.verdict==='UNVERIFIED').length;
+  const ic = triaged.filter(f=>f.verdict==='INCONCLUSIVE').length;
+  const nf = triaged.filter(f=>f.verdict==='NOT_A_FINDING').length;
 
   document.getElementById('result-title').innerHTML = `Results: ${esc(m.model || 'Unknown Model')}` +
-    (m.target ? `<div style="font-size:14px;font-weight:400;color:var(--accent2);margin-top:4px;">
+    (m.target ? `<div style="font-size:14px;font-weight:400;color:var(--accent2);margin-top:6px;display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
       <a href="${esc(m.target)}" target="_blank" style="color:var(--accent2);text-decoration:none;">${esc(m.target)}</a>
-      ${m.scan_mode ? '<span style="color:var(--text2);font-size:12px;margin-left:8px;">(' + esc(m.scan_mode) + ')</span>' : ''}
+      ${m.scan_mode ? '<span class="badge" style="background:rgba(99,102,241,0.08);color:#6366f1;font-size:11px;">' + esc(m.scan_mode) + '</span>' : ''}
+      <span class="badge" style="background:rgba(99,102,241,0.1);color:#6366f1;font-size:11px;">AI Agent</span>
     </div>` : '');
+
+  document.getElementById('dl-ai-raw-btn').style.display = '';
 
   const dur = m.duration_seconds ? formatDuration(m.duration_seconds) : '-';
   const tokens = m.total_tokens ? m.total_tokens.toLocaleString() : '-';
   const calls = m.llm_calls || '-';
   const cost = m.cost_usd != null ? '$' + m.cost_usd.toFixed(4) : '-';
-
-  document.getElementById('result-stats').innerHTML = [
-    stat(c.pages_crawled, 'Pages Crawled'),
-    stat(c.forms_found, 'Forms Found'),
-    stat(c.api_endpoints, 'API Endpoints'),
-    stat(c.total_tests, 'Payloads Tested'),
-    stat(c.phases_completed || '-', 'Phases'),
-    stat(data.ai_findings.length, 'AI Findings'),
-    stat(tp, 'True Positives'),
-    stat(fp, 'False Positives'),
-    stat(mr, 'Manual Review'),
-    stat((c.verification?.confirmed || 0) + (c.verification?.disproved || 0) || '-', 'Replay Confirmed'),
-  ].join('') +
-  `<div style="grid-column:1/-1;display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:12px;margin-top:4px;">` + [
-    stat(dur, 'Scan Duration'),
-    stat(tokens, 'Total Tokens'),
-    stat(calls, 'LLM Calls'),
-    stat(cost, 'LLM Cost'),
-  ].join('') + `</div>`;
+  const aiCount = m.ai_findings_count != null ? m.ai_findings_count : (data.ai_findings || []).length;
+  const mergedCount = m.merged_findings_count || triaged.length;
 
   const sev = data.severity_breakdown || {};
   const sevKeys = ['Critical','High','Medium','Low','Info'];
-  const sevHtml = sevKeys.filter(k => sev[k]).map(k => {
-    const cls = `sev-${k.toLowerCase()}`;
-    return `<span class="severity ${cls}" style="margin-right:12px;">${k}: ${sev[k]}</span>`;
-  }).join('');
-  if (sevHtml) {
-    document.getElementById('result-stats').innerHTML += `
-      <div style="grid-column:1/-1;padding:8px 0;font-size:13px;">
-        <span style="color:var(--text2);font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:0.5px;margin-right:12px;">Severity Breakdown:</span>${sevHtml}
+  const sevColors = {Critical:'#dc2626',High:'#ea580c',Medium:'#d97706',Low:'#2563eb',Info:'#6b7280'};
+
+  let html = '';
+
+  // ── Row 1: Dashboard-style stat boxes ──
+  html += '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:12px;margin-bottom:16px;">';
+  html += dstat(mergedCount, 'Total Findings', 'var(--orange)', '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>');
+  html += dstat(tp, 'True Positives', '#dc2626', '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>');
+  html += dstat(fp, 'False Positives', '#059669', '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg>');
+  html += dstat(mr + nv + ic, 'Needs Review', '#d97706', '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>');
+  html += dstat(dur, 'Duration', 'var(--text)', '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>');
+  html += dstat(cost, 'Cost', 'var(--blue)', '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="1" x2="12" y2="23"/><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>');
+  html += '</div>';
+
+  // ── Row 2: Severity breakdown + Coverage stats ──
+  html += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:16px;">';
+
+  // Severity card
+  const sevTotal = sevKeys.reduce((a, k) => a + (sev[k] || 0), 0);
+  let sevBars = '';
+  if (sevTotal > 0) {
+    sevBars = sevKeys.filter(k => sev[k]).map(k => {
+      const pct = Math.round((sev[k] / sevTotal) * 100);
+      return `<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">
+        <span style="width:60px;font-size:11px;font-weight:700;color:${sevColors[k]};">${k}</span>
+        <div style="flex:1;height:8px;background:var(--surface);border-radius:4px;overflow:hidden;">
+          <div style="width:${pct}%;height:100%;background:${sevColors[k]};border-radius:4px;transition:width 0.5s;"></div>
+        </div>
+        <span style="width:32px;text-align:right;font-size:12px;font-weight:700;color:var(--text);">${sev[k]}</span>
       </div>`;
+    }).join('');
   }
+  html += `<div style="padding:20px 24px;background:var(--surface2);border:1px solid var(--border);border-radius:var(--radius);">
+    <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.8px;color:var(--text2);margin-bottom:14px;">Severity Breakdown</div>
+    ${sevBars || '<div style="color:var(--text2);font-size:13px;">No severity data</div>'}
+  </div>`;
+
+  // Coverage card
+  html += `<div style="padding:20px 24px;background:rgba(99,102,241,0.03);border:1px solid rgba(99,102,241,0.12);border-radius:var(--radius);">
+    <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.8px;color:#6366f1;margin-bottom:14px;display:flex;align-items:center;gap:6px;">
+      <span style="width:8px;height:8px;border-radius:50%;background:#6366f1;display:inline-block;"></span>
+      AI Agent Coverage
+    </div>
+    <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:12px;">
+      <div style="text-align:center;padding:8px;background:var(--surface);border-radius:8px;"><div style="font-size:24px;font-weight:800;color:var(--accent2);">${aiCount}</div><div style="font-size:10px;font-weight:600;color:var(--text2);text-transform:uppercase;margin-top:2px;">Findings</div></div>
+      <div style="text-align:center;padding:8px;background:var(--surface);border-radius:8px;"><div style="font-size:24px;font-weight:800;color:var(--text);">${c.pages_crawled || 0}</div><div style="font-size:10px;font-weight:600;color:var(--text2);text-transform:uppercase;margin-top:2px;">Pages</div></div>
+      <div style="text-align:center;padding:8px;background:var(--surface);border-radius:8px;"><div style="font-size:24px;font-weight:800;color:var(--text);">${c.total_tests || 0}</div><div style="font-size:10px;font-weight:600;color:var(--text2);text-transform:uppercase;margin-top:2px;">Payloads</div></div>
+      <div style="text-align:center;padding:8px;background:var(--surface);border-radius:8px;"><div style="font-size:24px;font-weight:800;color:var(--text);">${c.phases_completed || '-'}</div><div style="font-size:10px;font-weight:600;color:var(--text2);text-transform:uppercase;margin-top:2px;">Phases</div></div>
+      <div style="text-align:center;padding:8px;background:var(--surface);border-radius:8px;"><div style="font-size:24px;font-weight:800;color:var(--text);">${c.forms_found || 0}</div><div style="font-size:10px;font-weight:600;color:var(--text2);text-transform:uppercase;margin-top:2px;">Forms</div></div>
+      <div style="text-align:center;padding:8px;background:var(--surface);border-radius:8px;"><div style="font-size:24px;font-weight:800;color:var(--text);">${c.api_endpoints || 0}</div><div style="font-size:10px;font-weight:600;color:var(--text2);text-transform:uppercase;margin-top:2px;">APIs</div></div>
+    </div>
+    <div style="margin-top:10px;padding-top:10px;border-top:1px solid rgba(99,102,241,0.1);display:flex;gap:16px;font-size:12px;color:var(--text2);">
+      <span>${tokens} tokens</span><span>${calls} LLM calls</span>
+    </div>
+  </div>`;
+  html += '</div>';
+
+  document.getElementById('result-stats').innerHTML = html;
 
   currentTriagedFindings = data.triaged_findings || [];
   renderComparison(data);
@@ -1594,7 +2556,23 @@ function formatDuration(seconds) {
 }
 
 function stat(val, label) {
-  return `<div class="stat"><div class="value">${val}</div><div class="label">${label}</div></div>`;
+  const s = String(val);
+  const cls = s.length > 20 ? 'value-sm' : 'value';
+  return `<div class="stat"><div class="${cls}">${val}</div><div class="label">${label}</div></div>`;
+}
+
+var currentSourceFilter = 'all';
+function setSourceFilter(filter) {
+  currentSourceFilter = filter;
+  document.querySelectorAll('.source-filter-btn').forEach(b => b.classList.remove('active'));
+  const active = document.querySelector(`.source-filter-btn[data-filter="${filter}"]`);
+  if (active) active.classList.add('active');
+  renderComparison({triaged_findings: currentTriagedFindings, coverage: window._lastCoverage || {}});
+}
+
+function sourceBadge(src) {
+  if (src === 'ai') return '<span style="display:inline-block;font-size:9px;padding:1px 5px;border-radius:3px;background:#8b5cf6;color:#fff;margin-left:4px;font-weight:600;">AI</span>';
+  return '';
 }
 
 function renderComparison(data) {
@@ -1614,24 +2592,44 @@ function renderComparison(data) {
     </div>`;
   }
 
-  el.innerHTML = vSummary + `<table><thead><tr>
-    <th>#</th><th>Finding</th><th>AI Sev</th><th>Triage Sev</th><th>Verdict</th><th>Verified</th><th>CWE</th><th>CVSS</th><th>Reason</th>
+  const hasSources = data.triaged_findings.some(f => f.source && f.source !== 'ai');
+  let sourceFilterHtml = '';
+  if (hasSources) {
+    const counts = {all: data.triaged_findings.length, ai: data.triaged_findings.filter(f => (f.source || 'ai') === 'ai').length};
+    sourceFilterHtml = `<div style="padding:8px 0;margin-bottom:10px;display:flex;gap:6px;align-items:center;">
+      <span style="font-size:11px;font-weight:600;color:var(--text2);margin-right:6px;">Filter by Source:</span>
+      <button class="source-filter-btn${currentSourceFilter==='all'?' active':''}" data-filter="all" onclick="setSourceFilter('all')" style="font-size:11px;padding:3px 10px;border-radius:4px;border:1px solid var(--border);background:${currentSourceFilter==='all'?'var(--accent)':'var(--surface2)'};color:${currentSourceFilter==='all'?'#fff':'var(--text)'};cursor:pointer;">All (${counts.all})</button>
+      <button class="source-filter-btn${currentSourceFilter==='ai'?' active':''}" data-filter="ai" onclick="setSourceFilter('ai')" style="font-size:11px;padding:3px 10px;border-radius:4px;border:1px solid var(--border);background:${currentSourceFilter==='ai'?'#8b5cf6':'var(--surface2)'};color:${currentSourceFilter==='ai'?'#fff':'var(--text)'};cursor:pointer;">AI (${counts.ai})</button>
+    </div>`;
+  }
+
+  let filtered = data.triaged_findings;
+  if (currentSourceFilter !== 'all') {
+    filtered = filtered.filter(f => (f.source || 'ai') === currentSourceFilter);
+  }
+
+  el.innerHTML = vSummary + sourceFilterHtml + `<table><thead><tr>
+    <th>#</th><th>Finding</th>${hasSources ? '<th>Source</th>' : ''}<th>AI Sev</th><th>Triage Sev</th><th>Verdict</th><th>Verified</th><th>CWE</th><th>CVSS</th><th>Reason</th>
   </tr></thead><tbody>` +
-  data.triaged_findings.map((f, i) => {
-    const vText = f.verdict === 'MANUAL_REVIEW'
-      ? 'Needs Human Review'
+  filtered.map((f, i) => {
+    const vText = f.verdict === 'MANUAL_REVIEW' ? 'Needs Review'
+      : f.verdict === 'UNVERIFIED' ? 'Not Verified'
+      : f.verdict === 'INCONCLUSIVE' ? 'Inconclusive'
       : f.verified
         ? (f.verification_method !== 'none'
-          ? (f.verdict === 'TRUE_POSITIVE' ? 'Replay Confirmed' : f.verdict === 'FALSE_POSITIVE' ? 'Replay Confirmed' : 'Inconclusive')
-          : 'Pattern')
-        : 'Pattern';
+          ? (f.verdict === 'TRUE_POSITIVE' || f.verdict === 'FALSE_POSITIVE' ? 'Replay Confirmed' : 'Inconclusive')
+          : 'Pattern Match')
+        : 'Pattern Match';
     const vColor = f.verdict === 'MANUAL_REVIEW' ? 'color:#d97706;'
+      : f.verdict === 'UNVERIFIED' ? 'color:#d97706;'
+      : f.verdict === 'INCONCLUSIVE' ? 'color:#6366f1;'
       : vText === 'Replay Confirmed' ? 'color:var(--green);'
-      : vText === 'Inconclusive' ? 'color:#f59e0b;'
       : 'color:var(--text2);';
+    const realIdx = data.triaged_findings.indexOf(f);
     return `<tr>
     <td>${i+1}</td>
     <td><strong>${esc(f.title)}</strong><br><span style="font-size:11px;color:var(--text2)">${esc(f.url||'')}</span></td>
+    ${hasSources ? `<td>${sourceBadge(f.source||'ai')}</td>` : ''}
     <td><span class="severity sev-${f.ai_severity?.toLowerCase()}">${f.ai_severity}</span></td>
     <td><span class="severity sev-${(f.final_severity||'').toLowerCase().replace(/\s+/g,'')}">${f.final_severity||'-'}</span></td>
     <td><span class="verdict v-${f.verdict?.toLowerCase()}">${f.verdict?.replace(/_/g,' ').toLowerCase().replace(/\b\w/g,c=>c.toUpperCase())}</span></td>
@@ -1642,7 +2640,7 @@ function renderComparison(data) {
         ${f.cvss_override != null ? f.cvss_override.toFixed(1) : (f.cvss ? f.cvss.toFixed(1) : '-')}
       </span>
       ${f.cvss_override != null ? '<span style="font-size:9px;color:var(--accent2);" title="Manually overridden"> *</span>' : ''}
-      <span class="cvss-edit" onclick="editCvss(${i})" style="cursor:pointer;font-size:10px;color:var(--text2);margin-left:3px;" title="Override CVSS">&#9998;</span>
+      <span class="cvss-edit" onclick="editCvss(${realIdx})" style="cursor:pointer;font-size:10px;color:var(--text2);margin-left:3px;" title="Override CVSS">&#9998;</span>
     </td>
     <td style="font-size:11px;max-width:200px">${esc(f.reason||'')}</td>
   </tr>`;}).join('') + '</tbody></table>';
@@ -1771,7 +2769,9 @@ function renderOutOfScope(rawItems) {
 function switchTab(name) {
   document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
   document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
-  event.target.classList.add('active');
+  const clicked = document.querySelector(`.tab[onclick*="'${name}'"]`);
+  if (clicked) clicked.classList.add('active');
+  else if (typeof event !== 'undefined' && event && event.target) event.target.classList.add('active');
   document.getElementById('tab-'+name).classList.add('active');
 }
 
@@ -1795,6 +2795,25 @@ async function generateReport() {
 function downloadJSON() {
   if (!currentScanId) return;
   window.open(`/api/results/${currentScanId}/download`, '_blank');
+}
+
+function downloadRawAI() {
+  if (!currentScanId) return;
+  window.open(`/api/results/${currentScanId}/raw/ai`, '_blank');
+}
+
+async function downloadExcel() {
+  if (!currentScanId) return;
+  try {
+    const resp = await fetch(`/api/results/${currentScanId}/excel`);
+    if (!resp.ok) { alert('Excel export failed'); return; }
+    const blob = await resp.blob();
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `scan_report_${currentScanId}.xlsx`;
+    a.click();
+    URL.revokeObjectURL(a.href);
+  } catch(e) { alert('Error: ' + e.message); }
 }
 
 function downloadPayloads() {
@@ -1832,16 +2851,121 @@ async function clearAllScans() {
   loadScans();
 }
 
-function esc(s) { if (!s) return ''; const d = document.createElement('div'); d.textContent = String(s); return d.innerHTML; }
-
 init();
 testConnectivity();
 
-setInterval(() => {
-  if (document.getElementById('scans-card').style.display !== 'none') {
-    loadScans();
+var _autoRefresh = true;
+var _autoRefreshSec = 10;
+var _arCountdown = _autoRefreshSec;
+var _arInterval = null;
+
+function toggleAutoRefresh() {
+  _autoRefresh = !_autoRefresh;
+  updateAutoRefreshUI();
+  if (_autoRefresh) {
+    _arCountdown = _autoRefreshSec;
+    startAutoRefresh();
+  } else {
+    stopAutoRefresh();
   }
-}, 10000);
+}
+
+function updateAutoRefreshUI() {
+  const btn = document.getElementById('ar-toggle');
+  const dot = document.getElementById('ar-dot');
+  const label = document.getElementById('ar-label');
+  const cd = document.getElementById('ar-countdown');
+  if (!btn) return;
+  if (_autoRefresh) {
+    dot.style.background = 'var(--green)';
+    dot.style.animation = 'pulse 1.5s ease-in-out infinite';
+    label.textContent = 'Auto';
+    cd.textContent = _arCountdown + 's';
+    cd.style.display = '';
+    btn.title = 'Auto-refresh ON (' + _autoRefreshSec + 's) — click to pause';
+  } else {
+    dot.style.background = 'var(--text2)';
+    dot.style.animation = 'none';
+    label.textContent = 'Paused';
+    cd.style.display = 'none';
+    btn.title = 'Auto-refresh paused — click to resume';
+  }
+}
+
+function startAutoRefresh() {
+  stopAutoRefresh();
+  _arInterval = setInterval(function() {
+    if (!_autoRefresh) return;
+    _arCountdown--;
+    if (_arCountdown <= 0) {
+      _arCountdown = _autoRefreshSec;
+      if (currentPage === 'scans') {
+        const sc = document.getElementById('scans-card');
+        if (sc && sc.style.display !== 'none') loadScans();
+      }
+      if (currentPage === 'dashboard') loadDashboard();
+    }
+    updateAutoRefreshUI();
+  }, 1000);
+}
+
+function stopAutoRefresh() {
+  if (_arInterval) { clearInterval(_arInterval); _arInterval = null; }
+}
+
+startAutoRefresh();
+
+
+
+function _insightRenderMd(text) {
+  let html = esc(text);
+  html = html.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>');
+  html = html.replace(/`([^`]+)`/g, '<code>$1</code>');
+  html = html.replace(/^### (.+)$/gm, '<div style="font-weight:700;font-size:14px;margin:8px 0 4px;">$1</div>');
+  html = html.replace(/^## (.+)$/gm, '<div style="font-weight:700;font-size:15px;margin:10px 0 4px;">$1</div>');
+  html = html.replace(/^- (.+)$/gm, '<div style="padding-left:12px;">&#8226; $1</div>');
+  html = html.replace(/^\d+\.\s+(.+)$/gm, function(m, p1, offset, str) {
+    return '<div style="padding-left:12px;">' + m.match(/^\d+/)[0] + '. ' + p1 + '</div>';
+  });
+
+  const lines = html.split('\n');
+  let inTable = false;
+  let tableHtml = '';
+  let tableRows = [];
+  const processed = [];
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (line.trim().startsWith('|') && line.trim().endsWith('|')) {
+      if (!inTable) { inTable = true; tableRows = []; }
+      const stripped = line.trim();
+      if (/^\|[\s\-:|]+\|$/.test(stripped)) continue;
+      tableRows.push(stripped);
+    } else {
+      if (inTable) {
+        processed.push(_buildTable(tableRows));
+        inTable = false;
+        tableRows = [];
+      }
+      processed.push(line);
+    }
+  }
+  if (inTable) processed.push(_buildTable(tableRows));
+
+  return processed.join('\n').replace(/\n/g, '<br>');
+}
+
+function _buildTable(rows) {
+  if (rows.length === 0) return '';
+  let h = '<table>';
+  rows.forEach((row, idx) => {
+    const cells = row.split('|').filter(c => c.trim() !== '');
+    const tag = idx === 0 ? 'th' : 'td';
+    h += '<tr>' + cells.map(c => '<' + tag + '>' + c.trim() + '</' + tag + '>').join('') + '</tr>';
+  });
+  return h + '</table>';
+}
+
 </script>
 </body>
 </html>

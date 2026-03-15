@@ -1,15 +1,15 @@
-#!/usr/bin/env bash
+﻿#!/usr/bin/env bash
 # OpenClaw Skill Installer for AI Agentic DAST Scanner
 # Usage: bash install.sh [SCANNER_URL]
 set -euo pipefail
 
-SCANNER_URL="${1:-http://18.117.143.222:8080}"
+SCANNER_URL="${1:-http://localhost:8080}"
 SKILL_DIR="$HOME/.openclaw/workspace/skills/ai-agentic-scanner"
 
 echo "=== AI Agentic Scanner - OpenClaw Skill Installer ==="
 echo ""
 
-# ── Step 1: Check if OpenClaw is installed ──
+# â”€â”€ Step 1: Check if OpenClaw is installed â”€â”€
 if ! command -v openclaw &>/dev/null; then
     echo "[!] OpenClaw not found. Installing via Docker..."
     echo ""
@@ -40,7 +40,7 @@ if ! command -v openclaw &>/dev/null; then
     echo ""
 fi
 
-# ── Step 2: Install the skill ──
+# â”€â”€ Step 2: Install the skill â”€â”€
 echo "[*] Installing ai-agentic-scanner skill..."
 mkdir -p "$SKILL_DIR"
 
@@ -49,7 +49,7 @@ cp "$SCRIPT_DIR/SKILL.md" "$SKILL_DIR/SKILL.md"
 
 echo "[*] Skill installed to: $SKILL_DIR"
 
-# ── Step 3: Set scanner URL in OpenClaw env ──
+# â”€â”€ Step 3: Set scanner URL in OpenClaw env â”€â”€
 OC_ENV="$HOME/.openclaw/.env"
 if [ -f "$OC_ENV" ]; then
     if grep -q "SCANNER_URL" "$OC_ENV"; then

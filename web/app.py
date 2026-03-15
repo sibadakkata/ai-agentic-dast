@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import glob
 import hashlib
+import logging
 import hmac
 import json
 import os
@@ -22,6 +23,8 @@ from fastapi.staticfiles import StaticFiles
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+logger = logging.getLogger(__name__)
+
 from scanners.ai_agent.agent import run_scan, save_results, ScanCancelled
 from scanners.ai_agent.auth import load_targets_from_dict
 from scanners.ai_agent.llm_config import LLMRouter, check_connectivity
@@ -39,7 +42,7 @@ app = FastAPI(
 # --- Basic Auth ---------------------------------------------------------------
 _security = HTTPBasic()
 _AUTH_USER = os.environ.get("DAST_AUTH_USER", "dast-admin")
-_AUTH_PASS = os.environ.get("DAST_AUTH_PASS", "Dk9xMvP2wLz7nQr8")
+_AUTH_PASS = os.environ.get("DAST_AUTH_PASS", "changeme")
 
 def _verify(credentials: HTTPBasicCredentials = Depends(_security)):
     user_ok = hmac.compare_digest(credentials.username.encode(), _AUTH_USER.encode())
@@ -64,6 +67,34 @@ REPORTS_DIR.mkdir(parents=True, exist_ok=True)
 SCANS: dict[str, dict] = {}
 CANCEL_FLAGS: dict[str, threading.Event] = {}
 PAUSE_FLAGS: dict[str, threading.Event] = {}
+
+def _normalize_severity(raw: str) -> str:
+    """Normalize AI-generated severity strings to standard levels."""
+    s = raw.lower().strip()
+    if "critical" in s:
+        return "Critical"
+    if "high" in s:
+        return "High"
+    if "medium" in s:
+        return "Medium"
+    if "low" in s:
+        return "Low"
+    if "info" in s or not s:
+        return "Info"
+    return raw.title()
+
+
+def _normalize_verdict(raw: str) -> str:
+    """Map raw AI verdicts to standard triage verdicts."""
+    v = raw.upper().strip()
+    _MAP = {
+        "CONFIRMED": "TRUE_POSITIVE",
+        "DISPROVED": "FALSE_POSITIVE",
+        "UNVERIFIED": "UNVERIFIED",
+        "INCONCLUSIVE": "INCONCLUSIVE",
+    }
+    return _MAP.get(v, v)
+
 
 def _load_scans_from_disk():
     """Restore scan metadata from disk on startup."""
@@ -161,11 +192,137 @@ async def logout():
 
 @app.get("/", response_class=HTMLResponse, include_in_schema=False)
 async def index(creds=Depends(_verify)):
-    return FileResponse(Path(__file__).parent / "static" / "index.html")
+    return FileResponse(
+        Path(__file__).parent / "static" / "index.html",
+        headers={"Cache-Control": "no-cache, no-store, must-revalidate", "Pragma": "no-cache"},
+    )
+
+
+@app.get("/api/dashboard", tags=["System"])
+async def get_dashboard():
+    """Aggregate stats for the dashboard page."""
+    total = len(SCANS)
+    running = sum(1 for s in SCANS.values() if s.get("status") == "running")
+    completed = sum(1 for s in SCANS.values() if s.get("status") in ("completed", "done"))
+    errored = sum(1 for s in SCANS.values() if s.get("status") in ("error", "failed"))
+    cancelled = sum(1 for s in SCANS.values() if s.get("status") == "cancelled")
+
+    severity_breakdown: dict[str, int] = {}
+    verdict_breakdown: dict[str, int] = {}
+    total_findings = 0
+    total_cost = 0.0
+
+    for sid, s in SCANS.items():
+        total_cost += s.get("cost", 0) or 0
+        findings = s.get("triaged_findings") or s.get("findings") or []
+
+        if not findings and s.get("findings_count", 0) and s.get("result_file"):
+            try:
+                fpath = RAW_DIR / s["result_file"]
+                if fpath.exists():
+                    rdata = json.loads(fpath.read_text(encoding="utf-8"))
+                    findings = rdata.get("findings", [])
+            except Exception:
+                pass
+
+        if not findings:
+            total_findings += s.get("findings_count", 0) or 0
+        else:
+            for f in findings:
+                total_findings += 1
+                raw_sev = (f.get("severity") or f.get("final_severity") or "Info").strip()
+                sev = _normalize_severity(raw_sev)
+                if sev and sev not in ("Not Exploitable", "TBD", ""):
+                    severity_breakdown[sev] = severity_breakdown.get(sev, 0) + 1
+                raw_verdict = f.get("verdict", "NEEDS_VERIFICATION")
+                verdict = _normalize_verdict(raw_verdict)
+                verdict_breakdown[verdict] = verdict_breakdown.get(verdict, 0) + 1
+
+    recent = []
+    sorted_scans = sorted(SCANS.items(), key=lambda x: x[1].get("started", ""), reverse=True)[:10]
+    for sid, s in sorted_scans:
+        findings_list = s.get("triaged_findings") or s.get("findings") or []
+        recent.append({
+            "id": sid,
+            "target": s.get("target_url", ""),
+            "model": s.get("model_name", s.get("model", "")),
+            "status": s.get("status", ""),
+            "findings": len(findings_list) if findings_list else s.get("findings_count", 0),
+            "cost": s.get("cost"),
+            "duration": s.get("duration"),
+            "scan_mode": s.get("scan_mode", ""),
+            "started": s.get("started", ""),
+        })
+
+    return {
+        "total_scans": total, "running": running, "completed": completed,
+        "errored": errored, "cancelled": cancelled,
+        "total_findings": total_findings, "total_cost": total_cost,
+        "severity_breakdown": severity_breakdown, "verdict_breakdown": verdict_breakdown,
+        "recent_scans": recent,
+    }
+
+
+@app.post("/api/insights/query", tags=["Insights"])
+async def insights_query(request: Request):
+    """Answer a natural-language question about scan findings using LLM."""
+    body = await request.json()
+    query = body.get("query", "").strip()
+    if not query:
+        return JSONResponse({"error": "query is required"}, status_code=400)
+
+    all_findings = []
+    scans_analyzed = 0
+    for sid, s in SCANS.items():
+        findings = s.get("triaged_findings") or s.get("findings") or []
+        if not findings:
+            rf = s.get("result_file", "")
+            if rf:
+                fpath = RAW_DIR / rf
+                try:
+                    if fpath.exists():
+                        rdata = json.loads(fpath.read_text(encoding="utf-8"))
+                        findings = rdata.get("findings", [])
+                except Exception:
+                    pass
+        if findings:
+            scans_analyzed += 1
+            for f in findings:
+                f_copy = dict(f)
+                f_copy["scan_id"] = sid
+                f_copy["target"] = s.get("target_url", "")
+                f_copy["model"] = s.get("model_name", s.get("model", ""))
+                all_findings.append(f_copy)
+
+    summary = json.dumps(all_findings[:200], indent=1, default=str)
+
+    try:
+        router = LLMRouter()
+        prompt = (
+            f"You are a security analyst assistant. The user has {len(all_findings)} findings across "
+            f"{scans_analyzed} scans.\n\nFindings data (up to 200):\n{summary}\n\n"
+            f"User question: {query}\n\n"
+            "Answer concisely in markdown. Include specific counts and details from the data."
+        )
+        model = body.get("model") or "bedrock/mistral.ministral-3-8b-instruct"
+        resp = await asyncio.to_thread(
+            router.complete,
+            model,
+            [{"role": "user", "content": prompt}],
+        )
+        answer = resp.choices[0].message.content or ""
+        return {
+            "answer": answer.strip(),
+            "scans_analyzed": scans_analyzed,
+            "findings_analyzed": len(all_findings),
+        }
+    except Exception as e:
+        logger.exception("Insights query failed")
+        return JSONResponse({"error": str(e)}, status_code=500)
 
 
 @app.get("/api/models", tags=["System"])
-async def get_models(creds=Depends(_verify)):
+async def get_models():
     return MODELS
 
 
@@ -174,14 +331,13 @@ async def list_scans(
     page: int = 1,
     per_page: int = 25,
     search: str = "",
-    creds=Depends(_verify),
 ):
     per_page = min(max(per_page, 1), 100)
     page = max(page, 1)
 
     all_scans = []
     for scan_id, info in sorted(SCANS.items(), key=lambda x: x[1].get("started", ""), reverse=True):
-        all_scans.append({
+        entry: dict = {
             "id": scan_id,
             "target": info.get("target_url", ""),
             "model": info.get("model_name", ""),
@@ -192,7 +348,10 @@ async def list_scans(
             "findings_count": info.get("findings_count"),
             "scan_mode": info.get("scan_mode", ""),
             "phases_completed": info.get("phases_completed", len(info.get("live_phases", []))),
-        })
+        }
+        if info.get("status") == "running":
+            entry["current_phase"] = info.get("current_phase", "")
+        all_scans.append(entry)
     existing_ids = {s["id"] for s in all_scans}
     for f in sorted(RAW_DIR.glob("aiagent_*.json"), key=os.path.getmtime, reverse=True):
         fid = f.stem
@@ -245,7 +404,6 @@ IMPORTS_DIR.mkdir(parents=True, exist_ok=True)
 @app.post("/api/upload", tags=["Scans"])
 async def upload_api_spec(
     file: UploadFile = File(...),
-    creds=Depends(_verify),
 ):
     """Save an uploaded Postman/Burp/Swagger file to imports/."""
     safe_name = file.filename.replace("..", "").replace("/", "_").replace("\\", "_")
@@ -255,8 +413,40 @@ async def upload_api_spec(
     return {"filename": safe_name, "size": len(contents)}
 
 
+@app.post("/api/scan/analyze", tags=["Scans"])
+async def analyze_instruction(request: Request):
+    """Parse a natural-language scan instruction into a structured scan plan."""
+    body = await request.json()
+    instruction = body.get("instruction", "").strip()
+    if not instruction:
+        return JSONResponse({"error": "instruction is required"}, status_code=400)
+    try:
+        router = LLMRouter()
+        prompt = (
+            "You are a DAST scan planner. Parse this instruction and return a JSON object with these fields:\n"
+            "  target_url (string, required), username (string or null), password (string or null),\n"
+            "  auth_type ('form'|'basic'|'bearer'|'auto'), scan_mode ('quick'|'standard'|'deep'),\n"
+            "  focus_urls (list of specific URLs to test), focus_areas (list like 'XSS', 'SQLi'),\n"
+            "  steps (list of human-readable steps the scan will take),\n"
+            "  context (brief summary of intent),\n"
+            "  estimated_time (string), estimated_cost (string).\n"
+            "Return ONLY valid JSON, no markdown.\n\n"
+            f"Instruction: {instruction}"
+        )
+        resp = await asyncio.to_thread(router.chat, [{"role": "user", "content": prompt}], model="mistral/ministral-8b-latest")
+        text = resp.strip()
+        if text.startswith("```"):
+            text = text.split("\n", 1)[-1].rsplit("```", 1)[0]
+        plan = json.loads(text)
+        return {"plan": plan}
+    except json.JSONDecodeError:
+        return {"plan": {"target_url": "", "context": "Could not parse AI response", "error": "Invalid JSON from LLM"}}
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
 @app.post("/api/scan", tags=["Scans"])
-async def start_scan(request: Request, creds=Depends(_verify)):
+async def start_scan(request: Request):
     body = await request.json()
     target_url = body.get("target_url", "").strip()
     username = body.get("username", "").strip()
@@ -491,7 +681,7 @@ async def _run_scan_task(scan_id, target_url, username, password, model, scan_mo
 
 
 @app.get("/api/scan/{scan_id}", tags=["Scans"])
-async def get_scan_status(scan_id: str, creds=Depends(_verify)):
+async def get_scan_status(scan_id: str):
     if scan_id in SCANS:
         s = SCANS[scan_id]
         return {
@@ -517,7 +707,7 @@ async def get_scan_status(scan_id: str, creds=Depends(_verify)):
 
 
 @app.get("/api/scan/{scan_id}/live", tags=["Scans"])
-async def get_scan_live(scan_id: str, since_test: int = 0, since_finding: int = 0, creds=Depends(_verify)):
+async def get_scan_live(scan_id: str, since_test: int = 0, since_finding: int = 0):
     """Return live scan activity: recent tests, findings, and phases since given offsets."""
     if scan_id not in SCANS:
         return JSONResponse({"error": "Scan not found"}, status_code=404)
@@ -540,7 +730,7 @@ async def get_scan_live(scan_id: str, since_test: int = 0, since_finding: int = 
 
 
 @app.post("/api/scan/{scan_id}/stop", tags=["Scans"])
-async def stop_scan(scan_id: str, creds=Depends(_verify)):
+async def stop_scan(scan_id: str):
     """Stop a running scan. Sets a cancellation flag that the agent checks between steps."""
     if scan_id not in SCANS:
         raise HTTPException(status_code=404, detail="Scan not found")
@@ -560,7 +750,7 @@ async def stop_scan(scan_id: str, creds=Depends(_verify)):
 
 
 @app.post("/api/scan/{scan_id}/pause", tags=["Scans"])
-async def pause_scan(scan_id: str, creds=Depends(_verify)):
+async def pause_scan(scan_id: str):
     """Pause a running scan. The agent will pause after the current LLM step."""
     if scan_id not in SCANS:
         raise HTTPException(status_code=404, detail="Scan not found")
@@ -577,7 +767,7 @@ async def pause_scan(scan_id: str, creds=Depends(_verify)):
 
 
 @app.post("/api/scan/{scan_id}/resume", tags=["Scans"])
-async def resume_scan(scan_id: str, creds=Depends(_verify)):
+async def resume_scan(scan_id: str):
     """Resume a paused scan."""
     if scan_id not in SCANS:
         raise HTTPException(status_code=404, detail="Scan not found")
@@ -636,7 +826,7 @@ def _extract_scan_params(old: dict) -> dict:
 
 
 @app.post("/api/scan/{scan_id}/retry", tags=["Scans"])
-async def retry_scan(scan_id: str, request: Request, creds=Depends(_verify)):
+async def retry_scan(scan_id: str, request: Request):
     """Re-run an errored/cancelled scan in-place.  Tries to continue from
     the last completed phase when possible; falls back to full re-run.
     Accepts optional JSON body: {scan_mode, model, force_restart: bool}."""
@@ -709,7 +899,7 @@ async def retry_scan(scan_id: str, request: Request, creds=Depends(_verify)):
 
 
 @app.post("/api/scan/{scan_id}/rescan", tags=["Scans"])
-async def rescan(scan_id: str, request: Request, creds=Depends(_verify)):
+async def rescan(scan_id: str, request: Request):
     """Create a NEW scan with the same parameters as an existing (typically
     completed) scan.  Returns the new scan_id."""
     if scan_id not in SCANS:
@@ -765,7 +955,7 @@ async def rescan(scan_id: str, request: Request, creds=Depends(_verify)):
 
 
 @app.delete("/api/scan/{scan_id}", tags=["Scans"])
-async def delete_scan(scan_id: str, creds=Depends(_verify)):
+async def delete_scan(scan_id: str):
     """Stop (if running) and fully delete a scan, its result files, and reports."""
     deleted = []
     if scan_id in SCANS:
@@ -805,7 +995,7 @@ async def delete_scan(scan_id: str, creds=Depends(_verify)):
 
 
 @app.delete("/api/scans", tags=["Scans"])
-async def delete_all_scans(creds=Depends(_verify)):
+async def delete_all_scans():
     """Stop all running scans and delete all scan records, result files, and reports."""
     for sid, info in list(SCANS.items()):
         if info.get("status") in ("running", "paused", "pausing", "stopping"):
@@ -831,7 +1021,7 @@ async def delete_all_scans(creds=Depends(_verify)):
 
 
 @app.get("/api/results/{scan_id}", tags=["Results"])
-async def get_results(scan_id: str, creds=Depends(_verify)):
+async def get_results(scan_id: str):
     fname = _find_result_file(scan_id)
     if not fname:
         return JSONResponse({"error": "Results not found"}, status_code=404)
@@ -856,10 +1046,12 @@ async def get_results(scan_id: str, creds=Depends(_verify)):
             "confidence": f.get("confidence", ""),
         })
         triaged = triage_classify(f, test_log)
+        final_sev = triaged.get("final_severity", "Info")
         finding_entry = {
             "title": triaged.get("title", ""),
             "ai_severity": f.get("severity", ""),
-            "final_severity": triaged.get("final_severity", ""),
+            "severity": final_sev,
+            "final_severity": final_sev,
             "verdict": triaged.get("verdict", ""),
             "reason": triaged.get("reason", ""),
             "confidence_score": triaged.get("confidence_score"),
@@ -916,7 +1108,7 @@ async def get_results(scan_id: str, creds=Depends(_verify)):
 
 
 @app.get("/api/results/{scan_id}/download", tags=["Results"])
-async def download_raw(scan_id: str, creds=Depends(_verify)):
+async def download_raw(scan_id: str):
     fname = _find_result_file(scan_id)
     if not fname:
         return JSONResponse({"error": "Not found"}, status_code=404)
@@ -924,7 +1116,7 @@ async def download_raw(scan_id: str, creds=Depends(_verify)):
 
 
 @app.post("/api/results/{scan_id}/cvss-override", tags=["Results"])
-async def cvss_override(scan_id: str, request: Request, creds=Depends(_verify)):
+async def cvss_override(scan_id: str, request: Request):
     """Save a CVSS override for a specific finding in a scan."""
     body = await request.json()
     title = body.get("title", "")
@@ -964,7 +1156,7 @@ async def cvss_override(scan_id: str, request: Request, creds=Depends(_verify)):
 
 
 @app.post("/api/results/{scan_id}/report", tags=["Results"])
-async def generate_report(scan_id: str, creds=Depends(_verify)):
+async def generate_report(scan_id: str):
     fname = _find_result_file(scan_id)
     if not fname:
         return JSONResponse({"error": "Not found"}, status_code=404)
@@ -993,16 +1185,105 @@ async def generate_report(scan_id: str, creds=Depends(_verify)):
         return JSONResponse({"error": f"Report generation failed: {str(e)}"}, status_code=500)
 
 
+@app.get("/api/reports", tags=["Results"])
+async def list_reports():
+    """List all generated PDF and Excel reports grouped by target."""
+    reports = []
+    for f in sorted(REPORTS_DIR.iterdir(), reverse=True) if REPORTS_DIR.exists() else []:
+        if f.suffix not in (".pdf", ".xlsx"):
+            continue
+        scan_id = f.stem.replace("report_", "").replace("excel_", "")
+        scan_info = SCANS.get(scan_id, {})
+        target = scan_info.get("target_url", "Unknown Target")
+        reports.append({
+            "filename": f.name, "size": f.stat().st_size,
+            "modified": datetime.fromtimestamp(f.stat().st_mtime).isoformat(),
+            "type": "pdf" if f.suffix == ".pdf" else "xlsx",
+            "url": f"/api/reports/{f.name}",
+            "scan_id": scan_id, "target": target,
+            "model": scan_info.get("model_name", scan_info.get("model", "")),
+            "scanner": scan_info.get("scanner", "ai"),
+            "findings_count": scan_info.get("findings_count", 0),
+            "started": scan_info.get("started", ""),
+        })
+    return {"reports": reports}
+
+
 @app.get("/api/reports/{filename}", tags=["Results"])
-async def download_report(filename: str, creds=Depends(_verify)):
+async def download_report(filename: str):
     fpath = REPORTS_DIR / filename
     if not fpath.exists():
         return JSONResponse({"error": "Not found"}, status_code=404)
-    return FileResponse(str(fpath), filename=filename, media_type="application/pdf")
+    media = "application/pdf" if filename.endswith(".pdf") else "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    return FileResponse(str(fpath), filename=filename, media_type=media)
+
+
+@app.delete("/api/reports/{filename}", tags=["Results"])
+async def delete_report_file(filename: str):
+    """Delete a single report file."""
+    fpath = REPORTS_DIR / filename
+    if not fpath.exists():
+        return JSONResponse({"error": "Not found"}, status_code=404)
+    fpath.unlink()
+    return {"deleted": filename}
+
+
+@app.delete("/api/reports", tags=["Results"])
+async def delete_reports_for_target(target: str = ""):
+    """Delete all reports (and optionally scan data) for a target URL."""
+    if not target:
+        return JSONResponse({"error": "target query param required"}, status_code=400)
+
+    deleted_files = []
+    deleted_scans = []
+
+    if target == "orphan":
+        known_ids = set(SCANS.keys())
+        for f in list(REPORTS_DIR.glob("*")) if REPORTS_DIR.exists() else []:
+            sid = f.stem.replace("report_", "").replace("excel_", "")
+            if sid not in known_ids:
+                f.unlink()
+                deleted_files.append(f.name)
+    else:
+        ids_to_delete = [sid for sid, s in SCANS.items() if s.get("target_url", "") == target]
+        for sid in ids_to_delete:
+            for f in list(REPORTS_DIR.glob(f"*{sid}*")):
+                f.unlink()
+                deleted_files.append(f.name)
+            for f in list(RAW_DIR.glob(f"*{sid}*")):
+                f.unlink()
+            SCANS.pop(sid, None)
+            deleted_scans.append(sid)
+        _save_scans_to_disk()
+
+    return {"deleted_files": deleted_files, "deleted_scans": deleted_scans}
+
+
+@app.get("/api/results/{scan_id}/excel", tags=["Results"])
+async def generate_excel(scan_id: str):
+    """Generate and download an Excel report for a scan."""
+    fname = _find_result_file(scan_id)
+    if not fname:
+        return JSONResponse({"error": "Results not found"}, status_code=404)
+    try:
+        from scripts.excel_exporter import export_excel
+        data = json.loads(Path(fname).read_text(encoding="utf-8"))
+        scan_info = SCANS.get(scan_id, {})
+        triaged = scan_info.get("triaged_findings") or data.get("findings", [])
+        xlsx_path = export_excel(data, triaged, scan_id, str(REPORTS_DIR))
+        return FileResponse(
+            str(xlsx_path),
+            filename=os.path.basename(xlsx_path),
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return JSONResponse({"error": f"Excel export failed: {str(e)}"}, status_code=500)
 
 
 @app.get("/api/results/{scan_id}/payloads", tags=["Results"])
-async def download_payloads(scan_id: str, creds=Depends(_verify)):
+async def download_payloads(scan_id: str):
     """Download all payloads tested per phase as a JSON file."""
     fname = _find_result_file(scan_id)
     if not fname:
@@ -1044,7 +1325,7 @@ async def download_payloads(scan_id: str, creds=Depends(_verify)):
 
 
 @app.get("/api/scan/{scan_id}/payloads-live", tags=["Scans"])
-async def download_live_payloads(scan_id: str, creds=Depends(_verify)):
+async def download_live_payloads(scan_id: str):
     """Download all live payloads captured so far (works for running or completed scans)."""
     if scan_id not in SCANS:
         return JSONResponse({"error": "Scan not found"}, status_code=404)

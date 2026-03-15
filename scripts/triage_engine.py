@@ -76,6 +76,20 @@ def _cwe_apply(r, profile_key):
     r["cvss_vector"] = p.get("vec", "")
 
 
+def _cwe_from_hint(r, finding):
+    """Apply CWE/CVSS from a cwe_hint if available."""
+    hint = finding.get("cwe_hint", "")
+    if not hint:
+        return
+    r["cwe"] = hint
+    for key, profile in CWE_PROFILES.items():
+        if profile.get("cwe") == hint:
+            r["cvss"] = profile.get("cvss", 0.0)
+            r["cvss_vector"] = profile.get("vec", "")
+            return
+    r["cvss"] = r.get("cvss") or 5.0
+
+
 def _adjust_cvss(r, finding, statuses, bodies, evidence, title):
     """Context-aware CVSS adjustment based on actual evidence.
 
@@ -154,8 +168,9 @@ def _adjust_cvss(r, finding, statuses, bodies, evidence, title):
 
     # 8. CORS with credentials vs without
     if "cors" in title:
-        acao = str(finding.get("verification_details", {}).get("acao", ""))
-        acac = str(finding.get("verification_details", {}).get("acac", ""))
+        vd = finding.get("verification_details") or {}
+        acao = str(vd.get("acao", "")) if isinstance(vd, dict) else ""
+        acac = str(vd.get("acac", "")) if isinstance(vd, dict) else ""
         if acao == "*" and acac == "true":
             base = max(base, 6.5)
             adjustments.append(f"Set to {base:.1f} — CORS * with credentials is exploitable")
@@ -297,11 +312,21 @@ def _runtime_cwe(r: dict, title: str):
 # ══════════════════════════════════════════════════════════════════════
 
 def find_tests(finding, test_log, limit=5):
-    url = (finding.get("url", "") or "").split("?")[0]
+    raw_url = finding.get("url", "") or ""
+    if isinstance(raw_url, list):
+        raw_url = raw_url[0] if raw_url else ""
+    url = str(raw_url).split("?")[0]
     param = finding.get("parameter", "") or ""
+    if isinstance(param, list):
+        param = param[0] if param else ""
+    if isinstance(param, dict):
+        param = json.dumps(param, default=str)
+    param = str(param)
     matched = []
     for t in test_log:
         req = t.get("request", {})
+        if not isinstance(req, dict):
+            continue
         t_url = req.get("url", "") or req.get("endpoint", "")
         score = 0
         if url and url in t_url:
@@ -322,10 +347,16 @@ def get_statuses(tests):
             continue
         s = resp.get("status")
         if s:
-            statuses.append(s)
+            try:
+                statuses.append(int(s))
+            except (ValueError, TypeError):
+                pass
         for r in resp.get("results", []):
             if isinstance(r, dict) and r.get("status"):
-                statuses.append(r["status"])
+                try:
+                    statuses.append(int(r["status"]))
+                except (ValueError, TypeError):
+                    pass
     return statuses
 
 
@@ -350,6 +381,8 @@ def _build_curl(t):
         return ""
     parts = [f"curl -X {m}"]
     headers = req.get("headers", {})
+    if not isinstance(headers, dict):
+        headers = {}
     for k, v in list(headers.items())[:8]:
         parts.append(f"  -H '{k}: {str(v)[:120]}'")
     body = req.get("body", "")
@@ -619,30 +652,48 @@ def classify(finding, test_log):
     """Universal triage: classify any scanner finding from any target.
     Returns dict with verdict, severity, CVE/CWE, evidence, steps, cvss_rationale, etc."""
     r = _classify_inner(finding, test_log)
-    title = (finding.get("title", "") or "").lower()
+    title = _safe_str(finding.get("title", "")).lower()
     ev_raw = finding.get("evidence", "") or ""
-    evidence = str(ev_raw).lower() if not isinstance(ev_raw, dict) else json.dumps(ev_raw).lower()
+    evidence = str(ev_raw).lower() if not isinstance(ev_raw, (dict, list)) else json.dumps(ev_raw).lower()
     tests = find_tests(finding, test_log)
     statuses = get_statuses(tests)
     bodies = get_response_bodies(tests)
     _adjust_cvss(r, finding, statuses, bodies, evidence, title)
+
+    source = finding.get("source", "ai")
+    r["source"] = source
+    if source == "both":
+        conf = r.get("confidence_score") or r.get("confidence", 0)
+        if isinstance(conf, (int, float)):
+            r["confidence_score"] = min(conf + 2, 10)
+        r.setdefault("corroborated", True)
+
     return r
+
+
+def _safe_str(val, default=""):
+    """Coerce value to string, picking first element if it's a list."""
+    if isinstance(val, list):
+        return str(val[0]) if val else default
+    return str(val) if val else default
 
 
 def _classify_inner(finding, test_log):
     """Core classification logic."""
-    title = (finding.get("title", "") or "").lower()
+    title = _safe_str(finding.get("title", "")).lower()
     ev_raw = finding.get("evidence", "") or ""
-    evidence = str(ev_raw).lower() if not isinstance(ev_raw, dict) else json.dumps(ev_raw).lower()
-    severity = finding.get("severity", "Info")
-    url = finding.get("url", "") or ""
-    payload = str(finding.get("payload", "") or "")
+    evidence = str(ev_raw).lower() if not isinstance(ev_raw, (dict, list)) else json.dumps(ev_raw).lower()
+    severity = _safe_str(finding.get("severity", "Info"))
+    url = _safe_str(finding.get("url", ""))
+    payload = _safe_str(finding.get("payload", ""))
 
     tests = find_tests(finding, test_log)
     statuses = get_statuses(tests)
     bodies = get_response_bodies(tests)
     all_redirects = all(s in (301, 302, 303, 307, 308) for s in statuses) if statuses else False
     confidence = _compute_confidence(finding, tests, statuses, bodies, evidence)
+
+    source = finding.get("source", "ai")
 
     r = {
         "title": finding.get("title", ""),
@@ -665,7 +716,10 @@ def _classify_inner(finding, test_log):
         "response_status": list(set(statuses))[:6],
         "verification_method": finding.get("verification_method", "none"),
         "verification_evidence": finding.get("verification_evidence", ""),
+        "source": source,
     }
+
+    _cwe_from_hint(r, finding)
 
     # ==================================================================
     # LAYER 0: RUNTIME VERIFICATION — real payload replay results
@@ -677,9 +731,9 @@ def _classify_inner(finding, test_log):
     rv_verified = finding.get("verified", False)
 
     if rv_verified and rv_verdict in ("CONFIRMED", "DISPROVED", "INCONCLUSIVE"):
-        rv_method = finding.get("verification_method", "")
-        rv_evidence = finding.get("verification_evidence", "")
-        rv_details = finding.get("verification_details", {})
+        rv_method = finding.get("verification_method", "") or ""
+        rv_evidence = finding.get("verification_evidence", "") or ""
+        rv_details = finding.get("verification_details") or {}
 
         if rv_verdict == "CONFIRMED":
             sev = _runtime_severity(title, rv_method, rv_details)
@@ -1619,7 +1673,7 @@ def _classify_inner(finding, test_log):
         r.update(verdict="TRUE_POSITIVE", final_severity="Low",
                  reason=f"Moderate confidence ({confidence}/10). Some evidence present "
                         "supporting the finding. Classified as Low TP.",
-                 dev_action="Investigate. May warrant Burp Suite confirmation for upgrade.")
+                 dev_action="Investigate. May warrant manual confirmation for upgrade.")
         return r
 
     is_config_finding = any(k in title for k in [
@@ -1648,8 +1702,8 @@ def _classify_inner(finding, test_log):
         r.update(verdict="MANUAL_REVIEW", final_severity="TBD",
                  reason=f"Insufficient evidence to decide (confidence {confidence}/10). "
                         "No strong positive or negative signals. Requires manual verification "
-                        "with Burp Suite or authenticated re-scan.",
-                 dev_action="Manual review required. Re-test with authenticated session or Burp Suite.")
+                        "or authenticated re-scan.",
+                 dev_action="Manual review required. Re-test with authenticated session.")
         return r
 
     if confidence >= -2:

@@ -14,7 +14,6 @@ from playwright.async_api import async_playwright
 
 from .api_import import (
     EndpointRegistry,
-    parse_burp_export,
     parse_openapi_spec,
     parse_postman_collection,
 )
@@ -293,9 +292,6 @@ async def run_scan(
             postman_path = _resolve_import_path(config_dir, target.postman_file)
             if postman_path:
                 registry.add(parse_postman_collection(postman_path, _resolve_import_path(config_dir, target.postman_env)))
-            burp_path = _resolve_import_path(config_dir, target.burp_file)
-            if burp_path:
-                registry.add(parse_burp_export(burp_path))
             openapi_path = _resolve_import_path(config_dir, target.openapi_file)
             if openapi_path:
                 registry.add(parse_openapi_spec(openapi_path))
@@ -935,9 +931,6 @@ async def run_dry_scan(
             postman_path = _resolve_import_path(config_dir, target.postman_file)
             if postman_path:
                 registry.add(parse_postman_collection(postman_path, _resolve_import_path(config_dir, target.postman_env)))
-            burp_path = _resolve_import_path(config_dir, target.burp_file)
-            if burp_path:
-                registry.add(parse_burp_export(burp_path))
             openapi_path = _resolve_import_path(config_dir, target.openapi_file)
             if openapi_path:
                 registry.add(parse_openapi_spec(openapi_path))

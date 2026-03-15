@@ -17,11 +17,23 @@ archive/
 # Build artifacts
 *.zip
 
-# Temp / test scripts
+# Temp / test / debug scripts
+_*.py
+_*.js
 test_*.py
+test_*.png
 !openclaw-skill/test_skill.py
+oos.py
 Winword.rtf
 ~$*
+
+# Test screenshots
+test_screenshots/
+
+# Node
+node_modules/
+package-lock.json
+package.json
 
 # Python
 __pycache__/

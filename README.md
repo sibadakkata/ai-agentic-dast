@@ -24,7 +24,7 @@ Every finding is then **triaged offline** by a 3-layer evidence-based engine tha
 │     Auto-detect auth type (form, SSO, OAuth, API key, bearer)       │
 │     Login → capture session → monitor token expiry → auto-refresh   │
 ├─────────────────────────────────────────────────────────────────────┤
-│  2. API BASELINE (if Postman/Burp/OpenAPI imported)                 │
+│  2. API BASELINE (if Postman/OpenAPI imported)                      │
 │     Execute every endpoint in order with original data              │
 │     Chain variables (IDs, tokens) between requests automatically    │
 │     Result: "known good" responses for comparison                   │
@@ -57,29 +57,34 @@ Every finding is then **triaged offline** by a 3-layer evidence-based engine tha
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
-## Quick Start (Web UI)
+## Quick Start (EC2 Deployment)
 
-The fastest way to get started — no CLI needed.
+The recommended path — clone the repo, configure, and deploy with one script.
+
+```bash
+# 1. Clone & upload to EC2
+scp -i key.pem -r ./POC ubuntu@<EC2-IP>:~/ai-dast-scanner
+
+# 2. SSH in and configure
+ssh -i key.pem ubuntu@<EC2-IP>
+cd ~/ai-dast-scanner
+cp .env.example .env
+nano .env  # Add your API keys (AWS Bedrock creds, auth password, etc.)
+
+# 3. Deploy
+bash deploy.sh
+# → Builds Docker image, starts container, waits for health check
+# → Web UI available at http://<EC2-IP>:8080
+```
+
+### Local Development (No Docker)
 
 ```bash
 pip install -r requirements.txt
 playwright install chromium
+cp .env.example .env && nano .env
 uvicorn web.app:app --host 0.0.0.0 --port 8080
 # Open http://localhost:8080
-# Login: dast-admin / (set via DAST_AUTH_PASS env var)
-```
-
-Or with Docker:
-
-```bash
-docker build -t ai-dast-scanner .
-docker run -d --name dast-scanner --network host \
-  --restart unless-stopped \
-  -e AWS_DEFAULT_REGION=us-east-1 \
-  -e DAST_AUTH_PASS=YourStrongPassword \
-  -v $(pwd)/dast-data/results:/app/results \
-  -v $(pwd)/dast-data/imports:/app/imports \
-  ai-dast-scanner uvicorn web.app:app --host 0.0.0.0 --port 8080
 ```
 
 ## Supported Models (AWS Bedrock)
@@ -126,7 +131,7 @@ The router auto-selects the path: `bedrock/` prefixed models always go direct to
 ## Web UI Features
 
 - **New Scan** — enter target URL, optional credentials, pick model and scan mode (web/API/both)
-- **API Imports** — upload Postman Collection (v2.0/v2.1), Burp Proxy Export (XML), or Swagger/OpenAPI spec (2.0, 3.0, 3.1 in JSON/YAML)
+- **API Imports** — upload Postman Collection (v2.0/v2.1) or Swagger/OpenAPI spec (2.0, 3.0, 3.1 in JSON/YAML)
 - **Live Scan Progress** — real-time view of tool calls, payloads tested, responses, pages crawled, and findings detected as the scan runs
 - **AI vs Triage** — side-by-side comparison of AI severity vs evidence-based triage verdict
 - **Crawled Endpoints** — full list of discovered links and API endpoints
@@ -146,28 +151,31 @@ The router auto-selects the path: `bedrock/` prefixed models always go direct to
 
 ## Docker Deployment (EC2)
 
-### Recommended Setup
+### Recommended Setup (Docker Compose)
+
+Use the included `deploy.sh` script which handles everything:
 
 ```bash
-# Build the image
-docker build -t ai-dast-scanner .
+bash deploy.sh
+```
 
-# Create persistent data directories
-mkdir -p /home/ubuntu/dast-data/results /home/ubuntu/dast-data/imports
+This runs `docker compose build && docker compose up -d` using the provided `docker-compose.yml`. All configuration (API keys, auth credentials, port) is read from the `.env` file.
 
-# Run with persistent volumes + auto-restart
-docker run -d --name dast-scanner --network host \
-  --restart unless-stopped \
-  -e AWS_DEFAULT_REGION=us-east-1 \
-  -e DAST_AUTH_PASS=YourStrongPassword \
-  -v /home/ubuntu/dast-data/results:/app/results \
-  -v /home/ubuntu/dast-data/imports:/app/imports \
-  ai-dast-scanner uvicorn web.app:app --host 0.0.0.0 --port 8080
+To customize, edit `.env` (copied from `.env.example`):
+
+```bash
+# .env
+ANTHROPIC_API_KEY=sk-ant-...     # Optional (if using Anthropic directly)
+AWS_ACCESS_KEY_ID=AKIA...        # For Bedrock models
+AWS_SECRET_ACCESS_KEY=...
+AWS_DEFAULT_REGION=us-east-1
+DAST_AUTH_USER=dast-admin
+DAST_AUTH_PASS=YourStrongPassword
 ```
 
 ### Data Persistence
 
-All scan data is stored in Docker volumes mounted to the host. If the container crashes, stops, or is rebuilt:
+All scan data is stored in Docker named volumes. If the container crashes, stops, or is rebuilt:
 
 | Data | Host Path | Survives Restart? |
 |------|-----------|-------------------|
@@ -262,7 +270,7 @@ curl -s -u "$DAST_USER:$DAST_PASS" \
 {"scan_id": "scan_20260304_143022_a1b2c3", "status": "started"}
 ```
 
-### 3. Upload API Spec (Postman / Burp / OpenAPI)
+### 3. Upload API Spec (Postman / OpenAPI)
 
 ```bash
 curl -s -u "$DAST_USER:$DAST_PASS" \
@@ -284,7 +292,7 @@ curl -s -u "$DAST_USER:$DAST_PASS" \
   }'
 ```
 
-Supported import keys: `postman`, `postman_env`, `burp`, `openapi`.
+Supported import keys: `postman`, `postman_env`, `openapi`.
 
 ### 4. Poll Scan Status
 
@@ -494,7 +502,7 @@ pip install mcp
 | `get_scan_stats` | Aggregated statistics: severity/verdict/category breakdown, cost, duration, coverage |
 | `generate_report` | Generate PDF report |
 | `download_payloads` | Export all tested payloads by phase |
-| `upload_api_spec` | Upload Postman/Burp/OpenAPI file |
+| `upload_api_spec` | Upload Postman/OpenAPI file |
 | `list_scans` | List all scan history (includes `scan_mode` per scan) |
 | `delete_scan` | Stop (if running) and permanently delete a scan, results, and reports |
 
@@ -508,6 +516,13 @@ SCANNER_URL=http://your-host:8080 SCANNER_PASS=secret python mcp_server.py --tra
 ## Project Structure
 
 ```
+.env.example                # Environment template (copy to .env and fill in)
+docker-compose.yml          # Docker Compose service definition
+Dockerfile                  # Production container image
+deploy.sh                   # One-command EC2 deployment script
+requirements.txt            # Python dependencies
+mcp_server.py               # MCP server (Model Context Protocol)
+mcp_config.example.json     # Example Cursor MCP configuration
 config/
   scanner_config.yaml       # Default model + scan settings
   targets.env.example       # Template for CLI credentials
@@ -517,33 +532,31 @@ scanners/ai_agent/
   llm_config.py             # LLM routing (Bedrock/LiteLLM) + cost tracking
   prompts.py                # System + phase prompts (15 website + 10 API phases)
   tools.py                  # 28 tools (browser, API, WebSocket, token, fuzzing)
-  api_import.py             # Postman/Burp/OpenAPI parsers
+  api_import.py             # Postman/OpenAPI parsers
   baseline_executor.py      # API happy-path executor + variable auto-chaining
   body_fuzzer.py            # Hybrid body fuzzer (LLM-planned, deterministic execution)
 scripts/
   run_scan.py               # CLI entry point
   report_generator.py       # PDF report generator with full evidence
+  excel_exporter.py         # Excel report exporter (multi-sheet .xlsx)
   triage_engine.py          # 3-layer universal triage engine
   cve_lookup.py             # NVD + OSV.dev dynamic CVE/CVSS lookup
 web/
   app.py                    # FastAPI backend (with Basic Auth)
   static/index.html         # Single-page web UI
 tests/
-  test_api_imports.py       # API import parser tests (Postman/Burp/OpenAPI)
-results/
+  test_api_imports.py       # API import parser tests (Postman/OpenAPI)
+results/                    # Created at runtime
   raw/                      # Scan output JSON
   reports/                  # Generated PDF reports
   cache/                    # NVD/OSV API response cache
-imports/                    # Uploaded API definitions (Postman/Burp/OpenAPI)
-mcp_server.py               # MCP server (Model Context Protocol)
-mcp_config.example.json     # Example Cursor MCP configuration
-Dockerfile                  # Production container image
+imports/                    # Uploaded API definitions (Postman/OpenAPI)
 ```
 
 ## Scan Capabilities
 
 - **Websites**: Traditional multi-page sites, SPAs (React/Angular/Vue), authenticated flows
-- **APIs**: REST, GraphQL, WebSocket — with Postman (v2.0/v2.1), OpenAPI (2.0/3.0/3.1), and Burp XML import support
+- **APIs**: REST, GraphQL, WebSocket — with Postman (v2.0/v2.1) and OpenAPI (2.0/3.0/3.1) import support
 - **Authentication**: Form login, SSO (SAML), OAuth 2.0/OIDC, MFA (TOTP), session refresh, or unauthenticated scanning
 - **Payloads**: LLM-generated per context — the agent reasons about what it sees and crafts payloads accordingly
 - **Business Logic**: IDOR, nonce reuse, race conditions, payment flow abuse, privilege escalation

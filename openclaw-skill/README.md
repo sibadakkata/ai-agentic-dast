@@ -1,4 +1,4 @@
-# AI Agentic Scanner - OpenClaw Skill
+﻿# AI Agentic Scanner - OpenClaw Skill
 
 An [OpenClaw](https://github.com/openclaw/openclaw) skill that lets you trigger and manage AI-powered DAST security scans through natural language chat.
 
@@ -6,11 +6,11 @@ An [OpenClaw](https://github.com/openclaw/openclaw) skill that lets you trigger 
 
 ```
 YOUR MACHINE (local)                        EC2 (remote)
-┌─────────────────────┐                     ┌─────────────────────┐
-│  test_skill.py      │    HTTP REST API    │  AI Agentic Scanner │
-│  (or OpenClaw agent)│ ──────────────────► │  (already running)  │
-│                     │ ◄────────────────── │  Docker container   │
-└─────────────────────┘    JSON responses   └─────────────────────┘
+â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”                     â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”
+â”‚  test_skill.py      â”‚    HTTP REST API    â”‚  AI Agentic Scanner â”‚
+â”‚  (or OpenClaw agent)â”‚ â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â–º â”‚  (already running)  â”‚
+â”‚                     â”‚ â—„â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ â”‚  Docker container   â”‚
+â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜    JSON responses   â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜
 ```
 
 You do **not** need to run the scanner locally. The scanner stays on EC2. Only this skill/test script runs on your machine and talks to EC2 over HTTP.
@@ -24,7 +24,7 @@ cd C:\Projects\Pen-Test\Acunetix\POC
 python openclaw-skill/test_skill.py list
 ```
 
-Default scanner URL: `http://18.117.143.222:8080`. Override with:
+Default scanner URL: `http://localhost:8080`. Override with:
 ```powershell
 $env:SCANNER_URL = "http://your-scanner:8080"
 ```
@@ -153,7 +153,7 @@ Model : Claude Haiku 4.5 (recommended)
 Cost  : $26.7496
 
 Generating PDF report...
-Report: http://18.117.143.222:8080/api/reports/scan_bedrock_us_anthropic_claude_haiku_4_5.pdf
+Report: http://localhost:8080/api/reports/scan_bedrock_us_anthropic_claude_haiku_4_5.pdf
 ```
 
 ### 8. Check Status of a Specific Scan
@@ -210,7 +210,7 @@ python openclaw-skill/test_skill.py report scan_20260311_144535_99d6f9
 
 Output:
 ```
-Report: http://18.117.143.222:8080/api/reports/scan_bedrock_us_anthropic_claude_haiku_4_5.pdf
+Report: http://localhost:8080/api/reports/scan_bedrock_us_anthropic_claude_haiku_4_5.pdf
 ```
 
 ### 11. Start a New Scan
@@ -242,7 +242,7 @@ python openclaw-skill/test_skill.py stop scan_20260312_082647_cbb4a2
 If you want team-wide access via Slack/Web UI:
 
 ```bash
-bash openclaw-skill/install.sh http://18.117.143.222:8080
+bash openclaw-skill/install.sh http://localhost:8080
 ```
 
 Then chat naturally in OpenClaw:
@@ -255,7 +255,7 @@ Then chat naturally in OpenClaw:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `SCANNER_URL` | `http://18.117.143.222:8080` | Scanner backend URL |
+| `SCANNER_URL` | `http://localhost:8080` | Scanner backend URL |
 | `SCANNER_USER` | `dast-admin` | Basic auth username |
 | `SCANNER_PASS` | (set in env) | Basic auth password |
 
@@ -263,8 +263,8 @@ Then chat naturally in OpenClaw:
 
 ```
 openclaw-skill/
-├── SKILL.md          # OpenClaw skill definition
-├── install.sh        # One-command installer for OpenClaw
-├── test_skill.py     # Standalone CLI (no OpenClaw needed)
-└── README.md         # This file
+â”œâ”€â”€ SKILL.md          # OpenClaw skill definition
+â”œâ”€â”€ install.sh        # One-command installer for OpenClaw
+â”œâ”€â”€ test_skill.py     # Standalone CLI (no OpenClaw needed)
+â””â”€â”€ README.md         # This file
 ```

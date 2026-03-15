@@ -56,7 +56,6 @@ class ScanTarget:
     auth_config: dict
     postman_file: str | None = None
     postman_env: str | None = None
-    burp_file: str | None = None
     openapi_file: str | None = None
 
 
@@ -521,7 +520,6 @@ def load_targets(config_path: str) -> list[ScanTarget]:
                 auth_config=auth_config,
                 postman_file=api_imports.get("postman"),
                 postman_env=api_imports.get("postman_env"),
-                burp_file=api_imports.get("burp"),
                 openapi_file=api_imports.get("openapi"),
             )
         )
@@ -550,6 +548,5 @@ def load_targets_from_dict(t: dict) -> ScanTarget:
         },
         postman_file=api_imports.get("postman"),
         postman_env=api_imports.get("postman_env"),
-        burp_file=api_imports.get("burp"),
         openapi_file=api_imports.get("openapi"),
     )

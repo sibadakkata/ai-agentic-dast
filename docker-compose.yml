@@ -1,0 +1,25 @@
+version: "3.9"
+
+services:
+  dast-scanner:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "${DAST_PORT:-8080}:8080"
+    environment:
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID:-}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY:-}
+      - AWS_DEFAULT_REGION=${AWS_DEFAULT_REGION:-us-east-1}
+      - DAST_AUTH_USER=${DAST_AUTH_USER:-dast-admin}
+      - DAST_AUTH_PASS=${DAST_AUTH_PASS:-changeme}
+    volumes:
+      - scan-results:/app/results
+      - scan-imports:/app/imports
+    restart: unless-stopped
+
+volumes:
+  scan-results:
+  scan-imports:

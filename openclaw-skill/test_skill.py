@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 """
 End-to-end test for the AI Agentic Scanner OpenClaw skill.
 
@@ -29,9 +29,9 @@ import time
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
 
-SCANNER_URL = os.environ.get("SCANNER_URL", "http://18.117.143.222:8080")
+SCANNER_URL = os.environ.get("SCANNER_URL", "http://localhost:8080")
 SCANNER_USER = os.environ.get("SCANNER_USER", "dast-admin")
-SCANNER_PASS = os.environ.get("SCANNER_PASS", "Dk9xMvP2wLz7nQr8")
+SCANNER_PASS = os.environ.get("SCANNER_PASS", "changeme")
 
 
 def _auth_header():
@@ -94,7 +94,7 @@ def _fmt_scan(s):
             f"  {'':28s}   Model: {model:30s}  findings={findings}  cost=${cost:.4f}")
 
 
-# ── Commands ──────────────────────────────────────────────
+# â”€â”€ Commands â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 
 def cmd_list(_args):

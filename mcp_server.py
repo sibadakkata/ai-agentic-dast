@@ -230,6 +230,16 @@ def get_live_activity(scan_id: str, since_test: int = 0, since_finding: int = 0)
                      params={"since_test": since_test, "since_finding": since_finding})
 
 
+def _get_all_scans() -> list[dict]:
+    """Fetch all scans, handling paginated response."""
+    data = _request("GET", "/api/scans", params={"per_page": 100})
+    if isinstance(data, list):
+        return data
+    if isinstance(data, dict) and "items" in data:
+        return data["items"]
+    return []
+
+
 @mcp.tool()
 def list_scans() -> list:
     """List all scans (past and running).
@@ -237,7 +247,7 @@ def list_scans() -> list:
     Returns:
         Array of scans with id, target, model, status, duration, cost, findings_count.
     """
-    return _request("GET", "/api/scans")
+    return _get_all_scans()
 
 
 @mcp.tool()
@@ -268,7 +278,7 @@ def download_payloads(scan_id: str) -> dict:
 
 @mcp.tool()
 def upload_api_spec(file_path: str) -> dict:
-    """Upload a Postman collection, Burp export, or OpenAPI spec for API scanning.
+    """Upload a Postman collection or OpenAPI spec for API scanning.
 
     Args:
         file_path: Local path to the file to upload.
@@ -363,8 +373,8 @@ def query_findings(
     Returns:
         Matching findings with scan context, severity counts, and per-scan breakdown.
     """
-    scans = _request("GET", "/api/scans")
-    if not isinstance(scans, list):
+    scans = _get_all_scans()
+    if not scans:
         return "No scans found."
 
     if scan_id:
@@ -515,8 +525,8 @@ def get_scan_stats(scan_id: str = "", target: str = "") -> str:
         Statistics: finding counts by severity/verdict/type, scan metadata
         (duration, cost, model), and comparison across scans if multiple match.
     """
-    scans = _request("GET", "/api/scans")
-    if not isinstance(scans, list):
+    scans = _get_all_scans()
+    if not scans:
         return "No scans found."
 
     if scan_id:
@@ -656,7 +666,7 @@ def scanner_models() -> str:
 @mcp.resource("scanner://scans")
 def scanner_scans() -> str:
     """All scan history."""
-    return json.dumps(_request("GET", "/api/scans"), indent=2)
+    return json.dumps(_get_all_scans(), indent=2)
 
 
 # ── Prompts ───────────────────────────────────────────────────────────
