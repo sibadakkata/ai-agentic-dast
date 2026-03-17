@@ -69,6 +69,30 @@ CWE_PROFILES = {
 }
 
 
+def _passive_recon_action(title: str) -> str:
+    """Remediation for passive recon findings."""
+    t = title.lower()
+    if "source map" in t:
+        return "Remove source maps from production. Configure build tools to exclude .map files from deployment."
+    if "dom sink" in t or "innerhtml" in t or "eval" in t or "trustashtml" in t:
+        return "Audit the identified DOM sink for user-controlled input. Use safe alternatives (textContent, sanitize libraries)."
+    if "hardcoded" in t and ("key" in t or "secret" in t or "password" in t or "token" in t):
+        return "URGENT: Remove hardcoded secrets from client-side code. Rotate compromised credentials. Use server-side env vars."
+    if "internal" in t and ("ip" in t or "url" in t or "localhost" in t):
+        return "Remove internal URLs/IPs from client-side JavaScript before deployment."
+    if "git" in t and ("expos" in t or "accessible" in t):
+        return "CRITICAL: Block .git/ directory access immediately. Use web server rules (nginx: location ~ /\\.git { deny all; })."
+    if ".env" in t or "environment file" in t:
+        return "CRITICAL: Block .env file access. Move secrets to a vault. Rotate all exposed credentials."
+    if "security header" in t or "missing" in t:
+        return "Add recommended security headers to all responses."
+    if "version disclosure" in t or "server version" in t:
+        return "Remove version information from response headers (Server, X-Powered-By)."
+    if "html comment" in t:
+        return "Remove sensitive information from HTML comments before deployment."
+    return "Review and remediate the identified issue."
+
+
 def _cwe_apply(r, profile_key):
     p = CWE_PROFILES.get(profile_key, {})
     r["cwe"] = p.get("cwe", "")
@@ -720,6 +744,28 @@ def _classify_inner(finding, test_log):
     }
 
     _cwe_from_hint(r, finding)
+
+    # ==================================================================
+    # LAYER 0A: PASSIVE RECON — deterministic checks, high confidence
+    # These are verified facts (file exists, header missing, pattern found).
+    # ==================================================================
+
+    if finding.get("finding_type") == "passive_recon":
+        cvss_h = finding.get("cvss_hint", 0)
+        sev = SEV_FROM_CVSS(cvss_h) if cvss_h else severity
+        r.update(
+            verdict="TRUE_POSITIVE",
+            final_severity=sev,
+            reason=f"[PASSIVE RECON] Deterministic check — {str(ev_raw)[:250]}",
+            dev_action=_passive_recon_action(title),
+            confidence=8,
+            verification_method="passive_deterministic",
+        )
+        if finding.get("cwe_hint"):
+            r["cwe"] = finding["cwe_hint"]
+        if cvss_h:
+            r["cvss"] = cvss_h
+        return r
 
     # ==================================================================
     # LAYER 0: RUNTIME VERIFICATION — real payload replay results

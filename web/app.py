@@ -119,13 +119,39 @@ app.mount("/static", StaticFiles(directory=Path(__file__).parent / "static"), na
 BASE = Path(__file__).resolve().parent.parent
 RAW_DIR = BASE / "results" / "raw"
 REPORTS_DIR = BASE / "results" / "reports"
-SCANS_META_FILE = BASE / "results" / "scans_meta.json"
 RAW_DIR.mkdir(parents=True, exist_ok=True)
 REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+
+from web import db as scandb
+scandb.init()
 
 SCANS: dict[str, dict] = {}
 CANCEL_FLAGS: dict[str, threading.Event] = {}
 PAUSE_FLAGS: dict[str, threading.Event] = {}
+
+_FORCE_CANCEL_TIMEOUT = 10  # seconds before force-transitioning "stopping" → "cancelled"
+
+
+def _schedule_force_cancel(scan_id: str):
+    """Background thread that force-transitions a scan from 'stopping' to 'cancelled'
+    if the graceful stop doesn't complete within the timeout."""
+    def _force():
+        time.sleep(_FORCE_CANCEL_TIMEOUT)
+        s = SCANS.get(scan_id)
+        if s and s.get("status") == "stopping":
+            logger.warning("Force-cancelling scan %s (stuck in stopping for %ds)", scan_id, _FORCE_CANCEL_TIMEOUT)
+            partial_findings = s.get("live_findings", [])
+            s.update({
+                "status": "cancelled",
+                "findings_count": len(partial_findings),
+                "progress": s.get("progress", []) + ["Force-cancelled (LLM call did not respond to stop in time)."],
+            })
+            CANCEL_FLAGS.pop(scan_id, None)
+            PAUSE_FLAGS.pop(scan_id, None)
+            _save_scans_to_disk()
+    t = threading.Thread(target=_force, daemon=True)
+    t.start()
+
 
 def _normalize_severity(raw: str) -> str:
     """Normalize AI-generated severity strings to standard levels."""
@@ -156,39 +182,55 @@ def _normalize_verdict(raw: str) -> str:
 
 
 def _load_scans_from_disk():
-    """Restore scan metadata from disk on startup."""
-    if SCANS_META_FILE.exists():
-        try:
-            data = json.loads(SCANS_META_FILE.read_text(encoding="utf-8"))
-            for scan_id, info in data.items():
-                if info.get("status") == "running":
-                    info["status"] = "error"
-                    info["error"] = "Server restarted during scan"
-                    progress = info.get("progress", [])
-                    progress.append("--- Container stopped/restarted during scan ---")
-                    info["progress"] = progress
-                elif info.get("status") in ("stopping", "paused", "pausing"):
-                    info["status"] = "cancelled"
-                    progress = info.get("progress", [])
-                    progress.append("--- Container restarted — marked as cancelled ---")
-                    info["progress"] = progress
-                SCANS[scan_id] = info
-            for scan_id in list(SCANS.keys()):
-                override_file = Path("results/raw") / f"{scan_id}_cvss_overrides.json"
-                if override_file.exists():
-                    try:
-                        SCANS[scan_id]["cvss_overrides"] = json.loads(
-                            override_file.read_text(encoding="utf-8"))
-                    except Exception:
-                        pass
-        except Exception:
-            pass
+    """Restore scan metadata from SQLite on startup.
+
+    Also handles one-time migration from the old JSON files if needed.
+    """
+    _old_meta = BASE / "results" / "scans_meta.json"
+    _old_ledger = BASE / "results" / "cost_ledger.json"
+    if scandb.scan_count() == 0 and _old_meta.exists():
+        scandb.migrate_from_json(_old_meta, _old_ledger)
+
+    data = scandb.load_all_scans()
+    dirty = False
+    for scan_id, info in data.items():
+        if info.get("status") == "running":
+            info["status"] = "error"
+            info["error"] = "Server restarted during scan"
+            progress = info.get("progress", [])
+            progress.append("--- Container stopped/restarted during scan ---")
+            info["progress"] = progress
+            dirty = True
+        elif info.get("status") in ("stopping", "paused", "pausing"):
+            info["status"] = "cancelled"
+            progress = info.get("progress", [])
+            progress.append("--- Container restarted — marked as cancelled ---")
+            info["progress"] = progress
+            dirty = True
+        SCANS[scan_id] = info
+
+    for scan_id in list(SCANS.keys()):
+        override_file = Path("results/raw") / f"{scan_id}_cvss_overrides.json"
+        if override_file.exists():
+            try:
+                SCANS[scan_id]["cvss_overrides"] = json.loads(
+                    override_file.read_text(encoding="utf-8"))
+            except Exception:
+                pass
+
+    if dirty:
+        _save_scans_to_disk()
+
+    if scandb.get_cost_ledger().get("all_time_cost", 0) == 0 and SCANS:
+        bootstrap_cost = sum(s.get("cost", 0) or 0 for s in SCANS.values())
+        if bootstrap_cost > 0:
+            scandb.set_cost_ledger(bootstrap_cost)
 
 _TRANSIENT_KEYS = frozenset({"live_tests", "live_findings", "live_phases", "live_crawled", "live_forms", "live_tool_calls", "live_out_of_scope", "live_tokens", "live_llm_calls", "live_cost", "_router"})
 _SECRET_KEYS = frozenset({"_password"})
 
 def _save_scans_to_disk():
-    """Persist scan metadata to disk (excluding transient live data)."""
+    """Persist scan metadata to SQLite (excluding transient live data)."""
     try:
         persist = {}
         for scan_id, info in SCANS.items():
@@ -196,9 +238,9 @@ def _save_scans_to_disk():
                 k: v for k, v in info.items()
                 if k not in _TRANSIENT_KEYS and k not in _SECRET_KEYS
             }
-        SCANS_META_FILE.write_text(json.dumps(persist, default=str), encoding="utf-8")
+        scandb.upsert_all(persist)
     except Exception:
-        pass
+        logger.exception("Failed to persist scans to SQLite")
 
 
 def _ensure_triaged(sid: str, s: dict) -> list[dict]:
@@ -407,9 +449,20 @@ async def get_dashboard():
     verdict_breakdown: dict[str, int] = {}
     total_findings = 0
     total_cost = 0.0
+    completed_cost = 0.0
+    errored_cost = 0.0
+    running_cost = 0.0
 
     for sid, s in SCANS.items():
-        total_cost += s.get("cost", 0) or 0
+        scan_cost = s.get("cost", 0) or s.get("live_cost", 0) or 0
+        total_cost += scan_cost
+        st = s.get("status", "")
+        if st in ("completed", "done"):
+            completed_cost += scan_cost
+        elif st in ("error", "failed", "cancelled"):
+            errored_cost += scan_cost
+        elif st in ("running", "paused", "pausing"):
+            running_cost += scan_cost
         findings = _ensure_triaged(sid, s)
 
         if not findings:
@@ -441,10 +494,24 @@ async def get_dashboard():
             "started": s.get("started", ""),
         })
 
+    ledger = scandb.get_cost_ledger()
+    all_time_cost = ledger.get("all_time_cost", 0)
+    deleted_cost = ledger.get("deleted_scans_cost", 0)
+    deleted_count = ledger.get("deleted_scans_count", 0)
+    if all_time_cost < total_cost:
+        all_time_cost = total_cost + deleted_cost
+
     return {
         "total_scans": total, "running": running, "completed": completed,
         "errored": errored, "cancelled": cancelled,
-        "total_findings": total_findings, "total_cost": total_cost,
+        "total_findings": total_findings,
+        "total_cost": total_cost,
+        "completed_cost": completed_cost,
+        "errored_cost": errored_cost,
+        "running_cost": running_cost,
+        "all_time_cost": round(all_time_cost, 4),
+        "deleted_cost": round(deleted_cost, 4),
+        "deleted_count": deleted_count,
         "severity_breakdown": severity_breakdown, "verdict_breakdown": verdict_breakdown,
         "recent_scans": recent,
     }
@@ -461,9 +528,9 @@ One or two sentences directly answering the question with key numbers.
 Use ONE of these formats depending on the question:
 
 FORMAT A — When listing findings or comparing items, ALWAYS use a markdown table:
-| # | Title | Severity | Verdict | Target | CWE |
-|---|-------|----------|---------|--------|-----|
-| 1 | ... | **High** | TRUE_POSITIVE | https://... | CWE-79 |
+| # | Title | Severity | Verdict | URL | CWE |
+|---|-------|----------|---------|-----|-----|
+| 1 | XSS in search | **High** | TRUE_POSITIVE | `https://example.com/search` | [CWE-79](https://cwe.mitre.org/data/definitions/79.html) |
 
 FORMAT B — When giving counts/statistics, use a summary table then bullet details:
 | Category | Count | Percentage |
@@ -473,13 +540,16 @@ FORMAT B — When giving counts/statistics, use a summary table then bullet deta
 FORMAT C — When explaining or summarizing, use bullet lists with bold labels:
 - **Finding**: description
 - **Severity**: **High**
-- **Evidence**: what was found
+- **URL**: `https://example.com/page`
+- **CWE**: [CWE-79](https://cwe.mitre.org/data/definitions/79.html)
 
-Rules:
+Formatting rules:
 - ALWAYS bold severity names: **Critical**, **High**, **Medium**, **Low**, **Info**
+- ALWAYS wrap URLs in backticks: `https://example.com/path`
+- ALWAYS format CWEs as markdown links: [CWE-79](https://cwe.mitre.org/data/definitions/79.html)
 - ALWAYS include specific counts and percentages from the data
 - ALWAYS use tables for 3+ items — never use long prose paragraphs
-- Show target URLs when relevant
+- Truncate long URLs with ellipsis in tables to keep columns readable: `https://example.com/very/lo...`
 - Keep total response under 500 words
 - No filler text, no disclaimers, no "let me know if you need more"
 """
@@ -1027,16 +1097,18 @@ async def _run_scan_task(scan_id, target_url, username, password, model, scan_mo
 
         meta = output.get("metadata", {})
         summary = output.get("summary", {})
+        final_cost = meta.get("cost_usd") or 0
         SCANS[scan_id].update({
             "status": "completed",
             "duration": round(duration, 1),
-            "cost": meta.get("cost_usd"),
+            "cost": final_cost,
             "total_tokens": meta.get("total_tokens"),
             "llm_calls": meta.get("llm_calls"),
             "findings_count": summary.get("total_findings", len(findings)),
             "result_file": os.path.basename(filepath),
             "progress": SCANS[scan_id]["progress"] + ["Scan completed."],
         })
+        scandb.add_all_time_cost(final_cost)
         _save_scans_to_disk()
     except ScanCancelled:
         duration = time.perf_counter() - start
@@ -1044,7 +1116,10 @@ async def _run_scan_task(scan_id, target_url, username, password, model, scan_mo
         filepath = str(RAW_DIR / f"aiagent_{model_slug}_{scan_id}.json")
         partial_findings = scan.get("live_findings", [])
         cost_summary = router.get_cost_summary() if router else []
-        save_results(filepath, partial_findings, cost_summary, target, model, duration, metrics={})
+        try:
+            save_results(filepath, partial_findings, cost_summary, target, model, duration, scan_metrics={})
+        except Exception:
+            filepath = None
         _tok = sum(c.get("input_tokens", 0) + c.get("output_tokens", 0) for c in cost_summary) if isinstance(cost_summary, list) else None
         _calls = sum(c.get("calls", 0) for c in cost_summary) if isinstance(cost_summary, list) else None
         _cost = sum(c.get("cost_usd", 0) for c in cost_summary) if isinstance(cost_summary, list) else None
@@ -1056,10 +1131,12 @@ async def _run_scan_task(scan_id, target_url, username, password, model, scan_mo
             "total_tokens": _tok,
             "llm_calls": _calls,
             "findings_count": len(partial_findings),
-            "result_file": os.path.basename(filepath),
+            "result_file": os.path.basename(filepath) if filepath else None,
             "phases_completed": phases_done,
             "progress": SCANS[scan_id]["progress"] + ["Scan cancelled by user."],
         })
+        if _cost:
+            scandb.add_all_time_cost(_cost)
         _save_scans_to_disk()
     except Exception as e:
         duration = time.perf_counter() - start
@@ -1068,20 +1145,23 @@ async def _run_scan_task(scan_id, target_url, username, password, model, scan_mo
         partial_findings = scan.get("live_findings", [])
         cost_summary = router.get_cost_summary() if router else {}
         try:
-            save_results(filepath, partial_findings, cost_summary, target, model, duration, metrics={})
+            save_results(filepath, partial_findings, cost_summary if isinstance(cost_summary, list) else [], target, model, duration, scan_metrics={})
         except Exception:
             filepath = None
         phases_done = len(scan.get("live_phases", []))
+        err_cost = cost_summary.get("total_cost_usd") if isinstance(cost_summary, dict) else None
         SCANS[scan_id].update({
             "status": "error",
             "error": str(e),
             "duration": round(duration, 1),
-            "cost": cost_summary.get("total_cost_usd") if isinstance(cost_summary, dict) else None,
+            "cost": err_cost,
             "findings_count": len(partial_findings),
             "result_file": os.path.basename(filepath) if filepath else None,
             "phases_completed": phases_done,
             "progress": SCANS[scan_id]["progress"] + [f"Error: {e}"],
         })
+        if err_cost:
+            scandb.add_all_time_cost(err_cost)
         _save_scans_to_disk()
 
 
@@ -1111,6 +1191,7 @@ async def get_scan_status(scan_id: str):
             "llm_calls": s.get("llm_calls") or s.get("live_llm_calls", 0),
             "findings_count": s.get("findings_count", len(s.get("live_findings", []))),
             "phases_completed": s.get("phases_completed", len(s.get("live_phases", []))),
+            "findings": s.get("live_findings", []) or _load_partial_findings(s),
         }
     fname = _find_result_file(scan_id)
     if fname:
@@ -1150,7 +1231,7 @@ async def stop_scan(scan_id: str):
     if scan_id not in SCANS:
         raise HTTPException(status_code=404, detail="Scan not found")
     s = SCANS[scan_id]
-    if s.get("status") not in ("running", "paused", "pausing"):
+    if s.get("status") not in ("running", "paused", "pausing", "stopping"):
         raise HTTPException(status_code=400, detail=f"Scan is not running (status: {s.get('status')})")
     flag = CANCEL_FLAGS.get(scan_id)
     if flag:
@@ -1159,31 +1240,36 @@ async def stop_scan(scan_id: str):
     if pause:
         pause.clear()
     s["status"] = "stopping"
-    s["progress"] = s.get("progress", []) + ["Stop requested by user — cancelling after current step..."]
+    s["_stop_requested_at"] = time.time()
+    s["progress"] = s.get("progress", []) + ["Stop requested by user — cancelling..."]
     _save_scans_to_disk()
-    return {"scan_id": scan_id, "status": "stopping", "message": "Scan stop requested. It will halt after the current step completes."}
+    _schedule_force_cancel(scan_id)
+    return {"scan_id": scan_id, "status": "stopping", "message": "Scan will stop within a few seconds."}
 
 
 @app.post("/api/scan/{scan_id}/pause", tags=["Scans"])
 async def pause_scan(scan_id: str):
-    """Pause a running scan. The agent will pause after the current LLM step."""
+    """Pause a running scan. The agent will pause after the current LLM step.
+    No further LLM calls are made while paused."""
     if scan_id not in SCANS:
         raise HTTPException(status_code=404, detail="Scan not found")
     s = SCANS[scan_id]
     if s.get("status") not in ("running",):
         raise HTTPException(status_code=400, detail=f"Scan is not running (status: {s.get('status')})")
     flag = PAUSE_FLAGS.get(scan_id)
-    if flag:
-        flag.set()
+    if not flag:
+        raise HTTPException(status_code=400, detail="Pause flag not found — scan may have already finished")
+    flag.set()
     s["status"] = "pausing"
     s["progress"] = s.get("progress", []) + ["Pause requested — will pause after current step..."]
     _save_scans_to_disk()
-    return {"scan_id": scan_id, "status": "pausing", "message": "Pause requested. Scan will pause after the current step completes."}
+    return {"scan_id": scan_id, "status": "pausing", "message": "Scan will pause after the current step completes."}
 
 
 @app.post("/api/scan/{scan_id}/resume", tags=["Scans"])
 async def resume_scan(scan_id: str):
-    """Resume a paused scan."""
+    """Resume a paused scan. Clears the pause flag so the agent continues
+    from exactly where it left off — no duplicate work."""
     if scan_id not in SCANS:
         raise HTTPException(status_code=404, detail="Scan not found")
     s = SCANS[scan_id]
@@ -1386,6 +1472,7 @@ async def delete_scan(scan_id: str):
     """Stop (if running) and fully delete a scan, its result files, and reports."""
     deleted = []
     if scan_id in SCANS:
+        scan_cost = SCANS[scan_id].get("cost", 0) or SCANS[scan_id].get("live_cost", 0) or 0
         cur_status = SCANS[scan_id].get("status")
         if cur_status in ("running", "paused", "pausing", "stopping"):
             flag = CANCEL_FLAGS.get(scan_id)
@@ -1397,8 +1484,11 @@ async def delete_scan(scan_id: str):
             SCANS[scan_id]["status"] = "cancelled"
             deleted.append("stopped_running_scan")
             await asyncio.sleep(0.5)
+        if scan_cost > 0:
+            scandb.add_deleted_cost(scan_cost)
         result_file = SCANS[scan_id].get("result_file")
         del SCANS[scan_id]
+        scandb.delete_scan(scan_id)
         CANCEL_FLAGS.pop(scan_id, None)
         PAUSE_FLAGS.pop(scan_id, None)
         deleted.append("scan_record")
@@ -1417,7 +1507,6 @@ async def delete_scan(scan_id: str):
             deleted.append(f.name)
     if not deleted:
         return JSONResponse({"error": "Scan not found"}, status_code=404)
-    _save_scans_to_disk()
     return {"deleted": deleted}
 
 
@@ -1433,9 +1522,14 @@ async def delete_all_scans():
             if pause:
                 pause.clear()
     await asyncio.sleep(0.5)
+    bulk_cost = sum(s.get("cost", 0) or s.get("live_cost", 0) or 0 for s in SCANS.values())
+    bulk_count = len(SCANS)
+    if bulk_cost > 0:
+        scandb.add_deleted_cost(bulk_cost, bulk_count)
     SCANS.clear()
     CANCEL_FLAGS.clear()
     PAUSE_FLAGS.clear()
+    scandb.delete_all_scans()
     count = 0
     for f in RAW_DIR.glob("*.json"):
         f.unlink()
@@ -1443,7 +1537,6 @@ async def delete_all_scans():
     for f in REPORTS_DIR.glob("*.pdf"):
         f.unlink()
         count += 1
-    _save_scans_to_disk()
     return {"deleted_files": count, "status": "cleared"}
 
 
@@ -1718,7 +1811,10 @@ async def delete_reports_for_target(target: str = ""):
                 deleted_files.append(f.name)
     else:
         ids_to_delete = [sid for sid, s in SCANS.items() if s.get("target_url", "") == target]
+        target_del_cost = 0.0
         for sid in ids_to_delete:
+            sc = SCANS.get(sid, {}).get("cost", 0) or 0
+            target_del_cost += sc
             for f in list(REPORTS_DIR.glob(f"*{sid}*")):
                 f.unlink()
                 deleted_files.append(f.name)
@@ -1726,7 +1822,10 @@ async def delete_reports_for_target(target: str = ""):
                 f.unlink()
             SCANS.pop(sid, None)
             deleted_scans.append(sid)
-        _save_scans_to_disk()
+        if target_del_cost > 0:
+            scandb.add_deleted_cost(target_del_cost, len(ids_to_delete))
+        if ids_to_delete:
+            scandb.delete_scans(ids_to_delete)
 
     return {"deleted_files": deleted_files, "deleted_scans": deleted_scans}
 

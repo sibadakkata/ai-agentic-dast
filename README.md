@@ -824,7 +824,7 @@ For websites (traditional or SPA), the flow is similar but uses browser automati
 
 ## Domain Scoping
 
-The scanner restricts activity to the target domain and its subdomains. Gen Digital owned domains are auto-scoped (norton.com, avg.com, avast.com, avira.com, ccleaner.com, gendigital.com, lifelock.com, nortonlifelock.com, reputation.com). Third-party domains are excluded and listed in the UI. Additional domains can be explicitly included via the "Additional Domains" field in the scan form.
+The scanner restricts activity to the target domain and its subdomains. Third-party domains are excluded and listed in the UI. Additional domains can be explicitly included via the "Additional Domains" field in the scan form. Groups of affiliated domains can be configured in `AFFILIATED_DOMAIN_GROUPS` (in `scanners/ai_agent/agent.py`) so that scanning one domain in a group auto-includes all others.
 
 ---
 

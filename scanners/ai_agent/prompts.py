@@ -294,19 +294,10 @@ def build_system_prompt(
 
     from urllib.parse import urlparse
 
-    GEN_DIGITAL_DOMAINS = {
-        "norton.com", "nortonlifelock.com", "lifelock.com",
-        "avast.com", "avg.com", "ccleaner.com",
-        "avira.com", "reputation.com", "gendigital.com",
-    }
+    from scanners.ai_agent.agent import _build_allowed_domains, _extract_base_domain
     target_host = (urlparse(url).hostname or "").lower()
-    parts_d = target_host.split(".")
-    base_domain = ".".join(parts_d[-2:]) if len(parts_d) >= 2 else target_host
-    allowed = {base_domain} if base_domain else set()
-    if base_domain in GEN_DIGITAL_DOMAINS:
-        allowed |= GEN_DIGITAL_DOMAINS
-    if extra_domains:
-        allowed |= set(d.strip().lower() for d in extra_domains if d.strip())
+    extra_set = set(d.strip().lower() for d in extra_domains if d.strip()) if extra_domains else None
+    allowed = _build_allowed_domains(url, extra_set)
     scope_str = ", ".join(f"*.{d}" for d in sorted(allowed))
 
     scan_scope = getattr(target, "scan_scope", "directory")

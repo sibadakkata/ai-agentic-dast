@@ -79,8 +79,17 @@ def _resolve_env_vars(obj: Any) -> Any:
 
 
 def _is_login_url(url: str) -> bool:
-    lower = url.lower()
-    return any(ind in lower for ind in LOGIN_PAGE_INDICATORS)
+    """Check if a URL is a login/auth page based on hostname + path only.
+
+    Query parameters are excluded to avoid false positives like
+    OIDC redirect_uri or client_id containing 'login' in their values.
+    """
+    try:
+        parsed = urlparse(url)
+        check_str = f"{parsed.hostname or ''}{parsed.path or ''}".lower()
+    except Exception:
+        check_str = url.lower()
+    return any(ind in check_str for ind in LOGIN_PAGE_INDICATORS)
 
 
 def _jwt_expired(token: str) -> bool:
@@ -229,6 +238,37 @@ Return ONLY valid JSON (no markdown, no explanation) with this structure:
 If you cannot determine the flow, use "form" and provide the best guess selectors. Prefer id, name, or data-testid attributes."""
 
 
+async def _click_visible_submit(page: Page, submit_sel: str | None, form_sel: str | None = None):
+    """Click the first visible submit/advance button, or press Enter as fallback."""
+    all_sels: list[str] = []
+    if submit_sel:
+        all_sels.extend(s.strip() for s in submit_sel.split(",") if s.strip())
+    all_sels.extend([
+        '#continue_button', '#signin_button', 'input[type="button"]',
+        'button:has-text("Continue")', 'button:has-text("Next")',
+        'button:has-text("Sign in")', 'button:has-text("Log in")',
+    ])
+    seen = set()
+    for sel in all_sels:
+        if sel in seen:
+            continue
+        seen.add(sel)
+        try:
+            loc = page.locator(sel).first
+            if await loc.is_visible(timeout=500):
+                await loc.click(timeout=3000)
+                return
+        except Exception:
+            continue
+    if form_sel:
+        try:
+            await page.locator(form_sel).evaluate("f => f.submit()")
+            return
+        except Exception:
+            pass
+    await page.keyboard.press("Enter")
+
+
 async def detect_and_login(
     page: Page,
     target: ScanTarget,
@@ -265,9 +305,12 @@ async def detect_and_login(
             logger.warning("LLM auth JSON parse failed: %s", e)
 
     flow = parsed.get("flow", "form")
-    username_sel = parsed.get("username_selector")
-    password_sel = parsed.get("password_selector")
-    submit_sel = parsed.get("submit_selector")
+    _DEFAULT_USER = 'input[type="email"], input[name="email"], input[name="username"], input#loginUsername'
+    _DEFAULT_PW = 'input[type="password"], input[name="password"], input#loginPassword'
+    _DEFAULT_SUBMIT = 'button[type="submit"], input[type="submit"], #continue_button, #signin_button, button#loginSubmitBtn'
+    username_sel = parsed.get("username_selector") or _DEFAULT_USER
+    password_sel = parsed.get("password_selector") or _DEFAULT_PW
+    submit_sel = parsed.get("submit_selector") or _DEFAULT_SUBMIT
     sso_sel = parsed.get("sso_button_selector")
     form_sel = parsed.get("form_selector")
     credentials = target.credentials or {}
@@ -286,26 +329,22 @@ async def detect_and_login(
                     except Exception:
                         continue
             await page.wait_for_load_state("networkidle", timeout=15000)
-            username_sel = username_sel or 'input[name="username"], input[name="email"], input[type="email"]'
-            password_sel = password_sel or 'input[name="password"], input[type="password"]'
-            submit_sel = submit_sel or 'button[type="submit"], input[type="submit"]'
 
         if username_sel and username:
             await page.fill(username_sel, username, timeout=5000)
         if password_sel and password:
-            await page.fill(password_sel, password, timeout=5000)
+            try:
+                await page.fill(password_sel, password, timeout=2000)
+            except Exception:
+                await _click_visible_submit(page, submit_sel, form_sel)
+                await page.wait_for_load_state("networkidle", timeout=10000)
+                await asyncio.sleep(2)
+                await page.fill(password_sel, password, timeout=8000)
 
-        if submit_sel:
-            await page.click(submit_sel, timeout=5000)
-        elif form_sel:
-            await page.locator(form_sel).evaluate("f => f.submit()")
-        else:
-            await page.keyboard.press("Enter")
-
+        await _click_visible_submit(page, submit_sel, form_sel)
         await page.wait_for_load_state("networkidle", timeout=15000)
     except Exception as e:
         logger.warning("Login interaction failed: %s", e)
-
     auth_config = target.auth_config or {}
     totp_secret = auth_config.get("totp_secret")
     if totp_secret:
@@ -337,10 +376,37 @@ async def detect_and_login(
             except Exception:
                 continue
 
+    # Wait for OIDC redirect chain to land on target host
+    target_host = urlparse(target.url).hostname or ""
+    try:
+        current_host = urlparse(page.url or "").hostname or ""
+        if target_host and current_host != target_host:
+            for _ in range(6):
+                await asyncio.sleep(3)
+                current_host = urlparse(page.url or "").hostname or ""
+                if current_host == target_host:
+                    break
+            if current_host != target_host:
+                logger.info("OIDC redirect didn't land on %s (on %s), navigating directly...",
+                            target_host, current_host)
+                try:
+                    await page.goto(target.url, wait_until="domcontentloaded", timeout=30000)
+                    try:
+                        await page.wait_for_load_state("networkidle", timeout=10000)
+                    except Exception:
+                        pass
+                    await asyncio.sleep(3)
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
     try:
         cookies = await page.context.cookies()
         final_url = page.url
-        success = not _is_login_url(final_url) and len(cookies) > 0
+        final_host = urlparse(final_url or "").hostname or ""
+        target_cookies = [c for c in cookies if target_host in (c.get("domain", ""))]
+        success = (final_host == target_host or bool(target_cookies)) and len(cookies) > 0
         tokens: dict[str, str] = {}
         try:
             redirect = page.url
@@ -422,6 +488,12 @@ async def authenticate(
 
     page = await browser.new_page()
 
+    # Start network-level JS capture from the very first navigation.
+    # This captures every .js request (login page, OIDC redirects, SPA chunks,
+    # CDN scripts, iframe resources) regardless of timing.
+    from .passive_recon import start_js_network_capture
+    network_js_urls = start_js_network_capture(page)
+
     if not has_creds and auth_type_config in ("auto", "form", "sso", "oauth"):
         logger.info("No credentials supplied — running unauthenticated scan")
         try:
@@ -477,6 +549,7 @@ async def authenticate(
         refresh_fn=_refresh_fn,
         target_url=target.url,
     )
+    session.network_js_urls = network_js_urls
     session.start_monitor()
     return session
 

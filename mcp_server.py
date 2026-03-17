@@ -357,10 +357,10 @@ def query_findings(
       - "How many issues were found in the NGP scan?"
       - "Show me all SQL injection findings"
       - "What Critical vulnerabilities exist across all scans?"
-      - "How many false positives in the Norton scan?"
+      - "How many false positives in the last scan?"
 
     Args:
-        target: Filter by target URL keyword (e.g., 'norton', 'avg', 'engine.tech').
+        target: Filter by target URL keyword (e.g., 'myapp', 'staging', 'api.example.com').
                  Case-insensitive partial match.
         keyword: Filter findings by title keyword (e.g., 'sql injection', 'xss',
                  'idor', 'missing header', 'csrf'). Case-insensitive partial match.
@@ -513,12 +513,12 @@ def get_scan_stats(scan_id: str = "", target: str = "") -> str:
     Use this to answer questions like:
       - "Give me a summary of the NGP scan"
       - "How many total issues across all scans?"
-      - "What was the cost of the Norton scan?"
+      - "What was the cost of the last scan?"
       - "Compare findings across all targets"
 
     Args:
         scan_id: Specific scan ID. Leave empty for all scans.
-        target: Filter by target URL keyword (e.g., 'norton', 'avg').
+        target: Filter by target URL keyword (e.g., 'myapp', 'staging').
                  Case-insensitive partial match. Leave empty for all.
 
     Returns:

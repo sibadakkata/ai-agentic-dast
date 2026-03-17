@@ -329,6 +329,9 @@ tr:hover td { background:rgba(79,70,229,0.03); }
 .verdict-tp { color:#059669; font-weight:600; }
 .verdict-fp { color:#6b7280; font-weight:600; }
 .verdict-mr { color:#d97706; font-weight:600; }
+.cwe-link { color:#6366f1; text-decoration:none; font-weight:500; border-bottom:1px dashed #6366f1; }
+.cwe-link:hover { color:#4f46e5; border-bottom-style:solid; }
+code.inline-url { background:#f1f5f9; color:#0f172a; padding:1px 5px; border-radius:3px; font-size:0.88em; word-break:break-all; }
 
 .insight-typing {
   display:flex; gap:5px; align-items:center; padding:14px 18px; align-self:flex-start;
@@ -497,7 +500,7 @@ tr:hover td { background:rgba(79,70,229,0.03); }
     <div id="ai-instruct-mode">
       <div class="form-group full">
         <label style="text-transform:none;font-size:13px;font-weight:500;color:var(--text2);letter-spacing:0;">Describe what you want to scan — the AI will build a plan for your approval</label>
-        <textarea id="ai-instruction" class="ai-instruct-area" placeholder="Example: Scan https://my-int.norton.com using user@email.com / MyP@ss123. Focus only on /extspa/backup page and look for XSS vulnerabilities — we found one during manual pen-testing."></textarea>
+        <textarea id="ai-instruction" class="ai-instruct-area" placeholder="Example: Scan https://staging.example.com using user@email.com / MyP@ss123. Focus only on /app/dashboard page and look for XSS vulnerabilities — we found one during manual pen-testing."></textarea>
       </div>
       <div class="form-group full" style="margin-top:8px;">
         <div class="expandable" onclick="toggleExpand(this)" style="font-size:13px;font-weight:600;color:var(--text2);letter-spacing:0.3px;">
@@ -919,7 +922,7 @@ async function loadDashboard() {
       dstat(d.completed, 'Completed', 'var(--green)', '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>') +
       dstat(d.errored, 'Errors', 'var(--red)', '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg>') +
       dstat(d.total_findings, 'Total Findings', 'var(--orange)', '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>') +
-      dstat('$' + (d.total_cost || 0).toFixed(2), 'Total Cost', 'var(--blue)', '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="1" x2="12" y2="23"/><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>');
+      _buildCostCard(d);
 
     const sevOrder = ['Critical','High','Medium','Low','Not Exploitable','Info','TBD'];
     const sevColors = {Critical:'#dc2626',High:'#ea580c',Medium:'#d97706',Low:'#2563eb',Info:'#6b7280','Not Exploitable':'#059669',TBD:'#92400e'};
@@ -990,6 +993,46 @@ async function loadDashboard() {
 
 function dstat(val, label, color, icon) {
   return '<div class="dash-stat"><div style="color:' + color + ';opacity:0.5;margin-bottom:8px;">' + (icon||'') + '</div><div class="dash-stat-val" style="color:' + color + '">' + val + '</div><div class="dash-stat-label">' + label + '</div></div>';
+}
+
+function _buildCostCard(d) {
+  var costIcon = '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="1" x2="12" y2="23"/><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>';
+  var listedCost = (d.total_cost || 0);
+  var allTime = (d.all_time_cost || 0);
+  var delCost = (d.deleted_cost || 0);
+  var delCount = (d.deleted_count || 0);
+  var completedCost = (d.completed_cost || 0);
+  var erroredCost = (d.errored_cost || 0);
+  var runningCost = (d.running_cost || 0);
+  var hasDeleted = delCost > 0;
+  var showAllTime = hasDeleted && allTime > listedCost;
+
+  var tipLines = [];
+  if (completedCost > 0) tipLines.push('Completed: $' + completedCost.toFixed(2));
+  if (erroredCost > 0) tipLines.push('Errored/Cancelled: $' + erroredCost.toFixed(2));
+  if (runningCost > 0) tipLines.push('In Progress: $' + runningCost.toFixed(2));
+  if (hasDeleted) tipLines.push('Deleted (' + delCount + ' scans): $' + delCost.toFixed(2));
+  var tooltip = tipLines.length ? tipLines.join('\n') : 'No cost data yet';
+
+  var primaryVal = showAllTime ? '$' + allTime.toFixed(2) : '$' + listedCost.toFixed(2);
+  var primaryLabel = showAllTime ? 'All-Time LLM Cost' : 'LLM Cost';
+
+  var subline = '';
+  if (showAllTime) {
+    subline = '<div style="font-size:10px;color:var(--text2);margin-top:4px;opacity:0.8;">' +
+      'Listed: $' + listedCost.toFixed(2) +
+      ' · Deleted: $' + delCost.toFixed(2) +
+      '</div>';
+  } else if (d.total_scans > 0) {
+    subline = '<div style="font-size:10px;color:var(--text2);margin-top:4px;opacity:0.8;">across ' + d.total_scans + ' scan' + (d.total_scans !== 1 ? 's' : '') + '</div>';
+  }
+
+  return '<div class="dash-stat" title="' + tooltip.replace(/"/g, '&quot;') + '" style="cursor:help;">' +
+    '<div style="color:var(--blue);opacity:0.5;margin-bottom:8px;">' + costIcon + '</div>' +
+    '<div class="dash-stat-val" style="color:var(--blue)">' + primaryVal + '</div>' +
+    '<div class="dash-stat-label">' + primaryLabel + '</div>' +
+    subline +
+    '</div>';
 }
 
 async function loadReports() {
@@ -1895,16 +1938,29 @@ function showScanControls(state) {
   const pause = document.getElementById('pause-scan-btn');
   const resume = document.getElementById('resume-scan-btn');
   if (stop) {
-    stop.style.display = (state === 'running' || state === 'paused' || state === 'pausing') ? 'inline-block' : 'none';
-    stop.disabled = false; stop.textContent = 'Stop Scan';
+    if (state === 'stopping') {
+      stop.style.display = 'inline-block'; stop.disabled = true; stop.textContent = 'Stopping...';
+    } else if (state === 'running' || state === 'paused' || state === 'pausing') {
+      stop.style.display = 'inline-block'; stop.disabled = false; stop.textContent = 'Stop Scan';
+    } else {
+      stop.style.display = 'none';
+    }
   }
   if (pause) {
-    pause.style.display = state === 'running' ? 'inline-block' : 'none';
-    pause.disabled = false; pause.textContent = 'Pause';
+    if (state === 'pausing') {
+      pause.style.display = 'inline-block'; pause.disabled = true; pause.textContent = 'Pausing...';
+    } else if (state === 'running') {
+      pause.style.display = 'inline-block'; pause.disabled = false; pause.textContent = 'Pause';
+    } else {
+      pause.style.display = 'none';
+    }
   }
   if (resume) {
-    resume.style.display = (state === 'paused' || state === 'pausing') ? 'inline-block' : 'none';
-    resume.disabled = false; resume.textContent = 'Resume';
+    if (state === 'paused' || state === 'pausing') {
+      resume.style.display = 'inline-block'; resume.disabled = false; resume.textContent = 'Resume';
+    } else {
+      resume.style.display = 'none';
+    }
   }
 }
 
@@ -1924,7 +1980,7 @@ async function stopScan() {
       return;
     }
     stopRequestedAt = Date.now();
-    document.getElementById('scan-status-msg').textContent = 'Stop requested — waiting for current LLM/tool call to finish...';
+    document.getElementById('scan-status-msg').textContent = 'Stopping scan...';
   } catch(e) {
     alert('Error stopping scan: ' + e.message);
     stopBtn.disabled = false;
@@ -2221,23 +2277,15 @@ async function pollLiveView(scanId) {
            <a href="${esc(data.target)}" target="_blank" style="color:var(--accent2);text-decoration:none;">${esc(data.target)}</a>
          </div>` : '';
     if (data.status === 'running') showScanControls('running');
-    else if (data.status === 'stopping') {
-      const stopBtn = document.getElementById('stop-scan-btn');
-      if (stopBtn) { stopBtn.disabled = true; stopBtn.textContent = 'Stopping...'; }
-    }
-    else if (data.status === 'pausing') {
-      const pauseBtn = document.getElementById('pause-scan-btn');
-      if (pauseBtn) { pauseBtn.disabled = true; pauseBtn.textContent = 'Pausing...'; }
-      const stopBtn = document.getElementById('stop-scan-btn');
-      if (stopBtn) { stopBtn.style.display = 'inline-block'; stopBtn.disabled = false; stopBtn.textContent = 'Stop Scan'; }
-    }
+    else if (data.status === 'stopping') showScanControls('stopping');
+    else if (data.status === 'pausing') showScanControls('pausing');
     else if (data.status === 'paused') { showScanControls('paused'); pauseRequestedAt = null; }
     else if (data.status === 'completed' || data.status === 'error' || data.status === 'cancelled') { showScanControls('idle'); stopRequestedAt = null; pauseRequestedAt = null; }
 
     let stoppingLabel = 'Stopping';
     if (data.status === 'stopping' && stopRequestedAt) {
       const elapsed = Math.round((Date.now() - stopRequestedAt) / 1000);
-      stoppingLabel = `Stopping (${elapsed}s) — waiting for current step`;
+      stoppingLabel = elapsed < 10 ? `Stopping (${elapsed}s)...` : `Stopping (${elapsed}s) — force cancelling...`;
     }
     let pausingLabel = 'Pausing';
     if (data.status === 'pausing' && pauseRequestedAt) {
@@ -2682,7 +2730,7 @@ async function viewScan(scanId) {
     if (statusData.status === 'running' || statusData.status === 'paused' || statusData.status === 'pausing' || statusData.status === 'stopping') {
       rv.style.display = 'none';
       openLiveView(scanId);
-      showScanControls(statusData.status === 'paused' ? 'paused' : 'running');
+      showScanControls(statusData.status);
       return;
     }
 
@@ -3268,8 +3316,22 @@ function _insightRenderMd(text) {
   // Inline: bold, italic, inline code, links
   html = html.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>');
   html = html.replace(/(?<!\*)\*([^*]+)\*(?!\*)/g, '<em>$1</em>');
-  html = html.replace(/`([^`]+)`/g, '<code>$1</code>');
+  html = html.replace(/`([^`]+)`/g, '<code class="inline-url">$1</code>');
   html = html.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
+
+  // Auto-linkify CWE references not already in a link (e.g. CWE-79 → clickable link)
+  html = html.replace(/(?<!href="[^"]*?)(?<!>)\b(CWE-(\d+))\b(?![^<]*<\/a>)/gi, function(_, full, num) {
+    return '<a href="https://cwe.mitre.org/data/definitions/' + num + '.html" target="_blank" rel="noopener" class="cwe-link">' + full + '</a>';
+  });
+
+  // Auto-linkify bare URLs not already inside tags or code blocks
+  html = html.replace(/(?<!href="|src="|>)(https?:\/\/[^\s<"']+)/g, function(url) {
+    if (url.length > 80) {
+      var display = url.substring(0, 60) + '…' + url.substring(url.length - 15);
+      return '<a href="' + url + '" target="_blank" rel="noopener" title="' + url + '">' + display + '</a>';
+    }
+    return '<a href="' + url + '" target="_blank" rel="noopener">' + url + '</a>';
+  });
 
   // Severity badges
   html = html.replace(/<strong>(Critical)<\/strong>/gi, '<span class="sev-badge sev-critical">Critical</span>');
@@ -3358,13 +3420,12 @@ function _insightRenderMd(text) {
 
 function _buildTable(rows) {
   if (rows.length === 0) return '';
-  let h = '<table>';
+  let h = '<table style="table-layout:fixed;width:100%;">';
   rows.forEach(function(row, idx) {
     const cells = row.split('|').filter(function(c) { return c.trim() !== ''; });
     const tag = idx === 0 ? 'th' : 'td';
     h += '<tr>' + cells.map(function(c) {
       let cell = c.trim();
-      // Apply severity badges inside table cells too
       cell = cell.replace(/\b(Critical)\b/gi, '<span class="sev-badge sev-critical">Critical</span>');
       cell = cell.replace(/\b(High)\b/gi, '<span class="sev-badge sev-high">High</span>');
       cell = cell.replace(/\b(Medium)\b/gi, '<span class="sev-badge sev-medium">Medium</span>');
@@ -3373,7 +3434,14 @@ function _buildTable(rows) {
       cell = cell.replace(/\bTRUE.?POSITIVE\b/gi, '<span class="verdict-tp">TRUE_POSITIVE</span>');
       cell = cell.replace(/\bFALSE.?POSITIVE\b/gi, '<span class="verdict-fp">FALSE_POSITIVE</span>');
       cell = cell.replace(/\bMANUAL.?REVIEW\b/gi, '<span class="verdict-mr">MANUAL_REVIEW</span>');
-      return '<' + tag + '>' + cell + '</' + tag + '>';
+      cell = cell.replace(/\b(CWE-(\d+))\b/gi, function(_, full, num) {
+        return '<a href="https://cwe.mitre.org/data/definitions/' + num + '.html" target="_blank" class="cwe-link">' + full + '</a>';
+      });
+      cell = cell.replace(/(?<!href="|>)(https?:\/\/[^\s<"']+)/g, function(url) {
+        var display = url.length > 50 ? url.substring(0, 40) + '…' : url;
+        return '<a href="' + url + '" target="_blank" title="' + url + '" style="word-break:break-all;">' + display + '</a>';
+      });
+      return '<' + tag + ' style="overflow:hidden;text-overflow:ellipsis;">' + cell + '</' + tag + '>';
     }).join('') + '</tr>';
   });
   return h + '</table>';

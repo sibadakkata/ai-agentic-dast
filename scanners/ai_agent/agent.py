@@ -19,6 +19,7 @@ from .api_import import (
 )
 from .auth import ScanTarget, authenticate, detect_app_type
 from .llm_config import ContentFiltered, ContextWindowExceeded, MalformedMessages, LLMRouter
+from .passive_recon import run_passive_recon
 from .prompts import build_system_prompt, get_phases
 from .tools import TOOL_DEFINITIONS, ScanTools
 
@@ -44,19 +45,22 @@ def _extract_base_domain(url: str) -> str:
     return host
 
 
-GEN_DIGITAL_DOMAINS = {
-    "norton.com", "nortonlifelock.com", "lifelock.com",
-    "avast.com", "avg.com", "ccleaner.com",
-    "avira.com", "reputation.com", "gendigital.com",
-}
+AFFILIATED_DOMAIN_GROUPS: list[set[str]] = [
+    # Add groups of affiliated domains here. If the target matches any domain
+    # in a group, all other domains in the same group become in-scope.
+    # Example: {"example.com", "example-cdn.com", "example-api.com"}
+]
 
 
-def _build_allowed_domains(target_url: str) -> set:
-    """Build full set of allowed domains. If target is a Gen Digital property, include all Gen domains."""
+def _build_allowed_domains(target_url: str, extra_domains: set | None = None) -> set:
+    """Build full set of allowed domains from the target URL and any affiliated groups."""
     base = _extract_base_domain(target_url)
     allowed = {base} if base else set()
-    if base in GEN_DIGITAL_DOMAINS:
-        allowed |= GEN_DIGITAL_DOMAINS
+    for group in AFFILIATED_DOMAIN_GROUPS:
+        if base in group or any(kw in base for kw in group):
+            allowed |= group
+    if extra_domains:
+        allowed |= extra_domains
     return allowed
 
 
@@ -79,7 +83,8 @@ _LOGIN_PAGE_INDICATORS = (
 )
 
 
-async def _check_session_lost(page, auth_session, target, original_url: str) -> bool:
+async def _check_session_lost(page, auth_session, target, original_url: str,
+                              router=None, model: str = "") -> bool:
     """Detect if the session was lost (redirected to login page).
 
     Returns True if re-authentication was performed.
@@ -92,7 +97,13 @@ async def _check_session_lost(page, auth_session, target, original_url: str) -> 
     except Exception:
         return False
 
-    is_login_page = any(kw in current_url for kw in _LOGIN_PAGE_INDICATORS)
+    # Check hostname+path only (not query params) for login indicators
+    try:
+        parsed = urlparse(current_url)
+        check_str = f"{parsed.hostname or ''}{parsed.path or ''}"
+    except Exception:
+        check_str = current_url
+    is_login_page = any(kw in check_str for kw in _LOGIN_PAGE_INDICATORS)
     if not is_login_page:
         is_login_page = any(kw in title for kw in _LOGIN_PAGE_INDICATORS)
     if not is_login_page:
@@ -112,7 +123,7 @@ async def _check_session_lost(page, auth_session, target, original_url: str) -> 
     try:
         from .auth import authenticate as _reauth
         browser = page.context.browser
-        new_session = await _reauth(browser, target, None, None)
+        new_session = await _reauth(browser, target, router, model)
         new_cookies = await new_session.page.context.cookies()
         await page.context.add_cookies(new_cookies)
         await page.goto(original_url, wait_until="domcontentloaded", timeout=15000)
@@ -258,6 +269,89 @@ def _classify_url(url: str, result: dict, tool_name: str) -> str:
     return "page"
 
 
+def _format_passive_for_llm(passive_findings: list[dict]) -> str:
+    """Summarize passive recon results so the LLM agent is aware of them."""
+    if not passive_findings:
+        return ""
+    lines = ["## Passive Reconnaissance Results (pre-scan, no LLM)",
+             f"Found {len(passive_findings)} issue(s) via deterministic checks:"]
+    for f in passive_findings:
+        lines.append(f"- [{f['severity']}] {f['title']} @ {f['url']}")
+        if f.get("evidence"):
+            lines.append(f"  Evidence: {f['evidence'][:200]}")
+    lines.append("\nUse these findings to prioritize your active scanning. "
+                 "For JS sink findings, attempt to prove exploitability by tracing user-controlled data into those sinks.")
+    return "\n".join(lines)
+
+
+async def _ensure_on_target(page, target_url: str, target_host: str) -> bool:
+    """Navigate to the target URL and confirm the browser is on the right host.
+
+    Returns True if the current page hostname matches target_host.
+    """
+    current_host = urlparse(page.url or "").hostname or ""
+    if current_host == target_host:
+        return True
+
+    print(f"  [PASSIVE] Navigating to target (current: {current_host}): {target_url}")
+    for attempt in range(3):
+        try:
+            await page.goto(target_url, wait_until="domcontentloaded", timeout=30000)
+            await asyncio.sleep(4 + attempt * 3)
+            current_host = urlparse(page.url or "").hostname or ""
+            if current_host == target_host:
+                print(f"  [PASSIVE] Landed on target: {page.url[:100]}")
+                return True
+            print(f"  [PASSIVE] Attempt {attempt+1}: host={current_host}, retrying...")
+        except Exception as nav_err:
+            logger.debug("Target nav attempt %d: %s", attempt, nav_err)
+    print(f"  [PASSIVE] Could not reach target, current page: {page.url[:100]}")
+    return False
+
+
+async def _wait_for_spa_ready(page, timeout_s: int = 25):
+    """Generic SPA readiness wait — framework-agnostic.
+
+    Strategy:
+    1. Wait for networkidle (no new requests for 500ms).
+    2. Poll the DOM content hash until it stabilises (SPA has finished
+       rendering route components, lazy chunks, iframes).
+    3. Cap total wait to avoid blocking forever on long-polling apps.
+    """
+    try:
+        await page.wait_for_load_state("networkidle", timeout=15000)
+    except Exception:
+        pass
+
+    # Poll DOM stability: hash the document.body.childElementCount + frame count
+    prev_hash = ""
+    stable_ticks = 0
+    for _ in range(timeout_s // 2):
+        try:
+            cur_hash = await page.evaluate("""() => {
+                const fc = document.querySelectorAll('iframe').length;
+                const sc = document.querySelectorAll('script[src]').length;
+                const bc = document.body ? document.body.childElementCount : 0;
+                return `${bc}-${sc}-${fc}`;
+            }""")
+        except Exception:
+            cur_hash = ""
+        if cur_hash == prev_hash and cur_hash:
+            stable_ticks += 1
+            if stable_ticks >= 2:
+                break
+        else:
+            stable_ticks = 0
+            prev_hash = cur_hash
+        await asyncio.sleep(2)
+
+    # Final networkidle check after DOM settled
+    try:
+        await page.wait_for_load_state("networkidle", timeout=5000)
+    except Exception:
+        pass
+
+
 def _resolve_import_path(base_dir: str, path: str | None) -> str | None:
     if not path:
         return None
@@ -322,6 +416,11 @@ async def run_scan(
             _cb("auth", {"status": "unauthenticated", "url": target.url})
         auth_session = await authenticate(browser, target, router, model)
         page = auth_session.page
+
+        # Network-level JS capture was started inside authenticate() on page
+        # creation, so it has captured every .js since the very first navigation.
+        network_js_urls = getattr(auth_session, "network_js_urls", set())
+
         print(f"  [AUTH] Auth type: {auth_session._auth_type}, URL after login: {page.url}")
         _cb("auth", {"status": "done", "type": auth_session._auth_type, "url": page.url})
         if auth_session._auth_type not in ("bearer", "none"):
@@ -354,9 +453,8 @@ async def run_scan(
                 except Exception as e:
                     print(f"  [IMPORT] Could not parse Burp file {burp_path}: {e}")
 
-        allowed_domains = _build_allowed_domains(target.url)
-        if extra_domains:
-            allowed_domains |= set(d.strip().lower() for d in extra_domains if d.strip())
+        extra_set = set(d.strip().lower() for d in extra_domains if d.strip()) if extra_domains else None
+        allowed_domains = _build_allowed_domains(target.url, extra_set)
         logger.info("Scope restricted to domain(s): %s", allowed_domains)
         _cb("scope", {"allowed_domains": sorted(allowed_domains)})
 
@@ -370,9 +468,98 @@ async def run_scan(
             exclude_urls=getattr(target, "exclude_urls", None) or [],
         )
 
+        # ── Navigate to target & wait for SPA readiness (generic) ────
+        # After OIDC/SSO auth the browser may still be on the login URL.
+        # We must land on the actual target host before passive recon can
+        # find SPA resources (iframes, CDN scripts, dynamic chunks).
+        target_host = urlparse(target.url).hostname or ""
+        landed_on_target = False
+        try:
+            landed_on_target = await _ensure_on_target(page, target.url, target_host)
+            if not landed_on_target:
+                # Auth didn't redirect to target. Re-authenticate with full flow.
+                print(f"  [AUTH-RETRY] Not on target after auth, re-authenticating...")
+                _cb("auth", {"status": "re-authenticating", "reason": "not_on_target"})
+                for retry in range(2):
+                    try:
+                        retry_result = await auth_session._refresh_fn()
+                        if retry_result.success:
+                            print(f"  [AUTH-RETRY] Re-auth attempt {retry+1} succeeded")
+                            fresh_cookies = await page.context.cookies()
+                            cookie_dict = {c["name"]: c["value"] for c in fresh_cookies}
+                            await http_client.aclose()
+                            http_client = httpx.AsyncClient(
+                                headers=auth_session.get_auth_header(),
+                                cookies=cookie_dict,
+                                timeout=30.0,
+                            )
+                            tools._http_client = http_client
+                        else:
+                            print(f"  [AUTH-RETRY] Re-auth attempt {retry+1} failed")
+                    except Exception as auth_err:
+                        print(f"  [AUTH-RETRY] Re-auth attempt {retry+1} error: {auth_err}")
+                    landed_on_target = await _ensure_on_target(page, target.url, target_host)
+                    if landed_on_target:
+                        print(f"  [AUTH-RETRY] Successfully landed on target after retry {retry+1}")
+                        break
+                    await asyncio.sleep(3)
+
+            if landed_on_target:
+                await _wait_for_spa_ready(page)
+                print(f"  [PASSIVE] Page ready on {urlparse(page.url or '').hostname}, "
+                      f"network JS captured: {len(network_js_urls)}")
+            else:
+                current_host = urlparse(page.url or "").hostname or ""
+                print(f"  [PASSIVE] WARNING: Still on {current_host}, NOT on {target_host}!")
+                print(f"  [PASSIVE] Authentication likely failed — passive recon may have limited results")
+                _cb("auth", {"status": "failed_redirect", "current_host": current_host, "target_host": target_host})
+        except Exception as e:
+            logger.warning("Pre-recon navigation failed (non-fatal): %s", e)
+
+        # Detect app type AFTER navigation (not on the login page)
         app_info = await detect_app_type(page)
         print(f"  [DETECT] SPA: {app_info.get('is_spa')}, Framework: {app_info.get('framework')}, WebSockets: {app_info.get('has_websockets')}")
         _cb("detect", {"is_spa": app_info.get("is_spa"), "framework": app_info.get("framework")})
+
+        def _passive_progress(event, data):
+            _cb("tool_call", {
+                "phase": "Passive Reconnaissance",
+                "tool": f"passive_{event}",
+                "request": data,
+                "response": {},
+            })
+
+        _cb("phase_start", {"phase": 0, "total": 0, "name": "Passive Reconnaissance", "id": "passive_recon"})
+        current_host = urlparse(page.url or "").hostname or ""
+        if current_host != target_host and target_host:
+            print(f"  [PASSIVE] SKIPPING — browser on {current_host}, not target {target_host}")
+            print(f"  [PASSIVE] Will retry after LLM navigates to target")
+            passive_findings = []
+            _cb("phase_end", {"phase": 0, "name": "Passive Reconnaissance (skipped — not on target)",
+                              "tool_calls": 0, "findings": 0})
+        else:
+            print("  [PASSIVE] Running passive reconnaissance...")
+            try:
+                passive_findings = await run_passive_recon(
+                    page=page,
+                    http_client=http_client,
+                    target_url=target.url,
+                    on_finding=lambda f: _cb("finding", {
+                        "title": f["title"], "severity": f["severity"],
+                        "url": f["url"], "phase": "Passive Reconnaissance",
+                    }),
+                    on_progress=_passive_progress,
+                    network_js_urls=network_js_urls,
+                )
+                findings.extend(passive_findings)
+                print(f"  [PASSIVE] Done: {len(passive_findings)} findings")
+            except Exception as e:
+                passive_findings = []
+                print(f"  [PASSIVE] Failed (non-fatal): {e}")
+                logger.warning("Passive recon failed: %s", e, exc_info=True)
+
+        _cb("phase_end", {"phase": 0, "name": "Passive Reconnaissance",
+                          "tool_calls": 0, "findings": len(passive_findings)})
 
         # ── Baseline Execution (happy path, no LLM) ──
         baseline_context = ""
@@ -490,6 +677,9 @@ async def run_scan(
 
         phases = get_phases(target.scan_mode, app_info, scan_scope=getattr(target, "scan_scope", "directory"), focus_areas=getattr(target, "focus_areas", None))
         system_prompt = build_system_prompt(target, registry, app_info, extra_domains=extra_domains)
+        if passive_findings:
+            passive_summary = _format_passive_for_llm(passive_findings)
+            system_prompt += "\n\n" + passive_summary
         if baseline_context:
             system_prompt += "\n\n" + baseline_context
         if body_fuzz_context:
@@ -617,7 +807,8 @@ async def run_scan(
 
                         if fn_name in ("navigate", "click") and page:
                             original = args_parsed.get("url") or target.url
-                            reauthed = await _check_session_lost(page, auth_session, target, original)
+                            reauthed = await _check_session_lost(page, auth_session, target, original,
+                                                                  router=router, model=model)
                             if reauthed:
                                 _cb("auth", {"status": "re-authenticated", "reason": "session_lost"})
                                 cookies = await page.context.cookies()
@@ -700,6 +891,41 @@ async def run_scan(
             print(f" {phase_tool_calls} tool calls, {phase_new_findings} findings")
             _cb("phase_end", {"phase": phase_num, "name": phase.name, "tool_calls": phase_tool_calls, "findings": phase_new_findings})
             messages = trim_context(messages, max_tokens=TRIM_TARGET_TOKENS)
+
+            # ── Re-run passive recon after first LLM phase ──────────────
+            # After the first phase the LLM has navigated/interacted with
+            # the SPA. Dynamic iframes and lazy-loaded scripts may now be
+            # present that weren't visible during the initial pass.
+            # CRITICAL: If initial passive recon was skipped (not on target),
+            # this is our second chance to run it on the actual target page.
+            if phase_idx == 0:
+                try:
+                    print("  [PASSIVE-2] Re-running passive recon on authenticated page...")
+                    _cb("phase_start", {"phase": 0, "total": 0, "name": "Passive Recon (post-auth)", "id": "passive_recon_2"})
+                    p2_findings = await run_passive_recon(
+                        page=page,
+                        http_client=http_client,
+                        target_url=target.url,
+                        on_finding=lambda f: _cb("finding", {
+                            "title": f["title"], "severity": f["severity"],
+                            "url": f["url"], "phase": "Passive Recon (post-auth)",
+                        }),
+                        on_progress=_passive_progress,
+                        network_js_urls=network_js_urls,
+                    )
+                    existing_titles = {f.get("title", "") + f.get("url", "") for f in findings}
+                    new_p2 = [f for f in p2_findings if f.get("title", "") + f.get("url", "") not in existing_titles]
+                    findings.extend(new_p2)
+                    print(f"  [PASSIVE-2] Done: {len(p2_findings)} total, {len(new_p2)} new findings")
+                    _cb("phase_end", {"phase": 0, "name": "Passive Recon (post-auth)",
+                                      "tool_calls": 0, "findings": len(new_p2)})
+                    if new_p2:
+                        p2_summary = _format_passive_for_llm(new_p2)
+                        messages.append({"role": "user", "content":
+                            f"[SYSTEM] Additional passive recon findings from the authenticated page:\n{p2_summary}\n"
+                            "Use these to inform your remaining scan phases."})
+                except Exception as e:
+                    logger.warning("Post-auth passive recon failed (non-fatal): %s", e)
 
         metrics["api_endpoints_found"] = len(registry.get_all())
         print(f"  [DONE] Pages: {metrics['pages_crawled']}, Forms: {metrics['forms_found']}, APIs: {metrics['api_endpoints_found']}, Findings: {len(findings)}")

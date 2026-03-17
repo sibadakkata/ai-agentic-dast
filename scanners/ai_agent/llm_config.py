@@ -60,6 +60,23 @@ class LLMRouter:
         through litellm even when a proxy is configured."""
         return any(model.startswith(p) for p in DIRECT_PREFIXES)
 
+    def _interruptible_call(self, fn, cancel_flag):
+        """Run a blocking LLM call in a daemon thread so cancel_flag
+        can be checked every 0.5s.  If the flag fires we raise immediately
+        instead of waiting for the HTTP round-trip to finish."""
+        from .agent import ScanCancelled
+        import concurrent.futures
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(fn)
+            while True:
+                try:
+                    return future.result(timeout=0.5)
+                except (concurrent.futures.TimeoutError, TimeoutError):
+                    if cancel_flag and cancel_flag.is_set():
+                        future.cancel()
+                        raise ScanCancelled("Scan stopped by user")
+
     def complete(
         self,
         model: str,
@@ -78,9 +95,15 @@ class LLMRouter:
                 raise ScanCancelled("Scan stopped by user")
             try:
                 if use_direct:
-                    response = self._direct_complete(model, messages, tools, **kwargs)
+                    call_fn = lambda: self._direct_complete(model, messages, tools, **kwargs)
                 else:
-                    response = self._proxy_complete(model, messages, tools, **kwargs)
+                    call_fn = lambda: self._proxy_complete(model, messages, tools, **kwargs)
+
+                if cancel_flag:
+                    response = self._interruptible_call(call_fn, cancel_flag)
+                else:
+                    response = call_fn()
+
                 self._track(model, response)
                 if cancel_flag and cancel_flag.is_set():
                     raise ScanCancelled("Scan stopped by user")
