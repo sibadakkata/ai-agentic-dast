@@ -12,16 +12,23 @@ This applies to all remote operations:
 - `ssh` to run `docker cp`, `docker restart`, or any command on the server
 - Any action that modifies the running production/staging environment
 
-## Required Flow
+## Git Branching Protocol
 
-1. Make all code changes locally
-2. Summarize what changed and what files are ready to deploy
-3. **Ask**: "Ready to deploy — shall I push to EC2?"
-4. **Wait** for explicit confirmation before proceeding
-5. Only then upload, copy into container, and restart
+**NEVER push directly to `master`.** All code changes must go through a feature branch and PR.
 
-## Never
+### Required Flow
 
+1. Create a feature branch from `master` (e.g. `feature/add-csrf-detection`)
+2. Make all code changes on the feature branch
+3. Push the branch and create a PR with `gh pr create`
+4. **Wait** for explicit user approval/merge before proceeding
+5. Only after PR is merged: ask user if they want to deploy to EC2
+6. Only after deploy approval: upload, copy into container, and restart
+
+### Never
+
+- Never push directly to `master` — always use a feature branch + PR
+- Never merge a PR without user approval
 - Never chain local edits with deployment in one step
 - Never assume "deploy" is implied when the user says "fix" or "update"
 - Never deploy as part of a verification/testing step without asking

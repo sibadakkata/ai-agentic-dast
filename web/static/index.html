@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Agentic Web Scanner - AI DAST Platform</title>
+<link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
 <style>
@@ -411,10 +412,7 @@ code.inline-url { background:#f1f5f9; color:#0f172a; padding:1px 5px; border-rad
   </nav>
   <div class="sidebar-footer">
     <div style="font-size:10px;font-weight:600;letter-spacing:1px;color:rgba(255,255,255,0.3);text-transform:uppercase;margin-bottom:10px;">Built by <span style="color:rgba(239,68,68,0.8);">Gen Digital Red Team</span></div>
-    <div id="sidebar-status" style="font-size:11px;color:rgba(255,255,255,0.4);display:flex;align-items:center;gap:6px;">
-      <span style="width:6px;height:6px;border-radius:50%;background:rgba(255,255,255,0.3);display:inline-block;"></span>
-      Connecting...
-    </div>
+    <div style="margin-top:4px;font-size:9px;letter-spacing:1.5px;color:rgba(255,255,255,0.25);text-transform:uppercase;font-weight:700;">&#128274; Internal Use Only</div>
   </div>
 </aside>
 
@@ -1367,21 +1365,16 @@ function doLogout() {
 
 async function testConnectivity() {
   const statusEl = document.getElementById('connectivity-status');
-  const sidebarEl = document.getElementById('sidebar-status');
   try {
     const resp = await fetch('/api/models');
     if (resp.ok) {
       if (statusEl) statusEl.innerHTML = '<span style="width:7px;height:7px;border-radius:50%;background:#059669;display:inline-block;"></span> Connected';
       if (statusEl) statusEl.style.color = '#059669';
-      if (sidebarEl) sidebarEl.innerHTML = '<span style="width:6px;height:6px;border-radius:50%;background:#34d399;display:inline-block;"></span> Online';
-      if (sidebarEl) sidebarEl.style.color = 'rgba(52,211,153,0.8)';
     } else {
       if (statusEl) { statusEl.innerHTML = '<span style="width:7px;height:7px;border-radius:50%;background:#d97706;display:inline-block;"></span> Issue'; statusEl.style.color = '#d97706'; }
-      if (sidebarEl) { sidebarEl.innerHTML = '<span style="width:6px;height:6px;border-radius:50%;background:#fbbf24;display:inline-block;"></span> Issue'; sidebarEl.style.color = 'rgba(251,191,36,0.8)'; }
     }
   } catch(e) {
     if (statusEl) { statusEl.innerHTML = '<span style="width:7px;height:7px;border-radius:50%;background:#dc2626;display:inline-block;"></span> Offline'; statusEl.style.color = '#dc2626'; }
-    if (sidebarEl) { sidebarEl.innerHTML = '<span style="width:6px;height:6px;border-radius:50%;background:#f87171;display:inline-block;"></span> Offline'; sidebarEl.style.color = 'rgba(248,113,113,0.8)'; }
   }
 }
 
@@ -3448,6 +3441,5 @@ function _buildTable(rows) {
 }
 
 </script>
-<div style="position:fixed;bottom:12px;right:16px;font-size:10px;color:rgba(0,0,0,0.45);letter-spacing:1.5px;text-transform:uppercase;font-weight:700;pointer-events:none;z-index:9999;user-select:none;">&#128274; Internal Use Only</div>
 </body>
 </html>
