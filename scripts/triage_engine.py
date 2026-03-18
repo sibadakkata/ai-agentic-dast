@@ -66,6 +66,18 @@ CWE_PROFILES = {
     "path_traversal_confirmed": {"cwe": "CWE-22", "cvss": 7.5, "vec": "AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N"},
     "idor_confirmed":   {"cwe": "CWE-639", "cvss": 6.5, "vec": "AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:N/A:N"},
     "deserialization":  {"cwe": "CWE-502", "cvss": 8.1, "vec": "AV:N/AC:H/PR:N/UI:N/S:U/C:H/I:H/A:H"},
+    "insecure_cookie":  {"cwe": "CWE-614", "cvss": 4.3, "vec": "AV:N/AC:L/PR:N/UI:R/S:U/C:L/I:N/A:N"},
+    "jwt_weakness":     {"cwe": "CWE-347", "cvss": 5.3, "vec": "AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N"},
+    "jwt_alg_none":     {"cwe": "CWE-347", "cvss": 9.1, "vec": "AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:N"},
+    "cors_misconfiguration": {"cwe": "CWE-942", "cvss": 7.5, "vec": "AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N"},
+    "missing_cache_control": {"cwe": "CWE-525", "cvss": 4.3, "vec": "AV:N/AC:L/PR:N/UI:R/S:U/C:L/I:N/A:N"},
+    "external_form":    {"cwe": "CWE-200", "cvss": 5.3, "vec": "AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N"},
+    "api_version_downgrade": {"cwe": "CWE-693", "cvss": 5.3, "vec": "AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N"},
+    "race_condition":   {"cwe": "CWE-362", "cvss": 6.5, "vec": "AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:H/A:N"},
+    "host_header_injection": {"cwe": "CWE-644", "cvss": 5.3, "vec": "AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N"},
+    "timing_enumeration": {"cwe": "CWE-203", "cvss": 5.3, "vec": "AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N"},
+    "bfla":             {"cwe": "CWE-285", "cvss": 7.5, "vec": "AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:N/A:N"},
+    "token_leakage":    {"cwe": "CWE-532", "cvss": 6.5, "vec": "AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:N/A:N"},
 }
 
 
@@ -90,6 +102,30 @@ def _passive_recon_action(title: str) -> str:
         return "Remove version information from response headers (Server, X-Powered-By)."
     if "html comment" in t:
         return "Remove sensitive information from HTML comments before deployment."
+    if "insecure cookie" in t or "cookie" in t and ("secure" in t or "httponly" in t or "samesite" in t):
+        return "Set Secure, HttpOnly, and SameSite=Strict/Lax flags on all session cookies."
+    if "jwt" in t and ("alg" in t or "weakness" in t or "none" in t):
+        return "Use strong asymmetric algorithms (RS256/ES256) for JWT signing. Enforce exp, iss, aud, jti claims. Never allow alg=none."
+    if "cors" in t:
+        return "Configure CORS to allow only trusted origins. Never reflect arbitrary Origin. Avoid Access-Control-Allow-Origin: * with credentials."
+    if "cache-control" in t or "cache" in t and "no-store" in t:
+        return "Set Cache-Control: no-store on all authenticated pages to prevent caching of sensitive data."
+    if "sri" in t or "subresource integrity" in t:
+        return "Add integrity= attributes to all external script and stylesheet tags. Use SRI hash generation tools."
+    if "form" in t and "external" in t:
+        return "Verify external form targets are trusted. Avoid submitting sensitive data to third-party domains."
+    if "api version" in t or "deprecated api" in t:
+        return "Decommission deprecated API versions. Redirect old version requests to current version. Apply same security controls to all active versions."
+    if "race condition" in t:
+        return "Implement idempotency keys, database-level locking, or optimistic concurrency control on state-changing operations."
+    if "host header" in t:
+        return "Validate and whitelist the Host header server-side. Do not use Host header values to generate URLs, redirects, or links."
+    if "timing" in t and "enum" in t:
+        return "Normalize response times for authentication endpoints regardless of username validity. Use constant-time comparison for credentials."
+    if "function-level" in t or "bfla" in t:
+        return "Enforce role-based access control at the API/function level. Deny by default and explicitly grant access per role."
+    if "token" in t and ("leak" in t or "log" in t or "telemetry" in t):
+        return "Remove security tokens from telemetry/logging payloads. Redact sensitive values before logging. Review all POST bodies to logging endpoints."
     return "Review and remediate the identified issue."
 
 

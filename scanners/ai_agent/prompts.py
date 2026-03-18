@@ -135,6 +135,65 @@ WEB_PHASES: list[ScanPhase] = [
         prompt="Test additional vectors: open redirect, CRLF injection, HTTP request smuggling, clickjacking, CSRF, and prototype pollution. Generate tests from the redirects, headers, and client-side logic you observed.",
         applies_to="website",
     ),
+    ScanPhase(
+        id="web_race_condition",
+        name="Race Condition Testing",
+        prompt=("Test for race conditions on state-changing operations. "
+                "Identify endpoints that modify state: coupon application, account balance, "
+                "vote/like actions, item checkout, password change, invitation acceptance. "
+                "For each, send 5-10 concurrent identical requests using parallel fetch calls "
+                "and check if the action was applied multiple times (e.g. balance deducted twice, "
+                "coupon applied twice). Use the browser's fetch API to fire requests simultaneously. "
+                "Also test TOCTOU (Time-of-Check-Time-of-Use) by rapidly alternating between "
+                "a check endpoint and an action endpoint. Only test endpoints you already discovered."),
+        max_steps=30,
+        applies_to="website",
+    ),
+    ScanPhase(
+        id="web_host_header",
+        name="Host Header Poisoning",
+        prompt=("Test Host header attacks. Send requests with: "
+                "(1) a modified Host header pointing to attacker.com, "
+                "(2) X-Forwarded-Host: attacker.com, "
+                "(3) X-Forwarded-For: 127.0.0.1, "
+                "(4) Host header with port injection (evil.com:80@target). "
+                "Check if the response reflects the injected host in any URLs, "
+                "redirects (Location header), password reset links, canonical URLs, "
+                "or HTML content. Also test if X-Forwarded-Host bypasses access controls. "
+                "Focus on password reset, email verification, and redirect endpoints."),
+        max_steps=20,
+        applies_to="website",
+    ),
+    ScanPhase(
+        id="web_timing_enum",
+        name="Timing-Based Enumeration",
+        prompt=("Test for timing-based user enumeration. "
+                "Craft requests to login or password-reset endpoints with: "
+                "(1) a known-valid username/email + wrong password, "
+                "(2) a non-existent username/email + wrong password. "
+                "Measure response times for each (send 3 requests per variant). "
+                "A consistent timing difference >100ms between valid and invalid usernames "
+                "indicates user enumeration. Also check for different HTTP status codes, "
+                "response sizes, or error messages between valid/invalid usernames. "
+                "Test on signup endpoints too — 'email already exists' responses."),
+        max_steps=20,
+        applies_to="website",
+    ),
+    ScanPhase(
+        id="web_bfla",
+        name="Broken Function-Level Authorization",
+        prompt=("Test for broken function-level authorization (BFLA). "
+                "From the application map, identify admin/privileged endpoints by looking for: "
+                "URL patterns containing /admin/, /manage/, /settings/, /config/, /users/, "
+                "/roles/, /permissions/, /internal/, /system/, /debug/. "
+                "Also look for API endpoints discovered during recon that accept PUT/DELETE/PATCH. "
+                "Attempt to access these endpoints with the current user's session token. "
+                "Check if changing HTTP method (GET to POST, POST to PUT) reveals different "
+                "functionality. Test if adding parameters like ?admin=true or role=admin "
+                "grants elevated access. Focus on vertical privilege escalation."),
+        max_steps=25,
+        applies_to="website",
+    ),
 ]
 
 API_PHASES: list[ScanPhase] = [
@@ -198,6 +257,43 @@ API_PHASES: list[ScanPhase] = [
         prompt="Test flow bypass, parameter tampering, race conditions, and idempotency violations. Generate tests from the business flows and state transitions you observed.",
         applies_to="api",
     ),
+    ScanPhase(
+        id="api_race_condition",
+        name="API Race Conditions",
+        prompt=("Test API endpoints for race conditions. "
+                "For every state-changing endpoint (POST, PUT, PATCH, DELETE) you discovered, "
+                "send 5-10 concurrent identical requests and check if the operation was applied "
+                "multiple times. Focus on: payment/transfer endpoints, resource creation, "
+                "quota/limit decrements, approval/activation flows. "
+                "Also test if the API supports idempotency keys — if so, verify they are enforced."),
+        max_steps=25,
+        applies_to="api",
+    ),
+    ScanPhase(
+        id="api_bfla",
+        name="API Function-Level Authorization",
+        prompt=("Test for broken function-level authorization in the API. "
+                "Identify admin/management endpoints from recon (paths with /admin/, /manage/, "
+                "/internal/, /users/{id}/role, /settings/). "
+                "Attempt to call them with the normal user's token. "
+                "Try method switching (GET→DELETE, GET→PUT) on discovered endpoints. "
+                "Check if adding admin-like query params (?role=admin, ?is_admin=1) bypasses auth. "
+                "Test if documentation endpoints (/swagger, /openapi, /graphql) are accessible."),
+        max_steps=20,
+        applies_to="api",
+    ),
+    ScanPhase(
+        id="api_host_header",
+        name="API Host Header Injection",
+        prompt=("Test API endpoints for host header injection. "
+                "Send requests with modified Host, X-Forwarded-Host, and X-Forwarded-For headers. "
+                "Check if responses contain reflected host values in URLs, HATEOAS links, "
+                "or redirect headers. Test if X-Forwarded-For: 127.0.0.1 bypasses IP allowlists "
+                "on restricted endpoints. Also check for different behavior with "
+                "X-Original-URL and X-Rewrite-URL headers (path override attacks)."),
+        max_steps=20,
+        applies_to="api",
+    ),
 ]
 
 
@@ -213,7 +309,7 @@ _FOCUS_PHASE_MAP: dict[str, set[str]] = {
     "bola":         {"web_a01", "api_authz"},
     "auth":         {"web_a07", "api_auth"},
     "authentication": {"web_a07", "api_auth"},
-    "access control": {"web_a01", "api_authz"},
+    "access control": {"web_a01", "api_authz", "web_bfla", "api_bfla"},
     "csrf":         {"web_extras"},
     "upload":       {"web_extras"},
     "misconfig":    {"web_a05"},
@@ -221,8 +317,14 @@ _FOCUS_PHASE_MAP: dict[str, set[str]] = {
     "graphql":      {"api_graphql"},
     "rate limit":   {"api_rate_limit"},
     "mass assignment": {"api_mass_assign"},
-    "business logic": {"web_extras", "api_business_logic"},
+    "business logic": {"web_extras", "api_business_logic", "web_race_condition", "api_race_condition"},
     "data exposure": {"api_data_exposure"},
+    "race condition": {"web_race_condition", "api_race_condition"},
+    "host header":  {"web_host_header", "api_host_header"},
+    "timing":       {"web_timing_enum"},
+    "enumeration":  {"web_timing_enum"},
+    "bfla":         {"web_bfla", "api_bfla"},
+    "authorization": {"web_a01", "api_authz", "web_bfla", "api_bfla"},
 }
 
 _RECON_PHASE_IDS = {"web_recon", "api_recon"}

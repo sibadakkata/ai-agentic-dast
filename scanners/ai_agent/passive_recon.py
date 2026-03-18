@@ -10,10 +10,19 @@ Runs before the LLM scan phases. Checks for:
   - HTML comments with secrets
   - Server version disclosure
   - Security tokens leaked into telemetry/logging endpoints
+  - Cookie security audit (Secure, HttpOnly, SameSite flags)
+  - JWT token analysis (weak algorithms, missing claims)
+  - CORS misconfiguration (permissive Access-Control-Allow-Origin)
+  - Cache-Control on authenticated pages
+  - Subresource Integrity (SRI) missing on external scripts
+  - API version downgrade discovery
+  - Form action targets on external domains
 """
 from __future__ import annotations
 
 import asyncio
+import base64
+import json
 import logging
 import re
 from urllib.parse import urljoin, urlparse
@@ -180,7 +189,7 @@ async def run_passive_recon(
     target_parsed = urlparse(target_url)
     base_url = f"{target_parsed.scheme}://{target_parsed.netloc}"
 
-    _progress("passive_start", {"checks": "source_maps, js_sinks, secrets, sensitive_files, headers, html_comments, telemetry_token_leakage"})
+    _progress("passive_start", {"checks": "source_maps, js_sinks, secrets, sensitive_files, headers, html_comments, telemetry_token_leakage, cookie_security, jwt_analysis, cors, cache_control, sri, form_actions, api_versioning"})
 
     # ── 1. Collect all JS files loaded by the page ────────────────────
     js_urls = await _collect_js_urls(page, target_url)
@@ -237,6 +246,55 @@ async def run_passive_recon(
         findings.append(f)
         _cb(f)
     _progress("passive_step", {"step": "Telemetry token leakage", "found": len(telemetry_findings)})
+
+    # ── 8. Cookie security audit ────────────────────────────────────────
+    cookie_findings = await _check_cookie_security(page, target_url)
+    for f in cookie_findings:
+        findings.append(f)
+        _cb(f)
+    _progress("passive_step", {"step": "Cookie security", "found": len(cookie_findings)})
+
+    # ── 9. JWT analysis ──────────────────────────────────────────────────
+    jwt_findings = await _check_jwt_security(page, target_url)
+    for f in jwt_findings:
+        findings.append(f)
+        _cb(f)
+    _progress("passive_step", {"step": "JWT analysis", "found": len(jwt_findings)})
+
+    # ── 10. CORS misconfiguration ────────────────────────────────────────
+    cors_findings = await _check_cors_misconfiguration(http_client, target_url)
+    for f in cors_findings:
+        findings.append(f)
+        _cb(f)
+    _progress("passive_step", {"step": "CORS check", "found": len(cors_findings)})
+
+    # ── 11. Cache-Control on authenticated pages ─────────────────────────
+    cache_findings = await _check_cache_control(http_client, target_url)
+    for f in cache_findings:
+        findings.append(f)
+        _cb(f)
+    _progress("passive_step", {"step": "Cache-Control", "found": len(cache_findings)})
+
+    # ── 12. SRI missing on external scripts ──────────────────────────────
+    sri_findings = await _check_sri(page, target_url)
+    for f in sri_findings:
+        findings.append(f)
+        _cb(f)
+    _progress("passive_step", {"step": "SRI check", "found": len(sri_findings)})
+
+    # ── 13. Form action targets on external domains ──────────────────────
+    form_findings = await _check_form_actions(page, target_url)
+    for f in form_findings:
+        findings.append(f)
+        _cb(f)
+    _progress("passive_step", {"step": "Form actions", "found": len(form_findings)})
+
+    # ── 14. API version downgrade ────────────────────────────────────────
+    api_ver_findings = await _check_api_version_downgrade(http_client, target_url, js_urls)
+    for f in api_ver_findings:
+        findings.append(f)
+        _cb(f)
+    _progress("passive_step", {"step": "API version check", "found": len(api_ver_findings)})
 
     _progress("passive_end", {"total_findings": len(findings)})
     logger.info("Passive recon complete: %d findings", len(findings))
@@ -1167,6 +1225,377 @@ async def _check_telemetry_token_leakage(page, target_url: str) -> list[dict]:
                 f"Manually inspect POST bodies for sensitive token leakage.",
                 source="passive_recon",
             ))
+
+    return findings
+
+
+# ══════════════════════════════════════════════════════════════════════
+# NEW CONTEXT-AWARE PASSIVE CHECKS
+# ══════════════════════════════════════════════════════════════════════
+
+async def _check_cookie_security(page, target_url: str) -> list[dict]:
+    """Audit every cookie for Secure, HttpOnly, SameSite flags."""
+    findings = []
+    try:
+        cookies = await page.context.cookies()
+        target_host = urlparse(target_url).hostname or ""
+        is_https = target_url.startswith("https")
+
+        session_kw = ("session", "sess", "sid", "auth", "token", "jwt",
+                      "login", "identity", "phpsessid", "jsessionid",
+                      "aspsession", "connect", "sso", "oidc")
+
+        for c in cookies:
+            name = c.get("name", "")
+            name_lower = name.lower()
+            is_session = any(kw in name_lower for kw in session_kw)
+            issues = []
+
+            if is_https and not c.get("secure", False):
+                issues.append("missing Secure flag (cookie sent over HTTP)")
+            if not c.get("httpOnly", False):
+                issues.append("missing HttpOnly flag (accessible via JavaScript)")
+            same_site = (c.get("sameSite") or "").lower()
+            if same_site not in ("strict", "lax"):
+                issues.append(f"SameSite={same_site or 'None'} (vulnerable to CSRF)")
+
+            if issues:
+                sev = "Medium" if is_session else "Low"
+                cvss = 5.3 if is_session else 3.1
+                findings.append(_make_finding(
+                    f"Insecure Cookie: {name}" + (" (Session Cookie)" if is_session else ""),
+                    sev, "CWE-614", cvss, target_url,
+                    f"Cookie '{name}' has: {'; '.join(issues)}."
+                    + (" Session cookies require all security flags." if is_session else ""),
+                    source="passive_recon",
+                ))
+    except Exception as e:
+        logger.debug("Cookie security check failed: %s", e)
+    return findings
+
+
+async def _check_jwt_security(page, target_url: str) -> list[dict]:
+    """Analyze JWT tokens found in cookies/storage for weak algorithms and claims."""
+    findings = []
+    jwts_found: list[tuple[str, str]] = []  # (source_label, token)
+
+    try:
+        cookies = await page.context.cookies()
+        for c in cookies:
+            val = c.get("value", "")
+            if val.startswith("eyJ") and val.count(".") == 2:
+                jwts_found.append((f"cookie:{c['name']}", val))
+    except Exception:
+        pass
+
+    try:
+        storage_jwts = await page.evaluate("""() => {
+            const out = [];
+            function scan(store, label) {
+                try {
+                    for (let i = 0; i < store.length; i++) {
+                        const k = store.key(i);
+                        const v = store.getItem(k) || '';
+                        if (v.startsWith('eyJ') && (v.match(/\\./g) || []).length === 2) {
+                            out.push([label + ':' + k, v]);
+                        }
+                    }
+                } catch(e) {}
+            }
+            scan(localStorage, 'localStorage');
+            scan(sessionStorage, 'sessionStorage');
+            return out;
+        }""")
+        for item in (storage_jwts or []):
+            jwts_found.append((item[0], item[1]))
+    except Exception:
+        pass
+
+    for source_label, token in jwts_found[:5]:
+        try:
+            parts = token.split(".")
+            header_b64 = parts[0] + "=" * (4 - len(parts[0]) % 4)
+            header = json.loads(base64.urlsafe_b64decode(header_b64))
+            alg = header.get("alg", "").upper()
+
+            payload_b64 = parts[1] + "=" * (4 - len(parts[1]) % 4)
+            payload_data = json.loads(base64.urlsafe_b64decode(payload_b64))
+
+            issues = []
+
+            if alg == "NONE":
+                issues.append("alg=none — token has NO signature verification (Critical)")
+            elif alg in ("HS256", "HS384", "HS512"):
+                issues.append(f"alg={alg} — symmetric HMAC (susceptible to key brute-force if weak secret)")
+            elif alg == "":
+                issues.append("empty algorithm — may bypass signature check")
+
+            if "exp" not in payload_data:
+                issues.append("no 'exp' claim — token never expires")
+            if "iss" not in payload_data and "aud" not in payload_data:
+                issues.append("missing 'iss'/'aud' — no issuer/audience validation")
+            if "jti" not in payload_data:
+                issues.append("no 'jti' — replay attacks possible")
+
+            sensitive_claims = []
+            for key in ("email", "password", "ssn", "phone", "address", "credit_card"):
+                if key in payload_data:
+                    sensitive_claims.append(key)
+            if sensitive_claims:
+                issues.append(f"PII in token payload: {', '.join(sensitive_claims)}")
+
+            if issues:
+                sev = "High" if "alg=none" in str(issues) or "never expires" in str(issues) else "Medium"
+                cvss = 7.5 if sev == "High" else 5.3
+                findings.append(_make_finding(
+                    f"JWT Security Weakness — {source_label}",
+                    sev, "CWE-347", cvss, target_url,
+                    f"JWT from {source_label} (alg={alg}): {'; '.join(issues)}. "
+                    f"Header: {json.dumps(header)}",
+                    payload=token[:50] + "...",
+                    source="passive_recon",
+                ))
+        except Exception:
+            pass
+
+    return findings
+
+
+async def _check_cors_misconfiguration(http_client, target_url: str) -> list[dict]:
+    """Test CORS configuration with a cross-origin preflight."""
+    findings = []
+    try:
+        evil_origin = "https://evil-attacker.com"
+        resp = await http_client.get(
+            target_url,
+            headers={"Origin": evil_origin},
+            timeout=10.0,
+        )
+        hdrs = {k.lower(): v for k, v in resp.headers.items()}
+        acao = hdrs.get("access-control-allow-origin", "")
+        acac = hdrs.get("access-control-allow-credentials", "").lower()
+
+        if acao == "*" and acac == "true":
+            findings.append(_make_finding(
+                "Critical CORS Misconfiguration — Wildcard Origin with Credentials",
+                "High", "CWE-942", 7.5, target_url,
+                "Access-Control-Allow-Origin: * combined with "
+                "Access-Control-Allow-Credentials: true. Any website can make "
+                "authenticated cross-origin requests and read responses.",
+                source="passive_recon",
+            ))
+        elif acao == evil_origin:
+            sev = "High" if acac == "true" else "Medium"
+            cvss = 7.5 if acac == "true" else 5.3
+            findings.append(_make_finding(
+                "CORS Reflects Arbitrary Origin" + (" with Credentials" if acac == "true" else ""),
+                sev, "CWE-942", cvss, target_url,
+                f"Server reflects attacker Origin ({evil_origin}) in "
+                f"Access-Control-Allow-Origin header"
+                + (". With credentials enabled, attacker can steal user data." if acac == "true"
+                   else ". Without credentials, impact is limited."),
+                source="passive_recon",
+            ))
+        elif acao == "null":
+            findings.append(_make_finding(
+                "CORS Allows Null Origin",
+                "Medium", "CWE-942", 5.3, target_url,
+                "Access-Control-Allow-Origin: null. Sandboxed iframes and "
+                "data: URIs send Origin: null, enabling cross-origin attacks.",
+                source="passive_recon",
+            ))
+    except Exception as e:
+        logger.debug("CORS check failed: %s", e)
+    return findings
+
+
+async def _check_cache_control(http_client, target_url: str) -> list[dict]:
+    """Check if authenticated pages have proper Cache-Control headers."""
+    findings = []
+    try:
+        resp = await http_client.get(target_url, timeout=10.0)
+        hdrs = {k.lower(): v for k, v in resp.headers.items()}
+        cc = hdrs.get("cache-control", "").lower()
+
+        has_auth_indicator = any(k in hdrs for k in (
+            "set-cookie", "authorization", "x-csrf-token",
+            "x-xsrf-token", "x-auth-token",
+        ))
+        body_has_auth = any(kw in resp.text[:2000].lower() for kw in (
+            "logout", "sign out", "my account", "profile", "dashboard",
+            "welcome,", "signed in as",
+        ))
+
+        if has_auth_indicator or body_has_auth:
+            if "no-store" not in cc:
+                severity = "Medium" if "private" not in cc else "Low"
+                findings.append(_make_finding(
+                    "Authenticated Page Missing Cache-Control: no-store",
+                    severity, "CWE-525", 4.3 if severity == "Medium" else 3.1,
+                    target_url,
+                    f"Authenticated page does not set Cache-Control: no-store "
+                    f"(current: '{cc or '(none)'}'). Sensitive content may be "
+                    f"cached by browsers or proxies, accessible via back button or shared cache.",
+                    source="passive_recon",
+                ))
+    except Exception as e:
+        logger.debug("Cache-Control check failed: %s", e)
+    return findings
+
+
+async def _check_sri(page, target_url: str) -> list[dict]:
+    """Check for external scripts/stylesheets missing Subresource Integrity."""
+    findings = []
+    try:
+        target_host = urlparse(target_url).hostname or ""
+        external_resources = await page.evaluate("""(targetHost) => {
+            const results = [];
+            const scripts = document.querySelectorAll('script[src]');
+            const links = document.querySelectorAll('link[rel="stylesheet"][href]');
+            for (const el of [...scripts, ...links]) {
+                const url = el.src || el.href;
+                if (!url || !url.startsWith('http')) continue;
+                try {
+                    const host = new URL(url).hostname;
+                    if (host !== targetHost && !el.integrity) {
+                        results.push({
+                            tag: el.tagName.toLowerCase(),
+                            url: url,
+                            host: host,
+                        });
+                    }
+                } catch(e) {}
+            }
+            return results.slice(0, 20);
+        }""", target_host)
+
+        cdn_resources = [r for r in (external_resources or []) if r.get("url")]
+        if cdn_resources:
+            urls_list = [r["url"].split("?")[0][-60:] for r in cdn_resources[:5]]
+            hosts = list(set(r["host"] for r in cdn_resources))
+            findings.append(_make_finding(
+                f"External Resources Missing Subresource Integrity (SRI) — {len(cdn_resources)} resource(s)",
+                "Low", "CWE-353", 3.7, target_url,
+                f"{len(cdn_resources)} external {'/'.join(set(r['tag'] for r in cdn_resources))} "
+                f"tag(s) from {', '.join(hosts[:3])} loaded without integrity= attribute. "
+                f"If these CDNs are compromised, malicious code executes in user browsers. "
+                f"Examples: {'; '.join(urls_list)}",
+                source="passive_recon",
+            ))
+    except Exception as e:
+        logger.debug("SRI check failed: %s", e)
+    return findings
+
+
+async def _check_form_actions(page, target_url: str) -> list[dict]:
+    """Check for forms submitting to external domains."""
+    findings = []
+    try:
+        target_host = urlparse(target_url).hostname or ""
+        external_forms = await page.evaluate("""(targetHost) => {
+            const forms = document.querySelectorAll('form[action]');
+            const results = [];
+            for (const form of forms) {
+                const action = form.action;
+                if (!action || !action.startsWith('http')) continue;
+                try {
+                    const host = new URL(action).hostname;
+                    if (host !== targetHost) {
+                        const hasPassword = !!form.querySelector('input[type="password"]');
+                        const hasSensitive = !!form.querySelector(
+                            'input[name*="card"], input[name*="ssn"], input[name*="credit"], '
+                            + 'input[name*="account"], input[name*="routing"]'
+                        );
+                        results.push({action, host, hasPassword, hasSensitive,
+                                     method: (form.method || 'GET').toUpperCase()});
+                    }
+                } catch(e) {}
+            }
+            return results;
+        }""", target_host)
+
+        for form in (external_forms or []):
+            sev = "High" if form.get("hasPassword") or form.get("hasSensitive") else "Medium"
+            cvss = 6.5 if sev == "High" else 4.3
+            findings.append(_make_finding(
+                f"Form Submits Data to External Domain ({form['host']})",
+                sev, "CWE-200", cvss, form["action"],
+                f"A {form['method']} form submits to {form['action']} (external). "
+                + ("Form contains password/sensitive fields — credentials sent to third party. " if sev == "High" else "")
+                + "Verify this is intentional and the receiving domain is trusted.",
+                source="passive_recon",
+            ))
+    except Exception as e:
+        logger.debug("Form action check failed: %s", e)
+    return findings
+
+
+async def _check_api_version_downgrade(http_client, target_url: str, js_urls: list[str]) -> list[dict]:
+    """Discover API version patterns and test if older versions are accessible."""
+    findings = []
+    version_pattern = re.compile(r'/v(\d+)/')
+    discovered_versions: dict[str, set[int]] = {}  # base_path -> set of versions
+
+    all_urls = [target_url] + js_urls[:20]
+    for url in all_urls:
+        for m in version_pattern.finditer(url):
+            ver = int(m.group(1))
+            prefix = url[:m.start()]
+            suffix = url[m.end():]
+            base_key = f"{prefix}__V__{suffix}"
+            discovered_versions.setdefault(base_key, set()).add(ver)
+
+    if not discovered_versions:
+        try:
+            page_text = ""
+            for js_url in js_urls[:5]:
+                try:
+                    resp = await http_client.get(js_url, timeout=8.0)
+                    if resp.status_code == 200:
+                        page_text += resp.text[:5000]
+                except Exception:
+                    pass
+            for m in re.finditer(r'["\'](/api/v(\d+)/[^"\']+)["\']', page_text):
+                path = m.group(1)
+                ver = int(m.group(2))
+                prefix = path[:path.index(f"/v{ver}/")]
+                suffix = path[path.index(f"/v{ver}/") + len(f"/v{ver}/"):]
+                base_key = f"{prefix}__V__{suffix}"
+                discovered_versions.setdefault(base_key, set()).add(ver)
+        except Exception:
+            pass
+
+    base_url = f"{urlparse(target_url).scheme}://{urlparse(target_url).netloc}"
+
+    for base_key, versions in discovered_versions.items():
+        max_ver = max(versions)
+        if max_ver <= 1:
+            continue
+
+        for older_ver in range(max(1, max_ver - 2), max_ver):
+            older_path = base_key.replace("__V__", f"/v{older_ver}/")
+            if older_path.startswith("http"):
+                test_url = older_path
+            else:
+                test_url = base_url + older_path
+
+            try:
+                resp = await http_client.get(test_url, timeout=8.0, follow_redirects=False)
+                if resp.status_code in (200, 201) and len(resp.content) > 50:
+                    body = resp.text[:200]
+                    if not body.strip().startswith("<!DOCTYPE") and not body.strip().startswith("<html"):
+                        current_path = base_key.replace("__V__", f"/v{max_ver}/")
+                        findings.append(_make_finding(
+                            f"Deprecated API Version Accessible — v{older_ver} (current: v{max_ver})",
+                            "Medium", "CWE-693", 5.3, test_url,
+                            f"API v{older_ver} still returns valid responses (HTTP {resp.status_code}). "
+                            f"Current version is v{max_ver}. Older API versions often lack security "
+                            f"controls (auth, rate limiting, input validation) added in newer versions.",
+                            source="passive_recon",
+                        ))
+                        break
+            except Exception:
+                pass
 
     return findings
 
