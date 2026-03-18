@@ -129,6 +129,7 @@ uvicorn web.app:app --host 0.0.0.0 --port 8080
 ```
 ├── README.md                    # This file
 ├── docs/                        # Detailed documentation
+│   ├── security-checks.md       #   Complete reference: all 62 check categories
 │   ├── architecture.md          #   AI agent architecture & design
 │   ├── triage-engine.md         #   Triage engine deep dive
 │   ├── api-scanning.md          #   How API scanning works (walkthrough)
@@ -168,10 +169,11 @@ uvicorn web.app:app --host 0.0.0.0 --port 8080
 
 | Document | Description |
 |----------|-------------|
+| [Security Checks](docs/security-checks.md) | **Complete reference of all 62 check categories** — passive recon, web phases, API phases, CWE/OWASP coverage |
 | [Architecture](docs/architecture.md) | AI agent design, LLM loop, tool system, phase orchestration |
 | [Triage Engine](docs/triage-engine.md) | How TP/FP classification works, confidence scoring, CVSS adjustment |
 | [API Scanning](docs/api-scanning.md) | Step-by-step walkthrough with banking API example |
-| [Web Scanning](docs/web-scanning.md) | Browser-based scanning, SPA handling, 15 OWASP phases |
+| [Web Scanning](docs/web-scanning.md) | Browser-based scanning, SPA handling, 23 OWASP + context-aware phases |
 | [REST API](docs/rest-api.md) | Full API reference with curl examples and Python SDK |
 | [Deployment](docs/deployment.md) | EC2 setup, Docker, Bedrock config, models, data persistence |
 | [Web UI](docs/web-ui.md) | UI features, scan configuration, AI planner |
