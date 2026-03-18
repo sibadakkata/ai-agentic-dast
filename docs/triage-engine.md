@@ -194,25 +194,47 @@ Consistent regardless of what the LLM originally reported:
 |-------------|-----|-----------|
 | SQL Injection (confirmed) | CWE-89 | 9.8 |
 | RCE / Command Injection | CWE-78 | 9.8 |
+| Unrestricted File Upload | CWE-434 | 9.8 |
+| JWT alg:none | CWE-347 | 9.1 |
 | Insecure Deserialization | CWE-502 | 8.1 |
 | SSRF (confirmed) | CWE-918 | 7.5 |
 | Path Traversal (confirmed) | CWE-22 | 7.5 |
 | Auth Bypass | CWE-287 | 7.5 |
+| CORS (wildcard + credentials) | CWE-942 | 7.5 |
+| Broken Function-Level Auth | CWE-285 | 7.5 |
+| Race Condition | CWE-362 | 6.5 |
+| HTTP Method Override | CWE-650 | 6.5 |
+| Token Leakage | CWE-532 | 6.5 |
+| Password Reset Weakness | CWE-640 | 6.5 |
 | IDOR | CWE-639 | 6.5 |
 | XSS (confirmed) | CWE-79 | 6.1 |
 | Missing SRI | CWE-353 | 6.1 |
+| Mixed Content (active) | CWE-319 | 5.3 |
+| Sensitive Data in URL | CWE-598 | 5.3 |
 | Rate Limiting | CWE-307 | 5.3 |
 | Prototype Pollution | CWE-1321 | 5.3 |
-| Session Management | CWE-384 | 5.3 |
-| Missing CSP | CWE-693 | 4.7 |
+| Session Management / Fixation | CWE-384 | 5.3 |
+| Host Header Injection | CWE-644 | 5.3 |
+| Timing-Based Enumeration | CWE-203 | 5.3 |
+| Content-Type Confusion | CWE-436 | 5.3 |
+| API Version Downgrade | CWE-693 | 5.3 |
+| JWT Weakness | CWE-347 | 5.3 |
+| CSP Weakness | CWE-693 | 4.7 |
 | Open Redirect | CWE-601 | 4.7 |
 | CSRF | CWE-352 | 4.3 |
 | Missing HSTS | CWE-319 | 4.3 |
-| Missing X-Frame-Options | CWE-1021 | 4.3 |
+| Clickjacking | CWE-1021 | 4.3 |
+| Missing Cache-Control | CWE-525 | 4.3 |
+| Insecure Cookie | CWE-614 | 4.3 |
+| Error Page Info Disclosure | CWE-209 | 3.7 |
 | Info Disclosure | CWE-200 | 3.7 |
 | Error Handling | CWE-391 | 3.7 |
 | CORS | CWE-942 | 3.7 |
+| Referrer-Policy Weak/Missing | CWE-200 | 3.1 |
 | Missing X-Content-Type-Options | CWE-16 | 3.1 |
+| HSTS Incomplete | CWE-319 | 2.1 |
+| Permissions-Policy Missing | CWE-16 | 2.1 |
+| Password Autocomplete | CWE-522 | 2.1 |
 
 ## Examples
 

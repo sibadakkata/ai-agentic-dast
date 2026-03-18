@@ -194,6 +194,61 @@ WEB_PHASES: list[ScanPhase] = [
         max_steps=25,
         applies_to="website",
     ),
+    ScanPhase(
+        id="web_file_upload",
+        name="File Upload Testing",
+        prompt=("Test for unrestricted file upload vulnerabilities. "
+                "Identify file upload forms or endpoints (look for <input type='file'>, "
+                "multipart/form-data forms, drag-and-drop zones, or API endpoints accepting files). "
+                "For each upload point, test: "
+                "(1) Upload a file with a server-executable extension (.php, .asp, .aspx, .jsp, .py, .cgi) "
+                "with benign content like <?php echo 'test'; ?> — check if the server stores and serves it. "
+                "(2) Double extension bypass: file.php.jpg, file.asp;.jpg, file.php%00.jpg. "
+                "(3) Content-Type mismatch: send a .php file with Content-Type: image/jpeg. "
+                "(4) SVG with embedded JavaScript: <svg><script>alert(1)</script></svg>. "
+                "(5) Oversized file (>50MB if possible) to test upload limits. "
+                "(6) Null byte in filename: file.php\\x00.jpg. "
+                "After upload, attempt to access the uploaded file URL directly. "
+                "If the file executes (PHP, JSP), this is Critical RCE."),
+        max_steps=30,
+        applies_to="website",
+    ),
+    ScanPhase(
+        id="web_password_reset",
+        name="Password Reset Flow Testing",
+        prompt=("Test the password reset/forgot password flow for security weaknesses. "
+                "Locate the password reset functionality (look for 'Forgot Password', "
+                "'Reset Password' links). Test: "
+                "(1) Account enumeration: submit a valid email vs non-existent email and compare "
+                "response messages, HTTP status codes, and response sizes. Different responses reveal "
+                "which accounts exist. "
+                "(2) If you receive a reset token/link, check token length and entropy. "
+                "Short or predictable tokens can be brute-forced. "
+                "(3) Submit the same reset request twice — does it invalidate the first token? "
+                "(4) Check if the reset page accepts the password change without the old password. "
+                "(5) Test Host header injection on the reset endpoint: set Host: attacker.com and check "
+                "if the reset link in any response contains attacker.com. "
+                "IMPORTANT: Only test with the scan's own email address. Do not test with other emails."),
+        max_steps=25,
+        applies_to="website",
+    ),
+    ScanPhase(
+        id="web_session_mgmt",
+        name="Session Management Testing",
+        prompt=("Test session management security. "
+                "(1) Check if the session cookie changes after login (session fixation). "
+                "Record the session cookie/token BEFORE login, compare AFTER login — they must differ. "
+                "(2) Check session cookie properties: is it HttpOnly? Secure? SameSite? "
+                "(3) Test concurrent sessions: make a second authenticated request from a different "
+                "context and check if the original session is still valid. "
+                "(4) Check if session token appears in URLs (query strings or path). "
+                "(5) Test if accessing a 'change password' or 'change email' endpoint invalidates "
+                "existing sessions or requires re-authentication. "
+                "(6) Check session token length and entropy — short tokens are brute-forceable. "
+                "IMPORTANT: Do NOT click logout or signout. Only inspect cookies and compare values."),
+        max_steps=20,
+        applies_to="website",
+    ),
 ]
 
 API_PHASES: list[ScanPhase] = [
@@ -294,6 +349,38 @@ API_PHASES: list[ScanPhase] = [
         max_steps=20,
         applies_to="api",
     ),
+    ScanPhase(
+        id="api_content_type",
+        name="Content-Type Confusion",
+        prompt=("Test API endpoints for content-type confusion attacks. "
+                "For each POST/PUT/PATCH endpoint discovered: "
+                "(1) Send the same JSON body but with Content-Type: application/xml — check if "
+                "the server parses it differently or returns errors revealing the XML parser. "
+                "(2) Send JSON body as application/x-www-form-urlencoded — some frameworks "
+                "auto-parse both, which may bypass JSON schema validation. "
+                "(3) Send multipart/form-data with the same fields — test if file upload is enabled. "
+                "(4) Send text/plain — some CORS configurations allow this without preflight. "
+                "(5) Remove Content-Type entirely — check how the server handles ambiguity. "
+                "Compare all responses to the baseline. Different parsing = different validation = bypass."),
+        max_steps=20,
+        applies_to="api",
+    ),
+    ScanPhase(
+        id="api_method_override",
+        name="HTTP Method Override",
+        prompt=("Test API endpoints for HTTP method override attacks. "
+                "For each endpoint, check if method override headers are honored: "
+                "(1) Send GET request with X-HTTP-Method-Override: DELETE — does it delete the resource? "
+                "(2) Send POST with X-HTTP-Method: PUT — does it update instead of create? "
+                "(3) Send GET with X-Method-Override: POST — does it execute the POST action? "
+                "(4) Send POST with _method=DELETE in the body (Rails/Laravel convention). "
+                "(5) Send GET with query parameter ?_method=PUT. "
+                "If any of these change server behavior, it means method-based access control "
+                "(e.g. 'only allow GET on this endpoint') can be bypassed. "
+                "Focus on endpoints that restrict certain HTTP methods."),
+        max_steps=20,
+        applies_to="api",
+    ),
 ]
 
 
@@ -325,6 +412,13 @@ _FOCUS_PHASE_MAP: dict[str, set[str]] = {
     "enumeration":  {"web_timing_enum"},
     "bfla":         {"web_bfla", "api_bfla"},
     "authorization": {"web_a01", "api_authz", "web_bfla", "api_bfla"},
+    "file upload":  {"web_file_upload"},
+    "upload":       {"web_file_upload", "web_extras"},
+    "password reset": {"web_password_reset"},
+    "session":      {"web_session_mgmt"},
+    "session management": {"web_session_mgmt"},
+    "content type": {"api_content_type"},
+    "method override": {"api_method_override"},
 }
 
 _RECON_PHASE_IDS = {"web_recon", "api_recon"}

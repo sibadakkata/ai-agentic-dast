@@ -150,6 +150,11 @@ The LLM agent runs its full OWASP scan, **enriched** with baseline + fuzzing res
 | 8 | **GraphQL** | Introspection, query batching, deep nesting (DoS), alias brute-force |
 | 9 | **Excessive Data Exposure** | Compares API response fields to what the UI renders — flags hidden PII/debug data |
 | 10 | **Business Logic** | Flow bypass, negative amounts, race conditions, idempotency violations |
+| 11 | **Race Conditions** | Concurrent identical requests on state-changing endpoints, idempotency key enforcement |
+| 12 | **Function-Level Auth** | Access admin/management endpoints with normal user token, method switching |
+| 13 | **Host Header Injection** | X-Forwarded-Host reflection, X-Forwarded-For IP bypass, path override headers |
+| 14 | **Content-Type Confusion** | Send JSON as XML, form-data as JSON, remove Content-Type — parser differential attacks |
+| 15 | **HTTP Method Override** | X-HTTP-Method-Override, X-Method-Override, _method param — bypass method-based ACL |
 
 ## Step 7: Runtime Verification
 

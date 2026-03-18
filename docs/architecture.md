@@ -106,40 +106,53 @@ The core scanning logic follows an **Observe-Think-Act-Analyze-Plan** cycle:
 
 ## Scan Phases
 
-### Website Phases (15)
+### Website Phases (22)
 
-| # | Phase | OWASP |
-|---|-------|-------|
-| 1 | Application Mapping | — |
-| 2 | Broken Access Control | A01 |
-| 3 | Cryptographic Failures | A02 |
-| 4 | SQL Injection | A03 |
-| 5 | Cross-Site Scripting | A03 |
-| 6 | Command Injection | A03 |
-| 7 | Template Injection (SSTI) | A03 |
-| 8 | Insecure Design / Business Logic | A04 |
-| 9 | Security Misconfiguration | A05 |
-| 10 | Vulnerable Components | A06 |
-| 11 | Authentication Failures | A07 |
-| 12 | Integrity Failures | A08 |
-| 13 | Logging Failures | A09 |
-| 14 | SSRF | A10 |
-| 15 | WebSocket + Beyond OWASP | — |
+| # | Phase | OWASP | Context-Aware |
+|---|-------|-------|---------------|
+| 1 | Application Mapping | — | |
+| 2 | Broken Access Control | A01 | |
+| 3 | Cryptographic Failures | A02 | |
+| 4 | SQL Injection | A03 | |
+| 5 | Cross-Site Scripting | A03 | |
+| 6 | Command Injection | A03 | |
+| 7 | Template Injection (SSTI) | A03 | |
+| 8 | Insecure Design / Business Logic | A04 | |
+| 9 | Security Misconfiguration | A05 | |
+| 10 | Vulnerable Components | A06 | |
+| 11 | Authentication Failures | A07 | |
+| 12 | Integrity Failures | A08 | |
+| 13 | Logging Failures | A09 | |
+| 14 | SSRF | A10 | |
+| 15 | WebSocket Testing | — | |
+| 16 | Beyond OWASP (CRLF, CSRF, etc.) | — | |
+| 17 | Race Condition Testing | A04 | ✓ Concurrent requests on state-changing ops |
+| 18 | Host Header Poisoning | A05 | ✓ Tests reflection in reset links/redirects |
+| 19 | Timing-Based Enumeration | A07 | ✓ Response time analysis for user enumeration |
+| 20 | Broken Function-Level Auth | A01 | ✓ Admin endpoint access with normal user |
+| 21 | File Upload Testing | A04 | ✓ Extension bypass, content-type mismatch, polyglot |
+| 22 | Password Reset Flow | A07 | ✓ Token predictability, account enumeration |
+| 23 | Session Management | A07 | ✓ Fixation, rotation, concurrent sessions |
 
-### API Phases (10)
+### API Phases (15)
 
-| # | Phase | Focus |
-|---|-------|-------|
-| 1 | Endpoint Discovery | Hidden/undocumented endpoints |
-| 2 | Authentication Testing | Token validation, JWT manipulation |
-| 3 | Authorization / BOLA | IDOR, horizontal/vertical escalation |
-| 4 | Injection Testing | SQLi, NoSQLi, XSS in JSON, XXE |
-| 5 | Mass Assignment | Extra fields, role escalation |
-| 6 | Rate Limiting | Brute-force resistance |
-| 7 | SSRF | URL-accepting parameters, metadata probes |
-| 8 | GraphQL | Introspection, batching, deep nesting |
-| 9 | Excessive Data Exposure | PII leakage, debug data |
-| 10 | Business Logic | Flow bypass, race conditions, price tampering |
+| # | Phase | Focus | Context-Aware |
+|---|-------|-------|---------------|
+| 1 | Endpoint Discovery | Hidden/undocumented endpoints | |
+| 2 | Authentication Testing | Token validation, JWT manipulation | |
+| 3 | Authorization / BOLA | IDOR, horizontal/vertical escalation | |
+| 4 | Injection Testing | SQLi, NoSQLi, XSS in JSON, XXE | |
+| 5 | Mass Assignment | Extra fields, role escalation | |
+| 6 | Rate Limiting | Brute-force resistance | |
+| 7 | SSRF | URL-accepting parameters, metadata probes | |
+| 8 | GraphQL | Introspection, batching, deep nesting | |
+| 9 | Excessive Data Exposure | PII leakage, debug data | |
+| 10 | Business Logic | Flow bypass, race conditions, price tampering | |
+| 11 | Race Conditions | Concurrent requests on state-changing endpoints | ✓ |
+| 12 | Function-Level Auth | Admin/management endpoint access | ✓ |
+| 13 | Host Header Injection | X-Forwarded-Host, path override | ✓ |
+| 14 | Content-Type Confusion | JSON↔XML↔form-data parser attacks | ✓ |
+| 15 | HTTP Method Override | X-HTTP-Method-Override bypass | ✓ |
 
 ## Tool System (28 Tools)
 
@@ -166,17 +179,41 @@ The auth module (`auth.py`) handles:
 
 ## Passive Reconnaissance
 
-Before any LLM calls, deterministic checks run at $0 cost:
+Before any LLM calls, 24 deterministic check categories run at $0 cost:
 
+**Information Disclosure**
 - Exposed JavaScript source maps (`.js.map` files accessible in production)
-- Dangerous DOM sinks (`innerHTML`, `eval`, `document.write`)
 - Hardcoded secrets/tokens in client-side JavaScript
 - Internal URLs/IPs leaked in source code
 - Sensitive files (`.git/`, `.env`, `wp-config.php`)
-- Missing security headers (HSTS, CSP, X-Frame-Options, etc.)
 - HTML comments containing sensitive information
-- Security tokens in telemetry/logging payloads (including custom CSRF headers)
-- JWT tokens sent to third-party domains
+- Error page information disclosure (stack traces, internal paths)
+- Email addresses exposed in source code
+- Sensitive data in URL query parameters
+
+**Client-Side Security**
+- Dangerous DOM sinks (`innerHTML`, `eval`, `document.write`)
+- Subresource Integrity (SRI) missing on external scripts
+- Mixed content (HTTP resources on HTTPS pages)
+- Password fields without autocomplete="off"
+- Form actions targeting external domains
+
+**Transport & Header Security**
+- Missing security headers (HSTS, CSP, X-Frame-Options, etc.)
+- CSP policy weakness analysis (`unsafe-inline`, `unsafe-eval`, wildcards)
+- CORS misconfiguration (reflected origin, wildcard + credentials)
+- Referrer-Policy missing or weak
+- Permissions-Policy missing
+- HTTP→HTTPS redirect validation
+- HSTS preload readiness (max-age, includeSubDomains)
+- Clickjacking (both X-Frame-Options and frame-ancestors missing)
+- Cache-Control on authenticated pages
+
+**Session & Token Security**
+- Cookie security audit (Secure, HttpOnly, SameSite flags)
+- JWT token analysis (weak algorithms, missing claims, PII)
+- Security tokens in telemetry/logging payloads (12 sub-checks)
+- API version downgrade (old versions still accessible)
 
 ## LLM Integration
 

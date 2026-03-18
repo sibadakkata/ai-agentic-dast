@@ -78,6 +78,21 @@ CWE_PROFILES = {
     "timing_enumeration": {"cwe": "CWE-203", "cvss": 5.3, "vec": "AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N"},
     "bfla":             {"cwe": "CWE-285", "cvss": 7.5, "vec": "AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:N/A:N"},
     "token_leakage":    {"cwe": "CWE-532", "cvss": 6.5, "vec": "AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:N/A:N"},
+    "csp_weakness":     {"cwe": "CWE-693", "cvss": 4.7, "vec": "AV:N/AC:L/PR:N/UI:R/S:C/C:L/I:N/A:N"},
+    "referrer_policy":  {"cwe": "CWE-200", "cvss": 3.1, "vec": "AV:N/AC:H/PR:N/UI:R/S:U/C:L/I:N/A:N"},
+    "permissions_policy": {"cwe": "CWE-16", "cvss": 2.1, "vec": "AV:N/AC:H/PR:N/UI:R/S:U/C:N/I:L/A:N"},
+    "mixed_content":    {"cwe": "CWE-319", "cvss": 5.3, "vec": "AV:N/AC:H/PR:N/UI:N/S:U/C:H/I:N/A:N"},
+    "password_autocomplete": {"cwe": "CWE-522", "cvss": 2.1, "vec": "AV:L/AC:L/PR:N/UI:R/S:U/C:L/I:N/A:N"},
+    "sensitive_url_params": {"cwe": "CWE-598", "cvss": 5.3, "vec": "AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N"},
+    "https_redirect":   {"cwe": "CWE-319", "cvss": 4.3, "vec": "AV:N/AC:L/PR:N/UI:R/S:U/C:L/I:N/A:N"},
+    "hsts_preload":     {"cwe": "CWE-319", "cvss": 2.1, "vec": "AV:N/AC:H/PR:N/UI:R/S:U/C:L/I:N/A:N"},
+    "error_disclosure": {"cwe": "CWE-209", "cvss": 3.7, "vec": "AV:N/AC:H/PR:N/UI:N/S:U/C:L/I:N/A:N"},
+    "clickjacking":     {"cwe": "CWE-1021", "cvss": 4.3, "vec": "AV:N/AC:L/PR:N/UI:R/S:U/C:N/I:L/A:N"},
+    "file_upload":      {"cwe": "CWE-434", "cvss": 9.8, "vec": "AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"},
+    "password_reset":   {"cwe": "CWE-640", "cvss": 6.5, "vec": "AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N"},
+    "session_fixation": {"cwe": "CWE-384", "cvss": 5.3, "vec": "AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N"},
+    "content_type_confusion": {"cwe": "CWE-436", "cvss": 5.3, "vec": "AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N"},
+    "method_override":  {"cwe": "CWE-650", "cvss": 6.5, "vec": "AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:H/A:N"},
 }
 
 
@@ -126,6 +141,36 @@ def _passive_recon_action(title: str) -> str:
         return "Enforce role-based access control at the API/function level. Deny by default and explicitly grant access per role."
     if "token" in t and ("leak" in t or "log" in t or "telemetry" in t):
         return "Remove security tokens from telemetry/logging payloads. Redact sensitive values before logging. Review all POST bodies to logging endpoints."
+    if "csp" in t and "weakness" in t:
+        return "Tighten CSP policy: remove 'unsafe-inline' and 'unsafe-eval', use nonces or hashes instead. Add frame-ancestors, base-uri, form-action directives."
+    if "referrer" in t and "policy" in t:
+        return "Set Referrer-Policy: strict-origin-when-cross-origin (or no-referrer for sensitive pages). Prevents URL leakage to third parties."
+    if "permissions" in t and "policy" in t:
+        return "Add Permissions-Policy header to restrict unused browser features: camera=(), microphone=(), geolocation=(), payment=()."
+    if "mixed content" in t:
+        return "Load all resources over HTTPS. Update hardcoded http:// URLs to https:// or use protocol-relative URLs. Set CSP upgrade-insecure-requests."
+    if "autocomplete" in t and "password" in t:
+        return "Add autocomplete='off' or autocomplete='new-password' to password input fields to prevent browser credential caching."
+    if "sensitive" in t and "url" in t and "param" in t:
+        return "Never pass passwords, tokens, or PII in URL query strings. Use POST body or HTTP headers. Query strings are logged everywhere."
+    if "https redirect" in t or ("http" in t and "redirect" in t and "https" in t):
+        return "Configure HTTP to redirect to HTTPS with a 301 (permanent) redirect. Enable HSTS to prevent future HTTP access."
+    if "hsts" in t and ("preload" in t or "incomplete" in t):
+        return "Set HSTS with max-age=31536000, includeSubDomains. Submit to hstspreload.org for browser preload list inclusion."
+    if "error page" in t and ("disclos" in t or "stack" in t or "information" in t):
+        return "Configure custom error pages that do not reveal stack traces, internal paths, or framework details. Return generic error messages."
+    if "clickjacking" in t or "frameable" in t:
+        return "Set X-Frame-Options: DENY and CSP frame-ancestors 'self' to prevent the page from being embedded in iframes."
+    if "file upload" in t or "unrestricted upload" in t:
+        return "CRITICAL: Validate uploaded file types server-side using magic bytes (not just extension/Content-Type). Store uploads outside webroot. Disable execution in upload directories."
+    if "password reset" in t:
+        return "Use cryptographically random, single-use, time-limited reset tokens. Return identical responses for valid/invalid emails. Invalidate old tokens on new request."
+    if "session fixation" in t or ("session" in t and "management" in t):
+        return "Regenerate session ID after login and privilege changes. Set Secure, HttpOnly, SameSite flags. Implement session timeout and concurrent session limits."
+    if "content" in t and "type" in t and "confusion" in t:
+        return "Validate Content-Type header server-side and reject unexpected types. Use explicit JSON/XML parsers, not automatic content negotiation."
+    if "method override" in t:
+        return "Disable HTTP method override headers (X-HTTP-Method-Override, X-Method-Override). If needed, restrict to specific trusted endpoints only."
     return "Review and remediate the identified issue."
 
 

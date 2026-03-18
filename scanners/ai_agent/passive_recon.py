@@ -189,7 +189,7 @@ async def run_passive_recon(
     target_parsed = urlparse(target_url)
     base_url = f"{target_parsed.scheme}://{target_parsed.netloc}"
 
-    _progress("passive_start", {"checks": "source_maps, js_sinks, secrets, sensitive_files, headers, html_comments, telemetry_token_leakage, cookie_security, jwt_analysis, cors, cache_control, sri, form_actions, api_versioning"})
+    _progress("passive_start", {"checks": "source_maps, js_sinks, secrets, sensitive_files, headers, html_comments, telemetry_token_leakage, cookie_security, jwt_analysis, cors, cache_control, sri, form_actions, api_versioning, csp_analysis, referrer_policy, permissions_policy, mixed_content, password_autocomplete, sensitive_url_params, https_redirect, hsts_preload, error_pages, clickjacking"})
 
     # ── 1. Collect all JS files loaded by the page ────────────────────
     js_urls = await _collect_js_urls(page, target_url)
@@ -295,6 +295,76 @@ async def run_passive_recon(
         findings.append(f)
         _cb(f)
     _progress("passive_step", {"step": "API version check", "found": len(api_ver_findings)})
+
+    # ── 15. CSP policy weakness analysis ──────────────────────────────
+    csp_findings = await _check_csp_weaknesses(http_client, target_url)
+    for f in csp_findings:
+        findings.append(f)
+        _cb(f)
+    _progress("passive_step", {"step": "CSP analysis", "found": len(csp_findings)})
+
+    # ── 16. Referrer-Policy ───────────────────────────────────────────
+    rp_findings = await _check_referrer_policy(http_client, target_url)
+    for f in rp_findings:
+        findings.append(f)
+        _cb(f)
+    _progress("passive_step", {"step": "Referrer-Policy", "found": len(rp_findings)})
+
+    # ── 17. Permissions-Policy ────────────────────────────────────────
+    pp_findings = await _check_permissions_policy(http_client, target_url)
+    for f in pp_findings:
+        findings.append(f)
+        _cb(f)
+    _progress("passive_step", {"step": "Permissions-Policy", "found": len(pp_findings)})
+
+    # ── 18. Mixed content ─────────────────────────────────────────────
+    mixed_findings = await _check_mixed_content(page, target_url)
+    for f in mixed_findings:
+        findings.append(f)
+        _cb(f)
+    _progress("passive_step", {"step": "Mixed content", "found": len(mixed_findings)})
+
+    # ── 19. Password autocomplete ─────────────────────────────────────
+    pw_findings = await _check_password_autocomplete(page, target_url)
+    for f in pw_findings:
+        findings.append(f)
+        _cb(f)
+    _progress("passive_step", {"step": "Password autocomplete", "found": len(pw_findings)})
+
+    # ── 20. Sensitive data in URL parameters ──────────────────────────
+    url_param_findings = await _check_sensitive_url_params(page, target_url)
+    for f in url_param_findings:
+        findings.append(f)
+        _cb(f)
+    _progress("passive_step", {"step": "Sensitive URL params", "found": len(url_param_findings)})
+
+    # ── 21. HTTP→HTTPS redirect validation ────────────────────────────
+    redirect_findings = await _check_https_redirect(http_client, target_url)
+    for f in redirect_findings:
+        findings.append(f)
+        _cb(f)
+    _progress("passive_step", {"step": "HTTPS redirect", "found": len(redirect_findings)})
+
+    # ── 22. HSTS preload readiness ────────────────────────────────────
+    hsts_findings = await _check_hsts_preload(http_client, target_url)
+    for f in hsts_findings:
+        findings.append(f)
+        _cb(f)
+    _progress("passive_step", {"step": "HSTS preload", "found": len(hsts_findings)})
+
+    # ── 23. Exposed error pages ───────────────────────────────────────
+    error_page_findings = await _check_error_pages(http_client, target_url)
+    for f in error_page_findings:
+        findings.append(f)
+        _cb(f)
+    _progress("passive_step", {"step": "Error pages", "found": len(error_page_findings)})
+
+    # ── 24. Clickjacking — frame-ancestors ────────────────────────────
+    cj_findings = await _check_clickjacking(http_client, target_url)
+    for f in cj_findings:
+        findings.append(f)
+        _cb(f)
+    _progress("passive_step", {"step": "Clickjacking", "found": len(cj_findings)})
 
     _progress("passive_end", {"total_findings": len(findings)})
     logger.info("Passive recon complete: %d findings", len(findings))
@@ -1597,6 +1667,440 @@ async def _check_api_version_downgrade(http_client, target_url: str, js_urls: li
             except Exception:
                 pass
 
+    return findings
+
+
+# ══════════════════════════════════════════════════════════════════════
+# BATCH 2: ADDITIONAL PASSIVE CHECKS (zero FP risk)
+# ══════════════════════════════════════════════════════════════════════
+
+_CSP_UNSAFE_DIRECTIVES = {
+    "'unsafe-inline'": ("Allows inline scripts/styles, defeating the purpose of CSP", "High"),
+    "'unsafe-eval'": ("Allows eval() and similar dynamic code execution", "High"),
+    "'unsafe-hashes'": ("Allows specific inline event handlers by hash", "Medium"),
+}
+
+_CSP_RISKY_SOURCES = {
+    "*": ("Wildcard allows loading from ANY origin", "High"),
+    "data:": ("data: URIs can inject arbitrary content", "Medium"),
+    "blob:": ("blob: URIs can bypass CSP restrictions", "Low"),
+    "http:": ("Allows loading over insecure HTTP on an HTTPS page", "Medium"),
+}
+
+
+async def _check_csp_weaknesses(http_client, target_url: str) -> list[dict]:
+    """Analyze CSP policy for exploitable weaknesses (not just presence)."""
+    findings = []
+    try:
+        resp = await http_client.get(target_url, timeout=10.0)
+        hdrs = {k.lower(): v for k, v in resp.headers.items()}
+        csp = hdrs.get("content-security-policy", "")
+
+        if not csp:
+            return findings
+
+        directives: dict[str, str] = {}
+        for part in csp.split(";"):
+            part = part.strip()
+            if not part:
+                continue
+            tokens = part.split(None, 1)
+            directive_name = tokens[0].lower()
+            directive_value = tokens[1] if len(tokens) > 1 else ""
+            directives[directive_name] = directive_value
+
+        weaknesses = []
+
+        for directive, value in directives.items():
+            for unsafe, (desc, sev) in _CSP_UNSAFE_DIRECTIVES.items():
+                if unsafe in value:
+                    weaknesses.append(f"{directive}: {unsafe} — {desc}")
+
+            for risky, (desc, sev) in _CSP_RISKY_SOURCES.items():
+                if risky in value.split():
+                    if risky == "http:" and not target_url.startswith("https"):
+                        continue
+                    weaknesses.append(f"{directive}: {risky} — {desc}")
+
+        if "default-src" not in directives and "script-src" not in directives:
+            weaknesses.append("No default-src or script-src — CSP has no script restriction")
+
+        if "frame-ancestors" not in directives:
+            weaknesses.append("No frame-ancestors directive — page may be frameable (clickjacking)")
+
+        if "object-src" not in directives and "'none'" not in directives.get("default-src", ""):
+            weaknesses.append("No object-src restriction — plugin-based attacks possible (Flash/Java)")
+
+        if "base-uri" not in directives:
+            weaknesses.append("No base-uri — <base> tag injection can redirect all relative URLs")
+
+        if "form-action" not in directives:
+            weaknesses.append("No form-action — forms can submit to any origin")
+
+        if weaknesses:
+            sev = "Medium" if any("unsafe-inline" in w or "unsafe-eval" in w or "* —" in w for w in weaknesses) else "Low"
+            findings.append(_make_finding(
+                f"Content Security Policy Weaknesses ({len(weaknesses)} issue(s))",
+                sev, "CWE-693", 4.7 if sev == "Medium" else 3.1, target_url,
+                "CSP policy present but has exploitable weaknesses: " + "; ".join(weaknesses[:8]),
+                payload=csp[:200],
+                source="passive_recon",
+            ))
+    except Exception as e:
+        logger.debug("CSP analysis failed: %s", e)
+    return findings
+
+
+async def _check_referrer_policy(http_client, target_url: str) -> list[dict]:
+    """Check for missing or weak Referrer-Policy header."""
+    findings = []
+    try:
+        resp = await http_client.get(target_url, timeout=10.0)
+        hdrs = {k.lower(): v for k, v in resp.headers.items()}
+        rp = hdrs.get("referrer-policy", "").lower().strip()
+
+        if not rp:
+            findings.append(_make_finding(
+                "Missing Referrer-Policy Header",
+                "Low", "CWE-200", 3.1, target_url,
+                "No Referrer-Policy header set. Browser defaults vary — full URL "
+                "(including query parameters with tokens) may be sent to third-party "
+                "sites via Referer header. Set to 'strict-origin-when-cross-origin' or 'no-referrer'.",
+                source="passive_recon",
+            ))
+        elif rp in ("unsafe-url", "no-referrer-when-downgrade"):
+            findings.append(_make_finding(
+                f"Weak Referrer-Policy: {rp}",
+                "Low", "CWE-200", 3.1, target_url,
+                f"Referrer-Policy is '{rp}' which sends the full URL (including "
+                f"path and query parameters) to third-party sites. Tokens or "
+                f"sensitive data in URLs will leak. Use 'strict-origin-when-cross-origin'.",
+                source="passive_recon",
+            ))
+    except Exception as e:
+        logger.debug("Referrer-Policy check failed: %s", e)
+    return findings
+
+
+async def _check_permissions_policy(http_client, target_url: str) -> list[dict]:
+    """Check for missing Permissions-Policy (formerly Feature-Policy) header."""
+    findings = []
+    try:
+        resp = await http_client.get(target_url, timeout=10.0)
+        hdrs = {k.lower(): v for k, v in resp.headers.items()}
+        pp = hdrs.get("permissions-policy", "")
+        fp = hdrs.get("feature-policy", "")
+
+        if not pp and not fp:
+            findings.append(_make_finding(
+                "Missing Permissions-Policy Header",
+                "Low", "CWE-16", 2.1, target_url,
+                "No Permissions-Policy (or legacy Feature-Policy) header set. "
+                "Browser features like camera, microphone, geolocation, and payment "
+                "API are not restricted. Set Permissions-Policy to disable unused features.",
+                source="passive_recon",
+            ))
+        elif fp and not pp:
+            findings.append(_make_finding(
+                "Deprecated Feature-Policy Header (Use Permissions-Policy)",
+                "Info", "CWE-16", 0.0, target_url,
+                f"Feature-Policy header present but Permissions-Policy (the replacement) "
+                f"is missing. Feature-Policy is deprecated and ignored by modern browsers.",
+                source="passive_recon",
+            ))
+    except Exception as e:
+        logger.debug("Permissions-Policy check failed: %s", e)
+    return findings
+
+
+async def _check_mixed_content(page, target_url: str) -> list[dict]:
+    """Detect HTTP resources loaded on an HTTPS page."""
+    findings = []
+    if not target_url.startswith("https"):
+        return findings
+    try:
+        mixed = await page.evaluate("""() => {
+            const results = [];
+            const check = (els, attr) => {
+                for (const el of els) {
+                    const url = el[attr] || el.getAttribute(attr) || '';
+                    if (url.startsWith('http://')) {
+                        results.push({tag: el.tagName, url: url.slice(0, 150), attr: attr});
+                    }
+                }
+            };
+            check(document.querySelectorAll('script[src]'), 'src');
+            check(document.querySelectorAll('link[href]'), 'href');
+            check(document.querySelectorAll('img[src]'), 'src');
+            check(document.querySelectorAll('iframe[src]'), 'src');
+            check(document.querySelectorAll('video[src], audio[src]'), 'src');
+            check(document.querySelectorAll('object[data]'), 'data');
+            return results.slice(0, 20);
+        }""")
+
+        if mixed:
+            active_mixed = [m for m in mixed if m["tag"] in ("SCRIPT", "LINK", "IFRAME", "OBJECT")]
+            passive_mixed = [m for m in mixed if m["tag"] in ("IMG", "VIDEO", "AUDIO")]
+
+            if active_mixed:
+                urls = [m["url"][:80] for m in active_mixed[:5]]
+                findings.append(_make_finding(
+                    f"Active Mixed Content — {len(active_mixed)} HTTP resource(s) on HTTPS page",
+                    "Medium", "CWE-319", 5.3, target_url,
+                    f"Scripts, stylesheets, or iframes loaded over HTTP on an HTTPS page. "
+                    f"An attacker on the network can modify these resources (MitM) to inject "
+                    f"malicious code. Resources: {'; '.join(urls)}",
+                    source="passive_recon",
+                ))
+            if passive_mixed and len(passive_mixed) >= 3:
+                findings.append(_make_finding(
+                    f"Passive Mixed Content — {len(passive_mixed)} HTTP resource(s)",
+                    "Low", "CWE-319", 2.1, target_url,
+                    f"{len(passive_mixed)} images/media loaded over HTTP on HTTPS page. "
+                    f"Lower risk than active mixed content but reveals browsing activity to MitM.",
+                    source="passive_recon",
+                ))
+    except Exception as e:
+        logger.debug("Mixed content check failed: %s", e)
+    return findings
+
+
+async def _check_password_autocomplete(page, target_url: str) -> list[dict]:
+    """Check for password fields without autocomplete='off'."""
+    findings = []
+    try:
+        pw_fields = await page.evaluate("""() => {
+            const fields = document.querySelectorAll('input[type="password"]');
+            return [...fields].map(f => ({
+                name: f.name || f.id || '(unnamed)',
+                autocomplete: f.getAttribute('autocomplete') || '(not set)',
+                formAction: f.form ? (f.form.action || '') : '',
+            }));
+        }""")
+
+        vulnerable = [f for f in (pw_fields or []) if f["autocomplete"] not in ("off", "new-password")]
+        if vulnerable:
+            names = [f["name"] for f in vulnerable[:5]]
+            findings.append(_make_finding(
+                f"Password Field(s) Allow Browser Autocomplete ({len(vulnerable)} field(s))",
+                "Low", "CWE-522", 2.1, target_url,
+                f"Password input(s) ({', '.join(names)}) do not set autocomplete='off' "
+                f"or autocomplete='new-password'. Browsers may cache credentials in "
+                f"plaintext on the user's device. On shared/public computers this is a risk.",
+                source="passive_recon",
+            ))
+    except Exception as e:
+        logger.debug("Password autocomplete check failed: %s", e)
+    return findings
+
+
+_SENSITIVE_PARAM_PATTERNS = re.compile(
+    r'(?:^|&)((?:password|passwd|pwd|secret|token|api[_-]?key|'
+    r'access[_-]?token|auth|session[_-]?id|ssn|credit[_-]?card|'
+    r'card[_-]?number|cvv|pin|private[_-]?key|bearer)'
+    r')=([^&]{4,})',
+    re.IGNORECASE,
+)
+
+
+async def _check_sensitive_url_params(page, target_url: str) -> list[dict]:
+    """Detect sensitive data in URL query parameters (logged by proxies/servers)."""
+    findings = []
+    try:
+        all_urls = await page.evaluate("""() => {
+            const urls = new Set();
+            urls.add(window.location.href);
+            for (const entry of performance.getEntriesByType('resource')) {
+                if (entry.name.includes('?')) urls.add(entry.name);
+            }
+            for (const entry of performance.getEntriesByType('navigation')) {
+                if (entry.name.includes('?')) urls.add(entry.name);
+            }
+            return [...urls].slice(0, 50);
+        }""")
+
+        flagged: list[tuple[str, str]] = []
+        seen_params: set[str] = set()
+        for url in (all_urls or []):
+            query = urlparse(url).query
+            if not query:
+                continue
+            for m in _SENSITIVE_PARAM_PATTERNS.finditer(query):
+                param_name = m.group(1).lower()
+                if param_name not in seen_params:
+                    seen_params.add(param_name)
+                    flagged.append((param_name, url[:120]))
+
+        if flagged:
+            param_list = [f"{p}= in {u}" for p, u in flagged[:5]]
+            findings.append(_make_finding(
+                f"Sensitive Data in URL Query Parameters ({len(flagged)} parameter(s))",
+                "Medium", "CWE-598", 5.3, target_url,
+                f"Sensitive parameters found in URL query strings: {'; '.join(param_list)}. "
+                f"Query strings are logged by web servers, proxies, CDNs, browser history, "
+                f"and Referer headers. Use POST body or HTTP headers for sensitive data.",
+                source="passive_recon",
+            ))
+    except Exception as e:
+        logger.debug("Sensitive URL params check failed: %s", e)
+    return findings
+
+
+async def _check_https_redirect(http_client, target_url: str) -> list[dict]:
+    """Check if the HTTP version of the site redirects to HTTPS."""
+    findings = []
+    if not target_url.startswith("https://"):
+        return findings
+    try:
+        http_url = target_url.replace("https://", "http://", 1)
+        resp = await http_client.get(http_url, timeout=10.0, follow_redirects=False)
+
+        if resp.status_code in (301, 302, 307, 308):
+            location = resp.headers.get("location", "")
+            if location.startswith("https://"):
+                if resp.status_code != 301:
+                    findings.append(_make_finding(
+                        f"HTTP→HTTPS Redirect Uses {resp.status_code} Instead of 301",
+                        "Low", "CWE-319", 2.1, http_url,
+                        f"HTTP redirects to HTTPS using {resp.status_code} ({location[:100]}). "
+                        f"Use 301 (permanent) for SEO and browser caching of the redirect.",
+                        source="passive_recon",
+                    ))
+            else:
+                findings.append(_make_finding(
+                    "HTTP Does Not Redirect to HTTPS",
+                    "Medium", "CWE-319", 4.3, http_url,
+                    f"HTTP version redirects to {location[:100]} which is not HTTPS. "
+                    f"First request is unencrypted and vulnerable to MitM downgrade.",
+                    source="passive_recon",
+                ))
+        elif resp.status_code == 200:
+            findings.append(_make_finding(
+                "HTTP Version Serves Content Without HTTPS Redirect",
+                "Medium", "CWE-319", 4.3, http_url,
+                "The HTTP version of the site returns content (HTTP 200) without "
+                "redirecting to HTTPS. Users accessing via HTTP have no transport encryption.",
+                source="passive_recon",
+            ))
+    except Exception as e:
+        logger.debug("HTTPS redirect check failed: %s", e)
+    return findings
+
+
+async def _check_hsts_preload(http_client, target_url: str) -> list[dict]:
+    """Check HSTS header for best-practice directives."""
+    findings = []
+    if not target_url.startswith("https://"):
+        return findings
+    try:
+        resp = await http_client.get(target_url, timeout=10.0)
+        hdrs = {k.lower(): v for k, v in resp.headers.items()}
+        hsts = hdrs.get("strict-transport-security", "")
+
+        if not hsts:
+            return findings
+
+        hsts_lower = hsts.lower()
+        issues = []
+
+        max_age_match = re.search(r'max-age=(\d+)', hsts_lower)
+        if max_age_match:
+            max_age = int(max_age_match.group(1))
+            if max_age < 31536000:
+                issues.append(f"max-age={max_age} is less than 1 year (31536000) — browsers forget quickly")
+        else:
+            issues.append("No max-age directive found")
+
+        if "includesubdomains" not in hsts_lower:
+            issues.append("Missing includeSubDomains — subdomains can be accessed over HTTP")
+
+        if issues:
+            findings.append(_make_finding(
+                f"HSTS Header Incomplete ({len(issues)} issue(s))",
+                "Low", "CWE-319", 2.1, target_url,
+                f"HSTS present but could be strengthened: {'; '.join(issues)}. "
+                f"Current value: {hsts[:150]}",
+                source="passive_recon",
+            ))
+    except Exception as e:
+        logger.debug("HSTS preload check failed: %s", e)
+    return findings
+
+
+_ERROR_DISCLOSURE_PATTERNS = [
+    (r'(?:Traceback|File\s+"[^"]+",\s+line\s+\d+)', "Python stack trace"),
+    (r'(?:at\s+[\w.$]+\([\w.]+:\d+:\d+\))', "JavaScript/Node.js stack trace"),
+    (r'(?:Exception\s+in\s+thread|java\.\w+\.\w+Exception)', "Java exception"),
+    (r'(?:Fatal\s+error|Call\s+Stack|in\s+/\w+/[\w./]+\.php)', "PHP error/stack trace"),
+    (r'(?:Microsoft\s+\.NET\s+Framework|System\.Web\.Http)', "ASP.NET error page"),
+    (r'(?:SQLSTATE\[|mysql_|pg_query|sqlite_)', "Database error/driver"),
+    (r'(?:\/usr\/local\/|\/home\/\w+\/|\/var\/www\/|C:\\\\)', "Internal file path"),
+    (r'(?:DB_HOST|DB_PASSWORD|DB_NAME|DATABASE_URL)', "Database configuration"),
+    (r'(?:nginx/\d|Apache/\d|IIS/\d|LiteSpeed)', "Web server version in error body"),
+]
+
+
+async def _check_error_pages(http_client, target_url: str) -> list[dict]:
+    """Probe error pages for information disclosure."""
+    findings = []
+    base = urlparse(target_url)
+    base_url = f"{base.scheme}://{base.netloc}"
+    test_paths = [
+        f"{base_url}/{'a' * 20}_{int(__import__('time').time())}",
+        f"{base_url}/%00",
+        f"{base_url}/..%2f..%2f",
+    ]
+
+    for test_url in test_paths:
+        try:
+            resp = await http_client.get(test_url, timeout=8.0, follow_redirects=False)
+            if resp.status_code not in (404, 500, 502, 503):
+                continue
+            body = resp.text[:3000]
+            disclosed = []
+            for pattern, desc in _ERROR_DISCLOSURE_PATTERNS:
+                if re.search(pattern, body, re.IGNORECASE):
+                    disclosed.append(desc)
+            if disclosed:
+                findings.append(_make_finding(
+                    f"Error Page Information Disclosure ({resp.status_code})",
+                    "Low", "CWE-209", 3.7, test_url,
+                    f"Error page (HTTP {resp.status_code}) reveals: {', '.join(disclosed)}. "
+                    f"Attackers use this to fingerprint the tech stack and craft targeted attacks.",
+                    source="passive_recon",
+                ))
+                break
+        except Exception:
+            pass
+    return findings
+
+
+async def _check_clickjacking(http_client, target_url: str) -> list[dict]:
+    """Check if the page is frameable (both X-Frame-Options and CSP frame-ancestors missing)."""
+    findings = []
+    try:
+        resp = await http_client.get(target_url, timeout=10.0)
+        hdrs = {k.lower(): v for k, v in resp.headers.items()}
+        xfo = hdrs.get("x-frame-options", "").upper()
+        csp = hdrs.get("content-security-policy", "").lower()
+
+        has_xfo = xfo in ("DENY", "SAMEORIGIN") or xfo.startswith("ALLOW-FROM")
+        has_frame_ancestors = "frame-ancestors" in csp
+
+        if not has_xfo and not has_frame_ancestors:
+            ct = hdrs.get("content-type", "").lower()
+            if "text/html" in ct or "application/xhtml" in ct:
+                findings.append(_make_finding(
+                    "Clickjacking — Page Frameable (No X-Frame-Options or frame-ancestors)",
+                    "Medium", "CWE-1021", 4.3, target_url,
+                    "Neither X-Frame-Options nor CSP frame-ancestors is set on this HTML page. "
+                    "An attacker can embed this page in an iframe on a malicious site and "
+                    "trick users into clicking hidden UI elements (clickjacking). "
+                    "Set X-Frame-Options: DENY or CSP frame-ancestors 'self'.",
+                    source="passive_recon",
+                ))
+    except Exception as e:
+        logger.debug("Clickjacking check failed: %s", e)
     return findings
 
 

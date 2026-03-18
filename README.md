@@ -12,8 +12,8 @@ A single LLM agent drives a real Chromium browser and HTTP client through the OW
 │                                                                       │
 │  ┌─────────────┐   ┌──────────────┐   ┌────────────────────────────┐ │
 │  │    Auth      │──▶│   Passive    │──▶│     LLM Deep Scan          │ │
-│  │  (auto-     │   │   Recon      │   │  (15 web + 10 API phases)  │ │
-│  │  detect)    │   │  ($0 cost)   │   │                            │ │
+│  │  (auto-     │   │   Recon      │   │  (23 web + 15 API phases)  │ │
+│  │  detect)    │   │ (24 checks)  │   │                            │ │
 │  └─────────────┘   └──────────────┘   └─────────────┬──────────────┘ │
 │                                                      │                │
 │  ┌─────────────┐   ┌──────────────┐                  ▼                │
@@ -42,8 +42,8 @@ This loop runs up to 25 steps per phase. Every finding is then **triaged offline
 
 | Feature | Description | Details |
 |---------|-------------|---------|
-| **Passive Reconnaissance** | Deterministic checks for source maps, DOM sinks, hardcoded secrets, missing headers, telemetry leakage, token exposure | Runs before LLM phases, $0 cost |
-| **Active Scanning** | 15 web phases + 10 API phases covering full OWASP Top 10 + business logic | [Web Scanning](docs/web-scanning.md) · [API Scanning](docs/api-scanning.md) |
+| **Passive Reconnaissance** | 24 deterministic checks: source maps, DOM sinks, secrets, headers, CSP analysis, CORS, JWT, cookies, telemetry leakage, mixed content, clickjacking, and more | Runs before LLM phases, $0 cost |
+| **Active Scanning** | 23 web phases + 15 API phases: full OWASP Top 10 + context-aware checks (race conditions, file upload, host header, session mgmt, method override) | [Web Scanning](docs/web-scanning.md) · [API Scanning](docs/api-scanning.md) |
 | **Triage Engine** | 3-layer evidence-based classification (TP/FP/Manual Review) with CWE/CVSS | [Triage Engine](docs/triage-engine.md) |
 | **Authentication** | Auto-detect form, SSO/OIDC, OAuth, API key, bearer — with session refresh | Multi-step OIDC, self-healing sessions |
 | **API Import** | Postman (v2.0/v2.1), OpenAPI/Swagger (2.0, 3.0, 3.1) | Baseline execution + hybrid fuzzing |
@@ -90,8 +90,8 @@ uvicorn web.app:app --host 0.0.0.0 --port 8080
 │  1. AUTHENTICATION                                                  │
 │     Auto-detect auth type → login → capture session → auto-refresh  │
 ├─────────────────────────────────────────────────────────────────────┤
-│  2. PASSIVE RECONNAISSANCE ($0)                                     │
-│     Source maps, DOM sinks, secrets, missing headers, token leakage │
+│  2. PASSIVE RECONNAISSANCE ($0) — 24 checks                         │
+│     Source maps, sinks, secrets, headers, CSP, CORS, JWT, cookies  │
 ├─────────────────────────────────────────────────────────────────────┤
 │  3. API BASELINE (if Postman/OpenAPI imported)                      │
 │     Execute every endpoint → capture "known good" responses         │
@@ -99,8 +99,8 @@ uvicorn web.app:app --host 0.0.0.0 --port 8080
 │  4. HYBRID BODY FUZZING (POST/PUT/PATCH endpoints)                  │
 │     LLM plans payloads ($0.001) → engine executes → LLM analyzes   │
 ├─────────────────────────────────────────────────────────────────────┤
-│  5. LLM DEEP SCAN (15 web + 10 API phases)                         │
-│     Agent uses 28 tools to test OWASP Top 10 + business logic       │
+│  5. LLM DEEP SCAN (23 web + 15 API phases)                         │
+│     OWASP Top 10 + context-aware: race, upload, host header, etc.  │
 ├─────────────────────────────────────────────────────────────────────┤
 │  6. RUNTIME VERIFICATION                                            │
 │     Replay payloads against live target → CONFIRMED / DISPROVED     │
