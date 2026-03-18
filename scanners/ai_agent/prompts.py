@@ -48,7 +48,7 @@ WEB_PHASES: list[ScanPhase] = [
     ScanPhase(
         id="web_a01",
         name="Broken Access Control",
-        prompt="Test for broken access control. For every ID parameter you observed (path, query, body), craft IDOR payloads using adjacent or predictable IDs. Attempt forced browsing to privileged paths, method tampering (e.g. GET→POST, POST→PUT), and privilege escalation by reusing tokens in different contexts. Generate payloads from the ID patterns you saw.",
+        prompt="Test for broken access control. For every ID parameter you observed (path, query, body), craft IDOR payloads using adjacent or predictable IDs. Attempt forced browsing to privileged paths, method tampering (e.g. GET→POST, POST→PUT), and privilege escalation by reusing tokens in different contexts. Generate payloads from the ID patterns you saw.{bola_user_b_web}",
         applies_to="website",
     ),
     ScanPhase(
@@ -267,7 +267,7 @@ API_PHASES: list[ScanPhase] = [
     ScanPhase(
         id="api_authz",
         name="Authorization / BOLA",
-        prompt="Test authorization. For every object ID in path, query, or body, craft IDOR payloads. Test horizontal and vertical privilege escalation. Generate payloads from the ID patterns you observed.",
+        prompt="Test authorization. For every object ID in path, query, or body, craft IDOR payloads. Test horizontal and vertical privilege escalation. Generate payloads from the ID patterns you observed.{bola_user_b_api}",
         applies_to="api",
     ),
     ScanPhase(

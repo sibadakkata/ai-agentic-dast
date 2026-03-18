@@ -597,6 +597,26 @@ code.inline-url { background:#f1f5f9; color:#0f172a; padding:1px 5px; border-rad
           <option value="bearer">Bearer Token</option>
         </select>
       </div>
+      <div class="form-group full" style="margin-top:4px;">
+        <div class="expandable" onclick="toggleExpand(this)" style="font-size:13px;font-weight:600;color:var(--text2);letter-spacing:0.3px;">
+          Second User for BOLA / BFLA Testing (Optional)
+        </div>
+        <div class="expand-content" id="bola-user-section">
+          <div style="padding:10px 14px;background:rgba(79,70,229,0.05);border-radius:8px;font-size:12px;color:var(--text2);margin-bottom:12px;line-height:1.6;">
+            Supply a second set of credentials (User B) to enable definitive BOLA/BFLA testing. The scanner will authenticate as User A (primary creds above), collect resource IDs, then switch to User B and attempt to access User A's resources. This proves authorization bypass rather than guessing.
+          </div>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
+            <div class="form-group">
+              <label>User B — Username</label>
+              <input type="text" id="username-b" placeholder="second user (optional)">
+            </div>
+            <div class="form-group">
+              <label>User B — Password</label>
+              <input type="password" id="password-b" placeholder="second user password">
+            </div>
+          </div>
+        </div>
+      </div>
       <div class="form-group full">
         <label>Vulnerability Focus <span style="font-weight:400;color:var(--text2);font-size:11px;">(select specific types or leave "Full Scan" for all checks)</span></label>
         <div id="focus-chips" class="focus-chips">
@@ -1454,7 +1474,8 @@ function renderPlan(plan) {
     <h3><span style="font-size:18px;">🤖</span> Scan Plan</h3>
     <div class="ai-plan-grid">
       <div><span class="plan-label">Target</span><div class="plan-value">${esc(plan.target_url || '')}</div></div>
-      <div><span class="plan-label">Auth</span><div class="plan-value">${plan.username ? esc(plan.username) + ' / ' + maskPw(plan.password) : '<span style="color:var(--text2)">No credentials</span>'}</div></div>
+      <div><span class="plan-label">Auth (User A)</span><div class="plan-value">${plan.username ? esc(plan.username) + ' / ' + maskPw(plan.password) : '<span style="color:var(--text2)">No credentials</span>'}</div></div>
+      ${(document.getElementById('username-b') && document.getElementById('username-b').value.trim()) ? `<div><span class="plan-label">BOLA User B</span><div class="plan-value">${esc(document.getElementById('username-b').value.trim())} / ${maskPw(document.getElementById('password-b').value)}</div></div>` : ''}
       <div><span class="plan-label">Scan Mode</span><div class="plan-value" style="text-transform:capitalize;">${esc(plan.scan_mode || 'both')}</div></div>
       <div><span class="plan-label">Scan Scope</span><div class="plan-value" style="text-transform:capitalize;">${esc((plan.scan_scope || 'directory').replace('_', ' '))}</div></div>
       <div><span class="plan-label">Auth Type</span><div class="plan-value" style="text-transform:capitalize;">${esc(plan.auth_type || 'auto')}</div></div>
@@ -1502,6 +1523,8 @@ async function confirmPlan() {
   if (!_currentPlan) return;
   const p = _currentPlan;
   const model = document.getElementById('ai-model-select').value || document.getElementById('model-select').value;
+  const ubEl = document.getElementById('username-b');
+  const pbEl = document.getElementById('password-b');
   const body = {
     target_url: p.target_url || '',
     username: p.username || '',
@@ -1518,6 +1541,8 @@ async function confirmPlan() {
     extra_domains: p.extra_domains || [],
     exclude_urls: p.exclude_urls || [],
   };
+  if (ubEl && ubEl.value.trim()) body.username_b = ubEl.value.trim();
+  if (pbEl && pbEl.value.trim()) body.password_b = pbEl.value.trim();
   const planCard = document.querySelector('#ai-plan-container .ai-plan-card');
   if (planCard) {
     const btns = planCard.querySelectorAll('button');
@@ -1894,6 +1919,9 @@ async function startScan() {
   const focusAreasRaw = (document.getElementById('focus-areas').value || '').trim();
   const focusAreas = focusAreasRaw ? focusAreasRaw.split(',').map(a => a.trim()).filter(Boolean) : [];
 
+  const usernameB = (document.getElementById('username-b').value || '').trim();
+  const passwordB = (document.getElementById('password-b').value || '').trim();
+
   const body = {
     target_url: url,
     username: document.getElementById('username').value,
@@ -1910,6 +1938,10 @@ async function startScan() {
     extra_domains: extraDomains,
     exclude_urls: (document.getElementById('exclude-urls').value || '').trim().split('\n').map(u => u.trim()).filter(Boolean),
   };
+  if (usernameB || passwordB) {
+    body.username_b = usernameB;
+    body.password_b = passwordB;
+  }
 
   const resp = await fetch('/api/scan', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) });
   if (!resp.ok) {

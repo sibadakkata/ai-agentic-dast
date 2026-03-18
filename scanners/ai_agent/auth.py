@@ -63,6 +63,7 @@ class ScanTarget:
     focus_areas: list[str] | None = None # e.g. ["XSS"], ["SQLi","XSS"] — empty = all
     scan_intensity: str = "deep"         # light | standard | deep
     exclude_urls: list[str] | None = None  # URLs/paths to skip during crawl and scan
+    credentials_b: dict | None = None    # optional User B for BOLA/BFLA two-user testing
 
 
 def _resolve_env_vars(obj: Any) -> Any:
@@ -611,6 +612,10 @@ def load_targets_from_dict(t: dict) -> ScanTarget:
     """Create a ScanTarget from a plain dict (used by web UI)."""
     auth = t.get("auth", {}) or {}
     api_imports = t.get("api_imports", {}) or {}
+    creds_b_raw = t.get("credentials_b") or {}
+    creds_b = None
+    if creds_b_raw.get("username") or creds_b_raw.get("password"):
+        creds_b = {"username": creds_b_raw.get("username", ""), "password": creds_b_raw.get("password", "")}
     return ScanTarget(
         id=t.get("id", "T1"),
         url=t.get("url", ""),
@@ -635,4 +640,5 @@ def load_targets_from_dict(t: dict) -> ScanTarget:
         focus_areas=t.get("focus_areas") or None,
         scan_intensity=t.get("scan_intensity", "deep"),
         exclude_urls=t.get("exclude_urls") or None,
+        credentials_b=creds_b,
     )

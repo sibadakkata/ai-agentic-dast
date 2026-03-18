@@ -883,6 +883,8 @@ async def start_scan(request: Request):
     target_url = body.get("target_url", "").strip()
     username = body.get("username", "").strip()
     password = body.get("password", "").strip()
+    username_b = body.get("username_b", "").strip()
+    password_b = body.get("password_b", "").strip()
     model = body.get("model", "claude-haiku-4-5-20251001")
     scan_mode_raw = body.get("scan_mode", "both")
     _MODE_MAP = {"standard": "both", "quick": "both", "deep": "both",
@@ -934,6 +936,8 @@ async def start_scan(request: Request):
         "auth_type": auth_type,
         "_username": username,
         "_password": password,
+        "_username_b": username_b,
+        "_password_b": password_b,
         "_api_imports": api_imports,
         "_extra_domains": extra_domains,
     }
@@ -942,20 +946,20 @@ async def start_scan(request: Request):
     thread = threading.Thread(
         target=_run_scan_in_thread,
         args=(scan_id, target_url, username, password, model, scan_mode, auth_type, api_imports, extra_domains, cancel_flag, pause_flag),
-        kwargs={"scan_scope": scan_scope, "focus_urls": focus_urls, "focus_areas": focus_areas, "scan_intensity": scan_intensity, "exclude_urls": exclude_urls},
+        kwargs={"scan_scope": scan_scope, "focus_urls": focus_urls, "focus_areas": focus_areas, "scan_intensity": scan_intensity, "exclude_urls": exclude_urls, "username_b": username_b, "password_b": password_b},
         daemon=True,
     )
     thread.start()
     return {"scan_id": scan_id, "status": "started"}
 
 
-def _run_scan_in_thread(scan_id, target_url, username, password, model, scan_mode, auth_type, api_imports=None, extra_domains=None, cancel_flag=None, pause_flag=None, start_from_phase=0, initial_findings=None, scan_scope="directory", focus_urls=None, focus_areas=None, scan_intensity="deep", exclude_urls=None):
+def _run_scan_in_thread(scan_id, target_url, username, password, model, scan_mode, auth_type, api_imports=None, extra_domains=None, cancel_flag=None, pause_flag=None, start_from_phase=0, initial_findings=None, scan_scope="directory", focus_urls=None, focus_areas=None, scan_intensity="deep", exclude_urls=None, username_b="", password_b=""):
     """Run scan in a separate thread with its own event loop so the main UI stays responsive."""
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     try:
         loop.run_until_complete(
-            _run_scan_task(scan_id, target_url, username, password, model, scan_mode, auth_type, api_imports, extra_domains, cancel_flag, pause_flag, start_from_phase, initial_findings, scan_scope=scan_scope, focus_urls=focus_urls, focus_areas=focus_areas, scan_intensity=scan_intensity, exclude_urls=exclude_urls)
+            _run_scan_task(scan_id, target_url, username, password, model, scan_mode, auth_type, api_imports, extra_domains, cancel_flag, pause_flag, start_from_phase, initial_findings, scan_scope=scan_scope, focus_urls=focus_urls, focus_areas=focus_areas, scan_intensity=scan_intensity, exclude_urls=exclude_urls, username_b=username_b, password_b=password_b)
         )
     finally:
         loop.close()
@@ -963,7 +967,7 @@ def _run_scan_in_thread(scan_id, target_url, username, password, model, scan_mod
         PAUSE_FLAGS.pop(scan_id, None)
 
 
-async def _run_scan_task(scan_id, target_url, username, password, model, scan_mode, auth_type, api_imports=None, extra_domains=None, cancel_flag=None, pause_flag=None, start_from_phase=0, initial_findings=None, scan_scope="directory", focus_urls=None, focus_areas=None, scan_intensity="deep", exclude_urls=None):
+async def _run_scan_task(scan_id, target_url, username, password, model, scan_mode, auth_type, api_imports=None, extra_domains=None, cancel_flag=None, pause_flag=None, start_from_phase=0, initial_findings=None, scan_scope="directory", focus_urls=None, focus_areas=None, scan_intensity="deep", exclude_urls=None, username_b="", password_b=""):
     try:
         scan = SCANS[scan_id]
         scan["progress"].append("Initializing LLM router...")
@@ -1076,6 +1080,8 @@ async def _run_scan_task(scan_id, target_url, username, password, model, scan_mo
             "exclude_urls": exclude_urls or [],
             "scan_intensity": scan_intensity,
         }
+        if username_b or password_b:
+            target_dict["credentials_b"] = {"username": username_b, "password": password_b}
         target = load_targets_from_dict(target_dict)
 
         scan["progress"].append(f"Starting scan with {model}...")
@@ -1321,6 +1327,8 @@ def _extract_scan_params(old: dict) -> dict:
         "auth_type": old.get("auth_type", "auto"),
         "username": old.get("_username", ""),
         "password": old.get("_password", ""),
+        "username_b": old.get("_username_b", ""),
+        "password_b": old.get("_password_b", ""),
         "api_imports": old.get("_api_imports", {}) or {},
         "extra_domains": old.get("_extra_domains", []) or [],
         "scan_scope": old.get("scan_scope", "directory"),
@@ -1392,7 +1400,7 @@ async def retry_scan(scan_id: str, request: Request):
         args=(scan_id, params["target_url"], params["username"], params["password"],
               model, scan_mode, params["auth_type"], params["api_imports"],
               params["extra_domains"], cancel_flag, pause_flag, start_from, prior_findings),
-        kwargs={"scan_scope": params["scan_scope"], "focus_urls": params["focus_urls"], "focus_areas": params["focus_areas"], "scan_intensity": params["scan_intensity"], "exclude_urls": params.get("exclude_urls", [])},
+        kwargs={"scan_scope": params["scan_scope"], "focus_urls": params["focus_urls"], "focus_areas": params["focus_areas"], "scan_intensity": params["scan_intensity"], "exclude_urls": params.get("exclude_urls", []), "username_b": params.get("username_b", ""), "password_b": params.get("password_b", "")},
         daemon=True,
     )
     thread.start()
@@ -1450,6 +1458,8 @@ async def rescan(scan_id: str, request: Request):
         "auth_type": params["auth_type"],
         "_username": params["username"],
         "_password": params["password"],
+        "_username_b": params.get("username_b", ""),
+        "_password_b": params.get("password_b", ""),
         "_api_imports": params["api_imports"],
         "_extra_domains": params["extra_domains"],
     }
@@ -1460,7 +1470,7 @@ async def rescan(scan_id: str, request: Request):
         args=(new_id, params["target_url"], params["username"], params["password"],
               model, scan_mode, params["auth_type"], params["api_imports"],
               params["extra_domains"], cancel_flag, pause_flag),
-        kwargs={"scan_scope": params["scan_scope"], "focus_urls": params["focus_urls"], "focus_areas": params["focus_areas"], "scan_intensity": params["scan_intensity"], "exclude_urls": params.get("exclude_urls", [])},
+        kwargs={"scan_scope": params["scan_scope"], "focus_urls": params["focus_urls"], "focus_areas": params["focus_areas"], "scan_intensity": params["scan_intensity"], "exclude_urls": params.get("exclude_urls", []), "username_b": params.get("username_b", ""), "password_b": params.get("password_b", "")},
         daemon=True,
     )
     thread.start()

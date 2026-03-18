@@ -468,6 +468,34 @@ async def run_scan(
             exclude_urls=getattr(target, "exclude_urls", None) or [],
         )
 
+        # ── Authenticate User B for BOLA/BFLA two-user testing ──────
+        user_b_auth_header: dict = {}
+        user_b_cookie_str: str = ""
+        has_user_b = bool(target.credentials_b and
+                          (target.credentials_b.get("username") or target.credentials_b.get("password")))
+        if has_user_b:
+            print(f"  [AUTH-B] Authenticating User B for BOLA testing...")
+            _cb("auth", {"status": "authenticating_user_b", "url": target.url})
+            try:
+                target_b = ScanTarget(
+                    id=target.id + "_b",
+                    url=target.url,
+                    scan_mode=target.scan_mode,
+                    credentials=target.credentials_b,
+                    auth_config=target.auth_config,
+                )
+                auth_session_b = await authenticate(browser, target_b, router, model)
+                user_b_auth_header = auth_session_b.get_auth_header()
+                cookies_b = await auth_session_b.page.context.cookies()
+                user_b_cookie_str = "; ".join(f"{c['name']}={c['value']}" for c in cookies_b)
+                await auth_session_b.page.close()
+                print(f"  [AUTH-B] User B auth type: {auth_session_b._auth_type}")
+                _cb("auth", {"status": "user_b_done", "type": auth_session_b._auth_type})
+            except Exception as e:
+                print(f"  [AUTH-B] User B auth failed (non-fatal): {e}")
+                _cb("auth", {"status": "user_b_failed", "error": str(e)})
+                has_user_b = False
+
         # ── Navigate to target & wait for SPA readiness (generic) ────
         # After OIDC/SSO auth the browser may still be on the login URL.
         # We must land on the actual target host before passive recon can
@@ -718,6 +746,34 @@ async def run_scan(
                     summary_lines.append(line)
                 findings_text = "\n".join(summary_lines) if summary_lines else "(no findings yet)"
                 phase_prompt = phase_prompt.replace("{findings_summary}", findings_text)
+
+            # Inject User B context into BOLA/authorization phases
+            bola_web_placeholder = "{bola_user_b_web}"
+            bola_api_placeholder = "{bola_user_b_api}"
+            if has_user_b and (bola_web_placeholder in phase_prompt or bola_api_placeholder in phase_prompt):
+                user_b_hdr_str = ", ".join(f'"{k}: {v}"' for k, v in user_b_auth_header.items()) if user_b_auth_header else "(none)"
+                user_b_block = (
+                    "\n\n--- TWO-USER BOLA/BFLA TESTING MODE ---\n"
+                    "A second user (User B) has been authenticated. You are currently logged in as User A.\n"
+                    "STEP 1: As User A, browse the application and collect resource IDs (user profiles, orders, "
+                    "documents, settings, etc.). Note every ID you find in URLs, responses, and hidden fields.\n"
+                    "STEP 2: For each resource ID belonging to User A, make the SAME request but with "
+                    "User B's credentials. Use the api_request tool with these EXACT headers to act as User B:\n"
+                    f"  Authorization headers: {user_b_hdr_str}\n"
+                    f"  Cookie: {user_b_cookie_str}\n"
+                    "STEP 3: Compare responses. If User B can read/modify/delete User A's resources, this is "
+                    "a CONFIRMED BOLA (Broken Object Level Authorization) — severity Critical.\n"
+                    "STEP 4: Also test vertical privilege escalation: use User B's creds to access admin-only "
+                    "endpoints or perform privileged actions (BFLA — Broken Function Level Authorization).\n"
+                    "For EVERY test, record: User A's resource ID, the endpoint, User B's response status "
+                    "and body snippet as evidence.\n"
+                    "--- END BOLA MODE ---"
+                )
+                phase_prompt = phase_prompt.replace(bola_web_placeholder, user_b_block)
+                phase_prompt = phase_prompt.replace(bola_api_placeholder, user_b_block)
+            else:
+                phase_prompt = phase_prompt.replace(bola_web_placeholder, "")
+                phase_prompt = phase_prompt.replace(bola_api_placeholder, "")
 
             messages.append({"role": "user", "content": phase_prompt})
 

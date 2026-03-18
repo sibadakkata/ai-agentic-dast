@@ -65,6 +65,8 @@ CWE_PROFILES = {
     "rce_confirmed":    {"cwe": "CWE-78",  "cvss": 9.8, "vec": "AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"},
     "path_traversal_confirmed": {"cwe": "CWE-22", "cvss": 7.5, "vec": "AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N"},
     "idor_confirmed":   {"cwe": "CWE-639", "cvss": 6.5, "vec": "AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:N/A:N"},
+    "bola_confirmed":   {"cwe": "CWE-639", "cvss": 8.6, "vec": "AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:N"},
+    "bfla_confirmed":   {"cwe": "CWE-285", "cvss": 8.1, "vec": "AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:N"},
     "deserialization":  {"cwe": "CWE-502", "cvss": 8.1, "vec": "AV:N/AC:H/PR:N/UI:N/S:U/C:H/I:H/A:H"},
     "insecure_cookie":  {"cwe": "CWE-614", "cvss": 4.3, "vec": "AV:N/AC:L/PR:N/UI:R/S:U/C:L/I:N/A:N"},
     "jwt_weakness":     {"cwe": "CWE-347", "cvss": 5.3, "vec": "AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N"},
@@ -394,7 +396,8 @@ def _runtime_cwe(r: dict, title: str):
         "xxe": "xxe_confirmed", "path traversal": "path_traversal_confirmed",
         "directory traversal": "path_traversal_confirmed",
         "command injection": "rce_confirmed", "remote code": "rce_confirmed",
-        "idor": "idor_confirmed", "csrf": "csrf", "rate limit": "rate_limit",
+        "idor": "idor_confirmed", "bola": "bola_confirmed", "bfla": "bfla_confirmed",
+        "csrf": "csrf", "rate limit": "rate_limit",
         "brute force": "rate_limit", "hsts": "missing_hsts", "csp": "missing_csp",
         "cookie": "session_mgmt", "open redirect": "open_redirect",
         "cors": "cors",
@@ -1154,7 +1157,58 @@ def _classify_inner(finding, test_log):
                      dev_action="No action - server rejects serialized input.")
             return r
 
-    # IDOR (Insecure Direct Object Reference)
+    # BOLA — confirmed two-user authorization bypass
+    is_bola = "bola" in title or ("broken object" in title and "authorization" in title)
+    is_bfla = "bfla" in title or ("broken function" in title and "authorization" in title)
+    two_user_evidence = any(kw in evidence for kw in ["user b", "user_b", "second user", "cross-user", "two-user"])
+    if is_bola or (is_bfla and two_user_evidence):
+        cwe_key = "bfla_confirmed" if is_bfla else "bola_confirmed"
+        _cwe_apply(r, cwe_key)
+        # Merge statuses from test_log AND request_response_pairs in the finding
+        all_statuses = list(statuses)
+        for pair in finding.get("request_response_pairs", []):
+            resp_text = pair.get("response", "") if isinstance(pair, dict) else ""
+            if isinstance(resp_text, str):
+                for tok in resp_text.split():
+                    try:
+                        code = int(tok)
+                        if 100 <= code <= 599:
+                            all_statuses.append(code)
+                            break
+                    except ValueError:
+                        continue
+        all_denied = all(s in (401, 403) for s in all_statuses) if all_statuses else False
+        if all_denied:
+            r.update(verdict="FALSE_POSITIVE", final_severity="Not Exploitable",
+                     reason=f"All {len(all_statuses)} cross-user requests returned 401/403. "
+                            "Server enforces object-level authorization correctly.",
+                     dev_action="No action - authorization checks are effective.")
+            return r
+        has_cross_access = (any(s == 200 for s in all_statuses) or "200" in evidence) and two_user_evidence
+        if has_cross_access:
+            sev = "Critical" if is_bola else "High"
+            r.update(verdict="TRUE_POSITIVE", final_severity=sev,
+                     reason=f"CONFIRMED {'BOLA' if is_bola else 'BFLA'}: User B successfully accessed "
+                            f"User A's resources. Two-user test proves authorization bypass.",
+                     steps=f"1. Authenticated as User A, collected resource IDs\n"
+                           f"2. Authenticated as User B, replayed requests to User A's resources\n"
+                           f"3. User B received 200 with User A's data — authorization bypass confirmed",
+                     dev_action="Implement object-level authorization checks on every data access. "
+                                "Verify the authenticated user owns the requested resource.")
+            return r
+        if two_user_evidence:
+            r.update(verdict="TRUE_POSITIVE", final_severity="High",
+                     reason=f"{'BOLA' if is_bola else 'BFLA'} pattern detected in two-user test. "
+                            "Some requests succeeded — review evidence for confirmation.",
+                     dev_action="Implement object-level authorization checks on every data access.")
+            return r
+        r.update(verdict="TRUE_POSITIVE", final_severity="Medium",
+                 reason=f"{'BOLA' if is_bola else 'BFLA'} title detected but no two-user evidence found. "
+                        "Manual confirmation recommended.",
+                 dev_action="Implement object-level authorization checks on every data access.")
+        return r
+
+    # IDOR (Insecure Direct Object Reference) — single-user mode
     if "idor" in title or "insecure direct object" in title or "broken object" in title:
         _cwe_apply(r, "idor_confirmed")
         all_denied = all(s in (401, 403) for s in statuses) if statuses else False

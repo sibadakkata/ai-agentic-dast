@@ -92,7 +92,7 @@ The LLM agent drives a real Chromium browser through each phase, crafting contex
 | # | Phase | OWASP | What the Agent Tests |
 |---|-------|-------|---------------------|
 | 1 | **Application Mapping** | — | Crawl pages, follow links, extract forms/inputs/storage, discover SPA routes via client-side navigation |
-| 2 | **Broken Access Control** | A01 | IDOR on path/query/body IDs, forced browsing to admin paths, HTTP method tampering (GET→POST→PUT) |
+| 2 | **Broken Access Control** | A01 | IDOR on path/query/body IDs, forced browsing to admin paths, HTTP method tampering (GET→POST→PUT). **Two-User BOLA mode**: when User B credentials are supplied, authenticates as both users, collects User A's resource IDs, replays as User B to prove authorization bypass (BOLA) or privilege escalation (BFLA). |
 | 3 | **Cryptographic Failures** | A02 | TLS/cipher checks, cookie flags (Secure/HttpOnly/SameSite), sensitive data in URLs or localStorage |
 | 4 | **SQL Injection** | A03 | Infer DB engine from errors, craft engine-specific payloads: error-based, blind boolean, time-based, UNION, stacked |
 | 5 | **Cross-Site Scripting** | A03 | Reflected, stored, DOM-based XSS. Polyglots, CSP bypass, event handlers, SVG payloads |
@@ -132,7 +132,7 @@ For APIs imported via Postman or OpenAPI, the scanner also runs deterministic ba
 |---|-------|---------------------|
 | 1 | **Endpoint Discovery** | Probe for undocumented endpoints using path patterns, OPTIONS, common admin/debug paths |
 | 2 | **Authentication Testing** | Remove auth headers, test JWT manipulation (alg:none, claim tampering), token expiry/reuse |
-| 3 | **Authorization / BOLA** | IDOR payloads on every object ID in path, query, body — horizontal and vertical escalation |
+| 3 | **Authorization / BOLA** | IDOR payloads on every object ID in path, query, body — horizontal and vertical escalation. **Two-User BOLA mode**: same as web — User A recon → User B replay to definitively confirm BOLA/BFLA. |
 | 4 | **Injection Testing** | SQLi, NoSQLi, LDAP injection, XSS in JSON responses, XXE in XML endpoints |
 | 5 | **Mass Assignment** | Extra fields in POST/PUT, read resource back to check persistence |
 | 6 | **Rate Limiting** | Rapid-fire requests to login/transaction endpoints, check for 429 responses |
@@ -226,7 +226,8 @@ The LLM **attempts to execute** each applicable chain, not just theorize. Only p
 | CWE-611 | XXE | Active (injection) |
 | CWE-614 | Sensitive Cookie Without Secure | Passive (cookie audit) |
 | CWE-615 | Comment Info Exposure | Passive (HTML comments) |
-| CWE-639 | Authorization Bypass Through ID | Active (IDOR/BOLA) |
+| CWE-639 | Authorization Bypass Through ID | Active (IDOR/BOLA single-user + two-user) |
+| CWE-285 | Improper Authorization (BFLA) | Active (two-user BFLA) |
 | CWE-640 | Weak Password Recovery | Active (password reset flow) |
 | CWE-644 | Improper Neutralization of HTTP Headers | Active (host header poisoning) |
 | CWE-650 | Trusting HTTP Methods | Active (method override) |
@@ -258,7 +259,7 @@ The LLM **attempts to execute** each applicable chain, not just theorize. Only p
 
 | OWASP API | Passive Checks | Active API Phases |
 |-----------|----------------|-------------------|
-| **API1** Broken Object Level Auth | — | Authorization/BOLA |
+| **API1** Broken Object Level Auth | — | Authorization/BOLA (single-user guess + two-user confirmed) |
 | **API2** Broken Authentication | JWT analysis, cookie audit | Authentication Testing |
 | **API3** Broken Object Property Level Auth | — | Mass Assignment, Data Exposure |
 | **API4** Unrestricted Resource Consumption | — | Rate Limiting |
