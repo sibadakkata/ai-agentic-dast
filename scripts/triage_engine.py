@@ -93,6 +93,7 @@ CWE_PROFILES = {
     "session_fixation": {"cwe": "CWE-384", "cvss": 5.3, "vec": "AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N"},
     "content_type_confusion": {"cwe": "CWE-436", "cvss": 5.3, "vec": "AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N"},
     "method_override":  {"cwe": "CWE-650", "cvss": 6.5, "vec": "AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:H/A:N"},
+    "attack_chain":     {"cwe": "CWE-20",  "cvss": 8.1, "vec": "AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:N"},
 }
 
 
@@ -171,6 +172,8 @@ def _passive_recon_action(title: str) -> str:
         return "Validate Content-Type header server-side and reject unexpected types. Use explicit JSON/XML parsers, not automatic content negotiation."
     if "method override" in t:
         return "Disable HTTP method override headers (X-HTTP-Method-Override, X-Method-Override). If needed, restrict to specific trusted endpoints only."
+    if "attack chain" in t or "chain" in t and ("exploit" in t or "combin" in t):
+        return "This is a multi-step attack chain combining multiple findings. Fix ALL individual vulnerabilities in the chain — patching any single link breaks the full chain."
     return "Review and remediate the identified issue."
 
 

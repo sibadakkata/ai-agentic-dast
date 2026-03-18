@@ -11,7 +11,8 @@ Complete reference of every security check the scanner performs. Organized by sc
 | Passive Reconnaissance | 24 checks | $0 (deterministic) | Zero/Very Low |
 | Active Web Phases | 23 phases | LLM-driven | Low (context-aware) |
 | Active API Phases | 15 phases | LLM-driven | Low (context-aware) |
-| **Total** | **62 check categories** | | |
+| Attack Chain Analysis | 1 phase (12 chain patterns) | LLM-driven | Low (must prove with evidence) |
+| **Total** | **63 check categories** | | |
 
 ---
 
@@ -152,7 +153,30 @@ For APIs imported via Postman or OpenAPI, the scanner also runs deterministic ba
 
 ---
 
-## Phase 4: Post-Scan Pipeline ($0 LLM Cost)
+## Phase 4: Attack Chain Analysis (Final LLM Phase)
+
+Runs **after all other phases complete**. Receives a summary of every finding discovered so far and attempts to combine them into multi-step attack chains with higher severity.
+
+| Chain Pattern | Individual Findings | Combined Impact |
+|--------------|-------------------|-----------------|
+| **OAuth Token Theft** | Open redirect + OAuth login flow | Critical — account takeover |
+| **Cross-Origin Data Theft** | CORS misconfig + missing SameSite + sensitive API | Critical — steal user data from attacker website |
+| **Session Hijack via XSS** | XSS + non-HttpOnly session cookie | Critical — steal session via `document.cookie` |
+| **Forced Actions via XSS** | XSS + CSRF-vulnerable form (password/email change) | Critical — attacker changes user's password |
+| **Cloud Credential Theft** | SSRF + cloud metadata (169.254.169.254) | Critical — AWS/Azure key extraction |
+| **Mass Data Dump** | IDOR + no rate limiting | Critical — enumerate all user records |
+| **Admin Token Forgery** | JWT alg:none + role claim in token | Critical — forge admin JWT |
+| **Poisoned Reset Link** | Host header injection + password reset endpoint | High — redirect reset link to attacker |
+| **Webshell RCE** | File upload + path traversal | Critical — execute code on server |
+| **WAF Bypass → Injection** | Content-type confusion + injection vulnerability | High — bypass validation via alternate parser |
+| **Brute Force** | Timing enumeration (valid users) + no rate limit | High — confirmed users + password spray |
+| **Auth Bypass via Old API** | API version downgrade + missing auth on old version | High — access without authentication |
+
+The LLM **attempts to execute** each applicable chain, not just theorize. Only proven chains with evidence are reported.
+
+---
+
+## Phase 5: Post-Scan Pipeline ($0 LLM Cost)
 
 | Step | What It Does |
 |------|-------------|

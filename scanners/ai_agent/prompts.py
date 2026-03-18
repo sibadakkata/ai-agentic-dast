@@ -384,6 +384,47 @@ API_PHASES: list[ScanPhase] = [
 ]
 
 
+ATTACK_CHAIN_PHASE = ScanPhase(
+    id="attack_chain_analysis",
+    name="Attack Chain Analysis",
+    prompt=(
+        "You have completed all individual scan phases. Now analyze your findings "
+        "for EXPLOITABLE ATTACK CHAINS — combinations of 2-3 vulnerabilities that "
+        "together create a higher-severity impact than any single finding alone.\n\n"
+        "Your findings so far:\n{findings_summary}\n\n"
+        "For each potential chain:\n"
+        "1. Identify which findings combine and explain the attack path\n"
+        "2. ATTEMPT to execute the chain using your tools (don't just theorize)\n"
+        "3. If successful, report as a single finding with severity based on "
+        "the COMBINED impact (often Critical even if individual findings are Low/Medium)\n"
+        "4. Include step-by-step evidence showing each link in the chain\n\n"
+        "Chain patterns to evaluate against YOUR findings:\n"
+        "- Open Redirect + OAuth/SSO → redirect token to attacker, account takeover\n"
+        "- CORS misconfig + sensitive API → cross-origin authenticated data theft\n"
+        "- XSS + non-HttpOnly cookie → steal session via document.cookie\n"
+        "- XSS + CSRF-vulnerable form → inject auto-submit (password/email change)\n"
+        "- SSRF + cloud metadata → fetch 169.254.169.254 for AWS/Azure credentials\n"
+        "- IDOR + no rate limit → mass enumeration of all user records\n"
+        "- JWT weakness (alg:none or weak key) + role claim → forge admin token\n"
+        "- Host header injection + password reset → poisoned reset link\n"
+        "- File upload + path traversal → place webshell in executable directory\n"
+        "- Content-type confusion + WAF → bypass input validation via alternate parser\n"
+        "- Timing enumeration + no rate limit → confirmed users + brute force\n"
+        "- Missing SameSite + CORS → cross-site authenticated request\n"
+        "- Session fixation + XSS → fix session then hijack via XSS\n"
+        "- API version downgrade + missing auth on old version → bypass new auth\n\n"
+        "RULES:\n"
+        "- Only report chains you can PROVE with evidence from actual requests\n"
+        "- Do NOT report theoretical chains you cannot attempt\n"
+        "- Each chain finding must reference the individual findings it combines\n"
+        "- Set severity based on the worst possible outcome of the full chain\n"
+        "- If no chains are exploitable, say so — don't force findings"
+    ),
+    max_steps=40,
+    applies_to="both",
+)
+
+
 _FOCUS_PHASE_MAP: dict[str, set[str]] = {
     "xss":          {"web_a03_xss", "api_injection"},
     "sqli":         {"web_a03_sqli", "api_injection"},
@@ -419,6 +460,8 @@ _FOCUS_PHASE_MAP: dict[str, set[str]] = {
     "session management": {"web_session_mgmt"},
     "content type": {"api_content_type"},
     "method override": {"api_method_override"},
+    "chain": {"attack_chain_analysis"},
+    "attack chain": {"attack_chain_analysis"},
 }
 
 _RECON_PHASE_IDS = {"web_recon", "api_recon"}
@@ -474,6 +517,9 @@ def get_phases(scan_mode: str, app_info: dict | None = None,
             if allowed_ids is not None and p.id not in allowed_ids:
                 continue
             phases.append(p)
+
+    if phases and (allowed_ids is None or "attack_chain_analysis" in allowed_ids):
+        phases.append(ATTACK_CHAIN_PHASE)
 
     return phases
 

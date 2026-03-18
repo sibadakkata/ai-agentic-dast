@@ -706,7 +706,20 @@ async def run_scan(
             phase_findings_before = len(findings)
             print(f"  [{phase_num}/{total_phases}] Phase: {phase.name} ({phase.id})...", end="", flush=True)
             _cb("phase_start", {"phase": phase_num, "total": total_phases, "name": phase.name, "id": phase.id})
-            messages.append({"role": "user", "content": phase.prompt})
+
+            phase_prompt = phase.prompt
+            if phase.id == "attack_chain_analysis" and findings:
+                summary_lines = []
+                for i, f in enumerate(findings, 1):
+                    line = f"{i}. [{f.get('severity','?')}] {f.get('title','?')} @ {f.get('url','?')}"
+                    ev = f.get("evidence", "")
+                    if ev:
+                        line += f" — {ev[:150]}"
+                    summary_lines.append(line)
+                findings_text = "\n".join(summary_lines) if summary_lines else "(no findings yet)"
+                phase_prompt = phase_prompt.replace("{findings_summary}", findings_text)
+
+            messages.append({"role": "user", "content": phase_prompt})
 
             for step in range(phase.max_steps):
                 _check_cancel()
