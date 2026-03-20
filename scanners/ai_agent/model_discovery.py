@@ -38,14 +38,13 @@ _SKIP_PATTERNS: list[str] = [
     "embed",
     "diffusion",
     "stability",
-    "titan-image",
-    "titan-embed",
-    "titan-multimodal",
-    "titan-text-premier",
-    "cohere.embed",
+    "amazon.titan",
+    "amazon.nova",
     "amazon.rerank",
-    "amazon.nova-canvas",
-    "amazon.nova-reel",
+    "cohere.",
+    "ai21.",
+    "ministral",
+    "mistral.",
 ]
 
 _PROVIDER_PRETTY: dict[str, str] = {

@@ -12,7 +12,7 @@ A single LLM agent drives a real Chromium browser and HTTP client through the OW
 │                                                                       │
 │  ┌─────────────┐   ┌──────────────┐   ┌────────────────────────────┐ │
 │  │    Auth      │──▶│   Passive    │──▶│     LLM Deep Scan          │ │
-│  │  (auto-     │   │   Recon      │   │  (23 web + 15 API phases)  │ │
+│  │  (auto-     │   │   Recon      │   │  (25 web + 15 API phases)  │ │
 │  │  detect)    │   │ (24 checks)  │   │                            │ │
 │  └─────────────┘   └──────────────┘   └─────────────┬──────────────┘ │
 │                                                      │                │
@@ -43,7 +43,7 @@ This loop runs up to 25 steps per phase. Every finding is then **triaged offline
 | Feature | Description | Details |
 |---------|-------------|---------|
 | **Passive Reconnaissance** | 24 deterministic checks: source maps, DOM sinks, secrets, headers, CSP analysis, CORS, JWT, cookies, telemetry leakage, mixed content, clickjacking, and more | Runs before LLM phases, $0 cost |
-| **Active Scanning** | 23 web phases + 15 API phases: full OWASP Top 10 + context-aware checks (race conditions, file upload, host header, session mgmt, method override) | [Web Scanning](docs/web-scanning.md) · [API Scanning](docs/api-scanning.md) |
+| **Active Scanning** | 25 web phases + 15 API phases: full OWASP Top 10 + context-aware checks (path traversal, XXE, race conditions, file upload, host header, session mgmt, HTTP smuggling) | [Web Scanning](docs/web-scanning.md) · [API Scanning](docs/api-scanning.md) |
 | **Triage Engine** | 3-layer evidence-based classification (TP/FP/Manual Review) with CWE/CVSS | [Triage Engine](docs/triage-engine.md) |
 | **Authentication** | Auto-detect form, SSO/OIDC, OAuth, API key, bearer — with session refresh | Multi-step OIDC, self-healing sessions |
 | **API Import** | Postman (v2.0/v2.1), OpenAPI/Swagger (2.0, 3.0, 3.1) | Baseline execution + hybrid fuzzing |
@@ -99,7 +99,7 @@ uvicorn web.app:app --host 0.0.0.0 --port 8080
 │  4. HYBRID BODY FUZZING (POST/PUT/PATCH endpoints)                  │
 │     LLM plans payloads ($0.001) → engine executes → LLM analyzes   │
 ├─────────────────────────────────────────────────────────────────────┤
-│  5. LLM DEEP SCAN (23 web + 15 API phases)                         │
+│  5. LLM DEEP SCAN (25 web + 15 API phases)                         │
 │     OWASP Top 10 + context-aware: race, upload, host header, etc.  │
 ├─────────────────────────────────────────────────────────────────────┤
 │  6. RUNTIME VERIFICATION                                            │
@@ -129,8 +129,11 @@ uvicorn web.app:app --host 0.0.0.0 --port 8080
 ```
 ├── README.md                    # This file
 ├── docs/                        # Detailed documentation
-│   ├── security-checks.md       #   Complete reference: all 62 check categories
 │   ├── architecture.md          #   AI agent architecture & design
+│   ├── system-prompt-guide.md   #   ★ How the LLM system prompt & phases work
+│   ├── scanner-internals.md     #   ★ E2E scan flow, evidence, retries, context mgmt
+│   ├── contributing.md          #   ★ How to add phases, tools, optimize detection
+│   ├── security-checks.md       #   Complete reference: all 63 check categories
 │   ├── triage-engine.md         #   Triage engine deep dive
 │   ├── api-scanning.md          #   How API scanning works (walkthrough)
 │   ├── web-scanning.md          #   How website scanning works
@@ -165,15 +168,40 @@ uvicorn web.app:app --host 0.0.0.0 --port 8080
 └── requirements.txt             # Python dependencies
 ```
 
+### Data storage (SQLite, not browser disk)
+
+- **`results/scanner.db`** — source of truth: `scans` (metadata), `scan_results` (full findings + summary JSON), `app_kv` (UI prefs), `cost_ledger`. On startup, any scan with `result_file` on disk but no `scan_results` row is **back-filled** and `findings_count` is reconciled.
+- **`results/raw/*.json`** — written when a scan finishes as **backup/export** only; API reads **DB first**, then legacy file once to populate DB.
+- **Scan list** (`GET /api/scans`) — DB-backed only (no file-only orphan rows).
+- **Payloads export** (`GET /api/results/{id}/payloads`) — generated in memory (no `payloads_*.json` cache file).
+- **Other files (not scan DB):** `imports/*` (uploaded Postman/Burp/OpenAPI), `results/reports/*` (PDF/XLSX exports), `data/models_cache.json` (Bedrock model list cache), `results/cache/*` (CVE lookup caches). These do not drive scan history or findings in the UI.
+
+**Regression (local code + UI strings):** `python _regression_local.py` (use a venv with `pip install -r requirements.txt` so agent/auth imports pass).
+
+**After deploy (e.g. EC2) — hit the live API from your machine:**
+
+```bash
+export DAST_BASE_URL=https://your-dast-host
+export DAST_AUTH_USER=dast-admin    # optional, if /api/ui-settings needs Basic auth
+export DAST_AUTH_PASS=your-secret
+python scripts/run_regression_ec2.py          # runs local regression + e2e smoke + API-only persistence checks
+python scripts/run_regression_ec2.py --pytest # same, plus pytest tests/
+```
+
+**Piecemeal:** `python scripts/e2e_ec2_smoke.py` (read-only HTTP smoke). `python scripts/regression_persistence.py --api-only` skips local `results/scanner.db` and only checks the remote URL (set `DAST_BASE_URL`). Without `DAST_AUTH_PASS`, a **401** on `/api/ui-settings` is reported as **SKIP**, not failure.
+
 ## Documentation
 
 | Document | Description |
 |----------|-------------|
-| [Security Checks](docs/security-checks.md) | **Complete reference of all 62 check categories** — passive recon, web phases, API phases, CWE/OWASP coverage |
 | [Architecture](docs/architecture.md) | AI agent design, LLM loop, tool system, phase orchestration |
+| [System Prompt Guide](docs/system-prompt-guide.md) | **How the LLM is instructed** — system prompt structure, phase prompts, payload methodology, finding format |
+| [Scanner Internals](docs/scanner-internals.md) | **E2E scan flow** — tool execution, evidence buffer, retry logic, context trimming, finding extraction |
+| [Contributing & Extending](docs/contributing.md) | **How to add new phases, tools, and optimize detection** — step-by-step guide for team members |
+| [Security Checks](docs/security-checks.md) | Complete reference of all 63 check categories — passive recon, web phases, API phases, CWE/OWASP coverage |
 | [Triage Engine](docs/triage-engine.md) | How TP/FP classification works, confidence scoring, CVSS adjustment |
 | [API Scanning](docs/api-scanning.md) | Step-by-step walkthrough with banking API example |
-| [Web Scanning](docs/web-scanning.md) | Browser-based scanning, SPA handling, 23 OWASP + context-aware phases |
+| [Web Scanning](docs/web-scanning.md) | Browser-based scanning, SPA handling, 25 OWASP + context-aware phases |
 | [REST API](docs/rest-api.md) | Full API reference with curl examples and Python SDK |
 | [Deployment](docs/deployment.md) | EC2 setup, Docker, Bedrock config, models, data persistence |
 | [Web UI](docs/web-ui.md) | UI features, scan configuration, AI planner |

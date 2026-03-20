@@ -77,9 +77,60 @@ VERDICT_COLORS = {"TRUE_POSITIVE": (200, 40, 40), "FALSE_POSITIVE": (20, 140, 60
 SEV_ORDER = {"Critical": 0, "High": 1, "Medium": 2, "Low": 3, "Info": 4}
 
 
+_rg_unicode_font = None
+
+def _rg_init_fonts(pdf):
+    """Register Unicode TTF font if available on the system."""
+    global _rg_unicode_font
+    if _rg_unicode_font is False:
+        return
+    if _rg_unicode_font:
+        for style, path in _rg_unicode_font.items():
+            pdf.add_font("DJV", style, path, uni=True)
+        return
+    from pathlib import Path as _P
+    candidates = {
+        "": ["/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", "/usr/share/fonts/TTF/DejaVuSans.ttf", "/usr/share/fonts/dejavu/DejaVuSans.ttf"],
+        "B": ["/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"],
+        "I": ["/usr/share/fonts/truetype/dejavu/DejaVuSans-Oblique.ttf"],
+    }
+    found = {}
+    for style, paths in candidates.items():
+        for p in paths:
+            if _P(p).exists():
+                found[style] = p
+                break
+    if "" in found:
+        _rg_unicode_font = {"": found[""], "B": found.get("B", found[""]), "I": found.get("I", found[""]), "BI": found.get("B", found[""])}
+        for style, path in _rg_unicode_font.items():
+            pdf.add_font("DJV", style, path, uni=True)
+    else:
+        _rg_unicode_font = False
+
+
 def _safe(text):
-    if not text: return ""
-    return str(text).encode("latin-1", errors="replace").decode("latin-1")[:3500]
+    if not text:
+        return ""
+    s = str(text)
+    s = s.replace("\u200b", "").replace("\u200c", "").replace("\u200d", "").replace("\ufeff", "")
+    if _rg_unicode_font:
+        return s[:3500]
+    s = s.replace("\u2014", " -- ").replace("\u2013", " - ")
+    s = s.replace("\u2018", "'").replace("\u2019", "'")
+    s = s.replace("\u201c", '"').replace("\u201d", '"')
+    s = s.replace("\u2026", "...").replace("\u00a0", " ")
+    s = s.replace("\u2022", "*").replace("\u2192", "->").replace("\u2190", "<-")
+    s = s.replace("\u2605", "*").replace("\u00b7", "-")
+    s = s.replace("\u2713", "[PASS]").replace("\u2714", "[PASS]")
+    s = s.replace("\u2717", "[FAIL]").replace("\u2718", "[FAIL]")
+    s = s.replace("\u25cf", "*").replace("\u25cb", "o").replace("\u25a0", "#").replace("\u25a1", "[ ]")
+    return s.encode("latin-1", errors="replace").decode("latin-1")[:3500]
+
+
+def _rg_font(pdf, style="", size=10):
+    """Use Unicode font if available, else Helvetica."""
+    family = "DJV" if _rg_unicode_font else "Helvetica"
+    pdf.set_font(family, style, size)
 
 
 def _build_curl(t):
@@ -154,11 +205,11 @@ class Report(FPDF):
         self._target = target
 
     def header(self):
-        self.set_font("Helvetica", "B", 9)
+        _rg_font(self, "B", 9)
         self.set_text_color(80, 80, 80)
-        label = f"Security Report - {self._model}"
+        label = _safe(f"Security Report - {self._model}")
         if self._target:
-            label += f" | {self._target}"
+            label = _safe(f"Security Report - {self._model} | {self._target}")
         self.cell(0, 7, label, align="C", new_x="LMARGIN", new_y="NEXT")
         self.set_draw_color(200, 200, 200)
         self.line(10, self.get_y(), 200, self.get_y())
@@ -166,12 +217,12 @@ class Report(FPDF):
 
     def footer(self):
         self.set_y(-15)
-        self.set_font("Helvetica", "I", 8)
+        _rg_font(self, "I", 8)
         self.set_text_color(150, 150, 150)
-        self.cell(0, 10, f"Page {self.page_no()}/{{nb}} | {self._model} | {datetime.now().strftime('%Y-%m-%d')}", align="C")
+        self.cell(0, 10, _safe(f"Page {self.page_no()}/{{nb}} | {self._model} | {datetime.now().strftime('%Y-%m-%d')}"), align="C")
 
     def section(self, title, color=(30, 60, 120)):
-        self.set_font("Helvetica", "B", 14)
+        _rg_font(self, "B", 14)
         self.set_text_color(*color)
         self.cell(0, 10, _safe(title), new_x="LMARGIN", new_y="NEXT")
         self.set_draw_color(*color)
@@ -179,10 +230,10 @@ class Report(FPDF):
         self.ln(4)
 
     def kv(self, label, value, lc=(80, 80, 80), vc=(30, 30, 30)):
-        self.set_font("Helvetica", "B", 9)
+        _rg_font(self, "B", 9)
         self.set_text_color(*lc)
         self.cell(32, 5, _safe(label))
-        self.set_font("Helvetica", "", 9)
+        _rg_font(self, "", 9)
         self.set_text_color(*vc)
         self.multi_cell(0, 5, _safe(value))
         self.ln(0.5)
@@ -190,11 +241,11 @@ class Report(FPDF):
     def box(self, label, text, bg, border=None, tc=(30, 30, 30)):
         if not text: return
         self.ln(1)
-        self.set_font("Helvetica", "B", 8)
+        _rg_font(self, "B", 8)
         self.set_text_color(*tc)
         self.cell(0, 5, _safe(label), new_x="LMARGIN", new_y="NEXT")
         x, y, w = self.get_x(), self.get_y(), 190
-        self.set_font("Courier", "", 7)
+        _rg_font(self, "", 7)
         safe_text = _safe(text[:3000])
         lines = self.multi_cell(w - 6, 3.5, safe_text, dry_run=True, output="LINES")
         h = min(max(len(lines) * 3.5 + 6, 10), 240)
@@ -219,7 +270,7 @@ class Report(FPDF):
         vc = VERDICT_COLORS.get(verdict, (100, 100, 100))
         self.set_fill_color(*c)
         self.set_text_color(255, 255, 255)
-        self.set_font("Helvetica", "B", 8)
+        _rg_font(self, "B", 8)
         self.cell(22, 6, _safe(sev), fill=True, align="C")
         self.cell(2, 6, "")
         self.set_fill_color(*vc)
@@ -227,13 +278,12 @@ class Report(FPDF):
         self.ln(8)
 
     def stage_header(self, label, color=(60, 60, 60), bg=(240, 240, 240)):
-        """Render a labeled stage header to separate pipeline phases."""
         if self.get_y() > 260:
             self.add_page()
         self.ln(2)
         self.set_fill_color(*bg)
         self.set_draw_color(*color)
-        self.set_font("Helvetica", "B", 8)
+        _rg_font(self, "B", 8)
         self.set_text_color(*color)
         self.cell(190, 6, _safe(f"  {label}"), fill=True, border="LTR",
                   new_x="LMARGIN", new_y="NEXT")
@@ -503,7 +553,7 @@ def render(pdf, idx, f, link_id=None):
     pdf.set_line_width(0.2)
     pdf.ln(2)
 
-    pdf.set_font("Helvetica", "B", 10)
+    _rg_font(pdf, "B", 10)
     pdf.set_text_color(30, 30, 30)
     pdf.multi_cell(0, 5, _safe(f"#{idx}  {f['title']}"))
     pdf.ln(1)
@@ -681,7 +731,7 @@ def render(pdf, idx, f, link_id=None):
             "STAGE 2: RUNTIME VERIFICATION  (not attempted for this finding type)",
             color=(120, 120, 120), bg=(245, 245, 245),
         )
-        pdf.set_font("Helvetica", "I", 8)
+        _rg_font(pdf, "I", 8)
         pdf.set_text_color(120, 120, 120)
         pdf.cell(0, 4, _safe("No replay verifier available for this vulnerability class."),
                  new_x="LMARGIN", new_y="NEXT")
@@ -753,7 +803,7 @@ def _render_summary_table(pdf, all_findings, link_ids):
     hdr_h = 7
 
     def _draw_header():
-        pdf.set_font("Helvetica", "B", 7)
+        _rg_font(pdf, "B", 7)
         pdf.set_fill_color(30, 60, 120)
         pdf.set_text_color(255, 255, 255)
         for w, label in zip(col_w, headers):
@@ -762,7 +812,7 @@ def _render_summary_table(pdf, all_findings, link_ids):
 
     _draw_header()
 
-    pdf.set_font("Helvetica", "", 6.5)
+    _rg_font(pdf, "", 6.5)
     for i, f in enumerate(all_findings, 1):
         ai_sev = f.get("ai_severity", "") or f.get("scanner_severity", "") or ""
         triage_sev = f["final_severity"]
@@ -776,7 +826,7 @@ def _render_summary_table(pdf, all_findings, link_ids):
         if pdf.get_y() + row_h > 272:
             pdf.add_page()
             _draw_header()
-            pdf.set_font("Helvetica", "", 6.5)
+            _rg_font(pdf, "", 6.5)
 
         bg = (245, 248, 255) if i % 2 == 0 else (255, 255, 255)
         pdf.set_fill_color(*bg)
@@ -786,12 +836,12 @@ def _render_summary_table(pdf, all_findings, link_ids):
 
         pdf.set_fill_color(*ai_sc)
         pdf.set_text_color(255, 255, 255)
-        pdf.set_font("Helvetica", "B", 6)
+        _rg_font(pdf, "B", 6)
         pdf.cell(col_w[1], row_h, _safe(ai_sev[:4]), border="TB", fill=True, align="C")
 
         pdf.set_fill_color(*tr_sc)
         pdf.set_text_color(255, 255, 255)
-        pdf.set_font("Helvetica", "B", 6)
+        _rg_font(pdf, "B", 6)
         pdf.cell(col_w[2], row_h, _safe(triage_sev[:4]), border="TB", fill=True, align="C")
 
         if has_sources:
@@ -799,22 +849,22 @@ def _render_summary_table(pdf, all_findings, link_ids):
             src_color = SOURCE_BADGE_COLORS.get(src, (100, 100, 100))
             pdf.set_fill_color(*src_color)
             pdf.set_text_color(255, 255, 255)
-            pdf.set_font("Helvetica", "B", 5.5)
+            _rg_font(pdf, "B", 5.5)
             pdf.cell(col_w[3], row_h, _safe(src.upper()), border="TB", fill=True, align="C")
 
         find_col = 4 if has_sources else 3
         pdf.set_fill_color(*bg)
         pdf.set_text_color(30, 60, 180)
-        pdf.set_font("Helvetica", "U", 6.5)
+        _rg_font(pdf, "U", 6.5)
         pdf.cell(col_w[find_col], row_h, _safe(title_short), border="TB", fill=True,
                  link=lid)
 
         pdf.set_text_color(60, 60, 60)
-        pdf.set_font("Helvetica", "", 6)
+        _rg_font(pdf, "", 6)
         pdf.cell(col_w[find_col + 1], row_h, _safe(impact), border="TB", fill=True)
 
         pdf.set_text_color(30, 100, 30)
-        pdf.set_font("Helvetica", "I", 6)
+        _rg_font(pdf, "I", 6)
         pdf.cell(col_w[find_col + 2], row_h, _safe(remed), border="RTB", fill=True)
         pdf.ln(row_h)
 
@@ -979,16 +1029,17 @@ def gen_report(model_key, classified, raw, scan_id=None):
 
     target_url = raw.get("target", "") if raw else ""
     pdf = Report(display, target=target_url)
+    _rg_init_fonts(pdf)
     pdf.alias_nb_pages()
     pdf.set_auto_page_break(auto=True, margin=18)
     pdf.add_page()
 
     # ── Title ──
-    pdf.set_font("Helvetica", "B", 20)
+    _rg_font(pdf, "B", 20)
     pdf.set_text_color(30, 60, 120)
     pdf.cell(0, 12, _safe(f"Security Report: {display}"), align="C",
              new_x="LMARGIN", new_y="NEXT")
-    pdf.set_font("Helvetica", "", 11)
+    _rg_font(pdf, "", 11)
     pdf.set_text_color(80, 80, 80)
     target_label = f"Target: {target_url}" if target_url else "Target: (see scan config)"
     pdf.cell(0, 7, _safe(target_label),
@@ -999,7 +1050,7 @@ def gen_report(model_key, classified, raw, scan_id=None):
              align="C", new_x="LMARGIN", new_y="NEXT")
     pdf.ln(3)
 
-    pdf.set_font("Helvetica", "", 7)
+    _rg_font(pdf, "", 7)
     pdf.set_text_color(100, 100, 100)
     pdf.multi_cell(0, 3.5, _safe(
         "Stage 1 (AI Agent): LLM autonomously tests the target, generates payloads, and reports findings.  |  "
@@ -1060,7 +1111,7 @@ def gen_report(model_key, classified, raw, scan_id=None):
     pdf.ln(2)
 
     # Severity breakdown for confirmed findings
-    pdf.set_font("Helvetica", "B", 10)
+    _rg_font(pdf, "B", 10)
     pdf.set_text_color(30, 30, 30)
     pdf.cell(0, 6, "Confirmed by CVSS-based Severity:", new_x="LMARGIN", new_y="NEXT")
     pdf.ln(1)
@@ -1069,10 +1120,10 @@ def gen_report(model_key, classified, raw, scan_id=None):
         if cnt:
             pdf.set_fill_color(*SEV_COLORS[sev])
             pdf.set_text_color(255, 255, 255)
-            pdf.set_font("Helvetica", "B", 9)
+            _rg_font(pdf, "B", 9)
             pdf.cell(22, 6, _safe(sev), fill=True, align="C")
             pdf.set_text_color(30, 30, 30)
-            pdf.set_font("Helvetica", "", 10)
+            _rg_font(pdf, "", 10)
             pdf.cell(20, 6, f"  {cnt}")
             pdf.ln(7)
 
@@ -1087,7 +1138,7 @@ def gen_report(model_key, classified, raw, scan_id=None):
         pdf.add_page()
         pdf.section("Findings Overview - Confirmed Vulnerabilities (click to jump)",
                      (20, 140, 60))
-        pdf.set_font("Helvetica", "I", 8)
+        _rg_font(pdf, "I", 8)
         pdf.set_text_color(80, 80, 80)
         pdf.multi_cell(0, 4, _safe(
             "Click any finding title (blue underline) to jump to full details, "
@@ -1100,7 +1151,7 @@ def gen_report(model_key, classified, raw, scan_id=None):
         pdf.add_page()
         pdf.section("Findings Overview - Manual Review Required (click to jump)",
                      (217, 119, 6))
-        pdf.set_font("Helvetica", "I", 8)
+        _rg_font(pdf, "I", 8)
         pdf.set_text_color(80, 80, 80)
         pdf.multi_cell(0, 4, _safe(
             "Triage engine could not confidently classify these as TP or FP. "
@@ -1113,7 +1164,7 @@ def gen_report(model_key, classified, raw, scan_id=None):
         pdf.add_page()
         pdf.section("Findings Overview - Needs Verification (click to jump)",
                      (200, 160, 20))
-        pdf.set_font("Helvetica", "I", 8)
+        _rg_font(pdf, "I", 8)
         pdf.set_text_color(80, 80, 80)
         pdf.multi_cell(0, 4, _safe(
             "These need manual testing. "
@@ -1126,7 +1177,7 @@ def gen_report(model_key, classified, raw, scan_id=None):
         pdf.add_page()
         pdf.section("Findings Overview - False Positives (click to jump)",
                      (200, 40, 40))
-        pdf.set_font("Helvetica", "I", 8)
+        _rg_font(pdf, "I", 8)
         pdf.set_text_color(80, 80, 80)
         pdf.multi_cell(0, 4, _safe(
             "Scanner incorrectly flagged these. Click to see why."))
@@ -1142,7 +1193,7 @@ def gen_report(model_key, classified, raw, scan_id=None):
         pdf.add_page()
         pdf.section(f"Confirmed Vulnerabilities - Details ({len(tp)})",
                      (20, 140, 60))
-        pdf.set_font("Helvetica", "I", 9)
+        _rg_font(pdf, "I", 9)
         pdf.set_text_color(80, 80, 80)
         pdf.multi_cell(0, 5, _safe(
             "Confirmed real issues with CVE/CVSS scores. "
@@ -1158,7 +1209,7 @@ def gen_report(model_key, classified, raw, scan_id=None):
         pdf.add_page()
         pdf.section(f"Manual Review Required - Details ({len(mr)})",
                      (217, 119, 6))
-        pdf.set_font("Helvetica", "I", 9)
+        _rg_font(pdf, "I", 9)
         pdf.set_text_color(80, 80, 80)
         pdf.multi_cell(0, 5, _safe(
             "Insufficient evidence to auto-classify. These need human review "
@@ -1172,7 +1223,7 @@ def gen_report(model_key, classified, raw, scan_id=None):
         pdf.add_page()
         pdf.section(f"Needs Verification - Details ({len(nv)})",
                      (200, 160, 20))
-        pdf.set_font("Helvetica", "I", 9)
+        _rg_font(pdf, "I", 9)
         pdf.set_text_color(80, 80, 80)
         pdf.multi_cell(0, 5, _safe(
             "Manual testing needed. "
@@ -1185,7 +1236,7 @@ def gen_report(model_key, classified, raw, scan_id=None):
     if fp:
         pdf.add_page()
         pdf.section(f"False Positives - Details ({len(fp)})", (200, 40, 40))
-        pdf.set_font("Helvetica", "I", 9)
+        _rg_font(pdf, "I", 9)
         pdf.set_text_color(80, 80, 80)
         pdf.multi_cell(0, 5, _safe(
             "Scanner incorrectly flagged these. Red box explains why. "
@@ -1199,7 +1250,7 @@ def gen_report(model_key, classified, raw, scan_id=None):
         pdf.add_page()
         pdf.section(f"Positive Observations ({len(na)})", (120, 120, 120))
         for i, f in enumerate(na, 1):
-            pdf.set_font("Helvetica", "", 9)
+            _rg_font(pdf, "", 9)
             pdf.set_text_color(30, 30, 30)
             pdf.cell(0, 5, _safe(f"  {i}. {f['title']}"),
                      new_x="LMARGIN", new_y="NEXT")

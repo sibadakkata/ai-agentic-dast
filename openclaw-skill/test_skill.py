@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 """
 End-to-end test for the AI Agentic Scanner OpenClaw skill.
 
@@ -8,13 +8,13 @@ Usage:
   python test_skill.py list                          # all scans
   python test_skill.py targets                       # unique targets scanned
   python test_skill.py models                        # models used per target
-  python test_skill.py find --url norton              # scans matching a URL substring
+  python test_skill.py find --url myapp               # scans matching a URL substring
   python test_skill.py find --model haiku            # scans using a specific model
-  python test_skill.py find --url norton --model haiku  # combined filter
+  python test_skill.py find --url myapp --model haiku  # combined filter
   python test_skill.py status <scan_id>              # single scan status
   python test_skill.py results <scan_id>             # findings from a scan
   python test_skill.py report <scan_id>              # generate PDF report
-  python test_skill.py latest-report --url norton    # report for latest scan of a target
+  python test_skill.py latest-report --url myapp     # report for latest scan of a target
   python test_skill.py scan --url https://example.com --mode website
   python test_skill.py scan --url https://example.com --wait   # wait for completion
   python test_skill.py stop <scan_id>
@@ -375,11 +375,11 @@ Examples:
   %(prog)s list                                   List all scans
   %(prog)s targets                                Show unique targets
   %(prog)s models                                 Show models used per target
-  %(prog)s find --url norton                      Find scans for norton
+  %(prog)s find --url myapp                       Find scans for a target
   %(prog)s find --model haiku                     Find scans using Haiku
-  %(prog)s find --url norton --model haiku        Combined filter
-  %(prog)s latest-report --url norton             Report for latest norton scan
-  %(prog)s latest-report --url norton --model ministral
+  %(prog)s find --url myapp --model haiku         Combined filter
+  %(prog)s latest-report --url myapp              Report for latest scan of a target
+  %(prog)s latest-report --url myapp --model ministral
   %(prog)s status <scan_id>                       Check scan status
   %(prog)s results <scan_id>                      Get findings
   %(prog)s report <scan_id>                       Generate PDF

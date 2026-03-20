@@ -1,11 +1,11 @@
-"""SQLite persistence for scan metadata and cost tracking.
+"""SQLite persistence for scan metadata, full result payloads, UI prefs, and cost.
 
-Replaces the previous flat-JSON approach (scans_meta.json, cost_ledger.json)
-with a single scanner.db file using WAL mode for safe concurrent access.
+Scan list and metadata live in ``scans``; full result JSON (findings + summary)
+is stored in ``scan_results`` and is the **source of truth** for the API.
+Legacy ``results/raw/*.json`` files are optional; reads fall back to disk and
+back-fill the DB.  PDF reports remain on disk.
 
-Data that stays as files (too large for SQLite rows):
-  - results/raw/*.json   — full scan results with findings
-  - results/reports/*.pdf — generated PDF reports
+UI column preferences (no browser localStorage) use ``app_kv``.
 """
 from __future__ import annotations
 
@@ -95,6 +95,16 @@ def init():
                 INSERT OR IGNORE INTO cost_ledger
                     (id, all_time_cost, deleted_scans_cost, deleted_scans_count)
                     VALUES (1, 0, 0, 0);
+
+                CREATE TABLE IF NOT EXISTS scan_results (
+                    scan_id TEXT PRIMARY KEY,
+                    payload   TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS app_kv (
+                    k TEXT PRIMARY KEY,
+                    v TEXT NOT NULL
+                );
             """)
             conn.commit()
             logger.info("SQLite DB initialised at %s", DB_PATH)
@@ -151,6 +161,7 @@ def delete_scan(scan_id: str):
         conn = _connect()
         try:
             conn.execute("DELETE FROM scans WHERE scan_id = ?", (scan_id,))
+            conn.execute("DELETE FROM scan_results WHERE scan_id = ?", (scan_id,))
             conn.commit()
         finally:
             conn.close()
@@ -166,6 +177,9 @@ def delete_scans(scan_ids: list[str]):
             conn.execute(
                 f"DELETE FROM scans WHERE scan_id IN ({placeholders})", scan_ids
             )
+            conn.execute(
+                f"DELETE FROM scan_results WHERE scan_id IN ({placeholders})", scan_ids
+            )
             conn.commit()
         finally:
             conn.close()
@@ -176,6 +190,7 @@ def delete_all_scans():
         conn = _connect()
         try:
             conn.execute("DELETE FROM scans")
+            conn.execute("DELETE FROM scan_results")
             conn.commit()
         finally:
             conn.close()
@@ -301,3 +316,63 @@ def migrate_from_json(scans_meta_file: Path, cost_ledger_file: Path) -> bool:
             logger.exception("Failed to migrate cost_ledger.json")
 
     return migrated
+
+
+# ── Full scan result JSON (findings + metadata) ─────────────────────────
+
+def save_scan_result(scan_id: str, payload_json: str):
+    """Store the complete raw result document for *scan_id*."""
+    with _lock:
+        conn = _connect()
+        try:
+            conn.execute(
+                """
+                INSERT INTO scan_results (scan_id, payload) VALUES (?, ?)
+                ON CONFLICT(scan_id) DO UPDATE SET payload = excluded.payload
+                """,
+                (scan_id, payload_json),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+
+def get_scan_result(scan_id: str) -> str | None:
+    """Return raw JSON string or None."""
+    conn = _connect()
+    try:
+        row = conn.execute(
+            "SELECT payload FROM scan_results WHERE scan_id = ?", (scan_id,)
+        ).fetchone()
+    finally:
+        conn.close()
+    if row and row["payload"]:
+        return row["payload"]
+    return None
+
+
+# ── App-wide key/value (UI preferences, etc.) ───────────────────────────
+
+def app_kv_get(key: str) -> str | None:
+    conn = _connect()
+    try:
+        row = conn.execute("SELECT v FROM app_kv WHERE k = ?", (key,)).fetchone()
+    finally:
+        conn.close()
+    return row["v"] if row else None
+
+
+def app_kv_set(key: str, value: str):
+    with _lock:
+        conn = _connect()
+        try:
+            conn.execute(
+                """
+                INSERT INTO app_kv (k, v) VALUES (?, ?)
+                ON CONFLICT(k) DO UPDATE SET v = excluded.v
+                """,
+                (key, value),
+            )
+            conn.commit()
+        finally:
+            conn.close()

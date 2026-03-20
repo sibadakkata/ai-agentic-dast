@@ -17,8 +17,10 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 
-from fastapi import FastAPI, BackgroundTasks, Depends, HTTPException, Request, UploadFile, File, Form, status
-from fastapi.responses import HTMLResponse, FileResponse, JSONResponse, Response
+from fastapi import FastAPI, BackgroundTasks, Depends, HTTPException, Request, UploadFile, File, Form, WebSocket, WebSocketDisconnect, status
+from io import BytesIO
+
+from fastapi.responses import HTMLResponse, FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.staticfiles import StaticFiles
 
@@ -129,6 +131,17 @@ SCANS: dict[str, dict] = {}
 CANCEL_FLAGS: dict[str, threading.Event] = {}
 PAUSE_FLAGS: dict[str, threading.Event] = {}
 
+import queue as _queue
+
+INTERACTIVE_BROWSERS: dict[str, dict] = {}
+# {scan_id: {
+#   "screenshot_b64": "",        latest JPEG screenshot (overwritten each frame)
+#   "events": queue.Queue(),     input events from frontend → Playwright
+#   "active": threading.Event(), set while interactive session is live
+#   "done": threading.Event(),   set when user clicks "I'm logged in"
+#   "viewport": (1280, 720),
+# }}
+
 _FORCE_CANCEL_TIMEOUT = 10  # seconds before force-transitioning "stopping" → "cancelled"
 
 
@@ -148,7 +161,7 @@ def _schedule_force_cancel(scan_id: str):
             })
             CANCEL_FLAGS.pop(scan_id, None)
             PAUSE_FLAGS.pop(scan_id, None)
-            _save_scans_to_disk()
+            _save_scan(scan_id)
     t = threading.Thread(target=_force, daemon=True)
     t.start()
 
@@ -201,6 +214,16 @@ def _load_scans_from_disk():
             progress.append("--- Container stopped/restarted during scan ---")
             info["progress"] = progress
             dirty = True
+            try:
+                raw = scandb.get_scan_result(scan_id)
+                if raw:
+                    partial = json.loads(raw)
+                    fc = len(partial.get("findings", []))
+                    if fc > 0:
+                        info["findings_count"] = fc
+                        progress.append(f"Recovered {fc} partial finding(s) from checkpoint.")
+            except Exception:
+                pass
         elif info.get("status") in ("stopping", "paused", "pausing"):
             info["status"] = "cancelled"
             progress = info.get("progress", [])
@@ -210,37 +233,192 @@ def _load_scans_from_disk():
         SCANS[scan_id] = info
 
     for scan_id in list(SCANS.keys()):
+        # One-time: legacy CVSS override sidecar (now stored inside scan row JSON in SQLite)
         override_file = Path("results/raw") / f"{scan_id}_cvss_overrides.json"
-        if override_file.exists():
+        if override_file.exists() and not SCANS[scan_id].get("cvss_overrides"):
             try:
                 SCANS[scan_id]["cvss_overrides"] = json.loads(
                     override_file.read_text(encoding="utf-8"))
+                dirty = True
             except Exception:
                 pass
+        # Clean up stale auth/interactive state from non-running scans
+        if SCANS[scan_id].get("status") not in ("running", "paused", "pausing"):
+            if SCANS[scan_id].pop("auth_challenge", None):
+                dirty = True
+            if SCANS[scan_id].pop("interactive_browser", None):
+                dirty = True
 
     if dirty:
         _save_scans_to_disk()
+
+    _backfill_scan_results_from_disk()
 
     if scandb.get_cost_ledger().get("all_time_cost", 0) == 0 and SCANS:
         bootstrap_cost = sum(s.get("cost", 0) or 0 for s in SCANS.values())
         if bootstrap_cost > 0:
             scandb.set_cost_ledger(bootstrap_cost)
 
-_TRANSIENT_KEYS = frozenset({"live_tests", "live_findings", "live_phases", "live_crawled", "live_forms", "live_tool_calls", "live_out_of_scope", "live_tokens", "live_llm_calls", "live_cost", "_router"})
+_TRANSIENT_KEYS = frozenset({"live_tests", "live_findings", "live_phases", "live_crawled", "live_forms", "live_tool_calls", "live_out_of_scope", "live_tokens", "live_llm_calls", "live_cost", "live_phase_tools", "_router"})
 _SECRET_KEYS = frozenset({"_password"})
 
-def _save_scans_to_disk():
-    """Persist scan metadata to SQLite (excluding transient live data)."""
+
+def _clean_scan_for_db(info: dict) -> dict:
+    """Strip transient/secret keys from a scan dict before persisting."""
+    return {k: v for k, v in info.items()
+            if k not in _TRANSIENT_KEYS and k not in _SECRET_KEYS}
+
+
+def _save_scan(scan_id: str):
+    """Persist a single scan record to SQLite.  Fast, targeted, safe."""
+    info = SCANS.get(scan_id)
+    if not info:
+        return
     try:
-        persist = {}
-        for scan_id, info in SCANS.items():
-            persist[scan_id] = {
-                k: v for k, v in info.items()
-                if k not in _TRANSIENT_KEYS and k not in _SECRET_KEYS
-            }
+        scandb.upsert_scan(scan_id, _clean_scan_for_db(info))
+    except Exception:
+        logger.exception("Failed to persist scan %s to SQLite", scan_id)
+
+
+def _save_scans_to_disk():
+    """Bulk-persist ALL scan records to SQLite (startup / migration only)."""
+    try:
+        persist = {sid: _clean_scan_for_db(info) for sid, info in SCANS.items()}
         scandb.upsert_all(persist)
     except Exception:
-        logger.exception("Failed to persist scans to SQLite")
+        logger.exception("Failed to bulk-persist scans to SQLite")
+
+
+# Periodic auto-save: flush every dirty scan to DB every 30 seconds as a
+# safety net so that in-memory changes are never more than ~30 s ahead of
+# the database.
+_autosave_dirty: set[str] = set()
+_autosave_lock = threading.Lock()
+
+
+def _mark_dirty(scan_id: str):
+    """Mark a scan as needing persistence on the next auto-save cycle."""
+    with _autosave_lock:
+        _autosave_dirty.add(scan_id)
+
+
+def _autosave_loop():
+    """Background thread that flushes dirty scans to SQLite periodically."""
+    while True:
+        time.sleep(30)
+        with _autosave_lock:
+            if not _autosave_dirty:
+                continue
+            to_flush = list(_autosave_dirty)
+            _autosave_dirty.clear()
+        try:
+            batch = {}
+            for sid in to_flush:
+                info = SCANS.get(sid)
+                if info:
+                    batch[sid] = _clean_scan_for_db(info)
+            if batch:
+                scandb.upsert_all(batch)
+        except Exception:
+            logger.exception("Auto-save failed for %d scans", len(to_flush))
+
+
+threading.Thread(target=_autosave_loop, daemon=True, name="db-autosave").start()
+
+
+def _persist_scan_result(scan_id: str, data: dict):
+    """Write full result JSON to SQLite (source of truth for API reads)."""
+    try:
+        scandb.save_scan_result(scan_id, json.dumps(data, default=str))
+    except Exception:
+        logger.exception("Failed to persist scan_results for %s", scan_id)
+
+
+def _persist_partial_findings(scan_id: str, scan: dict):
+    """Checkpoint partial findings + progress to scan_results so a crash doesn't lose them."""
+    findings = scan.get("live_findings", [])
+    if not findings:
+        return
+    try:
+        partial = {
+            "findings": findings,
+            "target": scan.get("target_url", ""),
+            "metadata": {
+                "model": scan.get("model", ""),
+                "partial": True,
+                "phases_completed": len(scan.get("live_phases", [])),
+            },
+            "summary": {"total_findings": len(findings)},
+        }
+        scandb.save_scan_result(scan_id, json.dumps(partial, default=str))
+    except Exception:
+        logger.debug("Partial findings checkpoint failed for %s", scan_id, exc_info=True)
+
+
+def _find_result_file(scan_id: str) -> str | None:
+    """Legacy path on disk (optional); used only to back-fill SQLite."""
+    if scan_id in SCANS and SCANS[scan_id].get("result_file"):
+        fpath = RAW_DIR / SCANS[scan_id]["result_file"]
+        if fpath.exists():
+            return str(fpath)
+    for f in RAW_DIR.glob("*.json"):
+        if scan_id in f.stem:
+            return str(f)
+    if (RAW_DIR / f"{scan_id}.json").exists():
+        return str(RAW_DIR / f"{scan_id}.json")
+    return None
+
+
+def _load_raw_result_dict(scan_id: str) -> dict | None:
+    """Load raw result document: DB first, then legacy file (and back-fill DB)."""
+    raw = scandb.get_scan_result(scan_id)
+    if raw:
+        try:
+            return json.loads(raw)
+        except Exception:
+            pass
+    fname = _find_result_file(scan_id)
+    if fname:
+        try:
+            data = json.loads(Path(fname).read_text(encoding="utf-8"))
+            _persist_scan_result(scan_id, data)
+            return data
+        except Exception:
+            pass
+    return None
+
+
+def _backfill_scan_results_from_disk():
+    """Startup: ensure ``scan_results`` has a row for every scan with ``result_file`` on disk.
+
+    Syncs ``findings_count`` from the payload when it differs; clears cached triage so UI
+    recomputes from canonical data.
+    """
+    meta_dirty = False
+    for scan_id, info in list(SCANS.items()):
+        try:
+            if scandb.get_scan_result(scan_id):
+                continue
+            rf = info.get("result_file")
+            if not rf:
+                continue
+            fpath = RAW_DIR / rf
+            if not fpath.exists():
+                continue
+            data = json.loads(fpath.read_text(encoding="utf-8"))
+            _persist_scan_result(scan_id, data)
+            summary = data.get("summary", {})
+            n = summary.get("total_findings")
+            if n is None:
+                n = len(data.get("findings", []))
+            if info.get("findings_count") != n:
+                SCANS[scan_id]["findings_count"] = n
+                meta_dirty = True
+            SCANS[scan_id].pop("triaged_findings", None)
+        except Exception:
+            logger.debug("Startup backfill scan_results failed for %s", scan_id, exc_info=True)
+    if meta_dirty:
+        _save_scans_to_disk()
 
 
 def _ensure_triaged(sid: str, s: dict) -> list[dict]:
@@ -254,15 +432,8 @@ def _ensure_triaged(sid: str, s: dict) -> list[dict]:
     if cached:
         return cached
 
-    result_file = s.get("result_file")
-    if not result_file:
-        return []
-    fpath = RAW_DIR / result_file
-    if not fpath.exists():
-        return []
-    try:
-        rdata = json.loads(fpath.read_text(encoding="utf-8"))
-    except Exception:
+    rdata = _load_raw_result_dict(sid)
+    if not rdata:
         return []
 
     raw_findings = rdata.get("findings", [])
@@ -282,6 +453,13 @@ def _ensure_triaged(sid: str, s: dict) -> list[dict]:
             "reason": t.get("reason", ""),
             "confidence_score": t.get("confidence"),
             "url": t.get("url", ""),
+            "parameter": f.get("parameter", ""),
+            "owasp_category": f.get("owasp_category", ""),
+            "payload": f.get("payload", ""),
+            "evidence": f.get("evidence", ""),
+            "remediation": f.get("remediation", ""),
+            "confidence": f.get("confidence", ""),
+            "request_response": f.get("request_response", []),
             "cwe": t.get("cwe", ""),
             "cvss": t.get("cvss"),
             "cvss_rationale": t.get("cvss_rationale", ""),
@@ -296,8 +474,14 @@ def _ensure_triaged(sid: str, s: dict) -> list[dict]:
     return triaged
 
 
-def _infer_scan_mode(scan_info: dict) -> str:
-    """Try to infer scan_mode from old scan data that didn't store it."""
+def _infer_scan_mode(scan_info: dict, scan_id: str | None = None) -> str:
+    """Try to infer scan_mode from DB result payload or legacy file."""
+    if scan_id:
+        data = _load_raw_result_dict(scan_id)
+        if data:
+            mode = data.get("scan_mode") or data.get("metadata", {}).get("scan_mode")
+            if mode:
+                return str(mode)
     result_file = scan_info.get("result_file")
     if result_file:
         fpath = RAW_DIR / result_file
@@ -320,8 +504,6 @@ _load_scans_from_disk()
 # --- Model registry (dynamic, auto-discovered from Bedrock) ------------------
 # Fallback used when the cache is empty (discovery not yet run, or IAM missing bedrock:ListFoundationModels).
 _FALLBACK_MODELS = [
-    {"id": "bedrock/mistral.ministral-3-8b-instruct", "name": "Ministral 8B (cheapest + tools)", "cost": "~$0.15/$0.15 per 1M tokens", "provider": "Mistral", "input_cost_per_m": 0.15},
-    {"id": "bedrock/mistral.ministral-3-14b-instruct", "name": "Ministral 14B (best value + tools)", "cost": "~$0.20/$0.20 per 1M tokens", "provider": "Mistral", "input_cost_per_m": 0.20},
     {"id": "bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0", "name": "Claude Haiku 4.5 (recommended)", "cost": "~$0.80/$4 per 1M tokens", "provider": "Anthropic", "input_cost_per_m": 0.80},
     {"id": "bedrock/us.anthropic.claude-sonnet-4-6", "name": "Claude Sonnet 4.6 (best quality)", "cost": "~$3/$15 per 1M tokens", "provider": "Anthropic", "input_cost_per_m": 3.00},
     {"id": "bedrock/us.anthropic.claude-opus-4-6-v1", "name": "Claude Opus 4.6 (premium)", "cost": "~$15/$75 per 1M tokens", "provider": "Anthropic", "input_cost_per_m": 15.00, "high_cost": True},
@@ -695,28 +877,7 @@ async def list_scans(
         if info.get("status") == "running":
             entry["current_phase"] = info.get("current_phase", "")
         all_scans.append(entry)
-    existing_ids = {s["id"] for s in all_scans}
-    for f in sorted(RAW_DIR.glob("aiagent_*.json"), key=os.path.getmtime, reverse=True):
-        fid = f.stem
-        if fid in existing_ids or any(eid in fid for eid in existing_ids):
-            continue
-        try:
-            data = json.loads(f.read_text(encoding="utf-8"))
-        except Exception:
-            continue
-        meta = data.get("metadata", {})
-        summary = data.get("summary", {})
-        all_scans.append({
-            "id": fid,
-            "target": data.get("target", ""),
-            "model": meta.get("model", ""),
-            "status": "completed",
-            "started": meta.get("timestamp", ""),
-            "duration": meta.get("scan_duration_seconds"),
-            "cost": meta.get("cost_usd"),
-            "findings_count": summary.get("total_findings", len(data.get("findings", []))),
-            "scan_mode": meta.get("scan_mode", ""),
-        })
+    # Scan list is DB-backed only (in-memory SCANS loaded from SQLite at startup).
 
     if search:
         q = search.lower()
@@ -738,6 +899,32 @@ async def list_scans(
         "per_page": per_page,
         "total_pages": total_pages,
     }
+
+
+@app.get("/api/ui-settings", tags=["Settings"])
+async def get_ui_settings(creds=Depends(_verify)):
+    """Column visibility and triage table prefs (stored in SQLite, not browser storage)."""
+    out: dict = {}
+    for key in ("scanColVisibility", "triage_cols"):
+        raw = scandb.app_kv_get(key)
+        if not raw:
+            continue
+        try:
+            out[key] = json.loads(raw)
+        except Exception:
+            out[key] = None
+    return out
+
+
+@app.put("/api/ui-settings", tags=["Settings"])
+async def put_ui_settings(request: Request, creds=Depends(_verify)):
+    """Merge partial UI settings into app_kv."""
+    body = await request.json()
+    for key in ("scanColVisibility", "triage_cols"):
+        if key not in body:
+            continue
+        scandb.app_kv_set(key, json.dumps(body[key], default=str))
+    return {"status": "ok"}
 
 
 IMPORTS_DIR = BASE / "imports"
@@ -920,6 +1107,8 @@ async def start_scan(request: Request):
     CANCEL_FLAGS[scan_id] = cancel_flag
     PAUSE_FLAGS[scan_id] = pause_flag
 
+    interactive_session = _create_interactive_session(scan_id)
+
     SCANS[scan_id] = {
         "target_url": target_url,
         "model": model,
@@ -941,33 +1130,34 @@ async def start_scan(request: Request):
         "_api_imports": api_imports,
         "_extra_domains": extra_domains,
     }
-    _save_scans_to_disk()
+    _save_scan(scan_id)
 
     thread = threading.Thread(
         target=_run_scan_in_thread,
         args=(scan_id, target_url, username, password, model, scan_mode, auth_type, api_imports, extra_domains, cancel_flag, pause_flag),
-        kwargs={"scan_scope": scan_scope, "focus_urls": focus_urls, "focus_areas": focus_areas, "scan_intensity": scan_intensity, "exclude_urls": exclude_urls, "username_b": username_b, "password_b": password_b},
+        kwargs={"scan_scope": scan_scope, "focus_urls": focus_urls, "focus_areas": focus_areas, "scan_intensity": scan_intensity, "exclude_urls": exclude_urls, "username_b": username_b, "password_b": password_b, "interactive_session": interactive_session},
         daemon=True,
     )
     thread.start()
     return {"scan_id": scan_id, "status": "started"}
 
 
-def _run_scan_in_thread(scan_id, target_url, username, password, model, scan_mode, auth_type, api_imports=None, extra_domains=None, cancel_flag=None, pause_flag=None, start_from_phase=0, initial_findings=None, scan_scope="directory", focus_urls=None, focus_areas=None, scan_intensity="deep", exclude_urls=None, username_b="", password_b=""):
+def _run_scan_in_thread(scan_id, target_url, username, password, model, scan_mode, auth_type, api_imports=None, extra_domains=None, cancel_flag=None, pause_flag=None, start_from_phase=0, initial_findings=None, scan_scope="directory", focus_urls=None, focus_areas=None, scan_intensity="deep", exclude_urls=None, username_b="", password_b="", interactive_session=None):
     """Run scan in a separate thread with its own event loop so the main UI stays responsive."""
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     try:
         loop.run_until_complete(
-            _run_scan_task(scan_id, target_url, username, password, model, scan_mode, auth_type, api_imports, extra_domains, cancel_flag, pause_flag, start_from_phase, initial_findings, scan_scope=scan_scope, focus_urls=focus_urls, focus_areas=focus_areas, scan_intensity=scan_intensity, exclude_urls=exclude_urls, username_b=username_b, password_b=password_b)
+            _run_scan_task(scan_id, target_url, username, password, model, scan_mode, auth_type, api_imports, extra_domains, cancel_flag, pause_flag, start_from_phase, initial_findings, scan_scope=scan_scope, focus_urls=focus_urls, focus_areas=focus_areas, scan_intensity=scan_intensity, exclude_urls=exclude_urls, username_b=username_b, password_b=password_b, interactive_session=interactive_session)
         )
     finally:
         loop.close()
         CANCEL_FLAGS.pop(scan_id, None)
         PAUSE_FLAGS.pop(scan_id, None)
+        INTERACTIVE_BROWSERS.pop(scan_id, None)
 
 
-async def _run_scan_task(scan_id, target_url, username, password, model, scan_mode, auth_type, api_imports=None, extra_domains=None, cancel_flag=None, pause_flag=None, start_from_phase=0, initial_findings=None, scan_scope="directory", focus_urls=None, focus_areas=None, scan_intensity="deep", exclude_urls=None, username_b="", password_b=""):
+async def _run_scan_task(scan_id, target_url, username, password, model, scan_mode, auth_type, api_imports=None, extra_domains=None, cancel_flag=None, pause_flag=None, start_from_phase=0, initial_findings=None, scan_scope="directory", focus_urls=None, focus_areas=None, scan_intensity="deep", exclude_urls=None, username_b="", password_b="", interactive_session=None):
     try:
         scan = SCANS[scan_id]
         scan["progress"].append("Initializing LLM router...")
@@ -989,16 +1179,21 @@ async def _run_scan_task(scan_id, target_url, username, password, model, scan_mo
                     scan["progress"].append("Unauthenticated scan — navigating to target...")
                 else:
                     scan["progress"].append(f"Auth: {status} {data.get('type', '')}")
+                _mark_dirty(scan_id)
             elif event == "scope":
                 domains = ", ".join(data.get("allowed_domains", []))
                 scan["progress"].append(f"Scope: scanning only *.{domains} — third-party domains blocked")
+                _mark_dirty(scan_id)
             elif event == "detect":
                 scan["progress"].append(f"Detected: SPA={data.get('is_spa')}, Framework={data.get('framework')}")
+                _mark_dirty(scan_id)
             elif event == "scan_start":
                 scan["progress"].append(f"Starting {data['total_phases']} scan phases...")
+                _save_scan(scan_id)
             elif event == "phase_start":
                 scan["current_phase"] = f"[{data['phase']}/{data['total']}] {data['name']}"
                 scan["progress"].append(scan["current_phase"])
+                _mark_dirty(scan_id)
             elif event == "phase_end":
                 scan["live_phases"].append({
                     "phase": data["phase"],
@@ -1006,18 +1201,23 @@ async def _run_scan_task(scan_id, target_url, username, password, model, scan_mo
                     "tool_calls": data["tool_calls"],
                     "findings": data["findings"],
                 })
-                _save_scans_to_disk()
+                _save_scan(scan_id)
+                _persist_partial_findings(scan_id, scan)
             elif event == "tool_call":
                 scan["live_tool_calls"] += 1
                 tool = data.get("tool", "")
+                phase_name = data.get("phase", "")
                 scan["live_tests"].append({
-                    "phase": data.get("phase", ""),
+                    "phase": phase_name,
                     "tool": tool,
                     "request": data.get("request", {}),
                     "response": data.get("response", {}),
                 })
-                if len(scan["live_tests"]) > 500:
-                    scan["live_tests"] = scan["live_tests"][-500:]
+                if len(scan["live_tests"]) > 2000:
+                    scan["live_tests"] = scan["live_tests"][-2000:]
+                phase_tools = scan.setdefault("live_phase_tools", {})
+                pt = phase_tools.setdefault(phase_name, {})
+                pt[tool] = pt.get(tool, 0) + 1
                 _r = scan.get("_router")
                 if _r:
                     _cs = _r.get_cost_summary()
@@ -1025,14 +1225,9 @@ async def _run_scan_task(scan_id, target_url, username, password, model, scan_mo
                     scan["live_llm_calls"] = sum(c.get("calls", 0) for c in _cs)
                     scan["live_cost"] = round(sum(c.get("cost_usd", 0) for c in _cs), 4)
                 if scan["live_tool_calls"] % 10 == 0:
-                    _save_scans_to_disk()
+                    _save_scan(scan_id)
             elif event == "finding":
-                scan["live_findings"].append({
-                    "title": data.get("title", ""),
-                    "severity": data.get("severity", ""),
-                    "url": data.get("url", ""),
-                    "phase": data.get("phase", ""),
-                })
+                scan["live_findings"].append(dict(data))
             elif event == "crawl":
                 url = data.get("url", "")
                 ctype = data.get("type", "page")
@@ -1040,14 +1235,41 @@ async def _run_scan_task(scan_id, target_url, username, password, model, scan_mo
                 scan["live_crawled"].append({"url": url, "type": ctype, "tool": tool})
                 label = {"page": "Page", "api": "API", "test": "Test"}.get(ctype, "URL")
                 scan["progress"].append(f"Crawled ({label}): {url} (#{data.get('count', 0)})")
+                _mark_dirty(scan_id)
             elif event == "paused":
                 scan["status"] = "paused"
                 scan["progress"].append("Scan paused — waiting for resume...")
-                _save_scans_to_disk()
+                _save_scan(scan_id)
             elif event == "resumed":
                 scan["status"] = "running"
                 scan["progress"].append("Scan resumed — continuing...")
-                _save_scans_to_disk()
+                _save_scan(scan_id)
+            elif event == "auth_challenge":
+                scan["auth_challenge"] = {
+                    "screenshot": data.get("screenshot", ""),
+                    "has_captcha": data.get("has_captcha", False),
+                    "message": data.get("message", ""),
+                    "waiting": True,
+                }
+                scan["progress"].append("Auth challenge detected — waiting for manual resolution...")
+                _save_scan(scan_id)
+            elif event == "auth_challenge_resolved":
+                scan.pop("auth_challenge", None)
+                scan["progress"].append("Auth challenge resolved — continuing scan...")
+                _save_scan(scan_id)
+            elif event == "interactive_browser_ready":
+                scan["interactive_browser"] = {"active": True, "viewport": data.get("viewport", [1280, 720])}
+                scan["progress"].append("Interactive browser ready — log in via the live browser view")
+                _save_scan(scan_id)
+            elif event == "interactive_browser_done":
+                scan.pop("interactive_browser", None)
+                scan["progress"].append("Interactive login completed — continuing scan...")
+                _save_scan(scan_id)
+            elif event == "progress_msg":
+                msg = data.get("message", "")
+                if msg:
+                    scan["progress"].append(msg)
+                    _save_scan(scan_id)
             elif event == "out_of_scope":
                 url = data.get("url", "")
                 if url and url not in [u["url"] for u in scan.get("live_out_of_scope", [])]:
@@ -1087,7 +1309,7 @@ async def _run_scan_task(scan_id, target_url, username, password, model, scan_mo
         scan["progress"].append(f"Starting scan with {model}...")
         start = time.perf_counter()
         config_dir = str(BASE / "config")
-        findings, metrics = await run_scan(target, model, router, config_dir, on_progress=_on_progress, extra_domains=extra_domains, cancel_flag=cancel_flag, pause_flag=pause_flag, start_from_phase=start_from_phase, initial_findings=initial_findings)
+        findings, metrics = await run_scan(target, model, router, config_dir, on_progress=_on_progress, extra_domains=extra_domains, cancel_flag=cancel_flag, pause_flag=pause_flag, start_from_phase=start_from_phase, initial_findings=initial_findings, interactive_session=interactive_session)
         duration = time.perf_counter() - start
 
         model_slug = model.replace("/", "_").replace(".", "_").replace(":", "_")
@@ -1100,6 +1322,8 @@ async def _run_scan_task(scan_id, target_url, username, password, model, scan_mo
             import json as _json
             with open(filepath, "w") as _f:
                 _json.dump(output, _f, indent=2, default=str)
+
+        _persist_scan_result(scan_id, output)
 
         meta = output.get("metadata", {})
         summary = output.get("summary", {})
@@ -1114,8 +1338,10 @@ async def _run_scan_task(scan_id, target_url, username, password, model, scan_mo
             "result_file": os.path.basename(filepath),
             "progress": SCANS[scan_id]["progress"] + ["Scan completed."],
         })
+        SCANS[scan_id].pop("auth_challenge", None)
+        SCANS[scan_id].pop("interactive_browser", None)
         scandb.add_all_time_cost(final_cost)
-        _save_scans_to_disk()
+        _save_scan(scan_id)
     except ScanCancelled:
         duration = time.perf_counter() - start
         model_slug = model.replace("/", "_").replace(".", "_").replace(":", "_")
@@ -1123,7 +1349,8 @@ async def _run_scan_task(scan_id, target_url, username, password, model, scan_mo
         partial_findings = scan.get("live_findings", [])
         cost_summary = router.get_cost_summary() if router else []
         try:
-            save_results(filepath, partial_findings, cost_summary, target, model, duration, scan_metrics={})
+            _partial_out = save_results(filepath, partial_findings, cost_summary, target, model, duration, scan_metrics={})
+            _persist_scan_result(scan_id, _partial_out)
         except Exception:
             filepath = None
         _tok = sum(c.get("input_tokens", 0) + c.get("output_tokens", 0) for c in cost_summary) if isinstance(cost_summary, list) else None
@@ -1141,21 +1368,37 @@ async def _run_scan_task(scan_id, target_url, username, password, model, scan_mo
             "phases_completed": phases_done,
             "progress": SCANS[scan_id]["progress"] + ["Scan cancelled by user."],
         })
+        SCANS[scan_id].pop("auth_challenge", None)
+        SCANS[scan_id].pop("interactive_browser", None)
         if _cost:
             scandb.add_all_time_cost(_cost)
-        _save_scans_to_disk()
+        _save_scan(scan_id)
     except Exception as e:
-        duration = time.perf_counter() - start
-        model_slug = model.replace("/", "_").replace(".", "_").replace(":", "_")
-        filepath = str(RAW_DIR / f"aiagent_{model_slug}_{scan_id}.json")
-        partial_findings = scan.get("live_findings", [])
-        cost_summary = router.get_cost_summary() if router else {}
         try:
-            save_results(filepath, partial_findings, cost_summary if isinstance(cost_summary, list) else [], target, model, duration, scan_metrics={})
+            duration = time.perf_counter() - start
         except Exception:
-            filepath = None
+            duration = 0
+        filepath = None
+        partial_findings = scan.get("live_findings", [])
+        cost_summary = []
+        err_cost = None
+        try:
+            cost_summary = router.get_cost_summary()
+        except Exception:
+            pass
+        if isinstance(cost_summary, list):
+            err_cost = round(sum(c.get("cost_usd", 0) for c in cost_summary), 4) or None
+        elif isinstance(cost_summary, dict):
+            err_cost = cost_summary.get("total_cost_usd")
+        try:
+            model_slug = model.replace("/", "_").replace(".", "_").replace(":", "_")
+            fp = str(RAW_DIR / f"aiagent_{model_slug}_{scan_id}.json")
+            _partial_out = save_results(fp, partial_findings, cost_summary if isinstance(cost_summary, list) else [], target, model, duration, scan_metrics={})
+            _persist_scan_result(scan_id, _partial_out)
+            filepath = fp
+        except Exception:
+            logger.debug("Error-handler save_results failed for %s", scan_id, exc_info=True)
         phases_done = len(scan.get("live_phases", []))
-        err_cost = cost_summary.get("total_cost_usd") if isinstance(cost_summary, dict) else None
         SCANS[scan_id].update({
             "status": "error",
             "error": str(e),
@@ -1166,9 +1409,11 @@ async def _run_scan_task(scan_id, target_url, username, password, model, scan_mo
             "phases_completed": phases_done,
             "progress": SCANS[scan_id]["progress"] + [f"Error: {e}"],
         })
+        SCANS[scan_id].pop("auth_challenge", None)
+        SCANS[scan_id].pop("interactive_browser", None)
         if err_cost:
             scandb.add_all_time_cost(err_cost)
-        _save_scans_to_disk()
+        _save_scan(scan_id)
 
 
 @app.get("/api/scan/{scan_id}", tags=["Scans"])
@@ -1197,11 +1442,18 @@ async def get_scan_status(scan_id: str):
             "llm_calls": s.get("llm_calls") or s.get("live_llm_calls", 0),
             "findings_count": s.get("findings_count", len(s.get("live_findings", []))),
             "phases_completed": s.get("phases_completed", len(s.get("live_phases", []))),
-            "findings": s.get("live_findings", []) or _load_partial_findings(s),
+            "findings": s.get("live_findings", []) or _load_partial_findings(scan_id),
         }
-    fname = _find_result_file(scan_id)
-    if fname:
-        return {"status": "completed", "result_file": os.path.basename(fname)}
+    data = _load_raw_result_dict(scan_id)
+    if data:
+        meta = data.get("metadata", {})
+        return {
+            "scan_id": scan_id,
+            "status": "completed",
+            "result_file": SCANS.get(scan_id, {}).get("result_file"),
+            "target": data.get("target", ""),
+            "model": meta.get("model", ""),
+        }
     return JSONResponse({"error": "Scan not found"}, status_code=404)
 
 
@@ -1217,6 +1469,7 @@ async def get_scan_live(scan_id: str, since_test: int = 0, since_finding: int = 
         "status": s.get("status"),
         "current_phase": s.get("current_phase", ""),
         "phases": s.get("live_phases", []),
+        "phase_tools": s.get("live_phase_tools", {}),
         "tests": tests[since_test:],
         "tests_total": len(tests),
         "findings": findings[since_finding:],
@@ -1248,7 +1501,7 @@ async def stop_scan(scan_id: str):
     s["status"] = "stopping"
     s["_stop_requested_at"] = time.time()
     s["progress"] = s.get("progress", []) + ["Stop requested by user — cancelling..."]
-    _save_scans_to_disk()
+    _save_scan(scan_id)
     _schedule_force_cancel(scan_id)
     return {"scan_id": scan_id, "status": "stopping", "message": "Scan will stop within a few seconds."}
 
@@ -1268,7 +1521,7 @@ async def pause_scan(scan_id: str):
     flag.set()
     s["status"] = "pausing"
     s["progress"] = s.get("progress", []) + ["Pause requested — will pause after current step..."]
-    _save_scans_to_disk()
+    _save_scan(scan_id)
     return {"scan_id": scan_id, "status": "pausing", "message": "Scan will pause after the current step completes."}
 
 
@@ -1286,20 +1539,119 @@ async def resume_scan(scan_id: str):
         flag.clear()
     s["status"] = "running"
     s["progress"] = s.get("progress", []) + ["Scan resumed by user"]
-    _save_scans_to_disk()
+    _save_scan(scan_id)
     return {"scan_id": scan_id, "status": "running"}
 
 
-def _load_partial_findings(scan_info: dict) -> list[dict]:
-    """Load partial findings from a scan's result file (if any)."""
-    rf = scan_info.get("result_file")
-    if not rf:
-        return []
+
+
+def _create_interactive_session(scan_id: str) -> dict:
+    """Create an interactive browser session for a scan."""
+    session = {
+        "screenshot_b64": "",
+        "events": _queue.Queue(),
+        "active": threading.Event(),
+        "done": threading.Event(),
+        "viewport": (1280, 720),
+    }
+    INTERACTIVE_BROWSERS[scan_id] = session
+    return session
+
+
+@app.websocket("/ws/scan/{scan_id}/browser")
+async def browser_websocket(websocket: WebSocket, scan_id: str):
+    """WebSocket for interactive browser — streams screenshots, receives mouse/key events."""
+    await websocket.accept()
+    session = INTERACTIVE_BROWSERS.get(scan_id)
+    if not session or not session["active"].is_set():
+        await websocket.send_json({"type": "error", "message": "No interactive session active"})
+        await websocket.close(code=1008)
+        return
+
+    last_hash = None
     try:
-        data = json.loads((RAW_DIR / rf).read_text(encoding="utf-8"))
-        return data.get("findings", [])
-    except Exception:
+        import asyncio as _aio
+
+        async def _send_screenshots():
+            nonlocal last_hash
+            while session["active"].is_set() and not session["done"].is_set():
+                shot = session.get("screenshot_b64", "")
+                if shot:
+                    h = hash(shot)
+                    if h != last_hash:
+                        await websocket.send_json({"type": "screenshot", "data": shot,
+                                                   "viewport": list(session["viewport"])})
+                        last_hash = h
+                await _aio.sleep(0.3)
+            await websocket.send_json({"type": "done"})
+
+        async def _receive_events():
+            while session["active"].is_set() and not session["done"].is_set():
+                try:
+                    data = await _aio.wait_for(websocket.receive_json(), timeout=1.0)
+                    session["events"].put(data)
+                except _aio.TimeoutError:
+                    continue
+                except WebSocketDisconnect:
+                    break
+
+        await _aio.gather(_send_screenshots(), _receive_events())
+    except WebSocketDisconnect:
+        pass
+    except Exception as e:
+        logger.warning("Interactive browser WS error: %s", e)
+    finally:
+        try:
+            await websocket.close()
+        except Exception:
+            pass
+
+
+@app.get("/api/scan/{scan_id}/interactive-browser", tags=["Scans"])
+async def get_interactive_browser_status(scan_id: str):
+    """Check if a scan has an active interactive browser session."""
+    session = INTERACTIVE_BROWSERS.get(scan_id)
+    if not session or not session["active"].is_set():
+        return {"active": False}
+    return {
+        "active": True,
+        "done": session["done"].is_set(),
+        "viewport": list(session["viewport"]),
+    }
+
+
+@app.post("/api/scan/{scan_id}/interactive-browser/done", tags=["Scans"])
+async def interactive_browser_done(scan_id: str):
+    """Signal that the user has finished logging in via the interactive browser."""
+    session = INTERACTIVE_BROWSERS.get(scan_id)
+    if not session or not session["active"].is_set():
+        raise HTTPException(status_code=400, detail="No active interactive session")
+    session["done"].set()
+    if scan_id in SCANS:
+        SCANS[scan_id]["progress"] = SCANS[scan_id].get("progress", []) + [
+            "Interactive login completed by user"
+        ]
+        _save_scan(scan_id)
+    return {"status": "ok", "message": "Interactive login marked complete, scan will continue"}
+
+
+@app.post("/api/scan/{scan_id}/interactive-browser/event", tags=["Scans"])
+async def interactive_browser_event(scan_id: str, request: Request):
+    """Fallback HTTP endpoint for sending input events (if WebSocket unavailable)."""
+    session = INTERACTIVE_BROWSERS.get(scan_id)
+    if not session or not session["active"].is_set():
+        raise HTTPException(status_code=400, detail="No active interactive session")
+    body = await request.json()
+    session["events"].put(body)
+    return {"status": "ok"}
+
+
+def _load_partial_findings(scan_id: str) -> list[dict]:
+    """Load findings from DB-backed result payload (or legacy file back-fill)."""
+    data = _load_raw_result_dict(scan_id)
+    if not data:
         return []
+    return data.get("findings", []) or []
 
 
 def _get_phases_completed(scan_info: dict) -> int:
@@ -1317,13 +1669,13 @@ def _get_phases_completed(scan_info: dict) -> int:
     return count
 
 
-def _extract_scan_params(old: dict) -> dict:
+def _extract_scan_params(old: dict, scan_id: str | None = None) -> dict:
     """Extract reusable parameters from an existing scan record."""
     return {
         "target_url": old.get("target_url", ""),
         "model": old.get("model", ""),
         "model_name": old.get("model_name", old.get("model", "")),
-        "scan_mode": old.get("scan_mode") or _infer_scan_mode(old),
+        "scan_mode": old.get("scan_mode") or _infer_scan_mode(old, scan_id),
         "auth_type": old.get("auth_type", "auto"),
         "username": old.get("_username", ""),
         "password": old.get("_password", ""),
@@ -1350,7 +1702,7 @@ async def retry_scan(scan_id: str, request: Request):
     if old.get("status") not in ("error", "cancelled"):
         raise HTTPException(status_code=400, detail=f"Only errored/cancelled scans can be retried (status: {old.get('status')})")
 
-    params = _extract_scan_params(old)
+    params = _extract_scan_params(old, scan_id)
     if not params["target_url"] or not params["model"]:
         raise HTTPException(status_code=400, detail="Original scan parameters missing — cannot retry")
 
@@ -1371,7 +1723,7 @@ async def retry_scan(scan_id: str, request: Request):
     if not force_restart:
         phases_done = _get_phases_completed(old)
         if phases_done > 0:
-            prior_findings = _load_partial_findings(old)
+            prior_findings = _load_partial_findings(scan_id)
             start_from = phases_done
 
     mode_label = "continuing" if start_from > 0 else "restarting"
@@ -1381,6 +1733,8 @@ async def retry_scan(scan_id: str, request: Request):
     pause_flag = threading.Event()
     CANCEL_FLAGS[scan_id] = cancel_flag
     PAUSE_FLAGS[scan_id] = pause_flag
+
+    interactive_session = _create_interactive_session(scan_id)
 
     old.update({
         "status": "running",
@@ -1393,14 +1747,14 @@ async def retry_scan(scan_id: str, request: Request):
         "result_file": None,
         "scan_mode": scan_mode,
     })
-    _save_scans_to_disk()
+    _save_scan(scan_id)
 
     thread = threading.Thread(
         target=_run_scan_in_thread,
         args=(scan_id, params["target_url"], params["username"], params["password"],
               model, scan_mode, params["auth_type"], params["api_imports"],
               params["extra_domains"], cancel_flag, pause_flag, start_from, prior_findings),
-        kwargs={"scan_scope": params["scan_scope"], "focus_urls": params["focus_urls"], "focus_areas": params["focus_areas"], "scan_intensity": params["scan_intensity"], "exclude_urls": params.get("exclude_urls", []), "username_b": params.get("username_b", ""), "password_b": params.get("password_b", "")},
+        kwargs={"scan_scope": params["scan_scope"], "focus_urls": params["focus_urls"], "focus_areas": params["focus_areas"], "scan_intensity": params["scan_intensity"], "exclude_urls": params.get("exclude_urls", []), "username_b": params.get("username_b", ""), "password_b": params.get("password_b", ""), "interactive_session": interactive_session},
         daemon=True,
     )
     thread.start()
@@ -1421,7 +1775,7 @@ async def rescan(scan_id: str, request: Request):
         raise HTTPException(status_code=404, detail="Scan not found")
     old = SCANS[scan_id]
 
-    params = _extract_scan_params(old)
+    params = _extract_scan_params(old, scan_id)
     if not params["target_url"] or not params["model"]:
         raise HTTPException(status_code=400, detail="Original scan parameters missing — cannot rescan")
 
@@ -1441,6 +1795,8 @@ async def rescan(scan_id: str, request: Request):
     pause_flag = threading.Event()
     CANCEL_FLAGS[new_id] = cancel_flag
     PAUSE_FLAGS[new_id] = pause_flag
+
+    interactive_session = _create_interactive_session(new_id)
 
     SCANS[new_id] = {
         "target_url": params["target_url"],
@@ -1463,14 +1819,14 @@ async def rescan(scan_id: str, request: Request):
         "_api_imports": params["api_imports"],
         "_extra_domains": params["extra_domains"],
     }
-    _save_scans_to_disk()
+    _save_scan(new_id)
 
     thread = threading.Thread(
         target=_run_scan_in_thread,
         args=(new_id, params["target_url"], params["username"], params["password"],
               model, scan_mode, params["auth_type"], params["api_imports"],
               params["extra_domains"], cancel_flag, pause_flag),
-        kwargs={"scan_scope": params["scan_scope"], "focus_urls": params["focus_urls"], "focus_areas": params["focus_areas"], "scan_intensity": params["scan_intensity"], "exclude_urls": params.get("exclude_urls", []), "username_b": params.get("username_b", ""), "password_b": params.get("password_b", "")},
+        kwargs={"scan_scope": params["scan_scope"], "focus_urls": params["focus_urls"], "focus_areas": params["focus_areas"], "scan_intensity": params["scan_intensity"], "exclude_urls": params.get("exclude_urls", []), "username_b": params.get("username_b", ""), "password_b": params.get("password_b", ""), "interactive_session": interactive_session},
         daemon=True,
     )
     thread.start()
@@ -1552,14 +1908,12 @@ async def delete_all_scans():
 
 @app.get("/api/results/{scan_id}", tags=["Results"])
 async def get_results(scan_id: str):
-    fname = _find_result_file(scan_id)
-    if not fname:
+    data = _load_raw_result_dict(scan_id)
+    if not data:
         return JSONResponse({"error": "Results not found"}, status_code=404)
-
-    data = json.loads(Path(fname).read_text(encoding="utf-8"))
-    findings = data.get("findings", [])
-    test_log = data.get("summary", {}).get("test_log", [])
-    meta = data.get("metadata", {})
+    findings = data.get("findings") or []
+    test_log = data.get("summary", {}).get("test_log") or []
+    meta = data.get("metadata") or {}
     summary = data.get("summary", {})
 
     ai_findings = []
@@ -1574,6 +1928,8 @@ async def get_results(scan_id: str):
             "payload": f.get("payload", ""),
             "evidence": f.get("evidence", ""),
             "confidence": f.get("confidence", ""),
+            "remediation": f.get("remediation", ""),
+            "request_response": f.get("request_response", []),
         })
         triaged = triage_classify(f, test_log)
         final_sev = triaged.get("final_severity", "Info")
@@ -1586,6 +1942,13 @@ async def get_results(scan_id: str):
             "reason": triaged.get("reason", ""),
             "confidence_score": triaged.get("confidence_score"),
             "url": triaged.get("url", ""),
+            "parameter": f.get("parameter", ""),
+            "owasp_category": f.get("owasp_category", ""),
+            "payload": f.get("payload", ""),
+            "evidence": f.get("evidence", ""),
+            "remediation": f.get("remediation", ""),
+            "confidence": f.get("confidence", ""),
+            "request_response": f.get("request_response", []),
             "cwe": triaged.get("cwe", ""),
             "cvss": triaged.get("cvss"),
             "cvss_rationale": triaged.get("cvss_rationale", ""),
@@ -1639,10 +2002,16 @@ async def get_results(scan_id: str):
 
 @app.get("/api/results/{scan_id}/download", tags=["Results"])
 async def download_raw(scan_id: str):
-    fname = _find_result_file(scan_id)
-    if not fname:
+    data = _load_raw_result_dict(scan_id)
+    if not data:
         return JSONResponse({"error": "Not found"}, status_code=404)
-    return FileResponse(fname, filename=os.path.basename(fname), media_type="application/json")
+    blob = json.dumps(data, indent=2, default=str).encode("utf-8")
+    fn = (SCANS.get(scan_id) or {}).get("result_file") or f"{scan_id}_results.json"
+    return StreamingResponse(
+        BytesIO(blob),
+        media_type="application/json",
+        headers={"Content-Disposition": f'attachment; filename="{fn}"'},
+    )
 
 
 @app.post("/api/results/{scan_id}/cvss-override", tags=["Results"])
@@ -1672,32 +2041,23 @@ async def cvss_override(scan_id: str, request: Request):
 
     key = f"{title}||{url}"
     scan["cvss_overrides"][key] = {"cvss": cvss_value, "note": note}
-
-    # Persist to disk
-    scan_dir = Path("results/raw")
-    override_file = scan_dir / f"{scan_id}_cvss_overrides.json"
-    try:
-        import json as _json
-        override_file.write_text(_json.dumps(scan["cvss_overrides"], indent=2))
-    except Exception as e:
-        logger.warning("Failed to persist CVSS override: %s", e)
+    _save_scan(scan_id)
 
     return {"status": "ok", "key": key, "cvss": cvss_value, "note": note}
 
 
 @app.post("/api/results/{scan_id}/report", tags=["Results"])
 async def generate_report(scan_id: str):
-    fname = _find_result_file(scan_id)
-    if not fname:
+    data = _load_raw_result_dict(scan_id)
+    if not data:
         return JSONResponse({"error": "Not found"}, status_code=404)
 
     try:
-        data = json.loads(Path(fname).read_text(encoding="utf-8"))
-        findings = data.get("findings", [])
-        test_log = data.get("summary", {}).get("test_log", [])
+        findings = data.get("findings") or []
+        test_log = data.get("summary", {}).get("test_log") or []
 
         import scripts.report_generator as rg
-        classified = [triage_classify(f, test_log) for f in findings]
+        classified = [triage_classify(f, test_log) for f in findings if isinstance(f, dict)]
         model_key = data.get("model", "") or data.get("metadata", {}).get("model", "unknown")
 
         orig_out = rg.OUT_DIR
@@ -1713,6 +2073,805 @@ async def generate_report(scan_id: str):
         import traceback
         traceback.print_exc()
         return JSONResponse({"error": f"Report generation failed: {str(e)}"}, status_code=500)
+
+
+_COMPLIANCE_FRAMEWORKS = {
+    "owasp": {
+        "name": "OWASP Top 10 2021",
+        "subtitle": "Open Worldwide Application Security Project",
+        "color": (30, 58, 138),
+        "mappings": {
+            "A01": {"title": "Broken Access Control", "controls": ["Authorization checks", "CORS policy", "Directory traversal prevention"],
+                    "desc": "Failures in enforcing access policies, allowing users to act outside their intended permissions.",
+                    "remediation": "Implement server-side access controls, deny by default, enforce record ownership, disable directory listing, rate-limit API access, invalidate JWT on logout."},
+            "A02": {"title": "Cryptographic Failures", "controls": ["TLS enforcement", "Sensitive data encryption", "Cookie security flags"],
+                    "desc": "Exposure of sensitive data due to weak or missing cryptographic protections.",
+                    "remediation": "Enforce TLS 1.2+, classify data sensitivity, encrypt data at rest with AES-256, use strong hashing (bcrypt/Argon2) for passwords, set Secure/HttpOnly/SameSite cookie flags."},
+            "A03": {"title": "Injection", "controls": ["Input validation", "Parameterized queries", "Output encoding"],
+                    "desc": "User-supplied data sent to an interpreter as part of a command or query without proper validation.",
+                    "remediation": "Use parameterized queries/prepared statements, validate and sanitize all inputs server-side, apply context-aware output encoding, use ORMs, deploy WAF rules."},
+            "A04": {"title": "Insecure Design", "controls": ["Threat modeling", "Secure design patterns", "Business logic validation"],
+                    "desc": "Missing or ineffective security controls due to flawed architectural and design decisions.",
+                    "remediation": "Integrate threat modeling into SDLC, establish secure design patterns library, implement business logic unit tests, use abuse-case testing in CI/CD."},
+            "A05": {"title": "Security Misconfiguration", "controls": ["Hardening", "Default credentials", "Error handling"],
+                    "desc": "Insecure default configurations, incomplete setups, open cloud storage, verbose errors, or unnecessary features.",
+                    "remediation": "Harden all environments uniformly, remove unused features/frameworks, automate configuration verification, implement proper error handling that does not leak stack traces."},
+            "A06": {"title": "Vulnerable and Outdated Components", "controls": ["Dependency scanning", "Version management", "Patch management"],
+                    "desc": "Use of components with known vulnerabilities or components no longer maintained.",
+                    "remediation": "Continuously inventory and monitor dependencies with SCA tools (Snyk, Dependabot), subscribe to CVE advisories, automate patching pipelines, remove unused dependencies."},
+            "A07": {"title": "Identification and Authentication Failures", "controls": ["Multi-factor auth", "Session management", "Password policy"],
+                    "desc": "Weaknesses in authentication mechanisms allowing credential attacks or session hijacking.",
+                    "remediation": "Implement MFA, enforce strong password policies (NIST 800-63B), use secure session management with proper timeouts, protect against credential stuffing with rate limiting and CAPTCHA."},
+            "A08": {"title": "Software and Data Integrity Failures", "controls": ["SRI checks", "Signed updates", "CI/CD pipeline security"],
+                    "desc": "Code and infrastructure that does not protect against integrity violations, including insecure CI/CD pipelines.",
+                    "remediation": "Use Subresource Integrity (SRI) for CDN assets, sign software artifacts, verify digital signatures, secure CI/CD pipeline with least-privilege and audit logging."},
+            "A09": {"title": "Security Logging and Monitoring Failures", "controls": ["Security event logging", "Monitoring", "Alerting"],
+                    "desc": "Insufficient logging, monitoring, or alerting to detect and respond to active breaches.",
+                    "remediation": "Log all authentication events, access control failures, and input validation errors; use centralized log management (SIEM); establish incident response runbooks; test alerting regularly."},
+            "A10": {"title": "Server-Side Request Forgery (SSRF)", "controls": ["URL validation", "Network segmentation", "Allowlist enforcement"],
+                    "desc": "Application fetches remote resources without validating the user-supplied URL, enabling attacks against internal services.",
+                    "remediation": "Validate and sanitize all client-supplied URLs, enforce URL allowlists, segment network access, disable HTTP redirections, block metadata endpoints (169.254.169.254)."},
+        },
+    },
+    "pci-dss": {
+        "name": "PCI DSS v4.0",
+        "subtitle": "Payment Card Industry Data Security Standard",
+        "color": (127, 29, 29),
+        "mappings": {
+            "6.2": {"title": "Bespoke and Custom Software Security", "owasp": ["A03", "A04"],
+                    "desc": "Develop software securely using industry best practices and addressing common vulnerabilities.",
+                    "remediation": "Conduct secure code reviews, train developers on OWASP Top 10, use SAST/DAST in CI/CD, validate all input on the server side."},
+            "6.4": {"title": "Public-Facing Web Application Protection", "owasp": ["A01", "A03", "A05", "A07"],
+                    "desc": "Protect public-facing web applications against known attacks on an ongoing basis.",
+                    "remediation": "Deploy a WAF, perform application vulnerability assessments at least annually and after changes, review web application architecture for security."},
+            "6.5": {"title": "Address Common Coding Vulnerabilities", "owasp": ["A03", "A02", "A05"],
+                    "desc": "Prevent common coding vulnerabilities in software development processes.",
+                    "remediation": "Train developers annually on secure coding, use automated SAST scanning, validate cryptographic implementations, sanitize all outputs."},
+            "11.3": {"title": "External and Internal Penetration Testing", "owasp": ["A01", "A02", "A03", "A04", "A05", "A06", "A07", "A08", "A09", "A10"],
+                    "desc": "Regularly test security of systems and networks through penetration testing.",
+                    "remediation": "Conduct internal and external pen tests at least annually and after significant changes, remediate exploitable vulnerabilities and re-test."},
+        },
+    },
+    "soc2": {
+        "name": "SOC 2 Type II",
+        "subtitle": "Service Organization Control - Trust Services Criteria",
+        "color": (88, 28, 135),
+        "mappings": {
+            "CC6.1": {"title": "Logical and Physical Access Controls", "owasp": ["A01", "A07"],
+                      "desc": "Restrict logical access to information assets through authentication and authorization mechanisms.",
+                      "remediation": "Implement RBAC, enforce MFA for privileged accounts, review access quarterly, log all access events."},
+            "CC6.6": {"title": "System Boundary Protection", "owasp": ["A05", "A10"],
+                      "desc": "Restrict data transmission, movement, and removal to authorized channels.",
+                      "remediation": "Deploy network segmentation, restrict outbound connections, validate server-side request targets, monitor data flows."},
+            "CC7.1": {"title": "Detection of Vulnerabilities", "owasp": ["A06", "A03"],
+                      "desc": "Detect and manage system vulnerabilities and configuration changes.",
+                      "remediation": "Run continuous vulnerability scanning, maintain a software inventory, implement automated patch management, track remediation SLAs."},
+            "CC7.2": {"title": "Anomaly Detection and Monitoring", "owasp": ["A09"],
+                      "desc": "Monitor system components for anomalies indicative of malicious acts or natural disasters.",
+                      "remediation": "Deploy SIEM with correlation rules, establish baseline behavior, alert on anomalies, conduct regular log reviews."},
+            "CC8.1": {"title": "Change Management", "owasp": ["A08"],
+                      "desc": "Authorize, design, develop, configure, document, test, approve, and implement changes.",
+                      "remediation": "Enforce change management process, require code reviews, implement CI/CD with security gates, verify software integrity."},
+        },
+    },
+    "hipaa": {
+        "name": "HIPAA Security Rule",
+        "subtitle": "Health Insurance Portability and Accountability Act",
+        "color": (21, 94, 117),
+        "mappings": {
+            "164.312(a)": {"title": "Access Control", "owasp": ["A01", "A07"],
+                           "desc": "Implement technical policies and procedures for access to ePHI systems.",
+                           "remediation": "Implement unique user identification, emergency access procedures, automatic logoff, encrypt ePHI at rest."},
+            "164.312(c)": {"title": "Integrity Controls", "owasp": ["A03", "A08"],
+                           "desc": "Protect ePHI from improper alteration or destruction.",
+                           "remediation": "Implement mechanisms to authenticate ePHI integrity, deploy input validation, use cryptographic checksums for data in transit."},
+            "164.312(d)": {"title": "Person or Entity Authentication", "owasp": ["A07", "A02"],
+                           "desc": "Verify the identity of persons or entities seeking access to ePHI.",
+                           "remediation": "Implement multi-factor authentication, enforce strong password policies, use certificate-based auth for system-to-system communication."},
+            "164.312(e)": {"title": "Transmission Security", "owasp": ["A02", "A05"],
+                           "desc": "Protect ePHI when transmitted over electronic networks.",
+                           "remediation": "Enforce TLS 1.2+ for all data in transit, implement integrity controls, disable insecure protocols, use VPN for remote access."},
+            "164.308(a)(1)": {"title": "Security Management Process - Risk Analysis", "owasp": ["A01", "A02", "A03", "A04", "A05", "A06", "A07", "A08", "A09", "A10"],
+                              "desc": "Conduct an accurate and thorough assessment of potential risks to ePHI.",
+                              "remediation": "Conduct comprehensive risk assessments annually, document all identified risks, implement risk mitigation plans, track remediation progress."},
+        },
+    },
+    "iso27001": {
+        "name": "ISO 27001:2022",
+        "subtitle": "Information Security Management System",
+        "color": (30, 64, 175),
+        "mappings": {
+            "A.8.9": {"title": "Configuration Management", "owasp": ["A05", "A06"],
+                      "desc": "Establish, document, implement, and review configurations including security settings.",
+                      "remediation": "Define security baselines for all technologies, automate configuration checks, track deviations, review configs on change."},
+            "A.8.24": {"title": "Use of Cryptography", "owasp": ["A02"],
+                       "desc": "Define and implement rules for the effective use of cryptography.",
+                       "remediation": "Define cryptographic policy, use approved algorithms (AES-256, RSA-2048+), manage keys via HSM/KMS, rotate keys regularly."},
+            "A.8.25": {"title": "Secure Development Life Cycle", "owasp": ["A03", "A04"],
+                       "desc": "Establish and apply rules for the secure development of software and systems.",
+                       "remediation": "Integrate security into all SDLC phases, require threat modeling, conduct design reviews, implement SAST/DAST in CI."},
+            "A.8.28": {"title": "Secure Coding", "owasp": ["A03", "A08"],
+                       "desc": "Apply secure coding principles to software development.",
+                       "remediation": "Follow OWASP Secure Coding Practices, require peer code review, use linters/SAST, train developers annually."},
+            "A.8.29": {"title": "Security Testing in Development and Acceptance", "owasp": ["A01", "A02", "A03", "A04", "A05", "A06", "A07", "A08", "A09", "A10"],
+                       "desc": "Define and implement security testing processes throughout the development life cycle.",
+                       "remediation": "Integrate DAST/SAST into CI/CD, conduct pen testing pre-release, define acceptance criteria for security, track defect resolution."},
+        },
+    },
+    "nist": {
+        "name": "NIST SP 800-53 Rev 5",
+        "subtitle": "Security and Privacy Controls for Information Systems",
+        "color": (30, 41, 59),
+        "mappings": {
+            "SA-11": {"title": "Developer Testing and Evaluation", "owasp": ["A03", "A04", "A08"],
+                      "desc": "Require developers to create and implement a security assessment plan.",
+                      "remediation": "Mandate SAST/DAST as part of build pipeline, require security-focused unit tests, conduct fuzz testing for critical inputs."},
+            "SI-10": {"title": "Information Input Validation", "owasp": ["A03"],
+                      "desc": "Check the validity of information inputs to the system.",
+                      "remediation": "Validate all inputs at the server side using allowlists, reject malformed data, implement context-specific encoding for outputs."},
+            "SC-8": {"title": "Transmission Confidentiality and Integrity", "owasp": ["A02"],
+                     "desc": "Protect the confidentiality and integrity of transmitted information.",
+                     "remediation": "Enforce TLS 1.2+ with strong cipher suites, implement HSTS, use certificate pinning for critical connections."},
+            "AC-3": {"title": "Access Enforcement", "owasp": ["A01", "A07"],
+                     "desc": "Enforce approved authorizations for logical access to information and system resources.",
+                     "remediation": "Implement RBAC with least privilege, enforce authorization on every request server-side, audit access decisions."},
+            "AU-2": {"title": "Event Logging", "owasp": ["A09"],
+                     "desc": "Identify events that the system is capable of logging in support of the audit function.",
+                     "remediation": "Log authentication events, privilege changes, data access, and failures; ship logs to centralized SIEM; retain per policy."},
+            "CM-6": {"title": "Configuration Settings", "owasp": ["A05", "A06"],
+                     "desc": "Establish and document configuration settings for system components.",
+                     "remediation": "Apply CIS Benchmarks, scan for misconfigurations weekly, disable unnecessary services, remove default accounts."},
+            "SC-5": {"title": "Denial-of-Service Protection", "owasp": ["A04"],
+                     "desc": "Protect against or limit the effects of denial-of-service events.",
+                     "remediation": "Implement rate limiting, use CDN/DDoS protection, validate resource consumption, limit request payload sizes."},
+        },
+    },
+}
+
+
+_PDF_UNICODE_FONT = None
+
+def _init_pdf_fonts(pdf):
+    """Register a Unicode TTF font if available, enabling full character support."""
+    global _PDF_UNICODE_FONT
+    if _PDF_UNICODE_FONT is False:
+        return
+    if _PDF_UNICODE_FONT:
+        for style, path in _PDF_UNICODE_FONT.items():
+            pdf.add_font("DJV", style, path, uni=True)
+        return
+    candidates = [
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Oblique.ttf",
+        "/usr/share/fonts/TTF/DejaVuSans.ttf",
+        "/usr/share/fonts/dejavu/DejaVuSans.ttf",
+    ]
+    regular = None
+    bold = None
+    italic = None
+    for c in candidates:
+        if Path(c).exists():
+            if "Bold" in c:
+                bold = c
+            elif "Oblique" in c or "Italic" in c:
+                italic = c
+            else:
+                regular = c
+    if regular:
+        _PDF_UNICODE_FONT = {"": regular, "B": bold or regular, "I": italic or regular, "BI": bold or regular}
+        for style, path in _PDF_UNICODE_FONT.items():
+            pdf.add_font("DJV", style, path, uni=True)
+    else:
+        _PDF_UNICODE_FONT = False
+
+
+def _safe_pdf(text):
+    """Sanitize text for PDF output — handles Unicode gracefully."""
+    if not text:
+        return ""
+    s = str(text)
+    s = s.replace("\u200b", "").replace("\u200c", "").replace("\u200d", "").replace("\ufeff", "")
+    if _PDF_UNICODE_FONT:
+        return s[:3500]
+    s = s.replace("\u2014", " -- ").replace("\u2013", " - ")
+    s = s.replace("\u2018", "'").replace("\u2019", "'")
+    s = s.replace("\u201c", '"').replace("\u201d", '"')
+    s = s.replace("\u2026", "...").replace("\u00a0", " ")
+    s = s.replace("\u2022", "*").replace("\u2192", "->").replace("\u2190", "<-")
+    s = s.replace("\u2605", "*").replace("\u00b7", "-")
+    s = s.replace("\u2713", "[PASS]").replace("\u2714", "[PASS]")
+    s = s.replace("\u2717", "[FAIL]").replace("\u2718", "[FAIL]")
+    s = s.replace("\u25cf", "*").replace("\u25cb", "o").replace("\u25a0", "#").replace("\u25a1", "[ ]")
+    s = s.replace("\u2502", "|").replace("\u2500", "-").replace("\u253c", "+")
+    s = s.replace("\u00e9", "e").replace("\u00e8", "e").replace("\u00ea", "e")
+    import re
+    s = re.sub(r'[\U00010000-\U0010FFFF]', '', s)
+    return s.encode("latin-1", errors="replace").decode("latin-1")[:3500]
+
+
+def _pdf_font(pdf, style="", size=10):
+    """Set font — use Unicode DJV if available, else Helvetica."""
+    family = "DJV" if _PDF_UNICODE_FONT else "Helvetica"
+    pdf.set_font(family, style, size)
+
+
+def _finding_sev(f: dict) -> str:
+    """Resolve severity from triaged finding — triage stores it in final_severity/scanner_severity."""
+    return (f.get("final_severity")
+            or f.get("severity")
+            or f.get("scanner_severity")
+            or "Info")
+
+
+_SEV_COLORS = {
+    "Critical": (153, 27, 27),
+    "High": (220, 38, 38),
+    "Medium": (234, 88, 12),
+    "Low": (22, 163, 74),
+    "Info": (100, 116, 139),
+    "Not Exploitable": (100, 116, 139),
+}
+
+_SEV_BG = {
+    "Critical": (254, 226, 226),
+    "High": (254, 226, 226),
+    "Medium": (255, 237, 213),
+    "Low": (220, 252, 231),
+    "Info": (241, 245, 249),
+    "Not Exploitable": (241, 245, 249),
+}
+
+
+def _pdf_severity_counts(findings: list[dict]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for f in findings:
+        s = _finding_sev(f)
+        counts[s] = counts.get(s, 0) + 1
+    return counts
+
+
+def _pdf_section_header(pdf, title: str, *, bg=(30, 41, 59), fg=(255, 255, 255)):
+    """Draw a full-width colored section header bar."""
+    pdf.set_fill_color(*bg)
+    pdf.set_text_color(*fg)
+    _pdf_font(pdf, "B", 11)
+    pdf.cell(0, 9, _safe_pdf(f"  {title}"), ln=True, fill=True)
+    pdf.set_text_color(0, 0, 0)
+    pdf.ln(3)
+
+
+def _pdf_kv_row(pdf, label: str, value: str, bold_val: bool = False):
+    _pdf_font(pdf, "B", 9)
+    pdf.cell(42, 6, _safe_pdf(label), ln=False)
+    _pdf_font(pdf, "B" if bold_val else "", 9)
+    pdf.cell(0, 6, _safe_pdf(value), ln=True)
+
+
+def _pdf_severity_badge(pdf, sev: str, w: int = 24):
+    color = _SEV_COLORS.get(sev, (100, 116, 139))
+    bg = _SEV_BG.get(sev, (241, 245, 249))
+    pdf.set_fill_color(*bg)
+    pdf.set_text_color(*color)
+    _pdf_font(pdf, "B", 8)
+    pdf.cell(w, 5, _safe_pdf(sev), align="C", fill=True)
+    pdf.set_text_color(0, 0, 0)
+
+
+def _pdf_horiz_bar(pdf, counts: dict, total: int, bar_w: float = 150):
+    """Draw a horizontal stacked severity bar chart."""
+    if total <= 0:
+        return
+    x0 = pdf.get_x() + 10
+    y0 = pdf.get_y()
+    for sev_name in ("Critical", "High", "Medium", "Low", "Info"):
+        cnt = counts.get(sev_name, 0)
+        if cnt <= 0:
+            continue
+        w = max(cnt / total * bar_w, 4)
+        color = _SEV_COLORS.get(sev_name, (100, 116, 139))
+        pdf.set_fill_color(*color)
+        pdf.rect(x0, y0, w, 6, "F")
+        if w > 12:
+            pdf.set_xy(x0, y0)
+            pdf.set_text_color(255, 255, 255)
+            _pdf_font(pdf, "B", 6)
+            pdf.cell(w, 6, _safe_pdf(str(cnt)), align="C")
+        x0 += w
+    pdf.set_text_color(0, 0, 0)
+    pdf.set_xy(10, y0 + 9)
+
+
+def _pdf_control_row(pdf, status: str, req_id: str, title: str, count: int, desc: str = "", remediation: str = "", mapped: str = ""):
+    """Draw a professional control assessment row with status, description, and remediation."""
+    if pdf.get_y() > 250:
+        pdf.add_page()
+    is_fail = status == "FAIL"
+    stripe_color = (220, 38, 38) if is_fail else (22, 163, 74)
+    row_bg = (254, 242, 242) if is_fail else (240, 253, 244)
+
+    pdf.set_fill_color(*row_bg)
+    y_start = pdf.get_y()
+    pdf.rect(10, y_start, 190, 8, "F")
+    pdf.set_fill_color(*stripe_color)
+    pdf.rect(10, y_start, 3, 8, "F")
+
+    pdf.set_xy(15, y_start + 1)
+    pdf.set_text_color(*stripe_color)
+    _pdf_font(pdf, "B", 9)
+    badge = "FAIL" if is_fail else "PASS"
+    pdf.cell(14, 6, _safe_pdf(badge))
+    pdf.set_text_color(30, 41, 59)
+    _pdf_font(pdf, "B", 9)
+    pdf.cell(0, 6, _safe_pdf(f"{req_id}: {title}"), ln=False)
+    pdf.set_xy(160, y_start + 1)
+    pdf.set_text_color(100, 116, 139)
+    _pdf_font(pdf, "", 8)
+    pdf.cell(40, 6, _safe_pdf(f"{count} finding{'s' if count != 1 else ''}"), ln=True, align="R")
+    pdf.set_text_color(0, 0, 0)
+    pdf.set_y(y_start + 8)
+
+    if desc:
+        _pdf_font(pdf, "I", 7)
+        pdf.set_text_color(100, 116, 139)
+        pdf.set_x(16)
+        pdf.multi_cell(180, 3.5, _safe_pdf(desc))
+        pdf.set_text_color(0, 0, 0)
+
+    if mapped:
+        _pdf_font(pdf, "", 7)
+        pdf.set_text_color(79, 70, 229)
+        pdf.set_x(16)
+        pdf.cell(0, 4, _safe_pdf(f"Maps to OWASP: {mapped}"), ln=True)
+        pdf.set_text_color(0, 0, 0)
+
+    return is_fail, remediation
+
+
+def _pdf_page_header_footer(pdf, fw_name: str, target_url: str, color: tuple = (30, 41, 59)):
+    """Set up page header and footer via FPDF2 overrides — called after pdf creation."""
+    class _PDF(pdf.__class__):
+        _hdr_fw = fw_name
+        _hdr_target = target_url[:60]
+        _hdr_color = color
+
+        def header(self):
+            if self.page_no() == 1:
+                return
+            self.set_fill_color(*self._hdr_color)
+            self.rect(0, 0, 210, 10, "F")
+            self.set_text_color(255, 255, 255)
+            _pdf_font(self, "B", 7)
+            self.set_xy(10, 2)
+            self.cell(0, 6, _safe_pdf(f"{self._hdr_fw} Compliance Report"), ln=False)
+            _pdf_font(self, "", 7)
+            self.cell(0, 6, _safe_pdf(self._hdr_target), ln=True, align="R")
+            self.set_text_color(0, 0, 0)
+            self.ln(4)
+
+        def footer(self):
+            self.set_y(-15)
+            self.set_draw_color(200, 200, 200)
+            self.line(10, self.get_y(), 200, self.get_y())
+            self.set_text_color(150, 150, 150)
+            _pdf_font(self, "", 7)
+            self.cell(95, 8, _safe_pdf("Agentic Web Scanner"), ln=False)
+            self.cell(95, 8, _safe_pdf(f"Page {self.page_no()}/{{nb}}"), ln=True, align="R")
+            self.set_text_color(0, 0, 0)
+
+    pdf.__class__ = _PDF
+
+
+@app.post("/api/results/{scan_id}/compliance/{framework}", tags=["Results"])
+async def generate_compliance_report(scan_id: str, framework: str):
+    """Generate a compliance-mapped report (PDF) for the given framework."""
+    if framework not in _COMPLIANCE_FRAMEWORKS:
+        return JSONResponse({"error": f"Unknown framework: {framework}. Supported: {', '.join(_COMPLIANCE_FRAMEWORKS)}"}, status_code=400)
+
+    data = _load_raw_result_dict(scan_id)
+    if not data:
+        return JSONResponse({"error": "Scan results not found"}, status_code=404)
+
+    try:
+        findings = data.get("findings") or []
+        test_log = data.get("summary", {}).get("test_log") or []
+        classified = [triage_classify(f, test_log) for f in findings if isinstance(f, dict)]
+        _tgt = data.get("target", "")
+        target_url = (_tgt if isinstance(_tgt, str) else _tgt.get("url", "") if isinstance(_tgt, dict) else str(_tgt)) or data.get("metadata", {}).get("target_url", "")
+        model_key = data.get("model", "") or data.get("metadata", {}).get("model", "unknown")
+        fw = _COMPLIANCE_FRAMEWORKS[framework]
+        fw_name = fw["name"]
+        fw_subtitle = fw.get("subtitle", "")
+        fw_color = fw.get("color", (30, 41, 59))
+        scan_date = data.get("metadata", {}).get("timestamp", "") or datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        duration = data.get("metadata", {}).get("duration_seconds") or data.get("metadata", {}).get("scan_duration_seconds")
+        dur_str = f"{int(duration)}s" if duration else "N/A"
+
+        from fpdf import FPDF
+        pdf = FPDF()
+        _init_pdf_fonts(pdf)
+        pdf.set_auto_page_break(auto=True, margin=22)
+        _pdf_page_header_footer(pdf, fw_name, target_url, fw_color)
+        pdf.alias_nb_pages()
+
+        # ── COVER PAGE ──
+        pdf.add_page()
+        pdf.set_fill_color(*fw_color)
+        pdf.rect(0, 0, 210, 80, "F")
+        accent_light = tuple(min(255, c + 40) for c in fw_color)
+        pdf.set_fill_color(*accent_light)
+        pdf.rect(0, 72, 210, 8, "F")
+
+        pdf.set_text_color(255, 255, 255)
+        _pdf_font(pdf, "B", 28)
+        pdf.set_y(18)
+        pdf.cell(0, 14, _safe_pdf(fw_name), ln=True, align="C")
+        _pdf_font(pdf, "", 12)
+        if fw_subtitle:
+            pdf.cell(0, 7, _safe_pdf(fw_subtitle), ln=True, align="C")
+        pdf.ln(4)
+        _pdf_font(pdf, "B", 14)
+        pdf.cell(0, 8, _safe_pdf("Compliance Assessment Report"), ln=True, align="C")
+        pdf.set_text_color(0, 0, 0)
+
+        pdf.set_y(90)
+        pdf.set_draw_color(*fw_color)
+        pdf.set_line_width(0.5)
+
+        _pdf_font(pdf, "B", 11)
+        pdf.set_text_color(*fw_color)
+        pdf.cell(0, 8, _safe_pdf("ASSESSMENT DETAILS"), ln=True)
+        pdf.line(10, pdf.get_y(), 90, pdf.get_y())
+        pdf.ln(4)
+        pdf.set_text_color(0, 0, 0)
+        _pdf_kv_row(pdf, "Target:", target_url[:100])
+        _pdf_kv_row(pdf, "Scan ID:", scan_id)
+        _pdf_kv_row(pdf, "Model:", model_key)
+        _pdf_kv_row(pdf, "Scan Date:", scan_date)
+        _pdf_kv_row(pdf, "Duration:", dur_str)
+        _pdf_kv_row(pdf, "Report Generated:", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+        pdf.ln(8)
+
+        # ── EXECUTIVE SUMMARY ──
+        tp_findings = [f for f in classified if f.get("verdict") not in ("FALSE_POSITIVE", "NOT_A_FINDING")]
+        tp_sev = _pdf_severity_counts(tp_findings)
+        all_sev = _pdf_severity_counts(classified)
+
+        _pdf_font(pdf, "B", 11)
+        pdf.set_text_color(*fw_color)
+        pdf.cell(0, 8, _safe_pdf("EXECUTIVE SUMMARY"), ln=True)
+        pdf.line(10, pdf.get_y(), 90, pdf.get_y())
+        pdf.ln(4)
+        pdf.set_text_color(0, 0, 0)
+
+        # Severity table
+        _pdf_font(pdf, "B", 8)
+        pdf.set_fill_color(241, 245, 249)
+        pdf.cell(30, 6, _safe_pdf("Severity"), fill=True, align="C")
+        pdf.cell(25, 6, _safe_pdf("Total"), fill=True, align="C")
+        pdf.cell(30, 6, _safe_pdf("True Positive"), fill=True, align="C")
+        pdf.cell(30, 6, _safe_pdf("False Positive"), fill=True, align="C")
+        pdf.ln()
+        for sev_name in ("Critical", "High", "Medium", "Low", "Info"):
+            total_cnt = all_sev.get(sev_name, 0)
+            tp_cnt = tp_sev.get(sev_name, 0)
+            fp_cnt = total_cnt - tp_cnt
+            if total_cnt == 0 and sev_name not in ("Critical", "High", "Medium"):
+                continue
+            color = _SEV_COLORS.get(sev_name, (0, 0, 0))
+            bg = _SEV_BG.get(sev_name, (241, 245, 249))
+            pdf.set_fill_color(*bg)
+            pdf.set_text_color(*color)
+            _pdf_font(pdf, "B", 8)
+            pdf.cell(30, 5, _safe_pdf(sev_name), fill=True, align="C")
+            _pdf_font(pdf, "", 8)
+            pdf.set_text_color(0, 0, 0)
+            pdf.cell(25, 5, _safe_pdf(str(total_cnt)), align="C")
+            pdf.cell(30, 5, _safe_pdf(str(tp_cnt)), align="C")
+            pdf.cell(30, 5, _safe_pdf(str(fp_cnt)), align="C")
+            pdf.ln()
+        pdf.ln(2)
+
+        _pdf_font(pdf, "B", 8)
+        pdf.cell(55, 5, _safe_pdf(f"Total: {len(classified)} findings"))
+        pdf.cell(0, 5, _safe_pdf(f"True Positives: {len(tp_findings)}"), ln=True)
+        pdf.ln(2)
+        _pdf_horiz_bar(pdf, tp_sev, len(tp_findings) or 1)
+        pdf.ln(2)
+
+        # Severity legend
+        _pdf_font(pdf, "", 7)
+        pdf.set_text_color(100, 116, 139)
+        legend = "  ".join(f"{s}: {tp_sev.get(s, 0)}" for s in ("Critical", "High", "Medium", "Low", "Info") if tp_sev.get(s, 0))
+        pdf.cell(0, 4, _safe_pdf(legend), ln=True)
+        pdf.set_text_color(0, 0, 0)
+
+        # ── OWASP bucketing (used by all frameworks) ──
+        owasp_findings: dict[str, list] = {}
+        for f in classified:
+            cat = (f.get("owasp") or f.get("owasp_category") or "")[:3].upper()
+            if cat and cat in [f"A{i:02d}" for i in range(1, 11)]:
+                owasp_findings.setdefault(cat, []).append(f)
+            elif cat:
+                owasp_findings.setdefault(cat, []).append(f)
+
+        # ── CONTROL ASSESSMENT ──
+        pdf.add_page()
+        _pdf_section_header(pdf, f"{fw_name} -- Control Assessment", bg=fw_color)
+
+        pass_count = 0
+        fail_count = 0
+        mapping_items = list(fw["mappings"].items())
+        all_control_remediations: list[tuple[str, str, str]] = []
+
+        if framework == "owasp":
+            for cat_id, cat_info in mapping_items:
+                matched = owasp_findings.get(cat_id, [])
+                status = "FAIL" if matched else "PASS"
+                if matched:
+                    fail_count += 1
+                else:
+                    pass_count += 1
+                is_fail, ctrl_rem = _pdf_control_row(
+                    pdf, status, cat_id, cat_info["title"], len(matched),
+                    desc=cat_info.get("desc", ""), remediation=cat_info.get("remediation", ""))
+
+                _pdf_font(pdf, "", 7)
+                for mf in matched[:5]:
+                    sev = _finding_sev(mf)
+                    ftitle = mf.get("title", "Untitled")[:80]
+                    verdict = mf.get("verdict", "")
+                    v_tag = f" [{verdict}]" if verdict and verdict != "TRUE_POSITIVE" else ""
+                    color = _SEV_COLORS.get(sev, (100, 116, 139))
+                    pdf.set_text_color(*color)
+                    pdf.set_x(18)
+                    pdf.cell(0, 4, _safe_pdf(f"[{sev}] {ftitle}{v_tag}"), ln=True)
+                    pdf.set_text_color(0, 0, 0)
+                if len(matched) > 5:
+                    _pdf_font(pdf, "I", 7)
+                    pdf.set_text_color(100, 116, 139)
+                    pdf.set_x(18)
+                    pdf.cell(0, 4, _safe_pdf(f"... and {len(matched) - 5} more"), ln=True)
+                    pdf.set_text_color(0, 0, 0)
+                if not matched:
+                    pdf.set_text_color(22, 163, 74)
+                    _pdf_font(pdf, "", 7)
+                    pdf.set_x(18)
+                    pdf.cell(0, 4, _safe_pdf("No vulnerabilities detected for this category."), ln=True)
+                    pdf.set_text_color(0, 0, 0)
+                pdf.ln(3)
+                if is_fail and ctrl_rem:
+                    all_control_remediations.append((cat_id, cat_info["title"], ctrl_rem))
+        else:
+            for req_id, req_info in mapping_items:
+                related_owasp = req_info.get("owasp", [])
+                matched = []
+                seen_titles = set()
+                for ocat in related_owasp:
+                    for mf in owasp_findings.get(ocat, []):
+                        t = mf.get("title", "")
+                        if t not in seen_titles:
+                            seen_titles.add(t)
+                            matched.append(mf)
+                status = "FAIL" if matched else "PASS"
+                if matched:
+                    fail_count += 1
+                else:
+                    pass_count += 1
+                mapped_str = ", ".join(related_owasp) if related_owasp else ""
+                is_fail, ctrl_rem = _pdf_control_row(
+                    pdf, status, req_id, req_info["title"], len(matched),
+                    desc=req_info.get("desc", ""), remediation=req_info.get("remediation", ""),
+                    mapped=mapped_str)
+
+                _pdf_font(pdf, "", 7)
+                for mf in matched[:3]:
+                    sev = _finding_sev(mf)
+                    ftitle = mf.get("title", "Untitled")[:80]
+                    color = _SEV_COLORS.get(sev, (100, 116, 139))
+                    pdf.set_text_color(*color)
+                    pdf.set_x(18)
+                    pdf.cell(0, 4, _safe_pdf(f"[{sev}] {ftitle}"), ln=True)
+                    pdf.set_text_color(0, 0, 0)
+                if len(matched) > 3:
+                    _pdf_font(pdf, "I", 7)
+                    pdf.set_text_color(100, 116, 139)
+                    pdf.set_x(18)
+                    pdf.cell(0, 4, _safe_pdf(f"... and {len(matched) - 3} more"), ln=True)
+                    pdf.set_text_color(0, 0, 0)
+                if not matched:
+                    pdf.set_text_color(22, 163, 74)
+                    _pdf_font(pdf, "", 7)
+                    pdf.set_x(18)
+                    pdf.cell(0, 4, _safe_pdf("No vulnerabilities mapped to this control."), ln=True)
+                    pdf.set_text_color(0, 0, 0)
+                pdf.ln(3)
+                if is_fail and ctrl_rem:
+                    all_control_remediations.append((req_id, req_info["title"], ctrl_rem))
+
+        # ── COMPLIANCE SCORE ──
+        total_controls = pass_count + fail_count
+        score_pct = round(pass_count / total_controls * 100) if total_controls else 0
+        pdf.ln(4)
+        score_bg = (220, 252, 231) if score_pct >= 80 else (255, 237, 213) if score_pct >= 50 else (254, 226, 226)
+        score_fg = (22, 101, 52) if score_pct >= 80 else (154, 52, 18) if score_pct >= 50 else (153, 27, 27)
+        pdf.set_fill_color(*score_bg)
+        pdf.set_text_color(*score_fg)
+        _pdf_font(pdf, "B", 12)
+        pdf.cell(0, 10, _safe_pdf(f"  Compliance Score: {pass_count}/{total_controls} controls passed ({score_pct}%)"), ln=True, fill=True)
+        pdf.set_text_color(0, 0, 0)
+
+        # Visual score bar
+        pdf.ln(2)
+        bar_x = 10
+        bar_w = 190
+        bar_y = pdf.get_y()
+        pdf.set_fill_color(229, 231, 235)
+        pdf.rect(bar_x, bar_y, bar_w, 5, "F")
+        fill_w = bar_w * score_pct / 100
+        pdf.set_fill_color(*score_fg)
+        if fill_w > 0:
+            pdf.rect(bar_x, bar_y, fill_w, 5, "F")
+        pdf.set_y(bar_y + 8)
+
+        # ── REMEDIATION ROADMAP ──
+        if all_control_remediations:
+            pdf.add_page()
+            _pdf_section_header(pdf, "Remediation Roadmap", bg=fw_color)
+            _pdf_font(pdf, "", 9)
+            pdf.set_text_color(60, 60, 60)
+            pdf.multi_cell(0, 5, _safe_pdf(
+                "The following remediation actions are recommended for each failing control. "
+                "Prioritize Critical and High severity findings first."))
+            pdf.set_text_color(0, 0, 0)
+            pdf.ln(4)
+
+            for idx, (ctrl_id, ctrl_title, rem) in enumerate(all_control_remediations, 1):
+                if pdf.get_y() > 255:
+                    pdf.add_page()
+                pdf.set_fill_color(241, 245, 249)
+                _pdf_font(pdf, "B", 9)
+                pdf.cell(0, 7, _safe_pdf(f"  {idx}. {ctrl_id}: {ctrl_title}"), ln=True, fill=True)
+                _pdf_font(pdf, "", 8)
+                pdf.set_x(14)
+                pdf.multi_cell(182, 4, _safe_pdf(rem))
+                pdf.ln(3)
+
+        # ── DETAILED FINDINGS ──
+        if classified:
+            pdf.add_page()
+            _pdf_section_header(pdf, "Detailed Findings", bg=fw_color)
+
+            for i, f in enumerate(classified, 1):
+                if pdf.get_y() > 245:
+                    pdf.add_page()
+                sev = _finding_sev(f)
+                title = f.get("title", "Untitled")[:100]
+                verdict = f.get("verdict", "")
+                owasp_cat = f.get("owasp") or f.get("owasp_category") or ""
+                url = f.get("url", "")
+                param = f.get("parameter", "")
+                payload = str(f.get("payload") or "")[:150]
+                evidence = str(f.get("scanner_evidence") or f.get("evidence") or "")[:250]
+                remediation = str(f.get("remediation") or f.get("dev_action") or "")[:250]
+                cwe = f.get("cwe", "")
+                cvss = f.get("cvss")
+                reason = f.get("reason", "")
+
+                color = _SEV_COLORS.get(sev, (100, 116, 139))
+                bg = _SEV_BG.get(sev, (241, 245, 249))
+                pdf.set_fill_color(*bg)
+                _pdf_font(pdf, "B", 9)
+                pdf.set_text_color(*color)
+                pdf.cell(20, 7, _safe_pdf(sev), fill=True, align="C")
+                pdf.set_text_color(30, 41, 59)
+                pdf.cell(0, 7, _safe_pdf(f"  {i}. {title}"), ln=True)
+                pdf.set_text_color(0, 0, 0)
+
+                _pdf_font(pdf, "", 7)
+                meta_parts = []
+                if verdict:
+                    meta_parts.append(f"Verdict: {verdict}")
+                if owasp_cat:
+                    meta_parts.append(f"OWASP: {owasp_cat}")
+                if cwe:
+                    meta_parts.append(f"CWE: {cwe}")
+                if cvss:
+                    meta_parts.append(f"CVSS: {cvss}")
+                if meta_parts:
+                    pdf.set_text_color(100, 116, 139)
+                    pdf.set_x(14)
+                    pdf.cell(0, 4, _safe_pdf(" | ".join(meta_parts)), ln=True)
+                    pdf.set_text_color(0, 0, 0)
+
+                if url:
+                    _pdf_font(pdf, "", 7)
+                    pdf.set_x(14)
+                    pdf.cell(0, 4, _safe_pdf(f"URL: {url[:120]}"), ln=True)
+                if param:
+                    pdf.set_x(14)
+                    pdf.cell(0, 4, _safe_pdf(f"Parameter: {param[:60]}"), ln=True)
+                if payload:
+                    pdf.set_text_color(180, 83, 9)
+                    pdf.set_x(14)
+                    pdf.cell(0, 4, _safe_pdf(f"Payload: {payload}"), ln=True)
+                    pdf.set_text_color(0, 0, 0)
+                if evidence:
+                    _pdf_font(pdf, "I", 7)
+                    pdf.set_x(14)
+                    pdf.multi_cell(182, 3.5, _safe_pdf(f"Evidence: {evidence}"))
+                    _pdf_font(pdf, "", 7)
+                if reason:
+                    pdf.set_text_color(100, 116, 139)
+                    pdf.set_x(14)
+                    pdf.multi_cell(182, 3.5, _safe_pdf(f"Triage: {reason[:200]}"))
+                    pdf.set_text_color(0, 0, 0)
+                if remediation:
+                    pdf.set_text_color(5, 150, 105)
+                    pdf.set_x(14)
+                    pdf.multi_cell(182, 3.5, _safe_pdf(f"Remediation: {remediation}"))
+                    pdf.set_text_color(0, 0, 0)
+
+                pdf.set_draw_color(229, 231, 235)
+                pdf.line(14, pdf.get_y() + 1, 196, pdf.get_y() + 1)
+                pdf.ln(3)
+
+        # ── ASSESSMENT SUMMARY & DISCLAIMER ──
+        pdf.add_page()
+        _pdf_section_header(pdf, "Assessment Summary", bg=fw_color)
+        _pdf_font(pdf, "", 10)
+        pdf.multi_cell(0, 5.5, _safe_pdf(
+            f"This {fw_name} compliance assessment was performed against {target_url} "
+            f"using AI-powered security scanning (model: {model_key}). "
+            f"The scan identified {len(classified)} total findings across {total_controls} "
+            f"compliance controls. {pass_count} control{'s' if pass_count != 1 else ''} "
+            f"passed ({score_pct}% compliance rate) and {fail_count} "
+            f"control{'s' if fail_count != 1 else ''} had associated findings requiring attention."
+        ))
+        pdf.ln(6)
+
+        _pdf_font(pdf, "B", 10)
+        pdf.set_text_color(*fw_color)
+        pdf.cell(0, 7, _safe_pdf("METHODOLOGY"), ln=True)
+        pdf.set_text_color(0, 0, 0)
+        _pdf_font(pdf, "", 8)
+        pdf.multi_cell(0, 4.5, _safe_pdf(
+            "This assessment was conducted using an AI-powered agentic security scanner that combines "
+            "passive reconnaissance, active vulnerability testing, and LLM-based analysis. The scanner "
+            "autonomously identifies security weaknesses across OWASP Top 10 categories and maps findings "
+            "to the applicable compliance framework controls. Each finding is classified with a severity "
+            "rating, triaged for accuracy, and assigned a remediation recommendation."
+        ))
+        pdf.ln(6)
+
+        pdf.set_fill_color(241, 245, 249)
+        _pdf_font(pdf, "B", 9)
+        pdf.cell(0, 7, _safe_pdf("  DISCLAIMER"), ln=True, fill=True)
+        _pdf_font(pdf, "I", 8)
+        pdf.set_text_color(100, 116, 139)
+        pdf.multi_cell(0, 4.5, _safe_pdf(
+            "This automated assessment identifies potential compliance gaps based on technical "
+            "vulnerability scanning. It does not constitute a formal compliance audit or certification. "
+            "Organizations should engage qualified assessors (QSA for PCI DSS, independent auditors for "
+            "SOC 2, etc.) for official compliance certifications. Findings should be validated by the "
+            "security team before remediation actions are taken."
+        ))
+        pdf.set_text_color(0, 0, 0)
+
+        out_name = f"{framework}_compliance_{scan_id}.pdf"
+        out_path = REPORTS_DIR / out_name
+        pdf.output(str(out_path))
+
+        return FileResponse(
+            str(out_path),
+            filename=out_name,
+            media_type="application/pdf",
+        )
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return JSONResponse({"error": f"Compliance report failed: {str(e)}"}, status_code=500)
 
 
 _SCAN_ID_RE = re.compile(r"(scan_\d{8}_\d{6}_[0-9a-f]{6})")
@@ -1761,12 +2920,14 @@ async def list_reports():
             continue
         scan_id, scan_info = _find_scan_for_report(f.name)
         target = scan_info.get("target_url", "")
-        if not target:
+        if not target and scan_id:
             try:
-                raw_match = list(RAW_DIR.glob(f"*{scan_id}*")) if scan_id else []
-                if raw_match:
-                    rd = json.loads(raw_match[0].read_text(encoding="utf-8"))
-                    target = rd.get("target", {}).get("url", "") or rd.get("metadata", {}).get("target_url", "")
+                rd = _load_raw_result_dict(scan_id)
+                if rd:
+                    t = rd.get("target", "")
+                    target = t.get("url", "") if isinstance(t, dict) else str(t)
+                    if not target:
+                        target = rd.get("metadata", {}).get("target_url", "") or ""
             except Exception:
                 pass
         target = target or "Unknown Target"
@@ -1843,15 +3004,16 @@ async def delete_reports_for_target(target: str = ""):
 @app.get("/api/results/{scan_id}/excel", tags=["Results"])
 async def generate_excel(scan_id: str):
     """Generate and download an Excel report for a scan."""
-    fname = _find_result_file(scan_id)
-    if not fname:
+    data = _load_raw_result_dict(scan_id)
+    if not data:
         return JSONResponse({"error": "Results not found"}, status_code=404)
     try:
-        from scripts.excel_exporter import export_excel
-        data = json.loads(Path(fname).read_text(encoding="utf-8"))
+        from scripts.excel_exporter import generate_excel
         scan_info = SCANS.get(scan_id, {})
         triaged = scan_info.get("triaged_findings") or data.get("findings", [])
-        xlsx_path = export_excel(data, triaged, scan_id, str(REPORTS_DIR))
+        raw = data.get("findings", [])
+        meta = data.get("metadata", {})
+        xlsx_path = generate_excel(scan_id, meta, triaged, raw, str(REPORTS_DIR))
         return FileResponse(
             str(xlsx_path),
             filename=os.path.basename(xlsx_path),
@@ -1866,11 +3028,9 @@ async def generate_excel(scan_id: str):
 @app.get("/api/results/{scan_id}/payloads", tags=["Results"])
 async def download_payloads(scan_id: str):
     """Download all payloads tested per phase as a JSON file."""
-    fname = _find_result_file(scan_id)
-    if not fname:
+    data = _load_raw_result_dict(scan_id)
+    if not data:
         return JSONResponse({"error": "Not found"}, status_code=404)
-
-    data = json.loads(Path(fname).read_text(encoding="utf-8"))
     test_log = data.get("summary", {}).get("test_log", [])
     phase_log = data.get("summary", {}).get("phase_log", [])
     target = data.get("target", "")
@@ -1900,9 +3060,12 @@ async def download_payloads(scan_id: str):
         "phases": list(phases_map.values()),
     }
 
-    out_file = RAW_DIR / f"payloads_{scan_id}.json"
-    out_file.write_text(json.dumps(output, indent=2, default=str), encoding="utf-8")
-    return FileResponse(str(out_file), filename=f"payloads_{scan_id}.json", media_type="application/json")
+    blob = json.dumps(output, indent=2, default=str).encode("utf-8")
+    return StreamingResponse(
+        BytesIO(blob),
+        media_type="application/json",
+        headers={"Content-Disposition": f'attachment; filename="payloads_{scan_id}.json"'},
+    )
 
 
 @app.get("/api/scan/{scan_id}/payloads-live", tags=["Scans"])
@@ -1923,19 +3086,6 @@ async def download_live_payloads(scan_id: str):
         "activity_log": tests,
     }
     return JSONResponse(output)
-
-
-def _find_result_file(scan_id: str) -> str | None:
-    if scan_id in SCANS and SCANS[scan_id].get("result_file"):
-        fpath = RAW_DIR / SCANS[scan_id]["result_file"]
-        if fpath.exists():
-            return str(fpath)
-    for f in RAW_DIR.glob("*.json"):
-        if scan_id in f.stem:
-            return str(f)
-    if (RAW_DIR / f"{scan_id}.json").exists():
-        return str(RAW_DIR / f"{scan_id}.json")
-    return None
 
 
 def _extract_crawled(summary: dict, test_log: list) -> list[dict]:

@@ -20,6 +20,7 @@ archive/
 # Temp / test / debug scripts
 _*.py
 _*.js
+_*.sh
 test_*.py
 test_*.png
 !openclaw-skill/test_skill.py

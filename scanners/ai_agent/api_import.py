@@ -385,6 +385,146 @@ def _traverse_postman_items(
     return endpoints
 
 
+def _burp_request_line_and_rest(raw: str) -> tuple[str, str, dict[str, str], str] | None:
+    """Parse raw HTTP request into (method, path_with_query, headers, body)."""
+    raw = raw.replace("\r\n", "\n").replace("\r", "\n")
+    lines = raw.split("\n")
+    if not lines:
+        return None
+    first = lines[0].strip().split()
+    if len(first) < 2:
+        return None
+    method, path_q = first[0].upper(), first[1]
+    headers: dict[str, str] = {}
+    i = 1
+    while i < len(lines):
+        line = lines[i]
+        i += 1
+        if not line.strip():
+            break
+        if ":" not in line:
+            continue
+        k, _, v = line.partition(":")
+        headers[k.strip()] = v.strip()
+    body = "\n".join(lines[i:]).rstrip()
+    return method, path_q, headers, body
+
+
+def _burp_auth_from_headers(headers: dict[str, str]) -> tuple[str, str | None]:
+    auth_val = None
+    for hk, hv in headers.items():
+        if hk.lower() == "authorization":
+            auth_val = hv.strip()
+            break
+    if auth_val:
+        low = auth_val.lower()
+        if low.startswith("bearer "):
+            return "bearer", auth_val[7:].strip()
+        if low.startswith("basic "):
+            return "basic", auth_val[6:].strip()
+    cookie_val = None
+    for hk, hv in headers.items():
+        if hk.lower() == "cookie":
+            cookie_val = hv.strip()
+            break
+    if cookie_val:
+        return "cookie", cookie_val
+    return "none", None
+
+
+def _burp_body_type(headers: dict[str, str], body: str) -> str:
+    ct = ""
+    for hk, hv in headers.items():
+        if hk.lower() == "content-type":
+            ct = hv.split(";")[0].strip().lower()
+            break
+    if "json" in ct:
+        return "json"
+    if "urlencoded" in ct or "x-www-form-urlencoded" in ct:
+        return "form"
+    if "graphql" in ct:
+        return "graphql"
+    if body:
+        return "raw"
+    return "none"
+
+
+def _burp_static_path(path_only: str) -> bool:
+    pl = path_only.lower()
+    return any(pl.endswith(ext) for ext in STATIC_ASSET_EXTENSIONS)
+
+
+def _endpoint_from_burp_raw(method: str, path_query: str, headers: dict[str, str], body: str) -> APIEndpoint | None:
+    if not path_query.startswith("/"):
+        return None
+    dummy = "http://burp.local" + path_query
+    parsed = urlparse(dummy)
+    path_only = parsed.path or "/"
+    if _burp_static_path(path_only):
+        return None
+    qparams = _query_params_to_dict(dummy)
+    host = ""
+    for hk, hv in headers.items():
+        if hk.lower() == "host":
+            host = hv.strip()
+            break
+    scheme = "https"
+    full_url = f"{scheme}://{host}{path_query}" if host else path_query
+    auth_type, auth_value = _burp_auth_from_headers(headers)
+    bt = _burp_body_type(headers, body)
+    body_out = body if body else None
+    return APIEndpoint(
+        method=method,
+        url=full_url,
+        path=path_only,
+        headers=headers,
+        query_params=qparams,
+        body=body_out,
+        body_type=bt,
+        auth_type=auth_type,
+        auth_value=auth_value,
+        tags=[],
+        variables={},
+        original_name=f"{method} {path_only}",
+    )
+
+
+def parse_burp_export(filepath: str) -> list[APIEndpoint]:
+    """Parse Burp Suite proxy history exported as XML."""
+    import xml.etree.ElementTree as ET
+
+    path = Path(filepath)
+    if not path.exists():
+        logger.error("Burp export file not found: %s", filepath)
+        return []
+    try:
+        root = ET.fromstring(path.read_text(encoding="utf-8", errors="replace"))
+    except ET.ParseError as e:
+        logger.error("Invalid Burp XML: %s - %s", filepath, e)
+        return []
+    out: list[APIEndpoint] = []
+    for item in root.findall(".//item"):
+        req_el = item.find("request")
+        if req_el is None:
+            continue
+        text = (req_el.text or "").strip()
+        if not text:
+            continue
+        is_b64 = (req_el.get("base64") or "").lower() == "true"
+        try:
+            raw = base64.b64decode(text).decode("utf-8", errors="replace") if is_b64 else text
+        except Exception:
+            raw = text
+        parsed = _burp_request_line_and_rest(raw)
+        if not parsed:
+            continue
+        m, pq, hdrs, body = parsed
+        ep = _endpoint_from_burp_raw(m, pq, hdrs, body)
+        if ep:
+            out.append(ep)
+    return out
+
+
 def parse_postman_collection(filepath: str, env_filepath: str | None = None) -> list[APIEndpoint]:
     path = Path(filepath)
     if not path.exists():

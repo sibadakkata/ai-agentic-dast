@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any, Awaitable, Callable
 from urllib.parse import parse_qs, urlparse
 
 import pyotp
+import tldextract
 import yaml
 from playwright.async_api import Page
 
@@ -22,6 +23,12 @@ try:
     import jwt
 except ImportError:
     jwt = None
+
+try:
+    from playwright_stealth import Stealth
+    _stealth = Stealth()
+except ImportError:
+    _stealth = None
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +52,8 @@ class AuthResult:
     tokens: dict[str, str]
     cookies: list[dict]
     success: bool
+    captcha_detected: bool = False
+    screenshot_b64: str = ""
 
 
 @dataclass
@@ -91,6 +100,44 @@ def _is_login_url(url: str) -> bool:
     except Exception:
         check_str = url.lower()
     return any(ind in check_str for ind in LOGIN_PAGE_INDICATORS)
+
+
+async def _detect_captcha(page: Page) -> bool:
+    """Check if the current page contains a CAPTCHA challenge."""
+    try:
+        return await page.evaluate("""() => {
+            // reCAPTCHA v2/v3
+            if (document.querySelector('iframe[src*="recaptcha"]')) return true;
+            if (document.querySelector('iframe[src*="google.com/recaptcha"]')) return true;
+            if (document.querySelector('.g-recaptcha')) return true;
+            if (document.querySelector('#recaptcha')) return true;
+            // hCaptcha
+            if (document.querySelector('iframe[src*="hcaptcha"]')) return true;
+            if (document.querySelector('.h-captcha')) return true;
+            // Cloudflare Turnstile
+            if (document.querySelector('iframe[src*="challenges.cloudflare.com"]')) return true;
+            if (document.querySelector('.cf-turnstile')) return true;
+            // Generic CAPTCHA indicators
+            if (document.querySelector('[class*="captcha" i]')) return true;
+            if (document.querySelector('[id*="captcha" i]')) return true;
+            // Check for CAPTCHA-related text
+            const bodyText = (document.body && document.body.innerText || '').toLowerCase();
+            if (bodyText.includes('verify you are human') || bodyText.includes('are you a robot')
+                || bodyText.includes('complete the security check')) return true;
+            return false;
+        }""")
+    except Exception:
+        return False
+
+
+async def _take_screenshot_b64(page: Page) -> str:
+    """Take a screenshot and return as base64 string."""
+    try:
+        raw = await page.screenshot(full_page=False, type="png")
+        return base64.b64encode(raw).decode("ascii")
+    except Exception as e:
+        logger.warning("Screenshot failed: %s", e)
+        return ""
 
 
 def _jwt_expired(token: str) -> bool:
@@ -257,6 +304,12 @@ async def _click_visible_submit(page: Page, submit_sel: str | None, form_sel: st
         try:
             loc = page.locator(sel).first
             if await loc.is_visible(timeout=500):
+                is_disabled = await loc.is_disabled(timeout=500)
+                if is_disabled:
+                    logger.debug("Button %s is visible but disabled, skipping", sel)
+                    continue
+                btn_text = await loc.inner_text(timeout=500)
+                print(f"  [AUTH-DEBUG] Clicking button: '{btn_text.strip()[:30]}' (sel={sel})")
                 await loc.click(timeout=3000)
                 return
         except Exception:
@@ -267,6 +320,7 @@ async def _click_visible_submit(page: Page, submit_sel: str | None, form_sel: st
             return
         except Exception:
             pass
+    print(f"  [AUTH-DEBUG] No visible submit button found, pressing Enter")
     await page.keyboard.press("Enter")
 
 
@@ -275,6 +329,9 @@ async def detect_and_login(
     target: ScanTarget,
     router: LLMRouter,
     model: str,
+    interactive_session: dict | None = None,
+    on_progress: Callable | None = None,
+    cancel_flag: Any = None,
 ) -> AuthResult:
 
     try:
@@ -318,6 +375,12 @@ async def detect_and_login(
     username = credentials.get("username", "")
     password = credentials.get("password", "")
 
+    logger.info("[AUTH-DEBUG] Flow=%s, username_sel=%s, password_sel=%s, submit_sel=%s, sso_sel=%s",
+                flow, username_sel, password_sel, submit_sel, sso_sel)
+    print(f"  [AUTH-DEBUG] Flow={flow}, user_sel={username_sel}, pw_sel={password_sel}")
+    print(f"  [AUTH-DEBUG] submit_sel={submit_sel}")
+    print(f"  [AUTH-DEBUG] URL before interaction: {page.url[:120]}")
+
     try:
         if flow == "sso" or flow == "oauth":
             if sso_sel:
@@ -332,20 +395,86 @@ async def detect_and_login(
             await page.wait_for_load_state("networkidle", timeout=15000)
 
         if username_sel and username:
+            print(f"  [AUTH-DEBUG] Filling username: {username[:20]}***")
             await page.fill(username_sel, username, timeout=5000)
+            await asyncio.sleep(0.5)
+            print(f"  [AUTH-DEBUG] Username filled OK")
         if password_sel and password:
             try:
                 await page.fill(password_sel, password, timeout=2000)
+                await asyncio.sleep(0.5)
+                print(f"  [AUTH-DEBUG] Password filled OK (same page)")
             except Exception:
+                print(f"  [AUTH-DEBUG] Password field not visible yet, clicking submit to advance...")
                 await _click_visible_submit(page, submit_sel, form_sel)
-                await page.wait_for_load_state("networkidle", timeout=10000)
-                await asyncio.sleep(2)
-                await page.fill(password_sel, password, timeout=8000)
+                await page.wait_for_load_state("networkidle", timeout=15000)
+                await asyncio.sleep(3)
+                print(f"  [AUTH-DEBUG] URL after username step: {page.url[:120]}")
+                # Capture error messages after username step
+                try:
+                    errs = await page.evaluate("""() => {
+                        const els = document.querySelectorAll('[class*="error"], [class*="alert"], [role="alert"], .error-message, .field-error');
+                        return Array.from(els).map(e => e.innerText).filter(t => t.trim()).join(' | ');
+                    }""")
+                    if errs:
+                        print(f"  [AUTH-DEBUG] Error messages after username: {errs[:200]}")
+                except Exception:
+                    pass
+                try:
+                    await page.fill(password_sel, password, timeout=8000)
+                except Exception:
+                    # Fallback: type character by character (triggers more JS events)
+                    print(f"  [AUTH-DEBUG] fill() failed, trying type() for password...")
+                    try:
+                        await page.click(password_sel, timeout=3000)
+                        await page.keyboard.type(password, delay=50)
+                    except Exception as type_err:
+                        print(f"  [AUTH-DEBUG] type() also failed: {type_err}")
+                        raise
+                await asyncio.sleep(0.5)
+                print(f"  [AUTH-DEBUG] Password filled OK (second step)")
 
+        # Wait a moment for form validation JS to enable submit button
+        await asyncio.sleep(1)
+        url_before_submit = page.url
+        print(f"  [AUTH-DEBUG] Clicking submit button...")
         await _click_visible_submit(page, submit_sel, form_sel)
-        await page.wait_for_load_state("networkidle", timeout=15000)
+        print(f"  [AUTH-DEBUG] Submit clicked, waiting for navigation...")
+
+        # Wait for navigation (OIDC redirect) rather than just networkidle
+        try:
+            await page.wait_for_url(lambda url: urlparse(url).hostname != urlparse(url_before_submit).hostname,
+                                    timeout=20000)
+            print(f"  [AUTH-DEBUG] URL changed to different host: {page.url[:120]}")
+        except Exception:
+            # Fallback to networkidle
+            try:
+                await page.wait_for_load_state("networkidle", timeout=10000)
+            except Exception:
+                pass
+            print(f"  [AUTH-DEBUG] URL after submit: {page.url[:120]}")
+
+        # Capture any error messages after submit
+        try:
+            errs = await page.evaluate("""() => {
+                const els = document.querySelectorAll('[class*="error"], [class*="alert"], [role="alert"], .error-message, .field-error, [class*="Error"]');
+                return Array.from(els).map(e => e.innerText).filter(t => t.trim()).join(' | ');
+            }""")
+            if errs:
+                print(f"  [AUTH-DEBUG] Error messages after login: {errs[:300]}")
+        except Exception:
+            pass
+
+        # Capture full visible text on the page after submit
+        try:
+            visible = await page.evaluate("() => document.body ? document.body.innerText.substring(0, 800) : ''")
+            if visible.strip():
+                print(f"  [AUTH-DEBUG] Page text after submit: {visible.strip()[:400]}")
+        except Exception:
+            pass
     except Exception as e:
         logger.warning("Login interaction failed: %s", e)
+        print(f"  [AUTH-DEBUG] Login interaction FAILED: {e}")
     auth_config = target.auth_config or {}
     totp_secret = auth_config.get("totp_secret")
     if totp_secret:
@@ -379,17 +508,22 @@ async def detect_and_login(
 
     # Wait for OIDC redirect chain to land on target host
     target_host = urlparse(target.url).hostname or ""
+    print(f"  [AUTH-DEBUG] Waiting for OIDC redirect to {target_host}...")
     try:
         current_host = urlparse(page.url or "").hostname or ""
+        print(f"  [AUTH-DEBUG] Current host: {current_host}")
         if target_host and current_host != target_host:
-            for _ in range(6):
+            for wait_i in range(10):
                 await asyncio.sleep(3)
                 current_host = urlparse(page.url or "").hostname or ""
+                print(f"  [AUTH-DEBUG] OIDC wait {wait_i+1}/10: host={current_host}, url={page.url[:100]}")
                 if current_host == target_host:
+                    print(f"  [AUTH-DEBUG] Landed on target host!")
                     break
             if current_host != target_host:
                 logger.info("OIDC redirect didn't land on %s (on %s), navigating directly...",
                             target_host, current_host)
+                print(f"  [AUTH-DEBUG] OIDC redirect FAILED, navigating directly to {target.url[:80]}...")
                 try:
                     await page.goto(target.url, wait_until="domcontentloaded", timeout=30000)
                     try:
@@ -397,10 +531,51 @@ async def detect_and_login(
                     except Exception:
                         pass
                     await asyncio.sleep(3)
-                except Exception:
-                    pass
-    except Exception:
-        pass
+                    print(f"  [AUTH-DEBUG] After direct nav: {page.url[:120]}")
+                except Exception as nav_e:
+                    print(f"  [AUTH-DEBUG] Direct nav failed: {nav_e}")
+        else:
+            print(f"  [AUTH-DEBUG] Already on target host: {current_host}")
+    except Exception as e:
+        print(f"  [AUTH-DEBUG] OIDC redirect check error: {e}")
+
+    # Check if we're still on the login page (auth failed)
+    final_check_host = urlparse(page.url or "").hostname or ""
+    auth_failed = final_check_host != target_host and _is_login_url(page.url or "")
+
+    if auth_failed:
+        print(f"  [AUTH] Login failed — still on {final_check_host}, not {target_host}")
+        has_captcha = await _detect_captcha(page)
+        screenshot_b64 = await _take_screenshot_b64(page)
+
+        if has_captcha:
+            print(f"  [AUTH] CAPTCHA detected on login page!")
+        else:
+            print(f"  [AUTH] No CAPTCHA detected — credentials may be wrong or bot detection active")
+
+        # Prefer interactive browser for CAPTCHA resolution (user logs in directly)
+        if interactive_session and (has_captcha or auth_failed):
+            _cb = on_progress or (lambda *a, **k: None)
+            print(f"  [AUTH] Opening interactive browser for manual login...")
+            _cb("auth_challenge", {
+                "screenshot": screenshot_b64,
+                "has_captcha": has_captcha,
+                "message": "Login blocked — use the live browser to log in manually.",
+            })
+            interactive_result = await _run_interactive_login(
+                page, target, interactive_session,
+                on_progress=on_progress, cancel_flag=cancel_flag,
+            )
+            _cb("auth_challenge_resolved", {})
+            if interactive_result.success:
+                return interactive_result
+            print(f"  [AUTH] Interactive login did not succeed — auth failed")
+
+        if auth_failed:
+            return AuthResult(
+                auth_type="form", tokens={}, cookies=[], success=False,
+                captcha_detected=has_captcha, screenshot_b64=screenshot_b64,
+            )
 
     try:
         cookies = await page.context.cookies()
@@ -431,6 +606,40 @@ async def detect_and_login(
     except Exception as e:
         logger.error("Auth verification failed: %s", e)
         return AuthResult(auth_type="form", tokens={}, cookies=[], success=False)
+
+
+def _extract_root_domain(hostname: str) -> str:
+    """Extract the registered root domain from any hostname using the Public Suffix List.
+    Examples: my.norton.com -> norton.com, app.bbc.co.uk -> bbc.co.uk, 192.168.1.1 -> 192.168.1.1"""
+    hostname = hostname.lstrip(".")
+    ext = tldextract.extract(hostname)
+    if ext.domain and ext.suffix:
+        return f"{ext.domain}.{ext.suffix}"
+    return hostname
+
+
+def _parse_cookie_string(cookie_str: str, domain: str) -> list[dict]:
+    """Parse a raw cookie string like 'name1=val1; name2=val2' into Playwright cookie dicts.
+    Sets cookies on the root domain so they work across all subdomains."""
+    root = _extract_root_domain(domain)
+    cookie_domain = f".{root}" if not root.startswith(".") else root
+
+    cookies = []
+    for part in cookie_str.split(";"):
+        part = part.strip()
+        if "=" not in part:
+            continue
+        name, _, value = part.partition("=")
+        name = name.strip()
+        value = value.strip()
+        if name:
+            cookies.append({
+                "name": name,
+                "value": value,
+                "domain": cookie_domain,
+                "path": "/",
+            })
+    return cookies
 
 
 async def detect_app_type(page: Page) -> dict[str, Any]:
@@ -475,11 +684,156 @@ async def detect_app_type(page: Page) -> dict[str, Any]:
     return result
 
 
+async def _run_interactive_login(
+    page: Page,
+    target: ScanTarget,
+    interactive_session: dict,
+    on_progress: Callable | None = None,
+    cancel_flag: Any = None,
+) -> AuthResult:
+    """Let the user log in manually via the interactive browser.
+
+    Streams screenshots from the Playwright page into ``interactive_session``
+    and applies mouse/keyboard events coming from the frontend.
+    Blocks until the user signals "done" or timeout (10 min).
+    """
+    _cb = on_progress or (lambda *a, **k: None)
+    viewport = page.viewport_size or {"width": 1280, "height": 720}
+    interactive_session["viewport"] = (viewport["width"], viewport["height"])
+    interactive_session["active"].set()
+
+    _cb("interactive_browser_ready", {"viewport": [viewport["width"], viewport["height"]]})
+    print(f"  [AUTH-INTERACTIVE] Browser ready — viewport {viewport['width']}x{viewport['height']}")
+    print(f"  [AUTH-INTERACTIVE] Current URL: {page.url}")
+
+    timeout = 600  # 10 minutes
+    elapsed = 0.0
+    frame_interval = 0.25
+
+    try:
+        while not interactive_session["done"].is_set() and elapsed < timeout:
+            if cancel_flag and cancel_flag.is_set():
+                raise Exception("Scan cancelled during interactive login")
+
+            # Take screenshot (JPEG for smaller size / faster streaming)
+            try:
+                raw = await page.screenshot(type="jpeg", quality=55)
+                interactive_session["screenshot_b64"] = base64.b64encode(raw).decode("ascii")
+            except Exception as e:
+                logger.debug("Interactive screenshot failed: %s", e)
+
+            # Process queued input events from frontend
+            events_queue = interactive_session["events"]
+            while not events_queue.empty():
+                try:
+                    evt = events_queue.get_nowait()
+                except Exception:
+                    break
+                await _apply_browser_event(page, evt, viewport)
+
+            await asyncio.sleep(frame_interval)
+            elapsed += frame_interval
+    finally:
+        interactive_session["active"].clear()
+        _cb("interactive_browser_done", {})
+
+    if elapsed >= timeout:
+        print("  [AUTH-INTERACTIVE] Timeout — user did not complete login in 10 min")
+        return AuthResult(auth_type="interactive_login", tokens={}, cookies=[], success=False)
+
+    # After user signals "done", wait for any in-flight OIDC/SSO redirects to
+    # land on the actual target host (not just the same root domain).
+    target_host = urlparse(target.url).hostname or ""
+    target_root = _extract_root_domain(target_host)
+
+    # Give SSO redirects up to 15 seconds to complete
+    for _redir_wait in range(30):
+        current_host = urlparse(page.url or "").hostname or ""
+        if current_host == target_host:
+            break
+        current_root = _extract_root_domain(current_host)
+        if current_root != target_root:
+            break  # navigated away from target domain entirely
+        print(f"  [AUTH-INTERACTIVE] Waiting for SSO redirect... ({current_host} → {target_host})")
+        await asyncio.sleep(0.5)
+
+    # Now navigate to the actual target URL if we're not there yet
+    current_host = urlparse(page.url or "").hostname or ""
+    if current_host != target_host:
+        print(f"  [AUTH-INTERACTIVE] Navigating to target: {target.url}")
+        try:
+            await page.goto(target.url, wait_until="domcontentloaded", timeout=15000)
+            await page.wait_for_load_state("networkidle", timeout=10000)
+        except Exception as e:
+            print(f"  [AUTH-INTERACTIVE] Navigation to target failed: {e}")
+
+    cookies = await page.context.cookies()
+    final_url = page.url or ""
+    current_host = urlparse(final_url).hostname or ""
+    current_root = _extract_root_domain(current_host)
+    on_target = current_root == target_root
+
+    # Detect if we got redirected back to a login/SSO page
+    login_indicators = ["login", "signin", "sso/idp", "auth/realms", "oauth", "accounts.google"]
+    redirected_to_login = any(ind in final_url.lower() for ind in login_indicators)
+
+    if redirected_to_login:
+        print(f"  [AUTH-INTERACTIVE] Redirected to login page — auth NOT successful: {final_url[:120]}")
+        return AuthResult(auth_type="interactive_login", tokens={}, cookies=cookies, success=False)
+
+    if on_target and cookies and current_host == target_host:
+        print(f"  [AUTH-INTERACTIVE] Login succeeded — URL: {final_url}, cookies: {len(cookies)}")
+        return AuthResult(auth_type="interactive_login", tokens={}, cookies=cookies, success=True)
+
+    if on_target and cookies:
+        print(f"  [AUTH-INTERACTIVE] On target domain but different host — URL: {final_url}, cookies: {len(cookies)}")
+        return AuthResult(auth_type="interactive_login", tokens={}, cookies=cookies, success=True)
+
+    print(f"  [AUTH-INTERACTIVE] Login not confirmed — current: {current_host} (root: {current_root}), "
+          f"expected: {target_host} (root: {target_root}), cookies: {len(cookies)}")
+    return AuthResult(auth_type="interactive_login", tokens={}, cookies=cookies, success=False)
+
+
+async def _apply_browser_event(page: Page, evt: dict, viewport: dict) -> None:
+    """Translate a frontend input event into a Playwright action on the page."""
+    try:
+        etype = evt.get("type", "")
+        if etype == "click":
+            x = evt.get("x", 0) * viewport["width"]
+            y = evt.get("y", 0) * viewport["height"]
+            button = evt.get("button", "left")
+            click_count = evt.get("clickCount", 1)
+            await page.mouse.click(x, y, button=button, click_count=click_count)
+        elif etype == "type":
+            text = evt.get("text", "")
+            if text:
+                await page.keyboard.type(text, delay=20)
+        elif etype == "keypress":
+            key = evt.get("key", "")
+            if key:
+                await page.keyboard.press(key)
+        elif etype == "scroll":
+            x = evt.get("x", 0.5) * viewport["width"]
+            y = evt.get("y", 0.5) * viewport["height"]
+            dx = evt.get("deltaX", 0)
+            dy = evt.get("deltaY", 0)
+            await page.mouse.wheel(dx, dy)
+        elif etype == "mousemove":
+            x = evt.get("x", 0) * viewport["width"]
+            y = evt.get("y", 0) * viewport["height"]
+            await page.mouse.move(x, y)
+    except Exception as e:
+        logger.debug("Interactive event error (%s): %s", evt.get("type"), e)
+
+
 async def authenticate(
     browser: Any,
     target: ScanTarget,
     router: LLMRouter,
     model: str,
+    interactive_session: dict | None = None,
+    on_progress: Callable | None = None,
+    cancel_flag: Any = None,
 ) -> AuthSession:
     auth_config = target.auth_config or {}
     auth_type_config = (auth_config.get("type") or "auto").lower()
@@ -489,13 +843,32 @@ async def authenticate(
 
     page = await browser.new_page()
 
+    # Apply stealth patches to hide automation fingerprints (navigator.webdriver,
+    # chrome.runtime, plugins, etc.).  Runs a handful of JS snippets — no delay.
+    if _stealth:
+        try:
+            await _stealth.apply_stealth_async(page)
+            logger.info("Stealth anti-detection patches applied")
+        except Exception as e:
+            logger.debug("Stealth patches failed (non-fatal): %s", e)
+
     # Start network-level JS capture from the very first navigation.
     # This captures every .js request (login page, OIDC redirects, SPA chunks,
     # CDN scripts, iframe resources) regardless of timing.
     from .passive_recon import start_js_network_capture
     network_js_urls = start_js_network_capture(page)
 
-    if not has_creds and auth_type_config in ("auto", "form", "sso", "oauth"):
+    if auth_type_config == "interactive_login" and interactive_session:
+        logger.info("Interactive login mode — opening browser for manual login")
+        try:
+            await page.goto(target.url, wait_until="domcontentloaded", timeout=60000)
+        except Exception:
+            logger.warning("Initial page load timed out — continuing with interactive login")
+        result = await _run_interactive_login(
+            page, target, interactive_session,
+            on_progress=on_progress, cancel_flag=cancel_flag,
+        )
+    elif not has_creds and auth_type_config in ("auto", "form", "sso", "oauth"):
         logger.info("No credentials supplied — running unauthenticated scan")
         try:
             await page.goto(target.url, wait_until="domcontentloaded", timeout=60000)
@@ -536,10 +909,16 @@ async def authenticate(
             await page.goto(target.url, wait_until="load", timeout=60000)
         except Exception:
             logger.warning("Initial page load timed out — continuing with auth attempt")
-        result = await detect_and_login(page, target, router, model)
+        result = await detect_and_login(
+            page, target, router, model,
+            interactive_session=interactive_session,
+            on_progress=on_progress, cancel_flag=cancel_flag,
+        )
 
     def _refresh_fn() -> Awaitable[AuthResult]:
-        return detect_and_login(page, target, router, model)
+        return detect_and_login(page, target, router, model,
+                                interactive_session=interactive_session,
+                                on_progress=on_progress, cancel_flag=cancel_flag)
 
     session = AuthSession(
         page=page,
@@ -551,6 +930,7 @@ async def authenticate(
         target_url=target.url,
     )
     session.network_js_urls = network_js_urls
+    session.captcha_detected = getattr(result, "captcha_detected", False)
     session.start_monitor()
     return session
 

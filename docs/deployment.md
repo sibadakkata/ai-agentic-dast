@@ -32,6 +32,25 @@ bash deploy.sh
 # → Web UI at http://<EC2-IP>:8080
 ```
 
+### Verify deployment (smoke + optional full scan)
+
+From your laptop (same network as allowed to reach the instance):
+
+```bash
+# Read-only HTTP checks
+export DAST_BASE_URL=http://YOUR_HOST:8080
+export DAST_AUTH_USER=dast-admin
+export DAST_AUTH_PASS=YourStrongPassword   # if ui-settings is protected
+python scripts/run_regression_ec2.py --pytest
+
+# Start a short scan against a public test app (OWASP Juice Shop demo by default)
+export DAST_BASE_URL=http://YOUR_HOST:8080
+python scripts/e2e_remote_scan.py --smoke    # health + POST /api/scan + running status
+python scripts/e2e_remote_scan.py            # wait until completed / error (needs LLM keys on server)
+```
+
+Override target: `E2E_TARGET_URL=https://...` or `--target-url`. Use only sites you are authorized to test.
+
 ### Environment Variables
 
 ```bash

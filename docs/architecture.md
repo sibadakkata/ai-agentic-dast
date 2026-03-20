@@ -106,53 +106,73 @@ The core scanning logic follows an **Observe-Think-Act-Analyze-Plan** cycle:
 
 ## Scan Phases
 
-### Website Phases (22)
+> Full phase prompt details: [System Prompt Guide](system-prompt-guide.md)
 
-| # | Phase | OWASP | Context-Aware |
-|---|-------|-------|---------------|
-| 1 | Application Mapping | — | |
-| 2 | Broken Access Control | A01 | |
-| 3 | Cryptographic Failures | A02 | |
-| 4 | SQL Injection | A03 | |
-| 5 | Cross-Site Scripting | A03 | |
-| 6 | Command Injection | A03 | |
-| 7 | Template Injection (SSTI) | A03 | |
-| 8 | Insecure Design / Business Logic | A04 | |
-| 9 | Security Misconfiguration | A05 | |
-| 10 | Vulnerable Components | A06 | |
-| 11 | Authentication Failures | A07 | |
-| 12 | Integrity Failures | A08 | |
-| 13 | Logging Failures | A09 | |
-| 14 | SSRF | A10 | |
-| 15 | WebSocket Testing | — | |
-| 16 | Beyond OWASP (CRLF, CSRF, etc.) | — | |
-| 17 | Race Condition Testing | A04 | ✓ Concurrent requests on state-changing ops |
-| 18 | Host Header Poisoning | A05 | ✓ Tests reflection in reset links/redirects |
-| 19 | Timing-Based Enumeration | A07 | ✓ Response time analysis for user enumeration |
-| 20 | Broken Function-Level Auth | A01 | ✓ Admin endpoint access with normal user |
-| 21 | File Upload Testing | A04 | ✓ Extension bypass, content-type mismatch, polyglot |
-| 22 | Password Reset Flow | A07 | ✓ Token predictability, account enumeration |
-| 23 | Session Management | A07 | ✓ Fixation, rotation, concurrent sessions |
+### Website Phases (25)
+
+| # | Phase ID | Name | OWASP | Context-Aware |
+|---|----------|------|-------|---------------|
+| 1 | `web_recon` | Application Mapping | — | |
+| 2 | `web_a01` | Broken Access Control | A01 | |
+| 3 | `web_a02` | Cryptographic Failures | A02 | |
+| 4 | `web_a03_sqli` | SQL Injection | A03 | ✓ DB-specific payloads (SQLite/MySQL/PG/MSSQL) |
+| 5 | `web_a03_xss` | Cross-Site Scripting | A03 | ✓ Context-aware (HTML/attr/JS/DOM) |
+| 6 | `web_a03_cmdi` | Command Injection | A03 | ✓ Unix/Windows, header injection |
+| 7 | `web_a03_ssti` | Template Injection (SSTI) | A03 | ✓ Engine-specific (Jinja2/Pebble/EJS/Mako) |
+| 8 | `web_a03_path_traversal` | Path Traversal / LFI | A03 | ✓ Encoded, double-encoded, null byte, wrappers |
+| 9 | `web_a03_xxe` | XML External Entity | A03 | ✓ Blind XXE, parameter entities, SVG upload |
+| 10 | `web_a04` | Insecure Design | A04 | ✓ Price tampering, step skipping, coupon abuse |
+| 11 | `web_a05` | Security Misconfiguration | A05 | |
+| 12 | `web_a06` | Vulnerable Components | A06 | |
+| 13 | `web_a07` | Authentication Failures | A07 | |
+| 14 | `web_a08` | Integrity Failures | A08 | |
+| 15 | `web_a09` | Logging Failures | A09 | |
+| 16 | `web_a10` | SSRF | A10 | |
+| 17 | `web_websocket` | WebSocket Testing | — | |
+| 18 | `web_extras` | Beyond OWASP (CRLF, CSRF) | — | |
+| 19 | `web_race_condition` | Race Condition Testing | A04 | ✓ Parallel fetch via execute_js |
+| 20 | `web_host_header` | Host Header Poisoning | A05 | ✓ Reflection in reset links/redirects |
+| 21 | `web_timing_enum` | Timing-Based Enumeration | A07 | ✓ Response time analysis for user enum |
+| 22 | `web_bfla` | Broken Function-Level Auth | A01 | ✓ Admin endpoint access with normal user |
+| 23 | `web_file_upload` | File Upload Testing | A04 | ✓ Extension bypass, polyglot |
+| 24 | `web_password_reset` | Password Reset Flow | A07 | ✓ Token predictability |
+| 25 | `web_session_mgmt` | Session Management | A07 | ✓ Fixation, rotation, concurrent sessions |
 
 ### API Phases (15)
 
-| # | Phase | Focus | Context-Aware |
-|---|-------|-------|---------------|
-| 1 | Endpoint Discovery | Hidden/undocumented endpoints | |
-| 2 | Authentication Testing | Token validation, JWT manipulation | |
-| 3 | Authorization / BOLA | IDOR, horizontal/vertical escalation | |
-| 4 | Injection Testing | SQLi, NoSQLi, XSS in JSON, XXE | |
-| 5 | Mass Assignment | Extra fields, role escalation | |
-| 6 | Rate Limiting | Brute-force resistance | |
-| 7 | SSRF | URL-accepting parameters, metadata probes | |
-| 8 | GraphQL | Introspection, batching, deep nesting | |
-| 9 | Excessive Data Exposure | PII leakage, debug data | |
-| 10 | Business Logic | Flow bypass, race conditions, price tampering | |
-| 11 | Race Conditions | Concurrent requests on state-changing endpoints | ✓ |
-| 12 | Function-Level Auth | Admin/management endpoint access | ✓ |
-| 13 | Host Header Injection | X-Forwarded-Host, path override | ✓ |
-| 14 | Content-Type Confusion | JSON↔XML↔form-data parser attacks | ✓ |
-| 15 | HTTP Method Override | X-HTTP-Method-Override bypass | ✓ |
+| # | Phase ID | Name | Focus | Context-Aware |
+|---|----------|------|-------|---------------|
+| 1 | `api_recon` | Endpoint Discovery | Hidden/undocumented endpoints | |
+| 2 | `api_auth` | Authentication Testing | Token validation, JWT manipulation | |
+| 3 | `api_authz` | Authorization / BOLA | IDOR, horizontal/vertical escalation | |
+| 4 | `api_injection` | Injection Testing | SQLi, NoSQLi, XSS, CMDi, XXE in JSON | ✓ |
+| 5 | `api_mass_assign` | Mass Assignment | Extra fields, role escalation | |
+| 6 | `api_rate_limit` | Rate Limiting | Brute-force resistance | |
+| 7 | `api_ssrf` | SSRF | URL-accepting params, metadata probes | |
+| 8 | `api_graphql` | GraphQL | Introspection, batching, deep nesting | |
+| 9 | `api_data_exposure` | Data Exposure | PII leakage, debug data | |
+| 10 | `api_business_logic` | Business Logic | Flow bypass, race conditions, price tampering | |
+| 11 | `api_race_condition` | Race Conditions | Concurrent state-changing requests | ✓ |
+| 12 | `api_bfla` | Function-Level Auth | Admin/management endpoint access | ✓ |
+| 13 | `api_host_header` | Host Header Injection | X-Forwarded-Host, path override | ✓ |
+| 14 | `api_content_type` | Content-Type Confusion & HTTP Smuggling | JSON↔XML↔form parser + CL.TE/TE.CL | ✓ |
+| 15 | `api_method_override` | HTTP Method Override | X-HTTP-Method-Override bypass | ✓ |
+
+### Attack Chain Phase (1)
+
+`attack_chain_analysis` — runs after all phases, combines findings into exploit chains (e.g. XSS + non-HttpOnly cookie → session hijack).
+
+### Reliability Mechanisms
+
+| Mechanism | File | Purpose |
+|-----------|------|---------|
+| **Evidence Buffer** | `agent.py` | Preserves compact test records that survive context trimming |
+| **Phase Retry** | `agent.py` `_RETRY_PHASES` | Re-attempts critical phases if 0 findings found (12 phases) |
+| **Min Security Calls** | `agent.py` `_MIN_SECURITY_CALLS` | Forces LLM to make enough tool calls before concluding (22 phases) |
+| **Finding Grounding** | `agent.py` `extract_findings` | Rejects findings without payload/evidence from actual tool output |
+| **Vuln Signal Extraction** | `tools.py` | Auto-detects SQL/XSS/CMDi/SSTI patterns and flags them prominently |
+
+> Deep dive on these mechanisms: [Scanner Internals](scanner-internals.md)
 
 ## Tool System (28 Tools)
 

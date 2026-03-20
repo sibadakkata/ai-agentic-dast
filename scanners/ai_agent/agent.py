@@ -84,10 +84,14 @@ _LOGIN_PAGE_INDICATORS = (
 
 
 async def _check_session_lost(page, auth_session, target, original_url: str,
-                              router=None, model: str = "") -> bool:
+                              router=None, model: str = "",
+                              interactive_session=None,
+                              on_progress=None, cancel_flag=None) -> bool:
     """Detect if the session was lost (redirected to login page).
 
     Returns True if re-authentication was performed.
+    When *interactive_session* is provided, opens the interactive browser
+    for the user to re-authenticate manually.
     """
     if not auth_session or auth_session._auth_type in ("none", "bearer", "api_key"):
         return False
@@ -97,7 +101,6 @@ async def _check_session_lost(page, auth_session, target, original_url: str,
     except Exception:
         return False
 
-    # Check hostname+path only (not query params) for login indicators
     try:
         parsed = urlparse(current_url)
         check_str = f"{parsed.hostname or ''}{parsed.path or ''}"
@@ -123,7 +126,10 @@ async def _check_session_lost(page, auth_session, target, original_url: str,
     try:
         from .auth import authenticate as _reauth
         browser = page.context.browser
-        new_session = await _reauth(browser, target, router, model)
+        new_session = await _reauth(browser, target, router, model,
+                                    interactive_session=interactive_session,
+                                    on_progress=on_progress,
+                                    cancel_flag=cancel_flag)
         new_cookies = await new_session.page.context.cookies()
         await page.context.add_cookies(new_cookies)
         await page.goto(original_url, wait_until="domcontentloaded", timeout=15000)
@@ -209,8 +215,10 @@ _PAGE_EXTENSIONS = re.compile(
     re.IGNORECASE,
 )
 _SECURITY_TEST_TOOLS = frozenset({
-    "inject_payload", "fuzz_parameter", "test_auth_bypass",
-    "test_method_override", "replay_with_modification",
+    "inject_payload", "fuzz_parameter", "api_request",
+    "test_auth_bypass", "test_method_override", "api_request_raw",
+    "replay_with_modification", "ws_inject", "execute_js",
+    "test_token_security",
 })
 
 def _classify_url(url: str, result: dict, tool_name: str) -> str:
@@ -269,6 +277,189 @@ def _classify_url(url: str, result: dict, tool_name: str) -> str:
     return "page"
 
 
+_MAX_EVIDENCE_PER_PHASE = 120
+
+_INJECTION_MARKERS = ("'", '"', "<", ">", "UNION", "SELECT", "script", "onerror",
+                      "onload", "alert", "SLEEP", "WAITFOR", "--", "#", "{{", "${")
+
+
+def _capture_evidence(
+    evidence: list[dict],
+    tool: str,
+    args: dict,
+    resp_summary: dict | str,
+    full_result: dict,
+):
+    """Capture compact evidence records for every security test tool call.
+
+    For fuzz_parameter, captures each individual payload result separately
+    so the LLM has granular evidence to cite.  Other tools get a single
+    record.  Keeps each record compact (~150 chars) so even 60 records
+    fit in a single context message (~9K chars).
+    """
+    if len(evidence) >= _MAX_EVIDENCE_PER_PHASE:
+        return
+    if not isinstance(full_result, dict):
+        return
+
+    # fuzz_parameter returns multiple results — capture each separately
+    if tool == "fuzz_parameter" and isinstance(full_result.get("results"), list):
+        ep_url = str(full_result.get("endpoint", ""))[:120]
+        param = str(full_result.get("param", ""))
+        for r in full_result["results"]:
+            if len(evidence) >= _MAX_EVIDENCE_PER_PHASE:
+                break
+            r_payload = str(r.get("payload", ""))[:150]
+            r_status = str(r.get("status", ""))
+            r_body = str(r.get("body_snippet", ""))[:100]
+            r_anomaly = r.get("anomaly")
+            r_reflected = r.get("reflected")
+            flags = []
+            if r_anomaly:
+                flags.append("ANOMALY")
+            if r_reflected:
+                flags.append("REFLECTED")
+            try:
+                if r_status and int(r_status) >= 400:
+                    flags.append("ERROR")
+            except (ValueError, TypeError):
+                pass
+            evidence.append({
+                "tool": f"fuzz_parameter[{param}]",
+                "url": ep_url,
+                "payload": r_payload,
+                "status": r_status,
+                "flags": " ".join(flags),
+                "evidence": r_body[:200],
+            })
+        return
+
+    status = full_result.get("status", "")
+    body = str(full_result.get("body_snippet", ""))[:120]
+    error = str(full_result.get("error", ""))[:100]
+    reflected = full_result.get("reflected")
+    anomaly = full_result.get("anomaly")
+    title = str(full_result.get("title", "") or full_result.get("error_title", ""))[:80]
+
+    inject_errors = full_result.get("errors")
+    if isinstance(inject_errors, list) and inject_errors:
+        anomaly = True
+        if not error:
+            error = "; ".join(str(e) for e in inject_errors[:3])
+
+    vuln_detected = full_result.get("VULNERABILITIES_DETECTED")
+    if vuln_detected:
+        anomaly = True
+
+    url = ""
+    if isinstance(args, dict):
+        url = str(args.get("url") or args.get("endpoint") or full_result.get("url") or "")[:120]
+
+    payload = ""
+    if isinstance(args, dict):
+        payload = str(args.get("body") or args.get("payload") or args.get("value") or args.get("script") or "")[:150]
+        if not payload and args.get("raw"):
+            payload = str(args["raw"])[:150]
+
+    snippet_parts = []
+    if title and ("error" in title.lower() or "Error" in title):
+        snippet_parts.append(title)
+    if error:
+        snippet_parts.append(error)
+    if body and not error:
+        snippet_parts.append(body[:100])
+    snippet = " | ".join(snippet_parts) if snippet_parts else str(status)
+
+    flags = []
+    if anomaly:
+        flags.append("ANOMALY")
+    if reflected:
+        flags.append("REFLECTED")
+    try:
+        if status and int(str(status)) >= 400:
+            flags.append("ERROR")
+        elif status and int(str(status)) == 200:
+            flags.append("OK")
+    except (ValueError, TypeError):
+        pass
+
+    evidence.append({
+        "tool": tool,
+        "url": url,
+        "payload": payload,
+        "status": str(status),
+        "flags": " ".join(flags),
+        "evidence": snippet[:200],
+    })
+
+
+def _format_evidence_buffer(evidence: list[dict]) -> str:
+    """Format the evidence buffer into a context message for finding generation."""
+    if not evidence:
+        return ""
+    lines = [
+        "=== EVIDENCE LOG FROM YOUR TOOL CALLS ===",
+        "Below is a record of every security test you performed. Use these EXACT",
+        "payloads and responses when writing your findings JSON.",
+        "",
+    ]
+    for i, ev in enumerate(evidence, 1):
+        flags = f" [{ev.get('flags', '')}]" if ev.get("flags") else ""
+        lines.append(
+            f"{i}. [{ev['tool']}]{flags} {ev['url']}"
+        )
+        if ev.get("payload"):
+            lines.append(f"   Payload: {ev['payload']}")
+        lines.append(f"   Status: {ev['status']} | Response: {ev['evidence']}")
+    lines.append("")
+    lines.append(
+        "REQUIRED: For each finding, the 'payload' field must contain the EXACT "
+        "string from a Payload line above. The 'evidence' field must contain the "
+        "EXACT Status + Response that proves the issue. The 'url' field must be "
+        "the EXACT URL tested. The 'parameter' must name the specific input field. "
+        "Findings without these fields will be REJECTED."
+    )
+    return "\n".join(lines)
+
+
+def _match_evidence_to_finding(finding: dict, evidence: list[dict]):
+    """Attach matching tool call request/response records to a finding.
+
+    Searches the evidence buffer for entries whose URL or payload overlap
+    with the finding's url/payload, and attaches the top matches as
+    ``request_response`` so the UI can display Burp-style detail.
+    """
+    if not evidence:
+        return
+    f_url = (finding.get("url") or "").lower()
+    f_payload = (finding.get("payload") or "").lower()
+
+    scored: list[tuple[int, dict]] = []
+    for ev in evidence:
+        score = 0
+        ev_url = (ev.get("url") or "").lower()
+        ev_payload = (ev.get("payload") or "").lower()
+        if f_url and ev_url and (f_url in ev_url or ev_url in f_url):
+            score += 2
+        if f_payload and ev_payload and f_payload in ev_payload:
+            score += 3
+        elif f_payload and ev_payload:
+            f_words = set(f_payload.split())
+            ev_words = set(ev_payload.split())
+            if f_words & ev_words:
+                score += 1
+        flags = ev.get("flags", "")
+        if "ERROR" in flags or "ANOMALY" in flags or "REFLECTED" in flags:
+            score += 1
+        if score > 0:
+            scored.append((score, ev))
+
+    scored.sort(key=lambda x: -x[0])
+    matches = [ev for _, ev in scored[:5]]
+    if matches:
+        finding["request_response"] = matches
+
+
 def _format_passive_for_llm(passive_findings: list[dict]) -> str:
     """Summarize passive recon results so the LLM agent is aware of them."""
     if not passive_findings:
@@ -284,28 +475,40 @@ def _format_passive_for_llm(passive_findings: list[dict]) -> str:
     return "\n".join(lines)
 
 
+def _hosts_match(current_host: str, target_host: str) -> bool:
+    """Check if current host matches target — exact match or same root domain.
+    e.g., my.norton.com matches norton.com, login.norton.com matches my.norton.com."""
+    if current_host == target_host:
+        return True
+    from scanners.ai_agent.auth import _extract_root_domain
+    return _extract_root_domain(current_host) == _extract_root_domain(target_host)
+
+
 async def _ensure_on_target(page, target_url: str, target_host: str) -> bool:
     """Navigate to the target URL and confirm the browser is on the right host.
 
-    Returns True if the current page hostname matches target_host.
+    Returns True if the current page hostname matches target_host (or same root domain).
     """
     current_host = urlparse(page.url or "").hostname or ""
-    if current_host == target_host:
+    if _hosts_match(current_host, target_host):
         return True
 
-    print(f"  [PASSIVE] Navigating to target (current: {current_host}): {target_url}")
+    print(f"  [NAV] Navigating to target (current: {current_host} -> {target_host}): {target_url}")
     for attempt in range(3):
         try:
-            await page.goto(target_url, wait_until="domcontentloaded", timeout=30000)
+            resp = await page.goto(target_url, wait_until="domcontentloaded", timeout=30000)
+            status = resp.status if resp else "no-response"
             await asyncio.sleep(4 + attempt * 3)
-            current_host = urlparse(page.url or "").hostname or ""
-            if current_host == target_host:
-                print(f"  [PASSIVE] Landed on target: {page.url[:100]}")
+            final_url = page.url or ""
+            current_host = urlparse(final_url).hostname or ""
+            if _hosts_match(current_host, target_host):
+                print(f"  [NAV] Landed on target (HTTP {status}): {final_url[:120]}")
                 return True
-            print(f"  [PASSIVE] Attempt {attempt+1}: host={current_host}, retrying...")
+            print(f"  [NAV] Attempt {attempt+1}: HTTP {status}, landed on {current_host} ({final_url[:120]}), expected {target_host}")
         except Exception as nav_err:
+            print(f"  [NAV] Attempt {attempt+1} error: {nav_err}")
             logger.debug("Target nav attempt %d: %s", attempt, nav_err)
-    print(f"  [PASSIVE] Could not reach target, current page: {page.url[:100]}")
+    print(f"  [NAV] Could not reach target after 3 attempts, current page: {page.url[:150]}")
     return False
 
 
@@ -372,6 +575,7 @@ async def run_scan(
     pause_flag=None,
     start_from_phase: int = 0,
     initial_findings: list[dict] | None = None,
+    interactive_session: dict | None = None,
 ) -> tuple[list[dict], dict]:
     config_dir = config_dir or os.getcwd()
     _cb = on_progress or (lambda *a, **k: None)
@@ -401,33 +605,128 @@ async def run_scan(
     SECURITY_TEST_TOOLS = {
         "inject_payload", "fuzz_parameter", "api_request",
         "test_auth_bypass", "test_method_override", "api_request_raw",
-        "replay_with_modification", "ws_inject",
+        "replay_with_modification", "ws_inject", "execute_js",
+        "test_token_security",
+    }
+
+    _MIN_SECURITY_CALLS: dict[str, int] = {
+        "web_a03_sqli": 15,
+        "web_a03_xss": 15,
+        "web_a03_cmdi": 8,
+        "web_a03_ssti": 6,
+        "web_a03_path_traversal": 6,
+        "web_a03_xxe": 4,
+        "web_a01": 6,
+        "web_a04": 5,
+        "web_a05": 5,
+        "web_a07": 6,
+        "web_a08": 4,
+        "web_a10": 5,
+        "web_extras": 5,
+        "web_bfla": 5,
+        "web_file_upload": 4,
+        "api_injection": 12,
+        "api_auth": 5,
+        "api_authz": 5,
+        "api_ssrf": 5,
+        "api_mass_assign": 4,
+        "api_graphql": 4,
+        "api_data_exposure": 4,
     }
 
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True)
+        browser = await p.chromium.launch(
+            headless=True,
+            args=["--disable-blink-features=AutomationControlled"],
+        )
         has_creds = bool((target.credentials or {}).get("username") or
                          (target.credentials or {}).get("password"))
-        if has_creds:
+
+        auth_type_cfg = ((target.auth_config or {}).get("type") or "auto").lower()
+        if auth_type_cfg == "interactive_login":
+            print(f"  [AUTH] Interactive login mode — opening browser for {target.url}")
+            _cb("auth", {"status": "interactive_login", "url": target.url})
+        elif has_creds:
             print(f"  [AUTH] Authenticating to {target.url}...")
             _cb("auth", {"status": "authenticating", "url": target.url})
         else:
             print(f"  [SCAN] Opening {target.url} (unauthenticated)...")
             _cb("auth", {"status": "unauthenticated", "url": target.url})
-        auth_session = await authenticate(browser, target, router, model)
+        _max_auth_attempts = 3
+        for _auth_attempt in range(1, _max_auth_attempts + 1):
+            _check_cancel()
+            auth_session = await authenticate(
+                browser, target, router, model,
+                interactive_session=interactive_session,
+                on_progress=_cb,
+                cancel_flag=cancel_flag,
+            )
+            auth_success = auth_session.success if hasattr(auth_session, "success") else True
+            if auth_success:
+                break
+
+            # Small grace period for the pause signal to arrive
+            # (frontend sends /done + /pause in quick succession)
+            if pause_flag and not pause_flag.is_set():
+                await asyncio.sleep(1.5)
+
+            # Auth failed — if scan was paused (user hit Pause during CAPTCHA/MFA),
+            # wait for resume and retry authentication
+            if pause_flag and pause_flag.is_set():
+                print(f"  [AUTH] Auth challenge caused pause — waiting for resume (attempt {_auth_attempt}/{_max_auth_attempts})")
+                _cb("paused", {})
+                _cb("progress_msg", {
+                    "message": f"Scan paused — authentication challenge (CAPTCHA/MFA/SSO). "
+                               f"Resume to retry login (attempt {_auth_attempt}/{_max_auth_attempts})."
+                })
+                while pause_flag.is_set():
+                    if cancel_flag and cancel_flag.is_set():
+                        raise ScanCancelled("Scan stopped by user")
+                    await asyncio.sleep(1)
+                _cb("resumed", {})
+                if _auth_attempt >= _max_auth_attempts:
+                    print(f"  [AUTH] Scan resumed — final attempt ({_auth_attempt}/{_max_auth_attempts})...")
+                    _cb("progress_msg", {"message": f"Scan resumed — FINAL login attempt ({_auth_attempt}/{_max_auth_attempts}). If this fails, scan continues unauthenticated."})
+                else:
+                    print(f"  [AUTH] Scan resumed — retrying authentication (attempt {_auth_attempt + 1}/{_max_auth_attempts})...")
+                    _cb("progress_msg", {"message": f"Scan resumed — retrying authentication (attempt {_auth_attempt + 1}/{_max_auth_attempts})..."})
+                # Re-create interactive session for the retry
+                if interactive_session:
+                    interactive_session["done"].clear()
+                    interactive_session["active"].clear()
+                    interactive_session["screenshot_b64"] = ""
+                continue
+
+            # Auth failed but not paused — continue unauthenticated
+            if _auth_attempt >= _max_auth_attempts:
+                print(f"  [AUTH] All {_max_auth_attempts} login attempts exhausted — continuing unauthenticated")
+                _cb("progress_msg", {
+                    "message": f"All {_max_auth_attempts} login attempts failed — continuing scan WITHOUT authentication. "
+                               f"Findings will be limited to unauthenticated checks only."
+                })
+            else:
+                print(f"  [AUTH] Auth failed (attempt {_auth_attempt}/{_max_auth_attempts}) — continuing unauthenticated")
+                _cb("progress_msg", {"message": "Authentication failed — continuing scan unauthenticated."})
+            break
+
         page = auth_session.page
 
         # Network-level JS capture was started inside authenticate() on page
         # creation, so it has captured every .js since the very first navigation.
         network_js_urls = getattr(auth_session, "network_js_urls", set())
 
-        print(f"  [AUTH] Auth type: {auth_session._auth_type}, URL after login: {page.url}")
-        _cb("auth", {"status": "done", "type": auth_session._auth_type, "url": page.url})
+        auth_final_host = urlparse(page.url or "").hostname or ""
+        auth_success = auth_session.success if hasattr(auth_session, "success") else True
+        print(f"  [AUTH] Auth type: {auth_session._auth_type}, success: {auth_success}, URL after login: {page.url}")
+        print(f"  [AUTH] Current host: {auth_final_host}, target host: {urlparse(target.url).hostname}")
+        _cb("auth", {"status": "done", "type": auth_session._auth_type, "url": page.url,
+                      "success": auth_success, "current_host": auth_final_host})
         if auth_session._auth_type not in ("bearer", "none"):
             metrics["auth_pages_detected"] += 1
 
         cookies = await page.context.cookies()
         cookie_dict = {c["name"]: c["value"] for c in cookies}
+        cookie_dict.setdefault("language", "en")
         headers = auth_session.get_auth_header()
         http_client = httpx.AsyncClient(
             headers=headers,
@@ -504,7 +803,10 @@ async def run_scan(
         landed_on_target = False
         try:
             landed_on_target = await _ensure_on_target(page, target.url, target_host)
-            if not landed_on_target:
+            if not landed_on_target and getattr(auth_session, "captcha_detected", False):
+                print(f"  [AUTH] CAPTCHA was detected — skipping retry loop")
+                landed_on_target = await _ensure_on_target(page, target.url, target_host)
+            elif not landed_on_target:
                 # Auth didn't redirect to target. Re-authenticate with full flow.
                 print(f"  [AUTH-RETRY] Not on target after auth, re-authenticating...")
                 _cb("auth", {"status": "re-authenticating", "reason": "not_on_target"})
@@ -537,10 +839,27 @@ async def run_scan(
                 print(f"  [PASSIVE] Page ready on {urlparse(page.url or '').hostname}, "
                       f"network JS captured: {len(network_js_urls)}")
             else:
-                current_host = urlparse(page.url or "").hostname or ""
+                current_url = page.url or ""
+                current_host = urlparse(current_url).hostname or ""
                 print(f"  [PASSIVE] WARNING: Still on {current_host}, NOT on {target_host}!")
+                print(f"  [PASSIVE] Current URL: {current_url[:200]}")
+                try:
+                    title = await page.title()
+                    print(f"  [PASSIVE] Page title: {title}")
+                except Exception:
+                    pass
+                browser_cookies = await page.context.cookies()
+                from scanners.ai_agent.auth import _extract_root_domain
+                root_dom = _extract_root_domain(target_host)
+                target_cookies = [c for c in browser_cookies if root_dom in c.get("domain", "")]
+                print(f"  [PASSIVE] Browser cookies: {len(browser_cookies)} total, {len(target_cookies)} for *{root_dom}")
+                if target_cookies:
+                    print(f"  [PASSIVE] Target cookie names: {', '.join(c['name'] for c in target_cookies[:10])}")
                 print(f"  [PASSIVE] Authentication likely failed — passive recon may have limited results")
-                _cb("auth", {"status": "failed_redirect", "current_host": current_host, "target_host": target_host})
+                print(f"  [PASSIVE] TIP: Ensure cookies are from an authenticated session on {target_host} (not the login page)")
+                _cb("auth", {"status": "failed_redirect", "current_host": current_host, "target_host": target_host,
+                             "current_url": current_url[:200], "browser_cookies": len(browser_cookies),
+                             "target_cookies": len(target_cookies)})
         except Exception as e:
             logger.warning("Pre-recon navigation failed (non-fatal): %s", e)
 
@@ -550,6 +869,9 @@ async def run_scan(
         _cb("detect", {"is_spa": app_info.get("is_spa"), "framework": app_info.get("framework")})
 
         def _passive_progress(event, data):
+            if event == "out_of_scope":
+                _cb("out_of_scope", data)
+                return
             _cb("tool_call", {
                 "phase": "Passive Reconnaissance",
                 "tool": f"passive_{event}",
@@ -557,13 +879,21 @@ async def run_scan(
                 "response": {},
             })
 
-        _cb("phase_start", {"phase": 0, "total": 0, "name": "Passive Reconnaissance", "id": "passive_recon"})
+        _phase_seq = 0
+
+        def _next_phase():
+            nonlocal _phase_seq
+            _phase_seq += 1
+            return _phase_seq
+
+        p = _next_phase()
+        _cb("phase_start", {"phase": p, "total": 0, "name": "Passive Reconnaissance", "id": "passive_recon"})
         current_host = urlparse(page.url or "").hostname or ""
         if current_host != target_host and target_host:
             print(f"  [PASSIVE] SKIPPING — browser on {current_host}, not target {target_host}")
             print(f"  [PASSIVE] Will retry after LLM navigates to target")
             passive_findings = []
-            _cb("phase_end", {"phase": 0, "name": "Passive Reconnaissance (skipped — not on target)",
+            _cb("phase_end", {"phase": p, "name": "Passive Reconnaissance (skipped — not on target)",
                               "tool_calls": 0, "findings": 0})
         else:
             print("  [PASSIVE] Running passive reconnaissance...")
@@ -572,10 +902,7 @@ async def run_scan(
                     page=page,
                     http_client=http_client,
                     target_url=target.url,
-                    on_finding=lambda f: _cb("finding", {
-                        "title": f["title"], "severity": f["severity"],
-                        "url": f["url"], "phase": "Passive Reconnaissance",
-                    }),
+                    on_finding=lambda f: _cb("finding", {**f, "phase": "Passive Reconnaissance"}),
                     on_progress=_passive_progress,
                     network_js_urls=network_js_urls,
                 )
@@ -586,7 +913,7 @@ async def run_scan(
                 print(f"  [PASSIVE] Failed (non-fatal): {e}")
                 logger.warning("Passive recon failed: %s", e, exc_info=True)
 
-        _cb("phase_end", {"phase": 0, "name": "Passive Reconnaissance",
+        _cb("phase_end", {"phase": p, "name": "Passive Reconnaissance",
                           "tool_calls": 0, "findings": len(passive_findings)})
 
         # ── Baseline Execution (happy path, no LLM) ──
@@ -694,7 +1021,10 @@ async def run_scan(
                     })
                     _cb("finding", {
                         "title": lf.title, "severity": lf.severity,
-                        "url": target.url, "phase": "Body Fuzzing",
+                        "url": target.url, "parameter": lf.field,
+                        "evidence": lf.evidence, "payload": lf.payload,
+                        "phase": "Body Fuzzing",
+                        "explanation": lf.explanation,
                     })
 
                 _cb("phase_end", {
@@ -776,6 +1106,8 @@ async def run_scan(
                 phase_prompt = phase_prompt.replace(bola_api_placeholder, "")
 
             messages.append({"role": "user", "content": phase_prompt})
+
+            phase_evidence: list[dict] = []
 
             for step in range(phase.max_steps):
                 _check_cancel()
@@ -874,20 +1206,34 @@ async def run_scan(
                             if parsed_blocked and parsed_blocked.scheme and parsed_blocked.hostname:
                                 _cb("out_of_scope", {"url": blocked_url, "tool": fn_name, "phase": phase.name})
 
+                        needs_reauth = False
                         if fn_name in ("navigate", "click") and page:
                             original = args_parsed.get("url") or target.url
-                            reauthed = await _check_session_lost(page, auth_session, target, original,
-                                                                  router=router, model=model)
-                            if reauthed:
-                                _cb("auth", {"status": "re-authenticated", "reason": "session_lost"})
-                                cookies = await page.context.cookies()
-                                cookie_dict = {c["name"]: c["value"] for c in cookies}
-                                http_client = httpx.AsyncClient(
-                                    headers=auth_session.get_auth_header(),
-                                    cookies=cookie_dict,
-                                    timeout=30.0,
-                                )
-                                tools._http_client = http_client
+                            needs_reauth = await _check_session_lost(
+                                page, auth_session, target, original,
+                                router=router, model=model,
+                                interactive_session=interactive_session,
+                                on_progress=_cb, cancel_flag=cancel_flag)
+                        elif fn_name in ("api_request", "fuzz_parameter", "api_request_raw",
+                                         "test_auth_bypass", "replay_with_modification"):
+                            resp_status = result.get("status") if isinstance(result, dict) else None
+                            if resp_status in (401, 403) and page and auth_session:
+                                needs_reauth = await _check_session_lost(
+                                    page, auth_session, target, target.url,
+                                    router=router, model=model,
+                                    interactive_session=interactive_session,
+                                    on_progress=_cb, cancel_flag=cancel_flag)
+                        if needs_reauth:
+                            _cb("auth", {"status": "re-authenticated", "reason": "session_lost"})
+                            cookies = await page.context.cookies()
+                            cookie_dict = {c["name"]: c["value"] for c in cookies}
+                            cookie_dict.setdefault("language", "en")
+                            http_client = httpx.AsyncClient(
+                                headers=auth_session.get_auth_header(),
+                                cookies=cookie_dict,
+                                timeout=30.0,
+                            )
+                            tools._http_client = http_client
 
                         crawl_url = None
                         if fn_name == "navigate" and result.get("url"):
@@ -915,13 +1261,19 @@ async def run_scan(
                             metrics["forms_found"] += len(result["forms"])
                         elif fn_name in ("get_network_log", "intercept_requests"):
                             registry.add_from_traffic(result)
-                        if fn_name in SECURITY_TEST_TOOLS:
+                        is_security_test = fn_name in SECURITY_TEST_TOOLS
+                        if not is_security_test and fn_name == "navigate":
+                            nav_url = (args_parsed.get("url") or "") if isinstance(args_parsed, dict) else ""
+                            if any(m in nav_url for m in _INJECTION_MARKERS):
+                                is_security_test = True
+                        if is_security_test:
                             metrics["test_log"].append({
                                 "phase": phase.id,
                                 "tool": fn_name,
                                 "request": args_parsed,
                                 "response_summary": resp_summary,
                             })
+                            _capture_evidence(phase_evidence, fn_name, args_parsed, resp_summary, result)
                     if unknown_in_batch > 0 and unknown_in_batch == len(tool_calls):
                         correction = (
                             " | IMPORTANT: All tool calls in this batch were invalid. "
@@ -936,6 +1288,8 @@ async def run_scan(
                         messages = trim_context(messages, max_tokens=TRIM_TARGET_TOKENS)
                 else:
                     content = msg_dict.get("content") or getattr(msg, "content", "") or ""
+                    if not isinstance(content, str):
+                        content = json.dumps(content) if isinstance(content, (dict, list)) else str(content)
                     snippet = content[:300].replace("\n", " ").strip()
                     _cb("tool_call", {
                         "phase": phase.name,
@@ -943,19 +1297,197 @@ async def run_scan(
                         "request": {"prompt": phase.prompt[:120] + "..." if len(phase.prompt) > 120 else phase.prompt},
                         "response": {"text": snippet[:200] + "..." if len(snippet) > 200 else snippet},
                     })
+
+                    # Check if the LLM has done enough security testing
+                    security_calls = sum(
+                        1 for t in metrics.get("test_log", [])
+                        if t.get("phase") == phase.id
+                    )
+                    min_calls = _MIN_SECURITY_CALLS.get(phase.id, 0)
+                    if security_calls < min_calls and step < phase.max_steps - 5:
+                        continuation = (
+                            f"STOP — you have only performed {security_calls} security test calls "
+                            f"but this phase requires at least {min_calls}. You MUST continue testing.\n"
+                            "DO NOT output findings yet. Instead:\n"
+                            "1. Use fuzz_parameter to send MULTIPLE payloads to DIFFERENT endpoints\n"
+                            "2. Test the LOGIN endpoint with injection payloads (api_request POST)\n"
+                            "3. Navigate to MORE pages and test their inputs (search, profile, order tracking)\n"
+                            "4. Call get_network_log to find API endpoints you haven't tested yet\n"
+                            "5. If you found an error/vulnerability, ESCALATE — try UNION SELECT, data extraction\n"
+                            "6. Test URL parameters on SPA routes (navigate to /#/route?param=PAYLOAD)\n"
+                            "Keep going until you've tested at least " + str(min_calls) + " distinct test calls."
+                        )
+                        logger.info(
+                            "Phase %s: only %d/%d security calls, forcing continuation at step %d",
+                            phase.name, security_calls, min_calls, step,
+                        )
+                        messages.append({"role": "user", "content": continuation})
+                        continue
+
                     new_f = extract_findings(str(content))
+
+                    rejected = extract_findings(str(content), require_evidence=False)
+                    has_ungrounded = len(rejected) > len(new_f)
+
+                    if has_ungrounded and phase_evidence:
+                        evidence_text = _format_evidence_buffer(phase_evidence)
+                        logger.info(
+                            "Phase %s: %d findings lacked evidence, retrying with %d evidence records",
+                            phase.name, len(rejected) - len(new_f), len(phase_evidence),
+                        )
+                        messages.append({"role": "user", "content": evidence_text})
+                        try:
+                            _check_cancel()
+                            retry_resp = router.complete(
+                                model=model,
+                                messages=messages,
+                                tools=[],
+                                cancel_flag=cancel_flag,
+                            )
+                            if retry_resp and getattr(retry_resp, "choices", None):
+                                retry_content = retry_resp.choices[0].message.content or ""
+                                retry_f = extract_findings(str(retry_content))
+                                if retry_f:
+                                    new_f = retry_f
+                                    logger.info("Evidence retry produced %d grounded findings", len(retry_f))
+                        except Exception as e:
+                            logger.warning("Evidence retry failed: %s", e)
+
                     findings.extend(new_f)
                     for f in new_f:
-                        _cb("finding", {"title": f.get("title", ""), "severity": f.get("severity", ""), "url": f.get("url", ""), "phase": phase.name})
+                        finding_data = dict(f)
+                        finding_data["phase"] = phase.name
+                        _match_evidence_to_finding(finding_data, phase_evidence)
+                        _cb("finding", finding_data)
                     break
 
             phase_new_findings = len(findings) - phase_findings_before
+
+            # ── Phase Retry: if key injection phase found 0, retry with analysis ──
+            _RETRY_PHASES = {"web_a03_sqli", "web_a03_xss", "web_a03_cmdi",
+                            "web_a03_ssti", "web_a03_path_traversal", "web_a03_xxe",
+                            "web_a01", "web_a07", "web_a10",
+                            "api_injection", "api_ssrf", "api_authz"}
+            if (phase.id in _RETRY_PHASES
+                    and phase_new_findings == 0
+                    and phase_evidence
+                    and not getattr(phase, "_retried", False)):
+                phase._retried = True
+                evidence_text = _format_evidence_buffer(phase_evidence)
+                retry_prompt = (
+                    f"RETRY — Phase '{phase.name}' found 0 vulnerabilities. "
+                    "Review your test results below and try a DIFFERENT approach:\n\n"
+                    f"{evidence_text}\n\n"
+                    "ANALYSIS REQUIRED:\n"
+                    "1. Look at which endpoints you tested and their responses\n"
+                    "2. Did you get any status 500, error messages, or anomalies? Those indicate injection worked.\n"
+                    "3. Did you use baseline_value with fuzz_parameter? Without it, payloads like ' won't "
+                    "trigger errors in SQL LIKE '%input%' clauses. Set baseline_value='test' so "
+                    "the actual value sent is 'test' + payload (e.g. q=test').\n"
+                    "4. Try DIFFERENT endpoints you haven't tested yet\n"
+                    "5. Try api_request with the full URL and payload manually constructed\n"
+                    "6. Try inject_payload on any form fields (login username, search box)\n\n"
+                    "DO NOT give up. Try at least 3 more approaches before concluding."
+                )
+                logger.info("Phase %s: 0 findings with %d evidence records, running retry pass",
+                            phase.name, len(phase_evidence))
+                print(f" [RETRY] {phase.name}: 0 findings, retrying with evidence analysis...")
+                _cb("phase_start", {"phase": phase_num, "total": total_phases,
+                                    "name": f"{phase.name} (retry)", "id": f"{phase.id}_retry"})
+                messages.append({"role": "user", "content": retry_prompt})
+                phase_evidence_retry: list[dict] = []
+                retry_findings_before = len(findings)
+                retry_tool_calls = 0
+                for retry_step in range(phase.max_steps):
+                    _check_cancel()
+                    try:
+                        _sanitize_all_messages(messages)
+                        messages = _repair_tool_pairs(messages)
+                        response = router.complete(model=model, messages=messages,
+                                                   tools=TOOL_DEFINITIONS, cancel_flag=cancel_flag)
+                    except (ContentFiltered, ContextWindowExceeded, MalformedMessages):
+                        break
+                    except ScanCancelled:
+                        raise
+                    _check_cancel()
+                    if not response or not getattr(response, "choices", None):
+                        break
+                    msg = response.choices[0].message
+                    msg_dict = msg.model_dump() if hasattr(msg, "model_dump") else dict(msg)
+                    msg_dict = _sanitize_message(msg_dict)
+                    messages.append(msg_dict)
+                    tool_calls = msg_dict.get("tool_calls") or getattr(msg, "tool_calls", None) or []
+                    if tool_calls:
+                        for tc in tool_calls:
+                            _check_cancel()
+                            tc_id = tc.get("id") if isinstance(tc, dict) else getattr(tc, "id", "")
+                            fn = tc.get("function") if isinstance(tc, dict) else getattr(tc, "function", {})
+                            fn_name = fn.get("name") if isinstance(fn, dict) else getattr(fn, "name", "")
+                            fn_name = _sanitize_tool_name(fn_name)
+                            fn_args = fn.get("arguments") if isinstance(fn, dict) else getattr(fn, "arguments", "{}")
+                            result = await tools.execute(fn_name, fn_args)
+                            retry_tool_calls += 1
+                            metrics["total_tool_calls"] += 1
+                            messages.append({"role": "tool", "tool_call_id": tc_id,
+                                             "content": _cap_result(result)})
+                            try:
+                                args_parsed = json.loads(fn_args) if isinstance(fn_args, str) else fn_args
+                            except Exception:
+                                args_parsed = {"raw": fn_args}
+                            resp_summary = {
+                                k: v for k, v in result.items()
+                                if k in ("status", "url", "error", "reflected", "anomaly", "body_snippet", "results", "title")
+                            } if isinstance(result, dict) else str(result)[:200]
+                            _cb("tool_call", {
+                                "phase": f"{phase.name} (retry)",
+                                "tool": fn_name,
+                                "request": {k: str(v)[:300] for k, v in args_parsed.items()} if isinstance(args_parsed, dict) else str(args_parsed)[:400],
+                                "response": {k: str(v)[:200] for k, v in resp_summary.items()} if isinstance(resp_summary, dict) else str(resp_summary)[:400],
+                            })
+                            is_sec = fn_name in SECURITY_TEST_TOOLS
+                            if not is_sec and fn_name == "navigate":
+                                nav_url = (args_parsed.get("url") or "") if isinstance(args_parsed, dict) else ""
+                                if any(m in nav_url for m in _INJECTION_MARKERS):
+                                    is_sec = True
+                            if is_sec:
+                                metrics["test_log"].append({"phase": phase.id, "tool": fn_name,
+                                                            "request": args_parsed, "response_summary": resp_summary})
+                                _capture_evidence(phase_evidence_retry, fn_name, args_parsed, resp_summary, result)
+                        if retry_tool_calls % 5 == 0 and _estimate_tokens(messages) > TRIM_TARGET_TOKENS:
+                            messages = trim_context(messages, max_tokens=TRIM_TARGET_TOKENS)
+                    else:
+                        content = msg_dict.get("content") or ""
+                        retry_f = extract_findings(str(content))
+                        if not retry_f and phase_evidence_retry:
+                            ev_text = _format_evidence_buffer(phase_evidence_retry)
+                            messages.append({"role": "user", "content": ev_text})
+                            try:
+                                ev_resp = router.complete(model=model, messages=messages, tools=[], cancel_flag=cancel_flag)
+                                if ev_resp and getattr(ev_resp, "choices", None):
+                                    retry_f = extract_findings(str(ev_resp.choices[0].message.content or ""))
+                            except Exception:
+                                pass
+                        findings.extend(retry_f)
+                        for f in retry_f:
+                            fd = dict(f)
+                            fd["phase"] = f"{phase.name} (retry)"
+                            _match_evidence_to_finding(fd, phase_evidence_retry or phase_evidence)
+                            _cb("finding", fd)
+                        break
+                retry_new = len(findings) - retry_findings_before
+                phase_new_findings += retry_new
+                phase_tool_calls += retry_tool_calls
+                print(f" [RETRY] {retry_tool_calls} tool calls, {retry_new} findings")
+                _cb("phase_end", {"phase": phase_num, "name": f"{phase.name} (retry)",
+                                  "tool_calls": retry_tool_calls, "findings": retry_new})
+
             metrics["phases_completed"] += 1
             metrics["phase_log"].append({
                 "phase": phase.id,
                 "name": phase.name,
                 "tool_calls": phase_tool_calls,
-                "findings": phase_new_findings,
+                "findings_count": phase_new_findings,
+                "evidence_buffer": phase_evidence[:60],
             })
             print(f" {phase_tool_calls} tool calls, {phase_new_findings} findings")
             _cb("phase_end", {"phase": phase_num, "name": phase.name, "tool_calls": phase_tool_calls, "findings": phase_new_findings})
@@ -975,10 +1507,7 @@ async def run_scan(
                         page=page,
                         http_client=http_client,
                         target_url=target.url,
-                        on_finding=lambda f: _cb("finding", {
-                            "title": f["title"], "severity": f["severity"],
-                            "url": f["url"], "phase": "Passive Recon (post-auth)",
-                        }),
+                        on_finding=lambda f: _cb("finding", {**f, "phase": "Passive Recon (post-auth)"}),
                         on_progress=_passive_progress,
                         network_js_urls=network_js_urls,
                     )
@@ -1069,8 +1598,36 @@ def _extract_json_objects(text: str):
                 yield text[start : i + 1]
 
 
-def extract_findings(content: str) -> list[dict]:
+def _has_evidence(obj: dict) -> bool:
+    """Return True if the finding has real proof — a non-empty payload or evidence field."""
+    payload = (obj.get("payload") or "").strip()
+    evidence = (obj.get("evidence") or "").strip()
+    return bool(payload) or bool(evidence)
+
+
+def _process_finding_obj(obj: dict, findings: list[dict], rejected: list[str],
+                         require_evidence: bool, dedup: bool = False) -> None:
+    """Process a single JSON object: extract findings from it or its wrapper keys."""
+    if isinstance(obj, dict):
+        if "title" in obj and "severity" in obj:
+            if require_evidence and not _has_evidence(obj):
+                rejected.append(obj.get("title", "?"))
+                return
+            if dedup and any(f.get("title") == obj.get("title") and f.get("severity") == obj.get("severity") for f in findings):
+                return
+            findings.append(obj)
+        else:
+            for wrapper_key in ("findings", "results", "vulnerabilities", "issues"):
+                inner = obj.get(wrapper_key)
+                if isinstance(inner, list):
+                    for item in inner:
+                        if isinstance(item, dict) and "title" in item and "severity" in item:
+                            _process_finding_obj(item, findings, rejected, require_evidence, dedup)
+
+
+def extract_findings(content: str, *, require_evidence: bool = True) -> list[dict]:
     findings: list[dict] = []
+    rejected: list[str] = []
     if not content:
         return findings
 
@@ -1078,19 +1635,20 @@ def extract_findings(content: str) -> list[dict]:
         for obj_str in _extract_json_objects(block.strip()):
             try:
                 obj = json.loads(obj_str)
-                if isinstance(obj, dict) and "title" in obj and "severity" in obj:
-                    findings.append(obj)
+                _process_finding_obj(obj, findings, rejected, require_evidence)
             except json.JSONDecodeError:
                 pass
 
     for obj_str in _extract_json_objects(content):
         try:
             obj = json.loads(obj_str)
-            if isinstance(obj, dict) and "title" in obj and "severity" in obj:
-                if not any(f.get("title") == obj.get("title") and f.get("severity") == obj.get("severity") for f in findings):
-                    findings.append(obj)
+            _process_finding_obj(obj, findings, rejected, require_evidence, dedup=True)
         except json.JSONDecodeError:
             pass
+
+    if rejected:
+        logger.warning("Rejected %d finding(s) without payload/evidence: %s",
+                       len(rejected), "; ".join(rejected[:5]))
 
     return findings
 
@@ -1281,7 +1839,10 @@ async def run_dry_scan(
     config_dir = config_dir or os.getcwd()
 
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True)
+        browser = await p.chromium.launch(
+            headless=True,
+            args=["--disable-blink-features=AutomationControlled"],
+        )
         auth_session = await authenticate(browser, target, router, model)
         page = auth_session.page
 

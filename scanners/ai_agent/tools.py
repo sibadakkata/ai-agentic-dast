@@ -27,8 +27,76 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
-BODY_SNIPPET_LEN = 500
+BODY_SNIPPET_LEN = 1500
 HTML_SNIPPET_LEN = 4000
+
+_SQL_ERROR_PATTERNS = (
+    "sqlite", "sql syntax", "sql error", "mysql", "ora-", "pg_query",
+    "odbc", "unrecognized token", "incomplete input", "unterminated",
+    "you have an error in your sql", "near \"", "syntax error at",
+    "unclosed quotation", "quoted string not properly terminated",
+    "sqlstate", "jdbc", "microsoft ole db", "microsoft sql server",
+)
+_XSS_INDICATORS = ("<script", "onerror=", "onload=", "alert(", "javascript:", "onfocus=")
+_CMDI_INDICATORS = ("uid=", "root:", "/bin/", "volume serial number", "windows\\system32")
+_SSTI_INDICATORS = ("49", "7777777", "__class__", "__mro__", "config{")
+_ERROR_INDICATORS = [
+    "error", "exception", "sql", "syntax", "undefined", "stack trace",
+    "sqlite", "mysql", "pg_", "ora-", "odbc", "uncaught", "unrecognized token",
+    "internal server error", "traceback", "fatal",
+]
+
+
+def _extract_vuln_signals(body: str, status_code: int, payload: str = "") -> dict:
+    """Extract vulnerability signals from an HTTP response body.
+
+    Returns a dict with optional keys: error_indicators, error_title, error_message,
+    VULNERABILITIES_DETECTED, ACTION_REQUIRED.
+    """
+    signals: dict = {}
+    body_lower = body.lower()
+
+    matched = [ind for ind in _ERROR_INDICATORS if ind in body_lower]
+    if matched:
+        signals["error_indicators"] = matched[:5]
+
+    import re as _re
+    title_m = _re.search(r"<title[^>]*>(.*?)</title>", body, _re.IGNORECASE | _re.DOTALL)
+    if title_m:
+        signals["error_title"] = title_m.group(1).strip()[:200]
+    for json_key in ("message", "error"):
+        json_m = _re.search(rf'"{json_key}"\s*:\s*"([^"]+)"', body)
+        if json_m:
+            signals["error_message"] = json_m.group(1)[:200]
+            break
+
+    vulns = []
+    err_text = (signals.get("error_title") or signals.get("error_message") or "").lower()
+    if any(p in err_text or p in body_lower for p in _SQL_ERROR_PATTERNS):
+        vulns.append({
+            "type": "SQL Injection", "payload": payload,
+            "status": status_code,
+            "proof": signals.get("error_title") or signals.get("error_message") or "SQL error in response",
+        })
+    if payload and any(p in payload.lower() for p in _XSS_INDICATORS) and payload in body:
+        vulns.append({
+            "type": "Cross-Site Scripting (XSS)", "payload": payload,
+            "status": status_code, "proof": "Payload reflected unescaped in response",
+        })
+    if any(p in body_lower for p in _CMDI_INDICATORS):
+        vulns.append({
+            "type": "Command Injection", "payload": payload,
+            "status": status_code, "proof": "OS command output detected in response",
+        })
+
+    if vulns:
+        signals["VULNERABILITIES_DETECTED"] = vulns
+        signals["ACTION_REQUIRED"] = (
+            "CONFIRMED vulnerabilities found! You MUST report each as a finding JSON with "
+            "title, severity, owasp_category, url, parameter, payload, evidence, confidence, remediation."
+        )
+
+    return signals
 
 
 def _truncate(s: str | None, max_len: int = BODY_SNIPPET_LEN) -> str:
@@ -143,6 +211,26 @@ class ScanTools:
         if url not in self._out_of_scope:
             self._out_of_scope.append(url)
         return False
+
+    def _resolve_url(self, url: str) -> str:
+        """Resolve relative URLs (e.g. /api/foo) to full URLs using the page origin."""
+        if not url or url.startswith("http://") or url.startswith("https://"):
+            return url
+        if url.startswith("/"):
+            origin = ""
+            if self._page:
+                try:
+                    p = urlparse(self._page.url)
+                    origin = f"{p.scheme}://{p.netloc}"
+                except Exception:
+                    pass
+            if not origin:
+                base = str(self._http_client.base_url).rstrip("/") if self._http_client.base_url else ""
+                if base and base != "":
+                    origin = base
+            if origin:
+                return origin.rstrip("/") + url
+        return url
 
     def get_out_of_scope_urls(self) -> list[str]:
         """Return list of unique URLs that were blocked as out-of-scope."""
@@ -261,6 +349,7 @@ class ScanTools:
     async def navigate(self, url: str) -> dict:
         if not self._require_page():
             return {"error": "No browser page (API-only mode)"}
+        url = self._resolve_url(url)
         if self._is_logout_url(url):
             return {"error": "BLOCKED: This is a logout/signout URL. Navigating here would destroy the authenticated session.", "skipped": True}
         if self._url_excluded(url):
@@ -373,30 +462,65 @@ class ScanTools:
         try:
             loc = self._page.locator(selector).first
             await loc.fill(payload)
+
+            submitted = False
             try:
                 form = loc.locator("xpath=ancestor::form").first
                 await form.evaluate("el => el.submit()")
+                submitted = True
             except Exception:
+                pass
+
+            if not submitted:
+                try:
+                    submit_btn = self._page.locator(
+                        "button[type='submit'], input[type='submit'], "
+                        "button:has-text('Submit'), button:has-text('Login'), "
+                        "button:has-text('Search'), button:has-text('Sign in'), "
+                        "button:has-text('Log in'), button[mat-raised-button], "
+                        "button.mat-button, button.btn-primary, button.submit-btn"
+                    ).first
+                    await submit_btn.click(timeout=3000)
+                    submitted = True
+                except Exception:
+                    pass
+
+            if not submitted:
                 await loc.press("Enter")
+
             await self._page.wait_for_load_state("networkidle", timeout=10000)
 
             content = await self._page.content()
             body_snippet = _truncate(content)
             reflected = payload in content
 
-            errors = []
-            if "error" in content.lower() or "exception" in content.lower():
-                errors.append("Error/exception text in response")
-            if "sql" in content.lower() and "syntax" in content.lower():
-                errors.append("Possible SQL error in response")
+            status_code = 200
+            try:
+                status_code = await self._page.evaluate("""() => {
+                    const perf = performance.getEntriesByType('navigation');
+                    const last = perf[perf.length - 1];
+                    return last ? (last.responseStatus || 200) : 200;
+                }""")
+            except Exception:
+                pass
 
-            return {
-                "status": 200,
+            result = {
+                "status": status_code,
                 "url": self._page.url,
                 "body_snippet": body_snippet,
-                "errors": errors,
                 "reflected": reflected,
             }
+
+            signals = _extract_vuln_signals(content, status_code, payload=payload)
+            if signals:
+                result.update(signals)
+            elif reflected:
+                result["ACTION_REQUIRED"] = (
+                    "Payload was REFLECTED in the page! Check if it's inside HTML, "
+                    "attributes, or script context — this may be XSS."
+                )
+
+            return result
         except Exception as e:
             return {"error": str(e)}
 
@@ -454,21 +578,75 @@ class ScanTools:
         try:
             forms = await self._page.evaluate("""() => {
                 const forms = [];
+                // Traditional <form> elements
                 document.querySelectorAll('form').forEach(f => {
                     const inputs = [];
                     f.querySelectorAll('input, textarea, select').forEach(inp => {
                         inputs.push({
-                            name: inp.name || inp.id || '',
+                            name: inp.name || inp.id || inp.getAttribute('formControlName') || inp.getAttribute('ng-model') || inp.placeholder || '',
                             type: inp.type || inp.tagName.toLowerCase(),
-                            value: inp.value || ''
+                            value: inp.value || '',
+                            selector: inp.id ? '#' + inp.id : (inp.name ? `[name="${inp.name}"]` : '')
                         });
                     });
                     forms.push({
                         action: f.action || '',
                         method: (f.method || 'GET').toUpperCase(),
-                        inputs: inputs
+                        inputs: inputs,
+                        source: 'form'
                     });
                 });
+
+                // SPA inputs NOT inside <form> (Angular, React, Vue)
+                const formInputs = new Set();
+                document.querySelectorAll('form input, form textarea, form select').forEach(el => formInputs.add(el));
+                const orphanInputs = [];
+                document.querySelectorAll('input, textarea, select, [contenteditable="true"]').forEach(inp => {
+                    if (formInputs.has(inp)) return;
+                    if (inp.type === 'hidden') return;
+                    const name = inp.name || inp.id || inp.getAttribute('formControlName')
+                        || inp.getAttribute('ng-model') || inp.getAttribute('data-testid')
+                        || inp.getAttribute('aria-label') || inp.placeholder || '';
+                    if (!name) return;
+                    orphanInputs.push({
+                        name: name,
+                        type: inp.type || inp.tagName.toLowerCase(),
+                        value: inp.value || '',
+                        selector: inp.id ? '#' + inp.id : (inp.name ? `[name="${inp.name}"]` : `[placeholder="${inp.placeholder}"]`)
+                    });
+                });
+                if (orphanInputs.length > 0) {
+                    forms.push({
+                        action: window.location.href,
+                        method: 'SPA',
+                        inputs: orphanInputs,
+                        source: 'spa_orphan_inputs'
+                    });
+                }
+
+                // Angular Material: mat-form-field inputs
+                const matInputs = [];
+                document.querySelectorAll('mat-form-field input, mat-form-field textarea').forEach(inp => {
+                    if (formInputs.has(inp)) return;
+                    const name = inp.getAttribute('formControlName') || inp.name || inp.id
+                        || inp.getAttribute('matInput') || inp.placeholder || '';
+                    if (!name) return;
+                    matInputs.push({
+                        name: name,
+                        type: inp.type || 'text',
+                        value: inp.value || '',
+                        selector: inp.id ? '#' + inp.id : `[formControlName="${inp.getAttribute('formControlName')}"]`
+                    });
+                });
+                if (matInputs.length > 0) {
+                    forms.push({
+                        action: window.location.href,
+                        method: 'SPA',
+                        inputs: matInputs,
+                        source: 'angular_material'
+                    });
+                }
+
                 return forms;
             }""")
             return {"forms": forms}
@@ -564,6 +742,7 @@ class ScanTools:
             return _error_dict(str(e))
 
     async def ws_connect(self, url: str, headers: dict | None = None) -> dict:
+        url = self._resolve_url(url)
         if self._page:
             try:
                 with self._page.expect_websocket(timeout=10000) as ws_info:
@@ -643,6 +822,7 @@ class ScanTools:
         body: str | None = None,
         auth_token: str | None = None,
     ) -> dict:
+        url = self._resolve_url(url)
         if self._url_excluded(url):
             return {"error": f"EXCLUDED by user: {url}", "skipped": True}
         if not self._url_in_scope(url):
@@ -664,12 +844,16 @@ class ScanTools:
             for k in list(selected_headers):
                 if k.lower() not in ("content-type", "content-length", "x-", "set-cookie"):
                     del selected_headers[k]
-            return {
+            result = {
                 "status": resp.status_code,
                 "headers": selected_headers,
                 "body_snippet": _truncate(resp_body),
                 "timing_ms": round(elapsed, 2),
             }
+            signals = _extract_vuln_signals(resp_body, resp.status_code, payload=body or "")
+            if signals:
+                result.update(signals)
+            return result
         except Exception as e:
             return _error_dict(str(e))
 
@@ -718,49 +902,64 @@ class ScanTools:
         baseline_status: int = 200,
         original_body: str | None = None,
         headers: dict | None = None,
+        baseline_value: str | None = None,
     ) -> dict:
+        endpoint = self._resolve_url(endpoint)
         if self._url_excluded(endpoint):
             return {"error": f"EXCLUDED by user: {endpoint}", "skipped": True}
         if not self._url_in_scope(endpoint):
             return {"error": f"URL out of scope (not in target domain): {endpoint}", "skipped": True}
         results = []
-        error_indicators = ["error", "exception", "sql", "syntax", "undefined", "stack trace"]
         hdrs = dict(headers) if headers else {}
         for payload in payloads:
+            effective_payload = f"{baseline_value}{payload}" if baseline_value else payload
             try:
+                start = time.perf_counter()
                 if param_location == "query":
                     parsed = urlparse(endpoint)
                     qs = parse_qs(parsed.query, keep_blank_values=True)
-                    qs[param_name] = [payload]
+                    qs[param_name] = [effective_payload]
                     new_query = urlencode(qs, doseq=True)
                     url = urlunparse((parsed.scheme, parsed.netloc, parsed.path, parsed.params, new_query, parsed.fragment))
                     resp = await self._http_client.request(method.upper(), url, headers=hdrs or None)
                 elif param_location == "header":
                     fuzz_hdrs = dict(hdrs)
-                    fuzz_hdrs[param_name] = payload
+                    fuzz_hdrs[param_name] = effective_payload
                     resp = await self._http_client.request(method.upper(), endpoint, headers=fuzz_hdrs)
                 elif param_location == "path":
-                    fuzzed_url = endpoint.replace(f"{{{param_name}}}", payload)
+                    fuzzed_url = endpoint.replace(f"{{{param_name}}}", effective_payload)
                     resp = await self._http_client.request(method.upper(), fuzzed_url, headers=hdrs or None)
                 else:
-                    mutated = _mutate_json_field(original_body, param_name, payload)
+                    mutated = _mutate_json_field(original_body, param_name, effective_payload)
                     content_hdrs = dict(hdrs)
                     content_hdrs.setdefault("Content-Type", "application/json")
                     resp = await self._http_client.request(
                         method.upper(), endpoint, headers=content_hdrs, content=mutated,
                     )
+                elapsed_ms = (time.perf_counter() - start) * 1000
                 body = resp.text
+                body_lower = body.lower()
                 status_diff = resp.status_code != baseline_status
-                has_errors = any(ind in body.lower() for ind in error_indicators)
+                matched_indicators = [ind for ind in _ERROR_INDICATORS if ind in body_lower]
+                has_errors = bool(matched_indicators)
                 reflected = payload in body
-                anomaly = status_diff or has_errors or reflected
-                results.append({
+                anomaly = status_diff or has_errors or reflected or elapsed_ms > 3000
+                result_entry = {
                     "payload": payload,
                     "status": resp.status_code,
                     "body_snippet": _truncate(body),
                     "anomaly": anomaly,
                     "reflected": reflected,
-                })
+                    "timing_ms": round(elapsed_ms, 1),
+                }
+                if matched_indicators:
+                    result_entry["error_indicators"] = matched_indicators[:5]
+                signals = _extract_vuln_signals(body, resp.status_code, payload=effective_payload)
+                if signals.get("error_title"):
+                    result_entry["error_title"] = signals["error_title"]
+                if signals.get("error_message"):
+                    result_entry["error_message"] = signals["error_message"]
+                results.append(result_entry)
             except Exception as e:
                 results.append({
                     "payload": payload,
@@ -768,14 +967,70 @@ class ScanTools:
                     "body_snippet": str(e),
                     "anomaly": True,
                     "reflected": False,
+                    "timing_ms": 0,
                 })
-        return {"endpoint": endpoint, "param": param_name, "location": param_location, "results": results}
+        anomalous = [r for r in results if r.get("anomaly")]
+        summary: dict = {
+            "endpoint": endpoint, "param": param_name, "location": param_location,
+            "total_tested": len(results), "anomalies_found": len(anomalous),
+            "results": results,
+        }
+        if anomalous:
+            highlights = []
+            vulns_detected = []
+            for r in anomalous:
+                actual = f"{baseline_value}{r['payload']}" if baseline_value else r['payload']
+                h = f"payload='{actual}' status={r['status']} timing={r.get('timing_ms',0)}ms"
+                err_text = (r.get("error_title") or r.get("error_message") or "").lower()
+                body_low = r.get("body_snippet", "").lower()
+                if any(p in err_text or p in body_low for p in _SQL_ERROR_PATTERNS):
+                    vuln = {
+                        "type": "SQL Injection",
+                        "param": param_name,
+                        "payload": actual,
+                        "status": r["status"],
+                        "proof": r.get("error_title") or r.get("error_message") or
+                                 next((ind for ind in r.get("error_indicators", [])
+                                       if ind in ("sqlite", "sql", "syntax", "mysql")), "SQL error in response"),
+                    }
+                    vulns_detected.append(vuln)
+                    h += f" *** SQL ERROR DETECTED: {vuln['proof']} ***"
+                elif r.get("reflected") and any(p in r['payload'].lower() for p in _XSS_INDICATORS):
+                    vulns_detected.append({
+                        "type": "Cross-Site Scripting (XSS)",
+                        "param": param_name, "payload": actual,
+                        "status": r["status"], "proof": "Payload reflected unescaped in response",
+                    })
+                    h += " *** XSS: PAYLOAD REFLECTED ***"
+                elif any(p in body_low for p in _CMDI_INDICATORS):
+                    vulns_detected.append({
+                        "type": "Command Injection",
+                        "param": param_name, "payload": actual,
+                        "status": r["status"], "proof": "OS command output in response",
+                    })
+                    h += " *** CMDI: OS OUTPUT DETECTED ***"
+                elif r.get("timing_ms", 0) > 3000:
+                    h += " *** SLOW RESPONSE — possible time-based blind injection ***"
+                elif r.get("error_title"):
+                    h += f" error='{r['error_title']}'"
+                elif r.get("error_indicators"):
+                    h += f" indicators={r['error_indicators']}"
+                highlights.append(h)
+            summary["anomaly_summary"] = " | ".join(highlights)
+            if vulns_detected:
+                summary["VULNERABILITIES_DETECTED"] = vulns_detected
+                summary["ACTION_REQUIRED"] = (
+                    "CONFIRMED vulnerabilities found! You MUST report each as a finding JSON with "
+                    "title, severity, owasp_category, url, parameter, payload, evidence, confidence, remediation. "
+                    "Use the exact payload and proof from VULNERABILITIES_DETECTED above."
+                )
+        return summary
 
     async def replay_with_modification(self, request: dict, modifications: dict) -> dict:
         try:
             orig = dict(request)
             method = orig.get("method", "GET")
-            url = orig.get("url", "")
+            url = self._resolve_url(orig.get("url", ""))
             if self._url_excluded(url):
                 return {"error": f"EXCLUDED by user: {url}", "skipped": True}
             if not self._url_in_scope(url):
@@ -797,13 +1052,17 @@ class ScanTools:
             orig_resp = await self._http_client.request(method, url, headers=headers, content=body)
             elapsed = (time.perf_counter() - start) * 1000
 
-            return {
+            result = {
                 "original_status": orig.get("status"),
                 "modified_status": orig_resp.status_code,
                 "diff_summary": f"Status {orig.get('status')} -> {orig_resp.status_code}",
                 "body_snippet": _truncate(orig_resp.text),
                 "timing_ms": round(elapsed, 2),
             }
+            signals = _extract_vuln_signals(orig_resp.text, orig_resp.status_code, payload=body or "")
+            if signals:
+                result.update(signals)
+            return result
         except Exception as e:
             return _error_dict(str(e))
 
@@ -818,6 +1077,7 @@ class ScanTools:
         endpoint: str,
         methods: list[str] | None = None,
     ) -> dict:
+        endpoint = self._resolve_url(endpoint)
         if self._url_excluded(endpoint):
             return {"error": f"EXCLUDED by user: {endpoint}", "skipped": True}
         if not self._url_in_scope(endpoint):
@@ -846,6 +1106,7 @@ class ScanTools:
         return {"results": results}
 
     async def test_method_override(self, endpoint: str) -> dict:
+        endpoint = self._resolve_url(endpoint)
         if self._url_excluded(endpoint):
             return {"error": f"EXCLUDED by user: {endpoint}", "skipped": True}
         if not self._url_in_scope(endpoint):
@@ -869,6 +1130,7 @@ class ScanTools:
         body: str | None = None, headers: dict | None = None,
     ) -> dict:
         """Test bearer token / JWT security."""
+        endpoint = self._resolve_url(endpoint)
         if self._url_excluded(endpoint):
             return {"error": f"EXCLUDED by user: {endpoint}", "skipped": True}
         if not self._url_in_scope(endpoint):
@@ -1226,7 +1488,9 @@ TOOL_DEFINITIONS = [
         "function": {
             "name": "fuzz_parameter",
             "description": "Fuzz a single parameter with payload list. Supports query, body (JSON), header, and path. "
-                           "For body: set param_location='body', provide original_body JSON, use dot notation for nested fields.",
+                           "For body: set param_location='body', provide original_body JSON, use dot notation for nested fields. "
+                           "IMPORTANT: Set baseline_value to a valid value (e.g. 'test') so payloads are APPENDED to it. "
+                           "This catches injection in SQL LIKE clauses where bare payloads may not trigger errors.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -1238,6 +1502,7 @@ TOOL_DEFINITIONS = [
                     "baseline_status": {"type": "integer", "default": 200},
                     "original_body": {"type": "string", "description": "Full original JSON body (required for body fuzzing)"},
                     "headers": {"type": "object", "description": "Request headers"},
+                    "baseline_value": {"type": "string", "description": "Normal valid value for the param. Payloads are APPENDED to this. E.g. 'test' means q=test' for SQLi. ALWAYS set this for injection testing."},
                 },
                 "required": ["endpoint", "method", "param_name", "payloads"],
             },

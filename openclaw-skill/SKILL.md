@@ -1,4 +1,4 @@
-﻿---
+---
 name: ai-agentic-scanner
 version: 1.0.0
 author: red-team
@@ -147,8 +147,8 @@ User: "What's the status of my last scan?"
 User: "Show me the findings from scan abc123"
 -> Get results, format findings grouped by verdict
 
-User: "How many high severity issues in the norton scan?"
--> List scans, find norton target, get results, count highs
+User: "How many high severity issues in the myapp scan?"
+-> List scans, find myapp target, get results, count highs
 
 User: "Stop the running scan"
 -> List scans, find running one, stop it
@@ -159,8 +159,8 @@ User: "Generate a report for the latest completed scan"
 User: "What targets have been scanned?"
 -> List scans, extract unique targets
 
-User: "What models were used to scan norton?"
--> List scans, filter by norton target, show models
+User: "What models were used to scan myapp?"
+-> List scans, filter by myapp target, show models
 
-User: "Get report for the latest norton scan using Haiku model"
+User: "Get report for the latest myapp scan using Haiku model"
 -> List scans, filter by target + model, get latest, generate report

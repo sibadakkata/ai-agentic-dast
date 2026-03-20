@@ -1,4 +1,4 @@
-﻿# AI Agentic Scanner - OpenClaw Skill
+# AI Agentic Scanner - OpenClaw Skill
 
 An [OpenClaw](https://github.com/openclaw/openclaw) skill that lets you trigger and manage AI-powered DAST security scans through natural language chat.
 
@@ -42,9 +42,9 @@ python openclaw-skill/test_skill.py list
 Output:
 ```
 All Scans (11 total)
-  scan_20260312_082647_cbb4a2   [running   ] both   https://ebiz-service-qa.norton.com/
+  scan_20260312_082647_cbb4a2   [running   ] both   https://staging.example.com/
                                  Model: Claude Haiku 4.5 (recommended)  findings=0  cost=$0.0000
-  scan_20260311_144426_77034d   [completed ] ?      https://my-int.norton.com
+  scan_20260311_144426_77034d   [completed ] ?      https://app.example.com
                                  Model: Claude Haiku 4.5 (recommended)  findings=68  cost=$29.5729
   ...
 ```
@@ -59,7 +59,7 @@ Output:
 ```
 Unique Targets (5 targets, 11 total scans)
 
-  https://ebiz-service-qa.norton.com/
+  https://staging.example.com/
     Scans  : 1
     Models : Claude Haiku 4.5 (recommended)
     Status : running
@@ -83,7 +83,7 @@ Models Used (2 models)
 
   Claude Haiku 4.5 (recommended)
     Scans    : 4
-    Targets  : https://dev-api.engine.tech, https://my-int.norton.com, ...
+    Targets  : https://dev-api.engine.tech, https://app.example.com, ...
     Findings : 136
     Cost     : $63.7420
 
@@ -96,8 +96,8 @@ Models Used (2 models)
 ### 4. Find Scans by URL
 
 ```powershell
-# All norton scans
-python openclaw-skill/test_skill.py find --url norton
+# All myapp scans
+python openclaw-skill/test_skill.py find --url myapp
 
 # All API engine scans
 python openclaw-skill/test_skill.py find --url engine.tech
@@ -117,29 +117,29 @@ python openclaw-skill/test_skill.py find --model ministral
 
 ```powershell
 # Norton scans using Haiku only
-python openclaw-skill/test_skill.py find --url norton --model haiku
+python openclaw-skill/test_skill.py find --url myapp --model haiku
 ```
 
 Output:
 ```
-Scans matching url~'norton' AND model~'haiku' (2 of 11)
-  scan_20260312_082647_cbb4a2   [running   ] both   https://ebiz-service-qa.norton.com/
+Scans matching url~'myapp' AND model~'haiku' (2 of 11)
+  scan_20260312_082647_cbb4a2   [running   ] both   https://staging.example.com/
                                  Model: Claude Haiku 4.5 (recommended)
-  scan_20260311_144426_77034d   [completed ] ?      https://my-int.norton.com
+  scan_20260311_144426_77034d   [completed ] ?      https://app.example.com
                                  Model: Claude Haiku 4.5 (recommended)  findings=68
 ```
 
 ### 7. Get Report for Latest Scan of a Target
 
 ```powershell
-# Latest completed norton scan -> PDF
-python openclaw-skill/test_skill.py latest-report --url norton
+# Latest completed myapp scan -> PDF
+python openclaw-skill/test_skill.py latest-report --url myapp
 
 # Latest AVG scan -> PDF
 python openclaw-skill/test_skill.py latest-report --url avg
 
-# Latest norton scan using Haiku model -> PDF
-python openclaw-skill/test_skill.py latest-report --url norton --model haiku
+# Latest myapp scan using Haiku model -> PDF
+python openclaw-skill/test_skill.py latest-report --url myapp --model haiku
 
 # Latest scan of any target using Ministral -> PDF
 python openclaw-skill/test_skill.py latest-report --model ministral
@@ -165,7 +165,7 @@ python openclaw-skill/test_skill.py status scan_20260312_082647_cbb4a2
 Output:
 ```
 Scan     : scan_20260312_082647_cbb4a2
-Target   : https://ebiz-service-qa.norton.com/
+Target   : https://staging.example.com/
 Mode     : both
 Model    : Claude Haiku 4.5 (recommended)
 Status   : running
@@ -193,11 +193,11 @@ Precision        : 50%
 
 --- TRUE POSITIVES ---
 [Medium      ] Absence of Rate Limiting on Security-Critical Endpoints
-               URL: https://buy.norton.com/api/v1/promo/validate
+               URL: https://api.example.com/v1/promo/validate
                Reason: [RUNTIME VERIFIED] All 15 rapid requests accepted. No 429.
 
 [Critical    ] Credential Brute Force Attack - No Account Lockout
-               URL: https://login.norton.com/sso/embedded/login
+               URL: https://login.example.com/sso/embedded/login
                Reason: [RUNTIME VERIFIED] All 15 rapid requests accepted. No 429.
 ...
 ```
@@ -248,7 +248,7 @@ bash openclaw-skill/install.sh http://localhost:8080
 Then chat naturally in OpenClaw:
 - "Scan https://example.com for vulnerabilities"
 - "What targets have been scanned?"
-- "Show findings from the norton scan"
+- "Show findings from the myapp scan"
 - "Generate a report for the latest AVG scan"
 
 ## Environment Variables

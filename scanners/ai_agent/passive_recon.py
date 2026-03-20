@@ -123,7 +123,7 @@ _TELEMETRY_URL_PATTERNS = re.compile(
     re.IGNORECASE,
 )
 
-# Known third-party telemetry/analytics domains
+# Known third-party telemetry/analytics domains (token-leakage destination check)
 _TELEMETRY_DOMAINS = (
     "sentry.io", "browser-intake-datadoghq", "rum-http-intake",
     "bam.nr-data.net", "js-agent.newrelic.com",
@@ -137,6 +137,79 @@ _TELEMETRY_DOMAINS = (
     "splunk", "logz.io", "sumo", "elastic-cloud",
     "applicationinsights.azure.com", "dc.services.visualstudio.com",
 )
+
+# Third-party vendor domains whose JS should NOT be analyzed for DOM sinks,
+# secrets, or source maps — findings on these are noise, not actionable by
+# the target owner.  Token leakage TO these domains is still checked (TC-8).
+_THIRD_PARTY_JS_DOMAINS = (
+    "ensighten.com", "nexus.ensighten.com",
+    "qualtrics.com", "siteintercept.qualtrics.com",
+    "omtrdc.net", "2o7.net", "demdex.net",
+    "tt.omtrdc.net",
+    "google-analytics.com", "googletagmanager.com", "googlesyndication.com",
+    "googleadservices.com", "doubleclick.net",
+    "facebook.net", "fbcdn.net", "connect.facebook.net",
+    "twitter.com", "platform.twitter.com",
+    "linkedin.com", "snap.licdn.com",
+    "hotjar.com", "script.hotjar.com",
+    "fullstory.com", "rs.fullstory.com",
+    "sentry.io", "browser.sentry-cdn.com",
+    "newrelic.com", "js-agent.newrelic.com", "bam.nr-data.net",
+    "datadoghq.com", "browser-intake-datadoghq.com",
+    "logrocket.io", "cdn.logrocket.io",
+    "bugsnag.com", "sessions.bugsnag.com",
+    "rollbar.com", "raygun.io",
+    "segment.io", "cdn.segment.com", "api.segment.io",
+    "amplitude.com", "cdn.amplitude.com",
+    "mixpanel.com", "cdn.mxpnl.com",
+    "optimizely.com", "cdn.optimizely.com",
+    "adobedtm.com", "assets.adobedtm.com",
+    "omniture.com",
+    "tealiumiq.com", "tags.tiqcdn.com",
+    "cookielaw.org", "cdn.cookielaw.org",
+    "onetrust.com",
+    "quantserve.com",
+    "adsrvr.org",
+    "cloudflareinsights.com",
+    "clarity.ms",
+    "mouseflow.com",
+    "crazyegg.com",
+    "heap.io", "heapanalytics.com",
+    "intercom.io", "widget.intercom.io",
+    "zendesk.com", "static.zdassets.com",
+    "drift.com", "js.driftt.com",
+    "hubspot.com", "js.hs-scripts.com", "js.hs-analytics.net",
+    "marketo.net", "munchkin.marketo.net",
+    "pardot.com",
+    "cdn.jsdelivr.net", "cdnjs.cloudflare.com", "unpkg.com",
+    "ajax.googleapis.com", "fonts.googleapis.com",
+    "stackpath.bootstrapcdn.com",
+    "code.jquery.com",
+)
+
+
+def _is_third_party_js(url: str, target_url: str) -> bool:
+    """Return True if a JS URL belongs to a known third-party vendor, not the target."""
+    try:
+        host = (urlparse(url).hostname or "").lower()
+        target_host = (urlparse(target_url).hostname or "").lower()
+    except Exception:
+        return False
+    if not host:
+        return False
+    target_parts = target_host.split(".")
+    target_base = ".".join(target_parts[-2:]) if len(target_parts) >= 2 else target_host
+    host_parts = host.split(".")
+    host_base = ".".join(host_parts[-2:]) if len(host_parts) >= 2 else host
+    if host_base == target_base or host == target_host:
+        return False
+    for tp in _THIRD_PARTY_JS_DOMAINS:
+        if host == tp or host.endswith("." + tp):
+            return True
+        tp_base = ".".join(tp.split(".")[-2:]) if "." in tp else tp
+        if host_base == tp_base:
+            return True
+    return False
 
 # Headers whose values should never appear in telemetry payloads
 _SENSITIVE_HEADERS = (
@@ -192,27 +265,43 @@ async def run_passive_recon(
     _progress("passive_start", {"checks": "source_maps, js_sinks, secrets, sensitive_files, headers, html_comments, telemetry_token_leakage, cookie_security, jwt_analysis, cors, cache_control, sri, form_actions, api_versioning, csp_analysis, referrer_policy, permissions_policy, mixed_content, password_autocomplete, sensitive_url_params, https_redirect, hsts_preload, error_pages, clickjacking"})
 
     # ── 1. Collect all JS files loaded by the page ────────────────────
-    js_urls = await _collect_js_urls(page, target_url)
+    all_js_urls = await _collect_js_urls(page, target_url)
     if network_js_urls:
-        before = len(js_urls)
-        dom_set = set(js_urls)
+        before = len(all_js_urls)
+        dom_set = set(all_js_urls)
         for u in network_js_urls:
             if u not in dom_set:
-                js_urls.append(u)
-        if len(js_urls) > before:
+                all_js_urls.append(u)
+        if len(all_js_urls) > before:
             logger.info("Network capture added %d JS URLs (DOM: %d, total: %d)",
-                        len(js_urls) - before, before, len(js_urls))
-    logger.info("Passive recon: found %d JS files", len(js_urls))
-    _progress("passive_step", {"step": "Collected JS files", "count": len(js_urls)})
+                        len(all_js_urls) - before, before, len(all_js_urls))
 
-    # ── 2. Check source maps ──────────────────────────────────────────
+    js_urls = []
+    third_party_js = []
+    for u in all_js_urls:
+        if _is_third_party_js(u, target_url):
+            third_party_js.append(u)
+        else:
+            js_urls.append(u)
+
+    logger.info("Passive recon: %d first-party JS, %d third-party JS (skipped)",
+                len(js_urls), len(third_party_js))
+    _progress("passive_step", {"step": "Collected JS files", "count": len(js_urls),
+                                "third_party_skipped": len(third_party_js)})
+
+    for tp_url in third_party_js:
+        _progress("out_of_scope", {"url": tp_url, "tool": "passive_recon",
+                                    "phase": "Passive Reconnaissance",
+                                    "reason": "Third-party vendor JS"})
+
+    # ── 2. Check source maps (first-party only) ───────────────────────
     source_map_findings = await _check_source_maps(http_client, js_urls)
     for f in source_map_findings:
         findings.append(f)
         _cb(f)
     _progress("passive_step", {"step": "Source map check", "found": len(source_map_findings)})
 
-    # ── 3. Analyze JS content for dangerous sinks + secrets ───────────
+    # ── 3. Analyze JS content for dangerous sinks + secrets (first-party only)
     js_analysis_findings = await _analyze_js_files(http_client, js_urls, page)
     for f in js_analysis_findings:
         findings.append(f)
@@ -478,6 +567,7 @@ async def _check_source_maps(http_client, js_urls: list[str]) -> list[dict]:
                             "Inline Source Map Embedded in JavaScript",
                             "Medium", "CWE-540", 5.3, js_url,
                             "Inline source map (data URI) contains original source code",
+                            payload=f"GET {js_url}",
                             source="passive_recon",
                         ))
                         break
@@ -500,10 +590,10 @@ async def _check_source_maps(http_client, js_urls: list[str]) -> list[dict]:
                     findings.append(_make_finding(
                         "JavaScript Source Map Exposed in Production",
                         "Medium", "CWE-540", 5.3, map_url,
-                        f"Source map accessible (HTTP 200, {size_kb:.0f}KB). "
-                        f"Contains original unminified source code and developer comments. "
-                        f"Referenced from: {js_url}",
-                        payload=map_url,
+                        f"GET {map_url} returned HTTP 200 ({size_kb:.0f}KB). "
+                        f"Response contains valid source map with original unminified source code "
+                        f"and developer comments. Referenced from: {js_url}",
+                        payload=f"GET {map_url}",
                         source="passive_recon",
                     ))
                     logger.info("  FOUND: Source map at %s (%.0fKB)", map_url, size_kb)
@@ -513,7 +603,7 @@ async def _check_source_maps(http_client, js_urls: list[str]) -> list[dict]:
                     "Low", "CWE-540", 3.1, js_url,
                     f"sourceMappingURL directive found pointing to {map_url} "
                     f"(HTTP {map_resp.status_code}). Reveals build toolchain details.",
-                    payload=map_url,
+                    payload=f"GET {map_url}",
                     source="passive_recon",
                 ))
 
@@ -2104,6 +2194,61 @@ async def _check_clickjacking(http_client, target_url: str) -> list[dict]:
     return findings
 
 
+_CWE_REMEDIATION: dict[str, str] = {
+    "CWE-16": "Set X-Content-Type-Options: nosniff header to prevent MIME-type sniffing.",
+    "CWE-79": "Sanitize all user input and use context-aware output encoding. Avoid innerHTML, eval, and dangerouslySetInnerHTML. Use a Content Security Policy (CSP).",
+    "CWE-95": "Avoid dynamic code execution (eval, new Function, setTimeout with strings). Use safer alternatives like JSON.parse or static dispatch tables.",
+    "CWE-200": "Remove sensitive files and directories from production. Configure the web server to deny access to dotfiles and config files.",
+    "CWE-319": "Enable HSTS (Strict-Transport-Security header) and enforce HTTPS for all connections. Set max-age to at least 31536000.",
+    "CWE-352": "Implement anti-CSRF tokens on all state-changing forms and verify the Origin/Referer header server-side.",
+    "CWE-384": "Regenerate the session ID after successful authentication and ensure session cookies use Secure, HttpOnly, and SameSite flags.",
+    "CWE-502": "Never deserialize untrusted data. Use safe serialization formats like JSON and validate schema before processing.",
+    "CWE-521": "Enforce strong password policies (minimum length, complexity). Use bcrypt/argon2 for hashing and implement account lockout.",
+    "CWE-522": "Never transmit credentials over unencrypted channels. Store passwords using strong one-way hashing (bcrypt, argon2).",
+    "CWE-524": "Set Cache-Control: no-store, no-cache, must-revalidate on pages containing sensitive data.",
+    "CWE-530": "Remove backup and configuration files from production. Add server rules to block access to .bak, .old, .config extensions.",
+    "CWE-532": "Remove or restrict access to debug logs, console output, and verbose error messages in production. Sanitize logged data.",
+    "CWE-538": "Remove version control directories (.git), config files, and metadata from production deployments. Use .gitignore and deploy scripts that exclude these.",
+    "CWE-540": "Remove source maps and inline source references from production builds. Configure build tools to disable source map generation for production.",
+    "CWE-601": "Validate and whitelist redirect URLs server-side. Never redirect to user-supplied URLs without validation.",
+    "CWE-614": "Set the Secure flag on all session cookies so they are only sent over HTTPS.",
+    "CWE-615": "Remove HTML comments containing sensitive information (internal paths, credentials, TODOs) from production pages.",
+    "CWE-693": "Implement defense-in-depth: Content Security Policy (CSP), Subresource Integrity (SRI), and X-Frame-Options headers.",
+    "CWE-798": "Never embed API keys, passwords, or secrets in client-side code. Use environment variables and server-side secret management.",
+    "CWE-918": "Validate and whitelist URLs for server-side requests. Block requests to internal IPs, localhost, and metadata endpoints.",
+    "CWE-942": "Remove or restrict cross-domain policy files (crossdomain.xml, clientaccesspolicy.xml). Set allow-access-from to specific trusted domains.",
+    "CWE-1021": "Set X-Frame-Options: DENY (or SAMEORIGIN) and use Content-Security-Policy frame-ancestors directive to prevent clickjacking.",
+    "CWE-1275": "Ensure cookies use the SameSite attribute (Strict or Lax) to prevent CSRF via cross-site requests.",
+}
+
+
+def _remediation_for(cwe: str, title: str = "") -> str:
+    if cwe and cwe in _CWE_REMEDIATION:
+        return _CWE_REMEDIATION[cwe]
+    tl = title.lower()
+    if "xss" in tl or "cross-site scripting" in tl:
+        return _CWE_REMEDIATION.get("CWE-79", "")
+    if "source map" in tl:
+        return _CWE_REMEDIATION.get("CWE-540", "")
+    if "secret" in tl or "api key" in tl or "credential" in tl or "hardcoded" in tl:
+        return _CWE_REMEDIATION.get("CWE-798", "")
+    if "hsts" in tl or "strict-transport" in tl:
+        return _CWE_REMEDIATION.get("CWE-319", "")
+    if "csp" in tl or "content-security-policy" in tl or "content security" in tl:
+        return _CWE_REMEDIATION.get("CWE-693", "")
+    if "csrf" in tl:
+        return _CWE_REMEDIATION.get("CWE-352", "")
+    if "session" in tl and ("fixation" in tl or "cookie" in tl):
+        return _CWE_REMEDIATION.get("CWE-384", "")
+    if "debug" in tl or "log" in tl or "verbose" in tl:
+        return _CWE_REMEDIATION.get("CWE-532", "")
+    if "redirect" in tl:
+        return _CWE_REMEDIATION.get("CWE-601", "")
+    if "clickjack" in tl or "frame" in tl:
+        return _CWE_REMEDIATION.get("CWE-1021", "")
+    return ""
+
+
 def _make_finding(title, severity, cwe, cvss, url, evidence, payload="", source="passive_recon") -> dict:
     return {
         "title": title,
@@ -2117,4 +2262,5 @@ def _make_finding(title, severity, cwe, cvss, url, evidence, payload="", source=
         "cwe_hint": cwe,
         "cvss_hint": cvss,
         "finding_type": "passive_recon",
+        "remediation": _remediation_for(cwe, title),
     }
