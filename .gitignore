@@ -17,10 +17,17 @@ archive/
 # Build artifacts
 *.zip
 
-# Temp / test / debug scripts
+# Temp / test / debug scripts & data
 _*.py
 _*.js
 _*.sh
+_*.json
+_*.txt
+_*_charts/
+
+# Generated reports
+*_Accuracy_Report.pdf
+*_Scan_Report.pdf
 test_*.py
 test_*.png
 !openclaw-skill/test_skill.py

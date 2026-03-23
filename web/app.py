@@ -52,6 +52,20 @@ app = FastAPI(
     redoc_url="/redoc",
 )
 
+@app.exception_handler(Exception)
+async def _global_exception_handler(request: Request, exc: Exception):
+    """Catch any unhandled exception and return a clean JSON error instead of a
+    raw 500 HTML page.  HTTPExceptions are re-raised so FastAPI handles them."""
+    if isinstance(exc, HTTPException):
+        raise exc
+    logger.error("Unhandled %s on %s %s: %s", type(exc).__name__,
+                 request.method, request.url.path, exc, exc_info=True)
+    return JSONResponse(
+        status_code=500,
+        content={"error": f"{type(exc).__name__}: {exc}" if str(exc) else type(exc).__name__,
+                 "detail": "An internal error occurred. Check server logs for details."},
+    )
+
 # --- Auth (cookie sessions + Basic Auth fallback for API clients) -------------
 _security = HTTPBasic(auto_error=False)
 _AUTH_USER = os.environ.get("DAST_AUTH_USER", "dast-admin")
@@ -154,8 +168,10 @@ def _schedule_force_cancel(scan_id: str):
         if s and s.get("status") == "stopping":
             logger.warning("Force-cancelling scan %s (stuck in stopping for %ds)", scan_id, _FORCE_CANCEL_TIMEOUT)
             partial_findings = s.get("live_findings", [])
+            phases_done = len(s.get("live_phases", []))
             s.update({
                 "status": "cancelled",
+                "error": f"Force-stopped: LLM call did not respond within {_FORCE_CANCEL_TIMEOUT}s. {len(partial_findings)} finding(s) preserved from {phases_done} phase(s).",
                 "findings_count": len(partial_findings),
                 "progress": s.get("progress", []) + ["Force-cancelled (LLM call did not respond to stop in time)."],
             })
@@ -226,6 +242,7 @@ def _load_scans_from_disk():
                 pass
         elif info.get("status") in ("stopping", "paused", "pausing"):
             info["status"] = "cancelled"
+            info["error"] = "Container restarted while scan was " + info.get("status", "active") + ". Partial results may be available."
             progress = info.get("progress", [])
             progress.append("--- Container restarted — marked as cancelled ---")
             info["progress"] = progress
@@ -621,6 +638,13 @@ async def index(request: Request, auth=Depends(_verify_or_redirect)):
 @app.get("/api/dashboard", tags=["System"])
 async def get_dashboard():
     """Aggregate stats for the dashboard page."""
+    try:
+        return await _get_dashboard_inner()
+    except Exception as e:
+        logger.error("get_dashboard failed: %s", e, exc_info=True)
+        return JSONResponse({"error": f"Dashboard error: {type(e).__name__}: {e}"}, status_code=500)
+
+async def _get_dashboard_inner():
     total = len(SCANS)
     running = sum(1 for s in SCANS.values() if s.get("status") == "running")
     completed = sum(1 for s in SCANS.values() if s.get("status") in ("completed", "done"))
@@ -764,7 +788,10 @@ async def insights_query(request: Request):
 
     Always uses the cheapest available model — this is an analytics query, not a scan.
     """
-    body = await request.json()
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "Invalid JSON body"}, status_code=400)
     query = body.get("query", "").strip()
     if not query:
         return JSONResponse({"error": "query is required"}, status_code=400)
@@ -919,7 +946,12 @@ async def get_ui_settings(creds=Depends(_verify)):
 @app.put("/api/ui-settings", tags=["Settings"])
 async def put_ui_settings(request: Request, creds=Depends(_verify)):
     """Merge partial UI settings into app_kv."""
-    body = await request.json()
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "Invalid JSON body"}, status_code=400)
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "Expected a JSON object"}, status_code=400)
     for key in ("scanColVisibility", "triage_cols"):
         if key not in body:
             continue
@@ -936,10 +968,15 @@ async def upload_api_spec(
     file: UploadFile = File(...),
 ):
     """Save an uploaded Postman/Burp/Swagger file to imports/."""
+    if not file.filename:
+        return JSONResponse({"error": "No filename provided"}, status_code=400)
     safe_name = file.filename.replace("..", "").replace("/", "_").replace("\\", "_")
     dest = IMPORTS_DIR / safe_name
-    contents = await file.read()
-    dest.write_bytes(contents)
+    try:
+        contents = await file.read()
+        dest.write_bytes(contents)
+    except Exception as e:
+        return JSONResponse({"error": f"Failed to save file: {e}"}, status_code=500)
     return {"filename": safe_name, "size": len(contents)}
 
 
@@ -989,7 +1026,10 @@ def _resolve_api_imports(api_imports: dict) -> tuple[dict, dict | None]:
 @app.post("/api/scan/analyze", tags=["Scans"])
 async def analyze_instruction(request: Request):
     """Parse a natural-language scan instruction into a structured scan plan."""
-    body = await request.json()
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "Invalid JSON body"}, status_code=400)
     instruction = body.get("instruction", "").strip()
     selected_model = body.get("model", "").strip()
     api_imports = body.get("api_imports", {}) or {}
@@ -1066,7 +1106,10 @@ async def analyze_instruction(request: Request):
 
 @app.post("/api/scan", tags=["Scans"])
 async def start_scan(request: Request):
-    body = await request.json()
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "Invalid JSON body"}, status_code=400)
     target_url = body.get("target_url", "").strip()
     username = body.get("username", "").strip()
     password = body.get("password", "").strip()
@@ -1100,7 +1143,7 @@ async def start_scan(request: Request):
         return JSONResponse({"error": "Target URL is required"}, status_code=400)
 
     scan_id = f"scan_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
-    model_name = next((m["name"] for m in _get_models() if m["id"] == model), model)
+    model_name = next((m.get("name", m.get("id", model)) for m in _get_models() if m.get("id") == model), model)
 
     cancel_flag = threading.Event()
     pause_flag = threading.Event()
@@ -1348,8 +1391,17 @@ async def _run_scan_task(scan_id, target_url, username, password, model, scan_mo
         filepath = str(RAW_DIR / f"aiagent_{model_slug}_{scan_id}.json")
         partial_findings = scan.get("live_findings", [])
         cost_summary = router.get_cost_summary() if router else []
+        _partial_metrics = {
+            "test_log": scan.get("live_tests", []),
+            "phase_log": scan.get("live_phases", []),
+            "pages_crawled": len(scan.get("live_crawled", [])),
+            "pages_list": [c.get("url", "") for c in scan.get("live_crawled", []) if isinstance(c, dict)],
+            "forms_found": scan.get("live_forms", 0),
+            "total_tool_calls": scan.get("live_tool_calls", 0),
+            "phases_completed": len(scan.get("live_phases", [])),
+        }
         try:
-            _partial_out = save_results(filepath, partial_findings, cost_summary, target, model, duration, scan_metrics={})
+            _partial_out = save_results(filepath, partial_findings, cost_summary, target, model, duration, scan_metrics=_partial_metrics)
             _persist_scan_result(scan_id, _partial_out)
         except Exception:
             filepath = None
@@ -1359,6 +1411,7 @@ async def _run_scan_task(scan_id, target_url, username, password, model, scan_mo
         phases_done = len(scan.get("live_phases", []))
         SCANS[scan_id].update({
             "status": "cancelled",
+            "error": f"Scan stopped by user after {phases_done} phase(s). {len(partial_findings)} finding(s) preserved.",
             "duration": round(duration, 1),
             "cost": _cost,
             "total_tokens": _tok,
@@ -1390,18 +1443,31 @@ async def _run_scan_task(scan_id, target_url, username, password, model, scan_mo
             err_cost = round(sum(c.get("cost_usd", 0) for c in cost_summary), 4) or None
         elif isinstance(cost_summary, dict):
             err_cost = cost_summary.get("total_cost_usd")
+        _err_metrics = {
+            "test_log": scan.get("live_tests", []),
+            "phase_log": scan.get("live_phases", []),
+            "pages_crawled": len(scan.get("live_crawled", [])),
+            "pages_list": [c.get("url", "") for c in scan.get("live_crawled", []) if isinstance(c, dict)],
+            "forms_found": scan.get("live_forms", 0),
+            "total_tool_calls": scan.get("live_tool_calls", 0),
+            "phases_completed": len(scan.get("live_phases", [])),
+        }
         try:
             model_slug = model.replace("/", "_").replace(".", "_").replace(":", "_")
             fp = str(RAW_DIR / f"aiagent_{model_slug}_{scan_id}.json")
-            _partial_out = save_results(fp, partial_findings, cost_summary if isinstance(cost_summary, list) else [], target, model, duration, scan_metrics={})
+            _partial_out = save_results(fp, partial_findings, cost_summary if isinstance(cost_summary, list) else [], target, model, duration, scan_metrics=_err_metrics)
             _persist_scan_result(scan_id, _partial_out)
             filepath = fp
         except Exception:
             logger.debug("Error-handler save_results failed for %s", scan_id, exc_info=True)
         phases_done = len(scan.get("live_phases", []))
+        err_msg = str(e).strip()
+        if not err_msg:
+            err_msg = type(e).__name__
+        err_detail = f"{err_msg} — occurred during phase {phases_done + 1}. {len(partial_findings)} finding(s) preserved."
         SCANS[scan_id].update({
             "status": "error",
-            "error": str(e),
+            "error": err_detail,
             "duration": round(duration, 1),
             "cost": err_cost,
             "findings_count": len(partial_findings),
@@ -1641,7 +1707,10 @@ async def interactive_browser_event(scan_id: str, request: Request):
     session = INTERACTIVE_BROWSERS.get(scan_id)
     if not session or not session["active"].is_set():
         raise HTTPException(status_code=400, detail="No active interactive session")
-    body = await request.json()
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "Invalid JSON body"}, status_code=400)
     session["events"].put(body)
     return {"status": "ok"}
 
@@ -1837,6 +1906,7 @@ async def rescan(scan_id: str, request: Request):
 async def delete_scan(scan_id: str):
     """Stop (if running) and fully delete a scan, its result files, and reports."""
     deleted = []
+    errors = []
     if scan_id in SCANS:
         scan_cost = SCANS[scan_id].get("cost", 0) or SCANS[scan_id].get("live_cost", 0) or 0
         cur_status = SCANS[scan_id].get("status")
@@ -1851,29 +1921,47 @@ async def delete_scan(scan_id: str):
             deleted.append("stopped_running_scan")
             await asyncio.sleep(0.5)
         if scan_cost > 0:
-            scandb.add_deleted_cost(scan_cost)
+            try:
+                scandb.add_deleted_cost(scan_cost)
+            except Exception as e:
+                errors.append(f"cost ledger: {e}")
         result_file = SCANS[scan_id].get("result_file")
         del SCANS[scan_id]
-        scandb.delete_scan(scan_id)
+        try:
+            scandb.delete_scan(scan_id)
+        except Exception as e:
+            errors.append(f"db delete: {e}")
         CANCEL_FLAGS.pop(scan_id, None)
         PAUSE_FLAGS.pop(scan_id, None)
         deleted.append("scan_record")
         if result_file:
             fpath = RAW_DIR / result_file
-            if fpath.exists():
-                fpath.unlink()
-                deleted.append(str(result_file))
-    for f in RAW_DIR.glob("*.json"):
+            try:
+                if fpath.exists():
+                    fpath.unlink()
+                    deleted.append(str(result_file))
+            except Exception:
+                pass
+    for f in list(RAW_DIR.glob("*.json")):
         if scan_id in f.stem:
-            f.unlink()
-            deleted.append(f.name)
-    for f in REPORTS_DIR.glob("*.pdf"):
+            try:
+                f.unlink()
+                deleted.append(f.name)
+            except Exception:
+                pass
+    for f in list(REPORTS_DIR.glob("*.pdf")):
         if scan_id in f.stem or any(scan_id in part for part in f.stem.split("_")):
-            f.unlink()
-            deleted.append(f.name)
+            try:
+                f.unlink()
+                deleted.append(f.name)
+            except Exception:
+                pass
     if not deleted:
         return JSONResponse({"error": "Scan not found"}, status_code=404)
-    return {"deleted": deleted}
+    result = {"deleted": deleted}
+    if errors:
+        result["warnings"] = errors
+    return result
 
 
 @app.delete("/api/scans", tags=["Scans"])
@@ -1895,24 +1983,44 @@ async def delete_all_scans():
     SCANS.clear()
     CANCEL_FLAGS.clear()
     PAUSE_FLAGS.clear()
-    scandb.delete_all_scans()
+    try:
+        scandb.delete_all_scans()
+    except Exception as e:
+        logger.warning("delete_all_scans DB cleanup: %s", e)
     count = 0
-    for f in RAW_DIR.glob("*.json"):
-        f.unlink()
-        count += 1
-    for f in REPORTS_DIR.glob("*.pdf"):
-        f.unlink()
-        count += 1
+    for f in list(RAW_DIR.glob("*.json")):
+        try:
+            f.unlink()
+            count += 1
+        except Exception:
+            pass
+    for f in list(REPORTS_DIR.glob("*.pdf")):
+        try:
+            f.unlink()
+            count += 1
+        except Exception:
+            pass
     return {"deleted_files": count, "status": "cleared"}
 
 
 @app.get("/api/results/{scan_id}", tags=["Results"])
 async def get_results(scan_id: str):
+    try:
+        return await _get_results_inner(scan_id)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("get_results(%s) failed: %s", scan_id, e, exc_info=True)
+        return JSONResponse({"error": f"Failed to load results: {type(e).__name__}: {e}"}, status_code=500)
+
+async def _get_results_inner(scan_id: str):
     data = _load_raw_result_dict(scan_id)
     if not data:
         return JSONResponse({"error": "Results not found"}, status_code=404)
     findings = data.get("findings") or []
     test_log = data.get("summary", {}).get("test_log") or []
+    if not test_log and scan_id in SCANS:
+        test_log = SCANS[scan_id].get("live_tests", [])
     meta = data.get("metadata") or {}
     summary = data.get("summary", {})
 
@@ -2017,7 +2125,10 @@ async def download_raw(scan_id: str):
 @app.post("/api/results/{scan_id}/cvss-override", tags=["Results"])
 async def cvss_override(scan_id: str, request: Request):
     """Save a CVSS override for a specific finding in a scan."""
-    body = await request.json()
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "Invalid JSON body"}, status_code=400)
     title = body.get("title", "")
     url = body.get("url", "")
     cvss_value = body.get("cvss")
@@ -2915,7 +3026,11 @@ def _find_scan_for_report(filename: str) -> tuple[str, dict]:
 async def list_reports():
     """List all generated PDF and Excel reports grouped by target."""
     reports = []
-    for f in sorted(REPORTS_DIR.iterdir(), reverse=True) if REPORTS_DIR.exists() else []:
+    try:
+        files = sorted(REPORTS_DIR.iterdir(), reverse=True) if REPORTS_DIR.exists() else []
+    except Exception:
+        files = []
+    for f in files:
         if f.suffix not in (".pdf", ".xlsx"):
             continue
         scan_id, scan_info = _find_scan_for_report(f.name)
@@ -2931,9 +3046,16 @@ async def list_reports():
             except Exception:
                 pass
         target = target or "Unknown Target"
+        try:
+            fstat = f.stat()
+            fsize = fstat.st_size
+            fmod = datetime.fromtimestamp(fstat.st_mtime).isoformat()
+        except Exception:
+            fsize = 0
+            fmod = ""
         reports.append({
-            "filename": f.name, "size": f.stat().st_size,
-            "modified": datetime.fromtimestamp(f.stat().st_mtime).isoformat(),
+            "filename": f.name, "size": fsize,
+            "modified": fmod,
             "type": "pdf" if f.suffix == ".pdf" else "xlsx",
             "url": f"/api/reports/{f.name}",
             "scan_id": scan_id, "target": target,
@@ -2960,7 +3082,10 @@ async def delete_report_file(filename: str):
     fpath = REPORTS_DIR / filename
     if not fpath.exists():
         return JSONResponse({"error": "Not found"}, status_code=404)
-    fpath.unlink()
+    try:
+        fpath.unlink()
+    except Exception as e:
+        return JSONResponse({"error": f"Failed to delete: {e}"}, status_code=500)
     return {"deleted": filename}
 
 
@@ -2978,8 +3103,11 @@ async def delete_reports_for_target(target: str = ""):
         for f in list(REPORTS_DIR.glob("*")) if REPORTS_DIR.exists() else []:
             sid = f.stem.replace("report_", "").replace("excel_", "")
             if sid not in known_ids:
-                f.unlink()
-                deleted_files.append(f.name)
+                try:
+                    f.unlink()
+                    deleted_files.append(f.name)
+                except Exception:
+                    pass
     else:
         ids_to_delete = [sid for sid, s in SCANS.items() if s.get("target_url", "") == target]
         target_del_cost = 0.0
@@ -2987,16 +3115,28 @@ async def delete_reports_for_target(target: str = ""):
             sc = SCANS.get(sid, {}).get("cost", 0) or 0
             target_del_cost += sc
             for f in list(REPORTS_DIR.glob(f"*{sid}*")):
-                f.unlink()
-                deleted_files.append(f.name)
+                try:
+                    f.unlink()
+                    deleted_files.append(f.name)
+                except Exception:
+                    pass
             for f in list(RAW_DIR.glob(f"*{sid}*")):
-                f.unlink()
+                try:
+                    f.unlink()
+                except Exception:
+                    pass
             SCANS.pop(sid, None)
             deleted_scans.append(sid)
         if target_del_cost > 0:
-            scandb.add_deleted_cost(target_del_cost, len(ids_to_delete))
+            try:
+                scandb.add_deleted_cost(target_del_cost, len(ids_to_delete))
+            except Exception:
+                pass
         if ids_to_delete:
-            scandb.delete_scans(ids_to_delete)
+            try:
+                scandb.delete_scans(ids_to_delete)
+            except Exception:
+                pass
 
     return {"deleted_files": deleted_files, "deleted_scans": deleted_scans}
 
@@ -3004,7 +3144,10 @@ async def delete_reports_for_target(target: str = ""):
 @app.get("/api/results/{scan_id}/excel", tags=["Results"])
 async def generate_excel(scan_id: str):
     """Generate and download an Excel report for a scan."""
-    data = _load_raw_result_dict(scan_id)
+    try:
+        data = _load_raw_result_dict(scan_id)
+    except Exception as e:
+        return JSONResponse({"error": f"Failed to load scan data: {e}"}, status_code=500)
     if not data:
         return JSONResponse({"error": "Results not found"}, status_code=404)
     try:
@@ -3038,6 +3181,8 @@ async def download_payloads(scan_id: str):
 
     phases_map = {}
     for entry in test_log:
+        if not isinstance(entry, dict):
+            continue
         pid = entry.get("phase", "unknown")
         if pid not in phases_map:
             phases_map[pid] = {"phase_id": pid, "phase_name": "", "payloads": []}
@@ -3048,6 +3193,8 @@ async def download_payloads(scan_id: str):
         })
 
     for p in phase_log:
+        if not isinstance(p, dict):
+            continue
         pid = p.get("phase", "")
         if pid in phases_map:
             phases_map[pid]["phase_name"] = p.get("name", "")
@@ -3082,7 +3229,7 @@ async def download_live_payloads(scan_id: str):
         "model": s.get("model", ""),
         "status": s.get("status", ""),
         "total_activity": len(tests),
-        "phases_completed": [{"name": p["name"], "tool_calls": p["tool_calls"], "findings": p["findings"]} for p in phases],
+        "phases_completed": [{"name": p.get("name", ""), "tool_calls": p.get("tool_calls", 0), "findings": p.get("findings", 0)} for p in phases if isinstance(p, dict)],
         "activity_log": tests,
     }
     return JSONResponse(output)
@@ -3093,14 +3240,31 @@ def _extract_crawled(summary: dict, test_log: list) -> list[dict]:
     crawled = []
     for t in test_log:
         req = t.get("request", {})
-        url = req.get("url", "") or req.get("endpoint", "")
-        method = req.get("method", "GET")
+        url = str(req.get("url", "") or req.get("endpoint", ""))
+        method = str(req.get("method", "GET"))
         if url and url not in urls:
             urls.add(url)
-            resp = t.get("response_summary", {})
-            status = resp.get("status", "") if isinstance(resp, dict) else ""
+            resp = t.get("response_summary") or t.get("response") or {}
+            status = resp.get("status") or resp.get("status_code", "") if isinstance(resp, dict) else ""
             crawled.append({"url": url, "method": method, "status": str(status)})
     return crawled
+
+
+def _parse_str_value(v):
+    """Try to parse a stringified list/dict back to native Python."""
+    if not isinstance(v, str):
+        return v
+    s = v.strip()
+    if (s.startswith("[") and s.endswith("]")) or (s.startswith("{") and s.endswith("}")):
+        try:
+            return json.loads(s)
+        except Exception:
+            try:
+                import ast
+                return ast.literal_eval(s)
+            except Exception:
+                pass
+    return v
 
 
 def _extract_payloads_by_endpoint(test_log: list) -> list[dict]:
@@ -3111,66 +3275,79 @@ def _extract_payloads_by_endpoint(test_log: list) -> list[dict]:
         if not isinstance(req, dict):
             continue
         tool = t.get("tool", "")
-        url = (req.get("url", "") or req.get("endpoint", "")).split("?")[0]
-        method = req.get("method", "GET")
-        if not url:
+        raw_url = str(req.get("url", "") or req.get("endpoint", ""))
+        url_base = raw_url.split("?")[0]
+        method = str(req.get("method", "GET"))
+        if not url_base:
             continue
-        key = f"{method} {url}"
+        key = f"{method} {url_base}"
         resp = t.get("response_summary") or t.get("response") or {}
         if not isinstance(resp, dict):
             resp = {}
+        resp_status = resp.get("status") or resp.get("status_code", "")
+        resp_anomaly = resp.get("anomaly", False)
+        if isinstance(resp_anomaly, str):
+            resp_anomaly = resp_anomaly.lower() in ("true", "yes")
+        resp_reflected = resp.get("reflected", False)
+        if isinstance(resp_reflected, str):
+            resp_reflected = resp_reflected.lower() in ("true", "yes")
+        resp_body = str(resp.get("body_snippet") or resp.get("body") or "")
 
         if tool == "fuzz_parameter":
-            param_name = req.get("param_name", "")
-            param_loc = req.get("param_location", "query")
-            raw_payloads = req.get("payloads", [])
+            param_name = str(req.get("param_name", ""))
+            param_loc = str(req.get("param_location", "query"))
+            raw_payloads = _parse_str_value(req.get("payloads", []))
             if isinstance(raw_payloads, str):
-                try:
-                    raw_payloads = json.loads(raw_payloads)
-                except Exception:
-                    raw_payloads = [raw_payloads]
-            per_payload_results = resp.get("results", [])
+                raw_payloads = [raw_payloads]
+            if not isinstance(raw_payloads, list):
+                raw_payloads = [str(raw_payloads)]
+            per_payload_results = _parse_str_value(resp.get("results", []))
             if not isinstance(per_payload_results, list):
                 per_payload_results = []
-            for i, pl in enumerate(raw_payloads[:100]):
-                pr = per_payload_results[i] if i < len(per_payload_results) else {}
-                if not isinstance(pr, dict):
-                    pr = {}
+            if raw_payloads:
+                for i, pl in enumerate(raw_payloads[:100]):
+                    pr = per_payload_results[i] if i < len(per_payload_results) else {}
+                    if not isinstance(pr, dict):
+                        pr = {}
+                    ep_map[key].append({
+                        "tool": tool,
+                        "method": method,
+                        "full_url": str(req.get("endpoint") or req.get("url", "")),
+                        "param": param_name,
+                        "param_location": param_loc,
+                        "payload": _truncate(str(pl), 200),
+                        "status": pr.get("status", resp_status),
+                        "anomaly": pr.get("anomaly", resp_anomaly),
+                        "reflected": pr.get("reflected", resp_reflected),
+                        "body_snippet": _truncate(str(pr.get("body_snippet", resp_body)), 120),
+                    })
+            else:
                 ep_map[key].append({
-                    "tool": tool,
-                    "method": method,
-                    "full_url": req.get("endpoint") or req.get("url", ""),
-                    "param": param_name,
-                    "param_location": param_loc,
-                    "payload": _truncate(str(pl), 200),
-                    "status": pr.get("status", ""),
-                    "anomaly": pr.get("anomaly", False),
-                    "reflected": pr.get("reflected", False),
-                    "body_snippet": _truncate(str(pr.get("body_snippet", "")), 120),
-                    "timing_ms": pr.get("timing_ms", ""),
+                    "tool": tool, "method": method,
+                    "full_url": raw_url, "param": param_name,
+                    "param_location": param_loc, "payload": "",
+                    "status": resp_status, "anomaly": resp_anomaly,
+                    "reflected": resp_reflected, "body_snippet": _truncate(resp_body, 120),
                 })
         elif tool == "inject_payload":
             ep_map[key].append({
-                "tool": tool,
-                "method": "DOM",
-                "full_url": url,
-                "param": req.get("selector", ""),
+                "tool": tool, "method": "DOM", "full_url": raw_url,
+                "param": str(req.get("selector", "")),
                 "payload": _truncate(str(req.get("payload", "")), 200),
-                "status": resp.get("status", ""),
-                "anomaly": resp.get("anomaly", False),
-                "reflected": resp.get("reflected", False),
-                "body_snippet": _truncate(str(resp.get("body_snippet", "")), 120),
+                "status": resp_status, "anomaly": resp_anomaly,
+                "reflected": resp_reflected,
+                "body_snippet": _truncate(resp_body, 120),
             })
         else:
-            body_str = req.get("body", "")
+            body_str = str(req.get("body", ""))
+            query = "?" + raw_url.split("?", 1)[1] if "?" in raw_url else ""
+            payload_display = body_str if body_str and body_str != "None" else (query if query else "")
             ep_map[key].append({
-                "tool": tool,
-                "method": method,
-                "full_url": req.get("url", ""),
-                "payload": _truncate(str(body_str), 200) if body_str else "",
-                "status": resp.get("status") or resp.get("status_code", ""),
-                "anomaly": resp.get("anomaly", False),
-                "body_snippet": _truncate(str(resp.get("body_snippet", "")), 120),
+                "tool": tool, "method": method, "full_url": raw_url,
+                "payload": _truncate(payload_display, 200),
+                "status": resp_status, "anomaly": resp_anomaly,
+                "reflected": resp_reflected,
+                "body_snippet": _truncate(resp_body, 120),
             })
 
     result = []

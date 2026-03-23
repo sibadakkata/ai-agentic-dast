@@ -54,7 +54,7 @@ svg text, svg tspan { font-family: 'Inter', -apple-system, BlinkMacSystemFont, s
 /* ===== CARDS ===== */
 .container { max-width:1280px; margin:0 auto; padding:24px; }
 .card { background:var(--surface); border:1px solid var(--border); border-radius:12px; padding:24px 28px; margin-bottom:20px; box-shadow:var(--shadow-sm); }
-.card h2 { font-size:17px; font-weight:700; margin-bottom:18px; display:flex; align-items:center; gap:10px; color:var(--text); letter-spacing:-0.2px; }
+.card h2 { font-size:18px; font-weight:700; margin-bottom:18px; display:flex; align-items:center; gap:10px; color:var(--text); letter-spacing:-0.3px; line-height:1.4; flex-wrap:wrap; }
 .card h2 .icon { font-size:20px; }
 
 /* ===== FORMS ===== */
@@ -176,11 +176,12 @@ tr:hover td { background:rgba(79,70,229,0.03); }
 .col-picker-dd .col-picker-divider { height:1px; background:var(--border); margin:4px 0; }
 
 /* ===== STAT CARDS (live view, results, error) ===== */
-.stats { display:grid; grid-template-columns:repeat(auto-fit, minmax(150px, 1fr)); gap:14px; margin-bottom:24px; }
-.stat { background:var(--surface2); border:1px solid var(--border); border-radius:var(--radius); padding:18px 16px; text-align:center; overflow:hidden; }
-.stat .value { font-size:22px; font-weight:700; color:var(--accent2); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; line-height:1.3; letter-spacing:-0.3px; }
-.stat .value-sm { font-size:14px; font-weight:600; color:var(--accent2); word-break:break-word; line-height:1.4; }
-.stat .label { font-size:11px; font-weight:600; color:var(--text2); margin-top:8px; text-transform:uppercase; letter-spacing:0.7px; }
+.stats { display:grid; grid-template-columns:repeat(auto-fit, minmax(130px, 1fr)); gap:12px; margin-bottom:24px; }
+.stat { background:var(--surface2); border:1px solid var(--border); border-radius:var(--radius); padding:14px 14px; text-align:center; overflow:hidden; min-width:0; }
+.stat .value { font-size:18px; font-weight:700; color:var(--accent2); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; line-height:1.3; letter-spacing:-0.3px; }
+.stat .value-md { font-size:15px; font-weight:700; color:var(--accent2); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; line-height:1.3; letter-spacing:-0.2px; }
+.stat .value-sm { font-size:13px; font-weight:600; color:var(--accent2); overflow:hidden; text-overflow:ellipsis; line-height:1.35; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; white-space:normal; word-break:break-word; }
+.stat .label { font-size:11px; font-weight:600; color:var(--text2); margin-top:5px; text-transform:uppercase; letter-spacing:0.6px; }
 
 /* ===== PROGRESS LOG ===== */
 .progress-log { background:var(--surface2); border:1px solid var(--border); border-radius:var(--radius); padding:16px 20px; font-family:var(--font-mono); font-size:12px; color:var(--text); max-height:160px; overflow-y:auto; line-height:1.8; }
@@ -918,8 +919,8 @@ input:focus-visible, select:focus-visible, textarea:focus-visible { outline:none
         <button type="button" class="btn btn-primary btn-sm" id="continue-scan-btn" onclick="continueScan()" style="background:var(--accent);font-size:13px;display:none;">▶ Continue From Phase <span id="continue-phase-num"></span></button>
         <button type="button" class="btn btn-outline btn-sm" id="retry-scan-btn" onclick="restartScan()" style="font-size:13px;color:var(--accent);border-color:var(--accent);">↻ Re-run From Scratch</button>
       </div>
-      <div style="background:rgba(239,68,68,0.1);border:1px solid rgba(239,68,68,0.3);border-radius:8px;padding:16px;margin-bottom:16px;">
-        <div style="font-size:12px;font-weight:600;color:var(--red);text-transform:uppercase;margin-bottom:8px;">Error Details</div>
+      <div id="error-detail-box" style="border-radius:8px;padding:16px;margin-bottom:16px;">
+        <div id="error-detail-label" style="font-size:12px;font-weight:600;text-transform:uppercase;margin-bottom:8px;"></div>
         <div id="error-message" style="font-family:monospace;font-size:13px;color:var(--text);word-break:break-all;"></div>
       </div>
       <div style="font-size:12px;font-weight:600;color:var(--text2);text-transform:uppercase;margin-bottom:8px;">Progress Log</div>
@@ -1292,6 +1293,88 @@ input:focus-visible, select:focus-visible, textarea:focus-visible { outline:none
 
 function esc(s) { if (!s) return ''; var d = document.createElement('div'); d.textContent = (typeof s === 'object' ? JSON.stringify(s, null, 2) : String(s)); return d.innerHTML; }
 
+function _shortModel(m) {
+  if (!m || m === '-') return '-';
+  let s = String(m);
+  s = s.split('/').pop() || s;
+  s = s.replace(/^(us\.|eu\.|ap\.)?(anthropic|amazon|meta|mistral|cohere|ai21)\./gi, '');
+  s = s.replace(/-\d{8,}-v\d+:\d+$/i, '');
+  s = s.replace(/-\d{8,}$/i, '');
+  s = s.replace(/:0$/, '');
+  const _friendlyMap = {
+    'claude-haiku-4-5': 'Claude Haiku 4.5',
+    'claude-sonnet-4': 'Claude Sonnet 4',
+    'claude-opus-4': 'Claude Opus 4',
+    'claude-3-5-sonnet': 'Claude 3.5 Sonnet',
+    'claude-3-5-haiku': 'Claude 3.5 Haiku',
+    'claude-3-haiku': 'Claude 3 Haiku',
+    'claude-3-sonnet': 'Claude 3 Sonnet',
+    'claude-3-opus': 'Claude 3 Opus',
+  };
+  const sl = s.toLowerCase();
+  for (const [k, v] of Object.entries(_friendlyMap)) {
+    if (sl.startsWith(k)) return v;
+  }
+  return s;
+}
+
+function _shortPhase(p) {
+  if (!p) return '';
+  let s = String(p);
+  const m = s.match(/^\[(\d+)\/(\d+)\]\s*(.+)/);
+  if (m) return `[${m[1]}/${m[2]}] ${m[3]}`;
+  return s;
+}
+
+function _shortDate(iso) {
+  if (!iso) return '-';
+  try {
+    const d = new Date(iso);
+    if (isNaN(d.getTime())) return '-';
+    const dd = String(d.getDate()).padStart(2, '0');
+    const mm = String(d.getMonth() + 1).padStart(2, '0');
+    const yy = String(d.getFullYear()).slice(-4);
+    const hh = String(d.getHours()).padStart(2, '0');
+    const mi = String(d.getMinutes()).padStart(2, '0');
+    return `${dd}/${mm}/${yy} ${hh}:${mi}`;
+  } catch(_) { return '-'; }
+}
+
+async function _safeFetch(url, opts) {
+  try {
+    const resp = await fetch(url, opts);
+    if (!resp.ok) {
+      let msg = `HTTP ${resp.status}`;
+      try { const d = await resp.json(); msg = d.error || d.detail || msg; } catch(_) { try { msg = await resp.text() || msg; } catch(_2) {} }
+      return { ok: false, status: resp.status, error: msg, data: null };
+    }
+    const ct = resp.headers.get('content-type') || '';
+    if (ct.includes('json')) { const data = await resp.json(); return { ok: true, status: resp.status, error: null, data }; }
+    return { ok: true, status: resp.status, error: null, data: resp };
+  } catch (e) {
+    return { ok: false, status: 0, error: e.message || 'Network error', data: null };
+  }
+}
+
+let _toastTimer = null;
+function _apiError(msg, context) {
+  const prefix = context ? context + ': ' : '';
+  const text = prefix + (msg || 'An unexpected error occurred');
+  console.error('[API Error]', text);
+  let toast = document.getElementById('api-toast');
+  if (!toast) {
+    toast = document.createElement('div');
+    toast.id = 'api-toast';
+    toast.style.cssText = 'position:fixed;bottom:24px;right:24px;z-index:99999;max-width:480px;padding:12px 20px;border-radius:8px;background:#1e1b2e;color:#f87171;font-size:13px;box-shadow:0 4px 24px rgba(0,0,0,0.4);border:1px solid rgba(248,113,113,0.3);opacity:0;transition:opacity 0.3s;pointer-events:auto;cursor:pointer;';
+    toast.onclick = () => { toast.style.opacity = '0'; };
+    document.body.appendChild(toast);
+  }
+  toast.textContent = text;
+  toast.style.opacity = '1';
+  if (_toastTimer) clearTimeout(_toastTimer);
+  _toastTimer = setTimeout(() => { toast.style.opacity = '0'; }, 6000);
+}
+
 function _cweLink(cwe) {
   if (!cwe) return '-';
   var s = String(cwe);
@@ -1412,8 +1495,8 @@ async function loadDashboard() {
         recent.map(function(s) {
           var fcStyle = (s.findings > 0) ? 'font-weight:700;color:' + (s.findings >= 10 ? 'var(--red)' : s.findings >= 3 ? 'var(--orange)' : 'var(--text)') : 'color:var(--text2)';
           return '<tr style="cursor:pointer;" onclick="viewScan(\'' + s.id + '\')">' +
-            '<td style="font-weight:600;color:var(--accent2);max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + esc(s.target) + '</td>' +
-            '<td style="font-size:12px;color:var(--text2);">' + esc(s.model) + '</td>' +
+            '<td style="font-weight:600;max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;"><a href="' + esc(s.target) + '" target="_blank" rel="noopener" onclick="event.stopPropagation();" style="color:var(--accent2);text-decoration:none;">' + esc(s.target) + '</a></td>' +
+            '<td style="font-size:12px;color:var(--text2);" title="' + esc(s.model) + '">' + esc(_shortModel(s.model)) + '</td>' +
             '<td><span class="badge badge-' + (s.status || 'unknown') + '">' + ((s.status || '-').charAt(0).toUpperCase() + (s.status || '-').slice(1)) + '</span></td>' +
             '<td style="' + fcStyle + ';">' + (s.findings != null ? s.findings : '-') + '</td>' +
             '<td style="font-size:12px;color:var(--text2);">' + (s.cost != null ? '$' + Number(s.cost).toFixed(2) : '-') + '</td>' +
@@ -1474,6 +1557,7 @@ async function loadReports() {
   const container = document.getElementById('reports-container');
   try {
     const resp = await fetch('/api/reports');
+    if (!resp.ok) { container.innerHTML = '<div class="empty" style="color:var(--red);">Failed to load reports (HTTP ' + resp.status + ')</div>'; return; }
     const data = await resp.json();
     const reports = data.reports || [];
     if (!reports.length) {
@@ -1631,6 +1715,7 @@ async function loadSettings() {
   }
   try {
     const resp = await fetch('/health');
+    if (!resp.ok) { document.getElementById('settings-system').innerHTML = '<div class="empty" style="color:var(--red);">Health check failed (HTTP ' + resp.status + ')</div>'; return; }
     const data = await resp.json();
     let html = '<div>';
     html += settingRow('Status', statusDot(data.status === 'ok', 'Healthy', 'Unhealthy'));
@@ -2177,8 +2262,8 @@ async function loadScans() {
 
       var cells = '';
       cells += '<div onclick="event.stopPropagation()"><input type="checkbox" class="scan-check" data-id="' + id + '" onchange="updateToolbar()" style="width:15px;height:15px;accent-color:var(--accent);cursor:pointer;"></div>';
-      if (_vis('target'))   cells += '<div class="target">' + esc(target) + '</div>';
-      if (_vis('model'))    cells += '<div class="model">' + esc(model) + '</div>';
+      if (_vis('target'))   cells += '<div class="target" style="color:var(--accent2);cursor:pointer;" title="' + esc(target) + '">' + esc(target) + '</div>';
+      if (_vis('model'))    cells += '<div class="model" title="' + esc(model) + '">' + esc(_shortModel(model)) + '</div>';
       if (_vis('status'))   cells += '<div><span class="badge badge-' + st + '">' + stLabel + '</span>' +
         (modeLabel ? ' <span class="badge" style="font-size:10px;padding:2px 7px;background:' + modeColor + '18;color:' + modeColor + ';margin-left:3px;">' + modeLabel + '</span>' : '') +
         (st === 'running' ? phaseInfo : '') + '</div>';
@@ -2342,12 +2427,13 @@ async function uploadFile(inputId) {
   statusEl.textContent = 'Uploading...';
   try {
     const resp = await fetch('/api/upload', { method: 'POST', body: formData });
+    if (!resp.ok) { const d = await resp.json().catch(() => ({})); statusEl.textContent = 'Upload failed: ' + (d.error || 'HTTP ' + resp.status); statusEl.style.color = 'var(--red)'; return ''; }
     const data = await resp.json();
     statusEl.textContent = 'Uploaded: ' + data.filename;
     statusEl.style.color = 'var(--green)';
     return data.filename;
   } catch(e) {
-    statusEl.textContent = 'Upload failed';
+    statusEl.textContent = 'Upload failed: ' + (e.message || 'Network error');
     statusEl.style.color = 'var(--red)';
     return '';
   }
@@ -2618,9 +2704,12 @@ async function exportScansToExcel() {
   if (selectedIds.length > 0) {
     dataToExport = _loadedScans.filter(s => selectedIds.includes(s.id));
   } else {
-    const resp = await fetch('/api/scans?' + new URLSearchParams({ per_page: 10000, search: _scanSearch || '' }));
-    const result = await resp.json();
-    dataToExport = result.items || result;
+    try {
+      const resp = await fetch('/api/scans?' + new URLSearchParams({ per_page: 10000, search: _scanSearch || '' }));
+      if (!resp.ok) { _apiError('Failed to load scans for export (HTTP ' + resp.status + ')', 'Export'); return; }
+      const result = await resp.json();
+      dataToExport = result.items || result;
+    } catch(e) { _apiError(e.message, 'Export'); return; }
   }
 
   if (!dataToExport.length) { _showAlert('Nothing to Export', 'No scans to export.'); return; }
@@ -2663,7 +2752,9 @@ async function bulkDelete() {
   const ids = getSelectedScanIds();
   if (!ids.length) return;
   if (!await _showConfirm('Delete Selected', `Stop & permanently delete ${ids.length} selected scan(s), results, and reports?`, 'Delete', 'btn-danger')) return;
-  for (const id of ids) { await fetch(`/api/scan/${id}`, { method: 'DELETE' }); }
+  let delErrors = 0;
+  for (const id of ids) { try { const r = await fetch(`/api/scan/${id}`, { method: 'DELETE' }); if (!r.ok) delErrors++; } catch(_) { delErrors++; } }
+  if (delErrors) _apiError(`${delErrors} of ${ids.length} scans failed to delete`, 'Bulk Delete');
   if (ids.includes(currentScanId)) {
     if (lvPollInterval) { clearInterval(lvPollInterval); lvPollInterval = null; }
     showList();
@@ -2864,14 +2955,14 @@ async function pollLiveView(scanId) {
 
     document.getElementById('live-scan-title').innerHTML =
       data.status === 'running' || data.status === 'stopping' || data.status === 'pausing'
-        ? `<span class="scanning-indicator"></span>${data.status === 'stopping' ? stoppingLabel : data.status === 'pausing' ? pausingLabel : 'Scan In Progress'} — ${esc(data.model || '')}${scannerBadge}${engineIndicator}${targetLine}`
+        ? `<span class="scanning-indicator"></span>${data.status === 'stopping' ? stoppingLabel : data.status === 'pausing' ? pausingLabel : 'Scan In Progress'} — ${esc(_shortModel(data.model_name || data.model))}${scannerBadge}${engineIndicator}${targetLine}`
         : data.status === 'paused'
-          ? `<span style="color:var(--yellow);">⏸</span> Scan Paused — ${esc(data.model || '')}${scannerBadge}${targetLine}`
+          ? `<span style="color:var(--yellow);">⏸</span> Scan Paused — ${esc(_shortModel(data.model_name || data.model))}${scannerBadge}${targetLine}`
           : data.status === 'completed'
-            ? `<span style="color:var(--green);">&#10003;</span> Scan Complete — ${esc(data.model || '')}${scannerBadge}${targetLine}`
+            ? `<span style="color:var(--green);">&#10003;</span> Scan Complete — ${esc(_shortModel(data.model_name || data.model))}${scannerBadge}${targetLine}`
             : data.status === 'cancelled'
-              ? `<span style="color:#f59e0b;">&#9632;</span> Scan Cancelled — ${esc(data.model || '')}${scannerBadge}${targetLine}`
-              : `<span style="color:var(--red);">&#10005;</span> Scan Error — ${esc(data.model || '')}${scannerBadge}${targetLine}`;
+              ? `<span style="color:#f59e0b;">&#9632;</span> Scan Cancelled — ${esc(_shortModel(data.model_name || data.model))}${scannerBadge}${targetLine}`
+              : `<span style="color:var(--red);">&#10005;</span> Scan Error — ${esc(_shortModel(data.model_name || data.model))}${scannerBadge}${targetLine}`;
 
     const log = document.getElementById('live-scan-log');
     if (data.progress && data.progress.length) {
@@ -2899,7 +2990,7 @@ async function pollLiveView(scanId) {
           AI Agent Engine
         </div>
         <div class="stats" style="margin-bottom:0;">
-          ${stat(engineStatusHtml(aiStatus) || '⏳ Waiting', 'Status')}
+          ${stat(engineStatusHtml(aiStatus) || '⏳ Waiting', 'Status', true)}
           ${stat(phaseDisplay || data.status || '-', 'Current Phase')}
           ${stat(live.tool_calls || 0, 'Tool Calls')}
           ${stat(live.pages_crawled || 0, 'Pages Crawled')}
@@ -3058,13 +3149,24 @@ function renderPhaseBreakdown(container, live) {
   }
 
   let html = '';
+  const cpNumMatch = currentPhase.match(/\[(\d+)\//);
+  const currentPhaseNum = cpNumMatch ? parseInt(cpNumMatch[1]) : null;
   phaseNames.forEach((phaseName, idx) => {
     const phaseData = phases.find(p => p.name === phaseName);
     const tests = testsByPhase[phaseName] || [];
     const totalCalls = phaseData ? phaseData.tool_calls : tests.length;
     const findingsCount = phaseData ? phaseData.findings : 0;
     const isCurrent = currentPhase.includes(phaseName) && !phaseData;
-    const phaseNum = phaseData ? phaseData.phase : idx + 1;
+    let phaseNum;
+    if (phaseData && typeof phaseData.phase === 'number' && phaseData.phase > 0) {
+      phaseNum = phaseData.phase;
+    } else if (isCurrent && currentPhaseNum) {
+      phaseNum = currentPhaseNum;
+    } else if (phaseData && phaseData.phase === 0) {
+      phaseNum = '—';
+    } else {
+      phaseNum = idx + 1;
+    }
 
     const toolGroups = {};
     tests.forEach(t => {
@@ -3299,10 +3401,6 @@ async function viewScan(scanId) {
 
   hideAllViews();
   const rv = document.getElementById('results-view');
-  rv.style.display = 'block';
-  document.getElementById('result-title').innerHTML = '<span class="scanning-indicator"></span> Loading scan data...';
-  document.getElementById('result-stats').innerHTML = '';
-  document.getElementById('tab-comparison').innerHTML = '<div class="empty">Loading...</div>';
 
   try {
     const statusResp = await fetch(`/api/scan/${scanId}`);
@@ -3310,17 +3408,20 @@ async function viewScan(scanId) {
     const statusData = await statusResp.json();
 
     if (statusData.status === 'running' || statusData.status === 'paused' || statusData.status === 'pausing' || statusData.status === 'stopping') {
-      rv.style.display = 'none';
       openLiveView(scanId);
       showScanControls(statusData.status);
       return;
     }
 
     if (statusData.status === 'error' || statusData.status === 'cancelled') {
-      rv.style.display = 'none';
       showErrorView(scanId, statusData);
       return;
     }
+
+    rv.style.display = 'block';
+    document.getElementById('result-title').innerHTML = '<span class="scanning-indicator"></span> Loading results...';
+    document.getElementById('result-stats').innerHTML = '';
+    document.getElementById('tab-comparison').innerHTML = '<div class="empty">Loading...</div>';
 
     const resp = await fetch(`/api/results/${scanId}`);
     if (!resp.ok) { alert('Results not available yet — scan may still be processing.'); showList(); return; }
@@ -3338,12 +3439,25 @@ function showErrorView(scanId, data) {
   hideAllViews();
   document.getElementById('error-view').style.display = 'block';
   const isCancelled = data.status === 'cancelled';
-  document.getElementById('error-title').innerHTML = `${isCancelled ? '⏹ Scan Cancelled' : '✕ Scan Error'} — ${esc(data.model || scanId)}` +
-    (data.target ? `<div style="font-size:14px;font-weight:400;color:var(--accent2);margin-top:4px;">${esc(data.target)}</div>` : '');
+  document.getElementById('error-title').innerHTML = `${isCancelled ? '⏹ Scan Cancelled' : '✕ Scan Error'} — ${esc(_shortModel(data.model_name || data.model) || scanId)}` +
+    (data.target ? `<div style="font-size:14px;font-weight:400;color:var(--accent2);margin-top:4px;"><a href="${esc(data.target)}" target="_blank" rel="noopener" style="color:var(--accent2);text-decoration:none;">${esc(data.target)}</a></div>` : '');
   document.getElementById('error-title').style.color = isCancelled ? 'var(--yellow)' : 'var(--red)';
 
-  const error = data.error || 'Unknown error';
+  const error = data.error || (isCancelled ? 'Scan was stopped.' : 'An unexpected error occurred. Check the progress log for details.');
   document.getElementById('error-message').textContent = error;
+  const errBox = document.getElementById('error-detail-box');
+  const errLabel = document.getElementById('error-detail-label');
+  if (isCancelled) {
+    errBox.style.background = 'rgba(234,179,8,0.1)';
+    errBox.style.border = '1px solid rgba(234,179,8,0.3)';
+    errLabel.style.color = 'var(--yellow)';
+    errLabel.textContent = 'Cancellation Details';
+  } else {
+    errBox.style.background = 'rgba(239,68,68,0.1)';
+    errBox.style.border = '1px solid rgba(239,68,68,0.3)';
+    errLabel.style.color = 'var(--red)';
+    errLabel.textContent = 'Error Details';
+  }
 
   const retryBtn = document.getElementById('retry-scan-btn');
   if (retryBtn) { retryBtn.disabled = false; retryBtn.textContent = '↻ Re-run From Scratch'; }
@@ -3362,14 +3476,14 @@ function showErrorView(scanId, data) {
   const errAiStatus = data.ai_status || '';
 
   let errStatsHtml = [
-    stat(data.model || '-', 'Model'),
+    stat(_shortModel(data.model_name || data.model), 'Model'),
     stat(data.scan_mode || '-', 'Scan Mode'),
     stat((data.scan_scope || 'directory').replace('_', ' '), 'Scope'),
     stat((data.focus_areas || []).length ? data.focus_areas.join(', ') : 'Full Scan', 'Vuln Focus'),
     stat((data.scan_intensity || 'deep').charAt(0).toUpperCase() + (data.scan_intensity || 'deep').slice(1), 'Intensity'),
-    stat(data.started ? new Date(data.started).toLocaleString() : '-', 'Started'),
+    stat(_shortDate(data.started), 'Started'),
     stat(data.duration ? Math.round(data.duration) + 's' : '-', 'Duration'),
-    stat(data.current_phase || '-', 'Last Phase'),
+    stat(_shortPhase(data.current_phase) || '-', 'Last Phase'),
     stat(_retryScanPhasesCompleted > 0 ? `${_retryScanPhasesCompleted} completed` : '0', 'Phases Done'),
     stat(data.findings_count != null ? data.findings_count : '-', 'Partial Findings'),
     stat(data.cost != null ? '$' + data.cost.toFixed(4) : '-', 'Cost So Far'),
@@ -3394,7 +3508,7 @@ function showErrorView(scanId, data) {
   if (hasFindings && findingsContainer) {
     findingsContainer.style.display = 'block';
     findingsContainer.innerHTML = '<div class="empty">Loading partial findings...</div>';
-    fetch(`/api/results/${scanId}`).then(r => r.ok ? r.json() : null).then(rData => {
+    fetch(`/api/results/${scanId}`).then(r => r.ok ? r.json() : null).catch(() => null).then(rData => {
       if (!rData || !rData.triaged_findings || !rData.triaged_findings.length) {
         findingsContainer.innerHTML = '<div class="empty">No findings data available</div>';
         return;
@@ -3469,7 +3583,7 @@ function renderResults(data) {
   const ic = triaged.filter(f=>f.verdict==='INCONCLUSIVE').length;
   const nf = triaged.filter(f=>f.verdict==='NOT_A_FINDING').length;
 
-  document.getElementById('result-title').innerHTML = `Results: ${esc(m.model || 'Unknown Model')}` +
+  document.getElementById('result-title').innerHTML = `Results: ${esc(_shortModel(m.model) || 'Unknown Model')}` +
     (m.target ? `<div style="font-size:14px;font-weight:400;color:var(--accent2);margin-top:6px;display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
       <a href="${esc(m.target)}" target="_blank" style="color:var(--accent2);text-decoration:none;">${esc(m.target)}</a>
       ${m.scan_mode ? '<span class="badge" style="background:rgba(99,102,241,0.08);color:#6366f1;font-size:11px;">' + esc(m.scan_mode) + '</span>' : ''}
@@ -3563,10 +3677,11 @@ function formatDuration(seconds) {
   return m + 'm ' + s + 's';
 }
 
-function stat(val, label) {
+function stat(val, label, rawHtml) {
   const s = String(val);
-  const cls = s.length > 20 ? 'value-sm' : 'value';
-  return `<div class="stat"><div class="${cls}">${val}</div><div class="label">${label}</div></div>`;
+  const plain = rawHtml ? s.replace(/<[^>]*>/g, '') : s;
+  const cls = plain.length > 20 ? 'value-sm' : plain.length > 12 ? 'value-md' : 'value';
+  return `<div class="stat" title="${esc(plain)}"><div class="${cls}">${rawHtml ? s : esc(s)}</div><div class="label">${label}</div></div>`;
 }
 
 var currentSourceFilter = 'all';
@@ -3766,8 +3881,8 @@ async function editCvss(idx) {
       f.cvss_override = val;
       f.cvss_override_note = note;
       renderComparison({triaged_findings: currentTriagedFindings, coverage: window._lastCoverage || {}});
-    } else { alert('Failed to save override'); }
-  } catch(e) { alert('Error: ' + e.message); }
+    } else { const d = await resp.json().catch(() => ({})); _apiError(d.error || 'HTTP ' + resp.status, 'CVSS Override'); }
+  } catch(e) { _apiError(e.message, 'CVSS Override'); }
 }
 
 function renderCrawled(endpoints) {
@@ -3913,18 +4028,18 @@ async function generateReport() {
   _rptMsg('rpt-gen-msg', 'Generating PDF report...');
   try {
     const resp = await fetch(`/api/results/${sid}/report`, {method:'POST'});
-    const data = await resp.json();
-    if (data.pdf) {
+    const data = await resp.json().catch(() => ({}));
+    if (resp.ok && data.pdf) {
       const link = `<a href="${data.pdf}" target="_blank" style="color:var(--green);font-weight:600;">Download PDF Report</a>`;
       _rptMsg('report-msg', link, true);
       _rptMsg('rpt-gen-msg', link, true);
       loadReports();
     } else {
-      const err = 'Failed: ' + (data.error || 'unknown');
+      const err = 'Failed: ' + (data.error || data.detail || 'HTTP ' + resp.status);
       _rptMsg('report-msg', err);
       _rptMsg('rpt-gen-msg', err);
     }
-  } catch(e) { _rptMsg('rpt-gen-msg', 'Error: ' + e.message); }
+  } catch(e) { _rptMsg('rpt-gen-msg', 'Error: ' + (e.message || 'Network error')); }
 }
 
 function downloadJSON() {
@@ -3945,7 +4060,7 @@ async function downloadExcel() {
   _rptMsg('rpt-gen-msg', 'Generating Excel report...');
   try {
     const resp = await fetch(`/api/results/${sid}/excel`);
-    if (!resp.ok) { _rptMsg('rpt-gen-msg', 'Excel export failed'); return; }
+    if (!resp.ok) { const d = await resp.json().catch(() => ({})); _rptMsg('rpt-gen-msg', 'Excel export failed: ' + (d.error || 'HTTP ' + resp.status)); return; }
     const blob = await resp.blob();
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
@@ -3968,6 +4083,7 @@ async function downloadLivePayloads() {
   if (!sid) return;
   try {
     const resp = await fetch(`/api/scan/${sid}/payloads-live`);
+    if (!resp.ok) { const d = await resp.json().catch(() => ({})); _apiError(d.error || 'HTTP ' + resp.status, 'Payloads Download'); return; }
     const data = await resp.json();
     const blob = new Blob([JSON.stringify(data, null, 2)], {type: 'application/json'});
     const a = document.createElement('a');
@@ -3975,7 +4091,7 @@ async function downloadLivePayloads() {
     a.download = `live_activity_${sid}.json`;
     a.click();
     URL.revokeObjectURL(a.href);
-  } catch(e) { alert('Error: ' + e.message); }
+  } catch(e) { _apiError(e.message, 'Payloads Download'); }
 }
 
 async function downloadCrawlMap() {
@@ -3983,6 +4099,7 @@ async function downloadCrawlMap() {
   if (!sid) { _showAlert('No Scan Selected', 'Please select a target and scan first.'); return; }
   try {
     const resp = await fetch(`/api/results/${sid}`);
+    if (!resp.ok) { const d = await resp.json().catch(() => ({})); _apiError(d.error || 'HTTP ' + resp.status, 'Crawl Map'); return; }
     const data = await resp.json();
     const crawled = data.crawled_endpoints || [];
     const blob = new Blob([JSON.stringify({scan_id: sid, target: data.metadata?.target, crawled_endpoints: crawled}, null, 2)], {type: 'application/json'});
@@ -3991,7 +4108,7 @@ async function downloadCrawlMap() {
     a.download = `crawl_map_${sid}.json`;
     a.click();
     URL.revokeObjectURL(a.href);
-  } catch(e) { alert('Error: ' + e.message); }
+  } catch(e) { _apiError(e.message, 'Crawl Map'); }
 }
 
 function switchReportTab(tab) {
@@ -4170,7 +4287,10 @@ async function generateComplianceReport(framework) {
 
 async function deleteScan(scanId) {
   if (!await _showConfirm('Delete Scan', 'Stop (if running) and permanently delete this scan, results, and reports?', 'Delete', 'btn-danger')) return;
-  await fetch(`/api/scan/${scanId}`, { method: 'DELETE' });
+  try {
+    const resp = await fetch(`/api/scan/${scanId}`, { method: 'DELETE' });
+    if (!resp.ok) { const d = await resp.json().catch(() => ({})); _apiError(d.error || 'HTTP ' + resp.status, 'Delete Scan'); }
+  } catch(e) { _apiError(e.message, 'Delete Scan'); }
   if (currentScanId === scanId) {
     if (lvPollInterval) { clearInterval(lvPollInterval); lvPollInterval = null; }
     showList();
@@ -4180,7 +4300,10 @@ async function deleteScan(scanId) {
 
 async function clearAllScans() {
   if (!await _showConfirm('Delete All Scans', 'Stop all running scans and permanently delete ALL scan history, results, and reports? This cannot be undone.', 'Delete All', 'btn-danger')) return;
-  await fetch('/api/scans', { method: 'DELETE' });
+  try {
+    const resp = await fetch('/api/scans', { method: 'DELETE' });
+    if (!resp.ok) { const d = await resp.json().catch(() => ({})); _apiError(d.error || 'HTTP ' + resp.status, 'Delete All'); }
+  } catch(e) { _apiError(e.message, 'Delete All'); }
   if (lvPollInterval) { clearInterval(lvPollInterval); lvPollInterval = null; }
   showList();
   loadScans();
