@@ -286,6 +286,234 @@ Return ONLY valid JSON (no markdown, no explanation) with this structure:
 If you cannot determine the flow, use "form" and provide the best guess selectors. Prefer id, name, or data-testid attributes."""
 
 
+# ---------------------------------------------------------------------------
+# LLM-driven auth agent — the LLM decides every step of the login flow
+# ---------------------------------------------------------------------------
+
+_AUTH_AGENT_SYSTEM = """You are an authentication agent controlling a browser via Playwright.
+Your goal: log into a web application using the provided credentials.
+
+At each step you receive the page HTML (trimmed) and the current URL.
+Decide the SINGLE next action to take.
+
+Return ONLY valid JSON (no markdown):
+{
+  "status": "action" | "success" | "need_mfa" | "need_captcha" | "failed",
+  "action": "fill" | "click" | "wait" | "navigate" | null,
+  "selector": "CSS selector for the target element" or null,
+  "value": "text to fill" or null,
+  "reasoning": "one-line explanation of what you see and why you chose this action"
+}
+
+Rules:
+- "fill": fill a text/email/password field. Provide selector and value.
+- "click": click a button/link/checkbox. Provide selector, value is null.
+- "wait": wait 3 seconds for page to load/redirect. selector and value are null.
+- "navigate": navigate to a URL. Put the URL in "value", selector is null.
+- status="success": the page shows the authenticated application (not a login/SSO page).
+- status="need_mfa": you see an MFA/2FA/OTP code input (NOT a regular password field).
+- status="need_captcha": you see a CAPTCHA challenge (reCAPTCHA, hCaptcha, Turnstile, etc.).
+- status="failed": login clearly failed (e.g. account locked, invalid user, max retries).
+
+IMPORTANT:
+- For multi-step logins (email first, then password), fill the visible field and click the advance/continue button.
+- Do NOT try to fill a password field if it is not visible or present in the HTML.
+- If you see error messages like "invalid password", the previous attempt failed.
+- Prefer specific selectors: #id, [name=...], [data-testid=...] over generic ones.
+- If already on the target application (not a login page), return status="success".
+- NEVER return the actual password in the "reasoning" field."""
+
+
+async def _get_page_context(page: Page, max_html: int = 10000) -> dict:
+    """Capture current page state for the LLM auth agent."""
+    url = page.url or ""
+    title = ""
+    html_snippet = ""
+    visible_text = ""
+    try:
+        title = await page.title() or ""
+    except Exception:
+        pass
+    try:
+        html = await page.content()
+        html_snippet = html[:max_html] if len(html) > max_html else html
+    except Exception:
+        pass
+    try:
+        visible_text = await page.evaluate(
+            "() => document.body ? document.body.innerText.substring(0, 1500) : ''"
+        )
+    except Exception:
+        pass
+    return {
+        "url": url,
+        "title": title,
+        "html": html_snippet,
+        "visible_text": visible_text[:1500],
+    }
+
+
+async def _llm_auth_agent_loop(
+    page: Page,
+    target: ScanTarget,
+    router: "LLMRouter",
+    model: str,
+    on_progress: Callable | None = None,
+    cancel_flag: Any = None,
+    max_steps: int = 12,
+) -> dict:
+    """Drive the login flow step-by-step using the LLM.
+
+    Returns dict with keys: success (bool), need_mfa (bool), need_captcha (bool),
+    failed (bool), steps (list of action dicts), last_reasoning (str).
+    """
+    _cb = on_progress or (lambda *a, **k: None)
+    credentials = target.credentials or {}
+    username = credentials.get("username", "")
+    password = credentials.get("password", "")
+    target_host = urlparse(target.url).hostname or ""
+
+    steps_taken: list[dict] = []
+    last_reasoning = ""
+
+    for step_i in range(max_steps):
+        if cancel_flag and cancel_flag.is_set():
+            return {"success": False, "need_mfa": False, "need_captcha": False,
+                    "failed": True, "steps": steps_taken, "last_reasoning": "Cancelled"}
+
+        ctx = await _get_page_context(page)
+        current_host = urlparse(ctx["url"]).hostname or ""
+
+        # Quick check: already on target and not a login page
+        if current_host == target_host and not _is_login_url(ctx["url"]):
+            print(f"  [AUTH-AGENT] Step {step_i+1}: Already on target — success")
+            return {"success": True, "need_mfa": False, "need_captcha": False,
+                    "failed": False, "steps": steps_taken,
+                    "last_reasoning": "Already on target application"}
+
+        user_msg = (
+            f"Step {step_i+1}/{max_steps}. Current URL: {ctx['url']}\n"
+            f"Page title: {ctx['title']}\n"
+            f"Target URL: {target.url}\n"
+            f"Credentials available: username={'yes' if username else 'no'}, "
+            f"password={'yes' if password else 'no'}\n"
+            f"Visible text (first 800 chars): {ctx['visible_text'][:800]}\n\n"
+            f"HTML:\n{ctx['html']}"
+        )
+
+        messages = [
+            {"role": "system", "content": _AUTH_AGENT_SYSTEM},
+            {"role": "user", "content": user_msg},
+        ]
+
+        try:
+            resp = router.complete(model=model, messages=messages, max_tokens=400)
+            raw = resp.choices[0].message.content or "{}"
+        except Exception as e:
+            logger.error("LLM auth agent call failed: %s", e)
+            print(f"  [AUTH-AGENT] LLM call failed at step {step_i+1}: {e}")
+            break
+
+        raw_clean = raw.strip()
+        if raw_clean.startswith("```"):
+            raw_clean = re.sub(r"^```\w*\n?", "", raw_clean)
+            raw_clean = re.sub(r"\n?```\s*$", "", raw_clean)
+        try:
+            decision = json.loads(raw_clean)
+        except json.JSONDecodeError:
+            logger.warning("LLM auth agent JSON parse failed: %s", raw_clean[:200])
+            print(f"  [AUTH-AGENT] Bad JSON at step {step_i+1}, retrying...")
+            continue
+
+        status = decision.get("status", "action")
+        action = decision.get("action")
+        selector = decision.get("selector")
+        value = decision.get("value")
+        reasoning = decision.get("reasoning", "")
+        last_reasoning = reasoning
+
+        # Mask password in logs
+        log_value = "***" if value and value == password else (value[:30] if value else "")
+        print(f"  [AUTH-AGENT] Step {step_i+1}: status={status} action={action} "
+              f"sel={selector} val={log_value} — {reasoning}")
+
+        steps_taken.append({
+            "step": step_i + 1, "status": status, "action": action,
+            "selector": selector, "reasoning": reasoning,
+        })
+
+        if status == "success":
+            return {"success": True, "need_mfa": False, "need_captcha": False,
+                    "failed": False, "steps": steps_taken, "last_reasoning": reasoning}
+        if status == "need_mfa":
+            return {"success": False, "need_mfa": True, "need_captcha": False,
+                    "failed": False, "steps": steps_taken, "last_reasoning": reasoning}
+        if status == "need_captcha":
+            return {"success": False, "need_mfa": False, "need_captcha": True,
+                    "failed": False, "steps": steps_taken, "last_reasoning": reasoning}
+        if status == "failed":
+            return {"success": False, "need_mfa": False, "need_captcha": False,
+                    "failed": True, "steps": steps_taken, "last_reasoning": reasoning}
+
+        # Execute the action
+        try:
+            if action == "fill" and selector:
+                fill_val = value or ""
+                # Resolve credential placeholders
+                if fill_val in ("{{username}}", "USERNAME", username) or \
+                   ("email" in (selector or "").lower() and fill_val == username):
+                    fill_val = username
+                elif fill_val in ("{{password}}", "PASSWORD", password) or \
+                     "password" in (selector or "").lower():
+                    fill_val = password
+                # If the LLM says to fill a username/email field, use the username
+                if not fill_val and ("email" in selector.lower() or "user" in selector.lower()):
+                    fill_val = username
+                if not fill_val and "password" in selector.lower():
+                    fill_val = password
+                try:
+                    await page.fill(selector, fill_val, timeout=5000)
+                except Exception:
+                    # Fallback: click then type
+                    await page.click(selector, timeout=3000)
+                    await page.keyboard.type(fill_val, delay=30)
+                await asyncio.sleep(0.5)
+
+            elif action == "click" and selector:
+                try:
+                    loc = page.locator(selector).first
+                    await loc.click(timeout=5000)
+                except Exception:
+                    # Fallback selectors for common buttons
+                    await page.keyboard.press("Enter")
+                try:
+                    await page.wait_for_load_state("networkidle", timeout=8000)
+                except Exception:
+                    pass
+                await asyncio.sleep(2)
+
+            elif action == "wait":
+                await asyncio.sleep(3)
+
+            elif action == "navigate" and value:
+                await page.goto(value, wait_until="domcontentloaded", timeout=20000)
+                try:
+                    await page.wait_for_load_state("networkidle", timeout=8000)
+                except Exception:
+                    pass
+                await asyncio.sleep(2)
+
+        except Exception as e:
+            print(f"  [AUTH-AGENT] Action failed at step {step_i+1}: {e}")
+            # Continue — the LLM will see the new page state and adapt
+
+    # Max steps reached
+    print(f"  [AUTH-AGENT] Max steps ({max_steps}) reached without resolution")
+    return {"success": False, "need_mfa": False, "need_captcha": False,
+            "failed": True, "steps": steps_taken,
+            "last_reasoning": f"Max steps reached. Last: {last_reasoning}"}
+
+
 async def _click_visible_submit(page: Page, submit_sel: str | None, form_sel: str | None = None):
     """Click the first visible submit/advance button, or press Enter as fallback."""
     all_sels: list[str] = []
@@ -334,154 +562,39 @@ async def detect_and_login(
     cancel_flag: Any = None,
 ) -> AuthResult:
 
-    try:
-        html = await page.content()
-        snippet = html[:12000] if len(html) > 12000 else html
-    except Exception as e:
-        logger.error("Failed to get page content: %s", e)
-        return AuthResult(auth_type="form", tokens={}, cookies=[], success=False)
+    _cb = on_progress or (lambda *a, **k: None)
+    target_host = urlparse(target.url).hostname or ""
+    print(f"  [AUTH] Starting LLM-driven auth agent for {target.url[:80]}")
+    _cb("progress_msg", {"message": "Auth: LLM agent analyzing login page..."})
 
-    messages = [
-        {"role": "user", "content": f"{AUTH_CLASSIFY_PROMPT}\n\nHTML:\n{snippet}"},
-    ]
-    try:
-        response = router.complete(model=model, messages=messages, max_tokens=500)
-        raw = response.choices[0].message.content
-    except Exception as e:
-        logger.error("LLM auth classification failed: %s", e)
-        raw = '{"flow": "form"}'
+    # --- Phase 1: LLM auth agent drives the login flow ---
+    agent_result = await _llm_auth_agent_loop(
+        page, target, router, model,
+        on_progress=on_progress, cancel_flag=cancel_flag,
+        max_steps=12,
+    )
 
-    parsed: dict[str, Any] = {"flow": "form"}
-    if raw:
-        raw_clean = raw.strip()
-        if raw_clean.startswith("```"):
-            raw_clean = re.sub(r"^```\w*\n?", "", raw_clean)
-            raw_clean = re.sub(r"\n?```\s*$", "", raw_clean)
-        try:
-            parsed = json.loads(raw_clean)
-        except json.JSONDecodeError as e:
-            logger.warning("LLM auth JSON parse failed: %s", e)
+    steps_log = ", ".join(
+        f"[{s['step']}] {s['action'] or s['status']}"
+        for s in agent_result.get("steps", [])
+    )
+    print(f"  [AUTH-AGENT] Result: success={agent_result['success']}, "
+          f"mfa={agent_result['need_mfa']}, captcha={agent_result['need_captcha']}, "
+          f"failed={agent_result['failed']}")
+    print(f"  [AUTH-AGENT] Steps: {steps_log}")
 
-    flow = parsed.get("flow", "form")
-    _DEFAULT_USER = 'input[type="email"], input[name="email"], input[name="username"], input#loginUsername'
-    _DEFAULT_PW = 'input[type="password"], input[name="password"], input#loginPassword'
-    _DEFAULT_SUBMIT = 'button[type="submit"], input[type="submit"], #continue_button, #signin_button, button#loginSubmitBtn'
-    username_sel = parsed.get("username_selector") or _DEFAULT_USER
-    password_sel = parsed.get("password_selector") or _DEFAULT_PW
-    submit_sel = parsed.get("submit_selector") or _DEFAULT_SUBMIT
-    sso_sel = parsed.get("sso_button_selector")
-    form_sel = parsed.get("form_selector")
-    credentials = target.credentials or {}
-    username = credentials.get("username", "")
-    password = credentials.get("password", "")
-
-    logger.info("[AUTH-DEBUG] Flow=%s, username_sel=%s, password_sel=%s, submit_sel=%s, sso_sel=%s",
-                flow, username_sel, password_sel, submit_sel, sso_sel)
-    print(f"  [AUTH-DEBUG] Flow={flow}, user_sel={username_sel}, pw_sel={password_sel}")
-    print(f"  [AUTH-DEBUG] submit_sel={submit_sel}")
-    print(f"  [AUTH-DEBUG] URL before interaction: {page.url[:120]}")
-
-    try:
-        if flow == "sso" or flow == "oauth":
-            if sso_sel:
-                await page.click(sso_sel, timeout=5000)
-            else:
-                for sel in ('button:has-text("SSO")', 'button:has-text("OAuth")', 'a:has-text("Sign in with")'):
-                    try:
-                        await page.click(sel, timeout=2000)
-                        break
-                    except Exception:
-                        continue
-            await page.wait_for_load_state("networkidle", timeout=15000)
-
-        if username_sel and username:
-            print(f"  [AUTH-DEBUG] Filling username: {username[:20]}***")
-            await page.fill(username_sel, username, timeout=5000)
-            await asyncio.sleep(0.5)
-            print(f"  [AUTH-DEBUG] Username filled OK")
-        if password_sel and password:
-            try:
-                await page.fill(password_sel, password, timeout=2000)
-                await asyncio.sleep(0.5)
-                print(f"  [AUTH-DEBUG] Password filled OK (same page)")
-            except Exception:
-                print(f"  [AUTH-DEBUG] Password field not visible yet, clicking submit to advance...")
-                await _click_visible_submit(page, submit_sel, form_sel)
-                await page.wait_for_load_state("networkidle", timeout=15000)
-                await asyncio.sleep(3)
-                print(f"  [AUTH-DEBUG] URL after username step: {page.url[:120]}")
-                # Capture error messages after username step
-                try:
-                    errs = await page.evaluate("""() => {
-                        const els = document.querySelectorAll('[class*="error"], [class*="alert"], [role="alert"], .error-message, .field-error');
-                        return Array.from(els).map(e => e.innerText).filter(t => t.trim()).join(' | ');
-                    }""")
-                    if errs:
-                        print(f"  [AUTH-DEBUG] Error messages after username: {errs[:200]}")
-                except Exception:
-                    pass
-                try:
-                    await page.fill(password_sel, password, timeout=8000)
-                except Exception:
-                    # Fallback: type character by character (triggers more JS events)
-                    print(f"  [AUTH-DEBUG] fill() failed, trying type() for password...")
-                    try:
-                        await page.click(password_sel, timeout=3000)
-                        await page.keyboard.type(password, delay=50)
-                    except Exception as type_err:
-                        print(f"  [AUTH-DEBUG] type() also failed: {type_err}")
-                        raise
-                await asyncio.sleep(0.5)
-                print(f"  [AUTH-DEBUG] Password filled OK (second step)")
-
-        # Wait a moment for form validation JS to enable submit button
-        await asyncio.sleep(1)
-        url_before_submit = page.url
-        print(f"  [AUTH-DEBUG] Clicking submit button...")
-        await _click_visible_submit(page, submit_sel, form_sel)
-        print(f"  [AUTH-DEBUG] Submit clicked, waiting for navigation...")
-
-        # Wait for navigation (OIDC redirect) rather than just networkidle
-        try:
-            await page.wait_for_url(lambda url: urlparse(url).hostname != urlparse(url_before_submit).hostname,
-                                    timeout=20000)
-            print(f"  [AUTH-DEBUG] URL changed to different host: {page.url[:120]}")
-        except Exception:
-            # Fallback to networkidle
-            try:
-                await page.wait_for_load_state("networkidle", timeout=10000)
-            except Exception:
-                pass
-            print(f"  [AUTH-DEBUG] URL after submit: {page.url[:120]}")
-
-        # Capture any error messages after submit
-        try:
-            errs = await page.evaluate("""() => {
-                const els = document.querySelectorAll('[class*="error"], [class*="alert"], [role="alert"], .error-message, .field-error, [class*="Error"]');
-                return Array.from(els).map(e => e.innerText).filter(t => t.trim()).join(' | ');
-            }""")
-            if errs:
-                print(f"  [AUTH-DEBUG] Error messages after login: {errs[:300]}")
-        except Exception:
-            pass
-
-        # Capture full visible text on the page after submit
-        try:
-            visible = await page.evaluate("() => document.body ? document.body.innerText.substring(0, 800) : ''")
-            if visible.strip():
-                print(f"  [AUTH-DEBUG] Page text after submit: {visible.strip()[:400]}")
-        except Exception:
-            pass
-    except Exception as e:
-        logger.warning("Login interaction failed: %s", e)
-        print(f"  [AUTH-DEBUG] Login interaction FAILED: {e}")
+    # --- Phase 2: Handle TOTP if we have a secret and the agent detected MFA ---
     auth_config = target.auth_config or {}
     totp_secret = auth_config.get("totp_secret")
-    if totp_secret:
+    if agent_result["need_mfa"] and totp_secret:
+        print(f"  [AUTH] MFA detected — auto-filling TOTP code")
+        _cb("progress_msg", {"message": "Auth: MFA detected, auto-filling TOTP code..."})
         try:
             totp = pyotp.TOTP(totp_secret)
             code = totp.now()
-            for sel in ('input[name="otp"]', 'input[name="code"]', 'input[placeholder*="code"]', 'input[placeholder*="OTP"]'):
+            for sel in ('input[name="otp"]', 'input[name="code"]',
+                        'input[placeholder*="code"]', 'input[placeholder*="OTP"]',
+                        'input[type="tel"]', 'input[autocomplete="one-time-code"]'):
                 try:
                     await page.fill(sel, code, timeout=3000)
                     await page.keyboard.press("Enter")
@@ -490,197 +603,113 @@ async def detect_and_login(
                 except Exception:
                     continue
         except Exception as e:
-            logger.warning("TOTP failed: %s", e)
-    else:
-        mfa_selectors = ['input[name="otp"]', 'input[name="code"]', 'input[placeholder*="code"]']
-        for sel in mfa_selectors:
-            try:
-                if await page.locator(sel).count() > 0:
-                    print("MFA/TOTP code required. Enter code:")
-                    code = input().strip()
-                    if code:
-                        await page.fill(sel, code, timeout=3000)
-                        await page.keyboard.press("Enter")
-                        await page.wait_for_load_state("networkidle", timeout=10000)
-                    break
-            except Exception:
-                continue
+            logger.warning("TOTP auto-fill failed: %s", e)
 
-    # Wait for OIDC redirect chain to land on target host (or same root domain)
-    target_host = urlparse(target.url).hostname or ""
-    _target_root_dom = _extract_root_domain(target_host)
-    print(f"  [AUTH-DEBUG] Waiting for OIDC redirect to {target_host} (root: {_target_root_dom})...")
-    try:
+        # Re-check: did TOTP resolve it?
+        await asyncio.sleep(3)
         current_host = urlparse(page.url or "").hostname or ""
-        print(f"  [AUTH-DEBUG] Current host: {current_host}")
-        if target_host and current_host != target_host:
-            for wait_i in range(10):
-                await asyncio.sleep(3)
-                current_host = urlparse(page.url or "").hostname or ""
-                current_root = _extract_root_domain(current_host)
-                is_login = _is_login_url(page.url or "")
-                print(f"  [AUTH-DEBUG] OIDC wait {wait_i+1}/10: host={current_host}, "
-                      f"root={current_root}, is_login={is_login}, url={page.url[:100]}")
-                if current_host == target_host:
-                    print(f"  [AUTH-DEBUG] Landed on target host!")
-                    break
-                if current_root == _target_root_dom and not is_login:
-                    print(f"  [AUTH-DEBUG] On same root domain and not a login page — likely authenticated")
-                    break
-            if current_host != target_host:
-                # Try navigating directly to the target
-                logger.info("OIDC redirect didn't land on %s (on %s), navigating directly...",
-                            target_host, current_host)
-                print(f"  [AUTH-DEBUG] Navigating directly to {target.url[:80]}...")
-                try:
-                    await page.goto(target.url, wait_until="domcontentloaded", timeout=30000)
-                    try:
-                        await page.wait_for_load_state("networkidle", timeout=10000)
-                    except Exception:
-                        pass
-                    await asyncio.sleep(3)
-                    print(f"  [AUTH-DEBUG] After direct nav: {page.url[:120]}")
-                except Exception as nav_e:
-                    print(f"  [AUTH-DEBUG] Direct nav failed: {nav_e}")
-        else:
-            print(f"  [AUTH-DEBUG] Already on target host: {current_host}")
-    except Exception as e:
-        print(f"  [AUTH-DEBUG] OIDC redirect check error: {e}")
+        if current_host == target_host and not _is_login_url(page.url or ""):
+            agent_result["success"] = True
+            agent_result["need_mfa"] = False
+            print(f"  [AUTH] TOTP succeeded — on target host")
 
-    # Check if we're still on the login page (auth failed)
-    final_check_host = urlparse(page.url or "").hostname or ""
-    final_check_root = _extract_root_domain(final_check_host)
-    target_root = _extract_root_domain(target_host)
-    on_same_org = final_check_root == target_root
-    on_login_url = _is_login_url(page.url or "")
-
-    # Check for visible error messages on the page (strong signal of failure)
-    _page_has_errors = False
-    try:
-        _page_has_errors = await page.evaluate("""() => {
-            const els = document.querySelectorAll(
-                '[class*="error"], [class*="alert-danger"], [role="alert"], '
-                + '.error-message, .field-error, [class*="Error"]'
-            );
-            const texts = Array.from(els).map(e => e.innerText).filter(t => t.trim());
-            const body = (document.body && document.body.innerText || '').toLowerCase();
-            return texts.some(t => /invalid|incorrect|wrong|failed|denied/i.test(t))
-                || body.includes('invalid') && body.includes('password');
-        }""")
-    except Exception:
-        pass
-
-    if final_check_host == target_host and not on_login_url and not _page_has_errors:
-        # On target host, not a login page, no errors — auth succeeded
-        auth_failed = False
-        print(f"  [AUTH-DEBUG] On target host {target_host}, not a login page — auth OK")
-    elif on_login_url or final_check_host != target_host:
-        # Still on a login/SSO page — verify by navigating to the target
-        print(f"  [AUTH-DEBUG] On {final_check_host} (login_url={on_login_url}, "
-              f"errors={_page_has_errors}), verifying by navigating to target...")
-        try:
-            await page.goto(target.url, wait_until="domcontentloaded", timeout=20000)
+    # --- Phase 3: If agent landed on SSO page, navigate to target to verify ---
+    if agent_result["success"]:
+        current_host = urlparse(page.url or "").hostname or ""
+        if current_host != target_host:
+            print(f"  [AUTH] Agent says success but on {current_host}, navigating to target...")
             try:
-                await page.wait_for_load_state("networkidle", timeout=10000)
+                await page.goto(target.url, wait_until="domcontentloaded", timeout=20000)
+                try:
+                    await page.wait_for_load_state("networkidle", timeout=10000)
+                except Exception:
+                    pass
+                await asyncio.sleep(3)
+                verify_host = urlparse(page.url or "").hostname or ""
+                if _is_login_url(page.url or "") or verify_host != target_host:
+                    print(f"  [AUTH] Verification failed — redirected to {verify_host}")
+                    agent_result["success"] = False
+                    agent_result["failed"] = True
+                else:
+                    print(f"  [AUTH] Verified — on target {verify_host}")
+            except Exception as e:
+                print(f"  [AUTH] Verification nav failed: {e}")
+                agent_result["success"] = False
+                agent_result["failed"] = True
+
+    # --- Phase 4: If login succeeded, collect cookies and return ---
+    if agent_result["success"]:
+        _cb("progress_msg", {"message": "Auth: Login successful (LLM agent)"})
+        try:
+            cookies = await page.context.cookies()
+            tokens: dict[str, str] = {}
+            try:
+                redirect = page.url or ""
+                if "access_token=" in redirect or "#access_token=" in redirect:
+                    parsed_url = urlparse(redirect)
+                    frag = parsed_url.fragment or parsed_url.query
+                    params = parse_qs(frag) if frag else {}
+                    for key in ("access_token", "refresh_token"):
+                        if key in params and params[key]:
+                            tokens[key] = params[key][0]
             except Exception:
                 pass
-            await asyncio.sleep(3)
-            verify_host = urlparse(page.url or "").hostname or ""
-            verify_login = _is_login_url(page.url or "")
-            auth_failed = verify_host != target_host or verify_login
-            print(f"  [AUTH-DEBUG] After verify nav: host={verify_host}, "
-                  f"is_login={verify_login}, auth_failed={auth_failed}")
-        except Exception as e:
-            print(f"  [AUTH-DEBUG] Verify nav failed: {e}")
-            auth_failed = True
-    else:
-        auth_failed = False
-    print(f"  [AUTH-DEBUG] Auth result: final_host={final_check_host}, target={target_host}, "
-          f"same_org={on_same_org}, login_url={on_login_url}, "
-          f"page_errors={_page_has_errors}, auth_failed={auth_failed}")
-
-    if auth_failed:
-        has_captcha = await _detect_captcha(page)
-        screenshot_b64 = await _take_screenshot_b64(page)
-
-        # Build a descriptive reason for the challenge
-        verify_host = urlparse(page.url or "").hostname or ""
-        if has_captcha:
-            challenge_reason = "CAPTCHA detected on the login page"
-            challenge_action = "Complete the CAPTCHA in the live browser, then click 'Login Complete'."
-            print(f"  [AUTH] CAPTCHA detected on login page!")
-        elif _page_has_errors:
-            challenge_reason = (f"Automated login returned an error on {verify_host} "
-                                f"(credentials may be wrong or form fill failed)")
-            challenge_action = ("Log in manually in the live browser. Once you see "
-                                "the target application, click 'Login Complete'.")
-            print(f"  [AUTH] Login failed — error messages on page at {verify_host}")
-        elif verify_host != target_host:
-            challenge_reason = (f"Login did not redirect back to {target_host} "
-                                f"(redirected to {verify_host})")
-            challenge_action = ("Log in manually in the live browser. Once you see "
-                                "the target application, click 'Login Complete'.")
-            print(f"  [AUTH] Login failed — redirected to {verify_host}, not {target_host}")
-        else:
-            challenge_reason = "Automated login failed (still on login page after submitting credentials)"
-            challenge_action = ("Log in manually in the live browser. Once you see "
-                                "the target application, click 'Login Complete'.")
-            print(f"  [AUTH] Login failed — still on login page after submitting credentials")
-
-        if interactive_session:
-            _cb = on_progress or (lambda *a, **k: None)
-            print(f"  [AUTH] Opening interactive browser for manual login...")
-            _cb("auth_challenge", {
-                "screenshot": screenshot_b64,
-                "has_captcha": has_captcha,
-                "reason": challenge_reason,
-                "action": challenge_action,
-                "current_url": page.url or "",
-                "message": f"{challenge_reason}. {challenge_action}",
-            })
-            interactive_result = await _run_interactive_login(
-                page, target, interactive_session,
-                on_progress=on_progress, cancel_flag=cancel_flag,
+            return AuthResult(
+                auth_type="form", tokens=tokens,
+                cookies=[{"name": c["name"], "value": c["value"],
+                          "domain": c.get("domain", "")} for c in cookies],
+                success=True,
             )
-            _cb("auth_challenge_resolved", {})
-            if interactive_result.success:
-                return interactive_result
-            print(f"  [AUTH] Interactive login did not succeed — auth failed")
+        except Exception as e:
+            logger.error("Cookie collection failed after successful login: %s", e)
+            return AuthResult(auth_type="form", tokens={}, cookies=[], success=True)
 
-        return AuthResult(
-            auth_type="form", tokens={}, cookies=[], success=False,
-            captcha_detected=has_captcha, screenshot_b64=screenshot_b64,
+    # --- Phase 5: Login needs human help — MFA, CAPTCHA, or outright failure ---
+    has_captcha = agent_result.get("need_captcha", False)
+    need_mfa = agent_result.get("need_mfa", False)
+    screenshot_b64 = await _take_screenshot_b64(page)
+    last_reason = agent_result.get("last_reasoning", "")
+
+    if need_mfa:
+        challenge_reason = f"MFA/2FA required: {last_reason}"
+        challenge_action = ("Enter the MFA/2FA code in the live browser, then click 'Login Complete'.")
+        challenge_type = "MFA/2FA"
+    elif has_captcha:
+        challenge_reason = f"CAPTCHA detected: {last_reason}"
+        challenge_action = "Complete the CAPTCHA in the live browser, then click 'Login Complete'."
+        challenge_type = "CAPTCHA"
+    else:
+        challenge_reason = f"Automated login failed: {last_reason}"
+        challenge_action = ("Log in manually in the live browser. Once you see "
+                            "the target application, click 'Login Complete'.")
+        challenge_type = "Login failure"
+
+    print(f"  [AUTH] {challenge_type}: {challenge_reason}")
+
+    if interactive_session:
+        _cb("auth_challenge", {
+            "screenshot": screenshot_b64,
+            "has_captcha": has_captcha,
+            "need_mfa": need_mfa,
+            "reason": challenge_reason,
+            "action": challenge_action,
+            "challenge_type": challenge_type,
+            "current_url": page.url or "",
+            "message": f"{challenge_reason}. {challenge_action}",
+        })
+        interactive_result = await _run_interactive_login(
+            page, target, interactive_session,
+            on_progress=on_progress, cancel_flag=cancel_flag,
         )
+        _cb("auth_challenge_resolved", {})
+        if interactive_result.success:
+            return interactive_result
+        print(f"  [AUTH] Interactive login did not succeed")
 
-    try:
-        cookies = await page.context.cookies()
-        final_url = page.url
-        final_host = urlparse(final_url or "").hostname or ""
-        target_cookies = [c for c in cookies if target_host in (c.get("domain", ""))]
-        success = (final_host == target_host or bool(target_cookies)) and len(cookies) > 0
-        tokens: dict[str, str] = {}
-        try:
-            redirect = page.url
-            if "access_token=" in redirect or "#access_token=" in redirect:
-                parsed_url = urlparse(redirect)
-                frag = parsed_url.fragment or parsed_url.query
-                params = parse_qs(frag) if frag else {}
-                for key in ("access_token", "refresh_token"):
-                    if key in params and params[key]:
-                        tokens[key] = params[key][0]
-        except Exception:
-            pass
-
-        auth_type = flow if flow in ("form", "sso", "oauth") else "form"
-        return AuthResult(
-            auth_type=auth_type,
-            tokens=tokens,
-            cookies=[{"name": c["name"], "value": c["value"], "domain": c.get("domain", "")} for c in cookies],
-            success=success,
-        )
-    except Exception as e:
-        logger.error("Auth verification failed: %s", e)
-        return AuthResult(auth_type="form", tokens={}, cookies=[], success=False)
+    return AuthResult(
+        auth_type="form", tokens={}, cookies=[], success=False,
+        captcha_detected=has_captcha, screenshot_b64=screenshot_b64,
+    )
 
 
 def _extract_root_domain(hostname: str) -> str:

@@ -1289,20 +1289,25 @@ async def _run_scan_task(scan_id, target_url, username, password, model, scan_mo
                 _save_scan(scan_id)
             elif event == "auth_challenge":
                 has_captcha = data.get("has_captcha", False)
+                need_mfa = data.get("need_mfa", False)
                 reason = data.get("reason", "")
                 action = data.get("action", "")
+                challenge_type = data.get("challenge_type", "")
+                if not challenge_type:
+                    challenge_type = "CAPTCHA" if has_captcha else ("MFA/2FA" if need_mfa else "Login failure")
                 scan["auth_challenge"] = {
                     "screenshot": data.get("screenshot", ""),
                     "has_captcha": has_captcha,
+                    "need_mfa": need_mfa,
+                    "challenge_type": challenge_type,
                     "message": data.get("message", ""),
                     "reason": reason,
                     "action": action,
                     "waiting": True,
                 }
-                challenge_type = "CAPTCHA" if has_captcha else "Login failure"
                 detail = reason or ("CAPTCHA on login page" if has_captcha else "automated login did not succeed")
                 next_step = action or "Log in manually via the live browser, then click 'Login Complete'."
-                scan["progress"].append(f"Auth challenge detected [{challenge_type}]: {detail}")
+                scan["progress"].append(f"Auth challenge [{challenge_type}]: {detail}")
                 scan["progress"].append(f"  → Action needed: {next_step}")
                 _save_scan(scan_id)
             elif event == "auth_challenge_resolved":
