@@ -3786,28 +3786,38 @@ function renderPayloads(byEndpoint) {
   const el = document.getElementById('tab-payloads');
   if (!byEndpoint.length) { el.innerHTML = '<div class="empty">No payload data</div>'; return; }
   const totalPayloads = byEndpoint.reduce((a,e) => a + e.payload_count, 0);
-  el.innerHTML = `<p style="color:var(--text2);font-size:13px;margin-bottom:12px">${byEndpoint.length} endpoints tested with ${totalPayloads} total payloads</p>` +
-  byEndpoint.map((ep, idx) => `
+  const totalAnomalies = byEndpoint.reduce((a,e) => a + (e.anomaly_count||0), 0);
+  el.innerHTML = `<p style="color:var(--text2);font-size:13px;margin-bottom:12px">${byEndpoint.length} endpoints tested with ${totalPayloads} total payloads` +
+    (totalAnomalies ? ` &middot; <span style="color:var(--red);font-weight:600;">${totalAnomalies} anomalies</span>` : '') + `</p>` +
+  byEndpoint.map((ep, idx) => {
+    var anomBadge = ep.anomaly_count ? `<span style="background:var(--red);color:#fff;font-size:10px;padding:1px 6px;border-radius:8px;margin-left:6px;">${ep.anomaly_count} anomal${ep.anomaly_count===1?'y':'ies'}</span>` : '';
+    return `
     <div class="endpoint-group" style="margin-bottom:4px;border:1px solid var(--border);border-radius:8px;overflow:hidden;">
       <div class="expandable" onclick="toggleExpand(this)" style="padding:10px 12px;background:var(--surface2);font-size:13px;">
         <strong style="color:var(--text);">${esc(ep.endpoint)}</strong>
-        <span style="color:var(--text2);font-size:12px;margin-left:8px;">${ep.payload_count} payloads</span>
+        <span style="color:var(--text2);font-size:12px;margin-left:8px;">${ep.payload_count} payloads</span>${anomBadge}
       </div>
       <div class="expand-content" style="margin-top:0;padding:0;border-radius:0;">
-        <table style="margin:0;"><thead><tr>
-          <th style="width:60px;">Method</th><th>URL</th><th>Body</th><th style="width:80px;">Status</th><th style="width:80px;">Anomaly</th>
+        <table style="margin:0;font-size:12px;"><thead><tr>
+          <th style="width:50px;">Tool</th><th style="width:80px;">Param</th><th>Payload</th><th style="width:60px;">Status</th><th style="width:65px;">Anomaly</th><th style="width:65px;">Reflected</th><th style="max-width:200px;">Response Snippet</th>
         </tr></thead><tbody>
-        ${ep.payloads.map(p => `<tr>
-          <td><span style="font-weight:700;color:var(--accent2)">${esc(p.method||'')}</span></td>
-          <td style="word-break:break-all;font-size:12px">${esc(p.full_url||'')}</td>
-          <td style="font-size:12px;word-break:break-all;max-width:200px;">${esc(p.body||'—')}</td>
+        ${ep.payloads.map(p => {
+          var plText = p.payload || p.body || '—';
+          var toolLabel = (p.tool||'api_request').replace('_',' ');
+          var paramText = p.param ? (p.param_location ? p.param + ' (' + p.param_location + ')' : p.param) : '—';
+          return `<tr style="${p.anomaly ? 'background:rgba(220,38,38,0.04);' : ''}">
+          <td style="font-size:11px;color:var(--text2);">${esc(toolLabel)}</td>
+          <td style="word-break:break-all;font-size:11px;font-weight:500;">${esc(paramText)}</td>
+          <td style="word-break:break-all;font-family:monospace;font-size:11px;max-width:300px;color:${p.anomaly ? 'var(--red)' : 'var(--text)'};">${esc(plText)}</td>
           <td>${p.status||'—'}</td>
           <td>${p.anomaly ? '<span style="color:var(--red);font-weight:700;">YES</span>' : '—'}</td>
-        </tr>`).join('')}
-        ${ep.payload_count > 50 ? `<tr><td colspan="5" style="color:var(--text2);font-size:12px;">... and ${ep.payload_count - 50} more</td></tr>` : ''}
+          <td>${p.reflected ? '<span style="color:var(--orange);font-weight:700;">YES</span>' : '—'}</td>
+          <td style="font-size:11px;word-break:break-all;max-width:200px;color:var(--text2);">${esc((p.body_snippet||'').substring(0,100))}${(p.body_snippet||'').length>100?'...':''}</td>
+        </tr>`}).join('')}
+        ${ep.payload_count > 200 ? `<tr><td colspan="7" style="color:var(--text2);font-size:12px;">... and ${ep.payload_count - 200} more</td></tr>` : ''}
         </tbody></table>
       </div>
-    </div>`).join('');
+    </div>`}).join('');
 }
 
 function renderAIRaw(findings) {

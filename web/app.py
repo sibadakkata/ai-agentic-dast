@@ -3105,36 +3105,83 @@ def _extract_crawled(summary: dict, test_log: list) -> list[dict]:
 
 def _extract_payloads_by_endpoint(test_log: list) -> list[dict]:
     from collections import defaultdict
-    ep_map = defaultdict(list)
+    ep_map: dict[str, list] = defaultdict(list)
     for t in test_log:
         req = t.get("request", {})
         if not isinstance(req, dict):
             continue
+        tool = t.get("tool", "")
         url = (req.get("url", "") or req.get("endpoint", "")).split("?")[0]
         method = req.get("method", "GET")
         if not url:
             continue
         key = f"{method} {url}"
-        raw_headers = req.get("headers", {})
-        if isinstance(raw_headers, dict):
-            headers_info = {k: _truncate(str(v), 60) for k, v in list(raw_headers.items())[:5]}
+        resp = t.get("response_summary") or t.get("response") or {}
+        if not isinstance(resp, dict):
+            resp = {}
+
+        if tool == "fuzz_parameter":
+            param_name = req.get("param_name", "")
+            param_loc = req.get("param_location", "query")
+            raw_payloads = req.get("payloads", [])
+            if isinstance(raw_payloads, str):
+                try:
+                    raw_payloads = json.loads(raw_payloads)
+                except Exception:
+                    raw_payloads = [raw_payloads]
+            per_payload_results = resp.get("results", [])
+            if not isinstance(per_payload_results, list):
+                per_payload_results = []
+            for i, pl in enumerate(raw_payloads[:100]):
+                pr = per_payload_results[i] if i < len(per_payload_results) else {}
+                if not isinstance(pr, dict):
+                    pr = {}
+                ep_map[key].append({
+                    "tool": tool,
+                    "method": method,
+                    "full_url": req.get("endpoint") or req.get("url", ""),
+                    "param": param_name,
+                    "param_location": param_loc,
+                    "payload": _truncate(str(pl), 200),
+                    "status": pr.get("status", ""),
+                    "anomaly": pr.get("anomaly", False),
+                    "reflected": pr.get("reflected", False),
+                    "body_snippet": _truncate(str(pr.get("body_snippet", "")), 120),
+                    "timing_ms": pr.get("timing_ms", ""),
+                })
+        elif tool == "inject_payload":
+            ep_map[key].append({
+                "tool": tool,
+                "method": "DOM",
+                "full_url": url,
+                "param": req.get("selector", ""),
+                "payload": _truncate(str(req.get("payload", "")), 200),
+                "status": resp.get("status", ""),
+                "anomaly": resp.get("anomaly", False),
+                "reflected": resp.get("reflected", False),
+                "body_snippet": _truncate(str(resp.get("body_snippet", "")), 120),
+            })
         else:
-            headers_info = {"raw": _truncate(str(raw_headers), 200)}
-        payload_info = {
-            "full_url": req.get("url", ""),
-            "method": method,
-            "body": _truncate(str(req.get("body", "")), 200),
-            "headers": headers_info,
-        }
-        resp = t.get("response_summary", {})
-        if isinstance(resp, dict):
-            payload_info["status"] = resp.get("status", "")
-            payload_info["anomaly"] = t.get("anomaly", False)
-        ep_map[key].append(payload_info)
+            body_str = req.get("body", "")
+            ep_map[key].append({
+                "tool": tool,
+                "method": method,
+                "full_url": req.get("url", ""),
+                "payload": _truncate(str(body_str), 200) if body_str else "",
+                "status": resp.get("status") or resp.get("status_code", ""),
+                "anomaly": resp.get("anomaly", False),
+                "body_snippet": _truncate(str(resp.get("body_snippet", "")), 120),
+            })
 
     result = []
     for ep, payloads in sorted(ep_map.items()):
-        result.append({"endpoint": ep, "payload_count": len(payloads), "payloads": payloads[:50]})
+        anomaly_count = sum(1 for p in payloads if p.get("anomaly"))
+        result.append({
+            "endpoint": ep,
+            "payload_count": len(payloads),
+            "anomaly_count": anomaly_count,
+            "payloads": payloads[:200],
+        })
     return result
 
 
