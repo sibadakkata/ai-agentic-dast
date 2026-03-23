@@ -551,68 +551,78 @@ async def detect_and_login(
     final_check_host = urlparse(page.url or "").hostname or ""
     final_check_root = _extract_root_domain(final_check_host)
     target_root = _extract_root_domain(target_host)
-
-    # Use root domain comparison for SSO flows: login.norton.com and
-    # my-int.norton.com share root "norton.com" — that's a normal SSO
-    # redirect, not a failure.  Only flag auth_failed when we're on a
-    # completely different domain AND the URL looks like a login page.
     on_same_org = final_check_root == target_root
     on_login_url = _is_login_url(page.url or "")
 
-    # Even on same org, if we're STILL on a login page, verify with
-    # cookies: if we have target-domain cookies, auth likely succeeded.
-    has_target_cookies = False
+    # Check for visible error messages on the page (strong signal of failure)
+    _page_has_errors = False
     try:
-        _cookies = await page.context.cookies()
-        has_target_cookies = any(
-            target_root in (c.get("domain", "") or "")
-            for c in _cookies
-        ) and len(_cookies) > 0
+        _page_has_errors = await page.evaluate("""() => {
+            const els = document.querySelectorAll(
+                '[class*="error"], [class*="alert-danger"], [role="alert"], '
+                + '.error-message, .field-error, [class*="Error"]'
+            );
+            const texts = Array.from(els).map(e => e.innerText).filter(t => t.trim());
+            const body = (document.body && document.body.innerText || '').toLowerCase();
+            return texts.some(t => /invalid|incorrect|wrong|failed|denied/i.test(t))
+                || body.includes('invalid') && body.includes('password');
+        }""")
     except Exception:
         pass
 
-    if on_same_org and on_login_url and has_target_cookies:
-        print(f"  [AUTH-DEBUG] On SSO page ({final_check_host}) but have "
-              f"{target_root} cookies — treating as SUCCESS (SSO redirect in progress)")
+    if final_check_host == target_host and not on_login_url and not _page_has_errors:
+        # On target host, not a login page, no errors — auth succeeded
         auth_failed = False
-    elif on_same_org and on_login_url and not has_target_cookies:
-        # Same org SSO page but no cookies yet — try navigating to target
-        print(f"  [AUTH-DEBUG] On same-org SSO page without cookies, navigating to target...")
+        print(f"  [AUTH-DEBUG] On target host {target_host}, not a login page — auth OK")
+    elif on_login_url or final_check_host != target_host:
+        # Still on a login/SSO page — verify by navigating to the target
+        print(f"  [AUTH-DEBUG] On {final_check_host} (login_url={on_login_url}, "
+              f"errors={_page_has_errors}), verifying by navigating to target...")
         try:
-            await page.goto(target.url, wait_until="domcontentloaded", timeout=15000)
-            await page.wait_for_load_state("networkidle", timeout=10000)
-            await asyncio.sleep(2)
-            redir_host = urlparse(page.url or "").hostname or ""
-            redir_login = _is_login_url(page.url or "")
-            auth_failed = redir_host != target_host and redir_login
-            print(f"  [AUTH-DEBUG] After nav to target: host={redir_host}, "
-                  f"is_login={redir_login}, auth_failed={auth_failed}")
+            await page.goto(target.url, wait_until="domcontentloaded", timeout=20000)
+            try:
+                await page.wait_for_load_state("networkidle", timeout=10000)
+            except Exception:
+                pass
+            await asyncio.sleep(3)
+            verify_host = urlparse(page.url or "").hostname or ""
+            verify_login = _is_login_url(page.url or "")
+            auth_failed = verify_host != target_host or verify_login
+            print(f"  [AUTH-DEBUG] After verify nav: host={verify_host}, "
+                  f"is_login={verify_login}, auth_failed={auth_failed}")
         except Exception as e:
-            print(f"  [AUTH-DEBUG] Nav to target failed: {e}")
+            print(f"  [AUTH-DEBUG] Verify nav failed: {e}")
             auth_failed = True
     else:
-        auth_failed = final_check_host != target_host and on_login_url
-    print(f"  [AUTH-DEBUG] Auth check: final_host={final_check_host}, target={target_host}, "
+        auth_failed = False
+    print(f"  [AUTH-DEBUG] Auth result: final_host={final_check_host}, target={target_host}, "
           f"same_org={on_same_org}, login_url={on_login_url}, "
-          f"has_cookies={has_target_cookies}, auth_failed={auth_failed}")
+          f"page_errors={_page_has_errors}, auth_failed={auth_failed}")
 
     if auth_failed:
         has_captcha = await _detect_captcha(page)
         screenshot_b64 = await _take_screenshot_b64(page)
 
         # Build a descriptive reason for the challenge
+        verify_host = urlparse(page.url or "").hostname or ""
         if has_captcha:
             challenge_reason = "CAPTCHA detected on the login page"
             challenge_action = "Complete the CAPTCHA in the live browser, then click 'Login Complete'."
             print(f"  [AUTH] CAPTCHA detected on login page!")
-        elif final_check_host != target_host:
-            challenge_reason = (f"Login did not redirect back to {target_host} "
-                                f"(stuck on {final_check_host})")
+        elif _page_has_errors:
+            challenge_reason = (f"Automated login returned an error on {verify_host} "
+                                f"(credentials may be wrong or form fill failed)")
             challenge_action = ("Log in manually in the live browser. Once you see "
                                 "the target application, click 'Login Complete'.")
-            print(f"  [AUTH] Login failed — stuck on {final_check_host}, not {target_host}")
+            print(f"  [AUTH] Login failed — error messages on page at {verify_host}")
+        elif verify_host != target_host:
+            challenge_reason = (f"Login did not redirect back to {target_host} "
+                                f"(redirected to {verify_host})")
+            challenge_action = ("Log in manually in the live browser. Once you see "
+                                "the target application, click 'Login Complete'.")
+            print(f"  [AUTH] Login failed — redirected to {verify_host}, not {target_host}")
         else:
-            challenge_reason = "Automated login failed (credentials may be wrong or bot detection active)"
+            challenge_reason = "Automated login failed (still on login page after submitting credentials)"
             challenge_action = ("Log in manually in the live browser. Once you see "
                                 "the target application, click 'Login Complete'.")
             print(f"  [AUTH] Login failed — still on login page after submitting credentials")
