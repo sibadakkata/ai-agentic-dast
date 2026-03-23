@@ -1288,13 +1288,22 @@ async def _run_scan_task(scan_id, target_url, username, password, model, scan_mo
                 scan["progress"].append("Scan resumed — continuing...")
                 _save_scan(scan_id)
             elif event == "auth_challenge":
+                has_captcha = data.get("has_captcha", False)
+                reason = data.get("reason", "")
+                action = data.get("action", "")
                 scan["auth_challenge"] = {
                     "screenshot": data.get("screenshot", ""),
-                    "has_captcha": data.get("has_captcha", False),
+                    "has_captcha": has_captcha,
                     "message": data.get("message", ""),
+                    "reason": reason,
+                    "action": action,
                     "waiting": True,
                 }
-                scan["progress"].append("Auth challenge detected — waiting for manual resolution...")
+                challenge_type = "CAPTCHA" if has_captcha else "Login failure"
+                detail = reason or ("CAPTCHA on login page" if has_captcha else "automated login did not succeed")
+                next_step = action or "Log in manually via the live browser, then click 'Login Complete'."
+                scan["progress"].append(f"Auth challenge detected [{challenge_type}]: {detail}")
+                scan["progress"].append(f"  → Action needed: {next_step}")
                 _save_scan(scan_id)
             elif event == "auth_challenge_resolved":
                 scan.pop("auth_challenge", None)
@@ -1306,7 +1315,7 @@ async def _run_scan_task(scan_id, target_url, username, password, model, scan_mo
                 _save_scan(scan_id)
             elif event == "interactive_browser_done":
                 scan.pop("interactive_browser", None)
-                scan["progress"].append("Interactive login completed — continuing scan...")
+                scan["progress"].append("Interactive login completed by user — continuing scan...")
                 _save_scan(scan_id)
             elif event == "progress_msg":
                 msg = data.get("message", "")
