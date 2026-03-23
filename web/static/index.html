@@ -3536,7 +3536,7 @@ function showErrorView(scanId, data) {
         const sc = sevColors[sev] || '#6b7280';
         const verdict = f.verdict || '-';
         const vc = verdict === 'TRUE_POSITIVE' ? '#059669' : verdict === 'FALSE_POSITIVE' ? '#dc2626' : '#6b7280';
-        tableHtml += `<tr style="cursor:pointer;" onclick="openFindingDetail(${i}, window._completedFindings)">
+        tableHtml += `<tr style="cursor:pointer;" onclick="showCompletedFindingDetail(${i})">
           <td>${i+1}</td>
           <td><span style="color:${sc};font-weight:700;font-size:11px;text-transform:uppercase;">${sev}</span></td>
           <td style="font-weight:600;max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(f.title || '-')}</td>
