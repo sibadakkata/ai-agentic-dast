@@ -2220,7 +2220,7 @@ async function loadScans() {
     const curPage = result.page || 1;
     _loadedScans = scans;
 
-    countEl.textContent = total + ' scan' + (total !== 1 ? 's' : '') + (_scanSearch ? ' matching "' + _scanSearch + '"' : ' total');
+    if (countEl) countEl.textContent = total + ' scan' + (total !== 1 ? 's' : '') + (_scanSearch ? ' matching "' + _scanSearch + '"' : ' total');
 
     if (!scans.length) {
       el.innerHTML = '<div class="empty">' + (_scanSearch ? 'No scans match "' + esc(_scanSearch) + '".' : 'No scans yet. Configure a target above and click Start Scan.') + '</div>';
@@ -2597,23 +2597,20 @@ let stopRequestedAt = null;
 async function stopScan() {
   if (!currentScanId) return;
   const stopBtn = document.getElementById('stop-scan-btn');
-  stopBtn.disabled = true;
-  stopBtn.textContent = 'Stopping...';
+  if (stopBtn) { stopBtn.disabled = true; stopBtn.textContent = 'Stopping...'; }
   try {
     const resp = await fetch(`/api/scan/${currentScanId}/stop`, { method: 'POST' });
     const data = await resp.json();
     if (!resp.ok) {
       alert(data.detail || 'Failed to stop scan');
-      stopBtn.disabled = false;
-      stopBtn.textContent = 'Stop Scan';
+      if (stopBtn) { stopBtn.disabled = false; stopBtn.textContent = 'Stop Scan'; }
       return;
     }
     stopRequestedAt = Date.now();
-    document.getElementById('scan-status-msg').textContent = 'Stopping scan...';
+    const _ssm1 = document.getElementById('scan-status-msg'); if (_ssm1) _ssm1.textContent = 'Stopping scan...';
   } catch(e) {
     alert('Error stopping scan: ' + e.message);
-    stopBtn.disabled = false;
-    stopBtn.textContent = 'Stop Scan';
+    if (stopBtn) { stopBtn.disabled = false; stopBtn.textContent = 'Stop Scan'; }
   }
 }
 
@@ -2653,7 +2650,7 @@ async function pauseScan() {
     const resp = await fetch(`/api/scan/${currentScanId}/pause`, { method: 'POST' });
     if (!resp.ok) { const d = await resp.json(); alert(d.detail || 'Failed to pause'); btn.disabled = false; btn.textContent = 'Pause'; return; }
     pauseRequestedAt = Date.now();
-    document.getElementById('scan-status-msg').textContent = 'Pause requested — waiting for current step to finish...';
+    const _ssm2 = document.getElementById('scan-status-msg'); if (_ssm2) _ssm2.textContent = 'Pause requested — waiting for current step to finish...';
   } catch(e) { alert('Error: ' + e.message); btn.disabled = false; btn.textContent = 'Pause'; }
 }
 
@@ -2666,7 +2663,7 @@ async function resumeScan() {
     const resp = await fetch(`/api/scan/${currentScanId}/resume`, { method: 'POST' });
     if (!resp.ok) { const d = await resp.json(); alert(d.detail || 'Failed to resume'); btn.disabled = false; btn.textContent = 'Resume'; return; }
     showScanControls('running');
-    document.getElementById('scan-status-msg').textContent = 'Scan resumed';
+    const _ssm3 = document.getElementById('scan-status-msg'); if (_ssm3) _ssm3.textContent = 'Scan resumed';
   } catch(e) { alert('Error: ' + e.message); btn.disabled = false; btn.textContent = 'Resume'; }
 }
 
@@ -2817,7 +2814,7 @@ async function retryScanById(scanId, forceRestart) {
       : 'Restarting scan from scratch...';
     openLiveView(scanId);
     showScanControls('running');
-    document.getElementById('scan-status-msg').textContent = msg;
+    const _ssm4 = document.getElementById('scan-status-msg'); if (_ssm4) _ssm4.textContent = msg;
     loadScans();
   } catch(e) {
     alert('Error retrying scan: ' + e.message);
@@ -2832,7 +2829,7 @@ async function rescanById(scanId) {
     if (!resp.ok) { alert(data.detail || 'Failed to rescan'); return; }
     openLiveView(data.scan_id);
     showScanControls('running');
-    document.getElementById('scan-status-msg').textContent = 'New scan started (re-scan)...';
+    const _ssm5 = document.getElementById('scan-status-msg'); if (_ssm5) _ssm5.textContent = 'New scan started (re-scan)...';
     loadScans();
   } catch(e) {
     alert('Error rescanning: ' + e.message);
@@ -2869,21 +2866,24 @@ function openLiveView(scanId) {
   _allLiveTests = [];
   _allLiveFindings = [];
   _prevPhaseRender = '';
-  document.getElementById('lv-tests-body').innerHTML = '';
-  document.getElementById('lv-findings-body').innerHTML = '';
-  document.getElementById('lv-phases-body').innerHTML = '';
-  document.getElementById('lv-crawled-body').innerHTML = '';
-  document.getElementById('lv-crawled-count').textContent = '0';
+  const _lv = id => document.getElementById(id);
+  const _lvSet = (id, prop, val) => { const e = _lv(id); if (e) e[prop] = val; };
+  _lvSet('lv-tests-body', 'innerHTML', '');
+  _lvSet('lv-findings-body', 'innerHTML', '');
+  _lvSet('lv-phases-body', 'innerHTML', '');
+  _lvSet('lv-crawled-body', 'innerHTML', '');
+  _lvSet('lv-crawled-count', 'textContent', '0');
   _prevCrawledCount = 0;
-  document.getElementById('lv-phase-text').textContent = 'Loading...';
-  document.getElementById('lv-tests-count').textContent = '0';
-  document.getElementById('lv-findings-count').textContent = '0';
-  document.getElementById('lv-phases-count').textContent = '0';
-  document.getElementById('live-scan-log').textContent = '';
-  document.getElementById('live-scan-stats').innerHTML = '';
+  _lvSet('lv-phase-text', 'textContent', 'Loading...');
+  _lvSet('lv-tests-count', 'textContent', '0');
+  _lvSet('lv-findings-count', 'textContent', '0');
+  _lvSet('lv-phases-count', 'textContent', '0');
+  _lvSet('live-scan-log', 'textContent', '');
+  _lvSet('live-scan-stats', 'innerHTML', '');
 
   hideAllViews();
-  document.getElementById('live-scan-view').style.display = 'block';
+  const _lvEl = document.getElementById('live-scan-view');
+  if (_lvEl) _lvEl.style.display = 'block';
 
   pollLiveView(scanId);
   if (lvPollInterval) clearInterval(lvPollInterval);
@@ -2953,7 +2953,8 @@ async function pollLiveView(scanId) {
       engineIndicator = `<span class="badge" style="margin-left:6px;background:rgba(99,102,241,0.1);color:#6366f1;font-size:11px;">&#9654; AI</span>`;
     }
 
-    document.getElementById('live-scan-title').innerHTML =
+    const _lvTitle = document.getElementById('live-scan-title');
+    if (_lvTitle) _lvTitle.innerHTML =
       data.status === 'running' || data.status === 'stopping' || data.status === 'pausing'
         ? `<span class="scanning-indicator"></span>${data.status === 'stopping' ? stoppingLabel : data.status === 'pausing' ? pausingLabel : 'Scan In Progress'} — ${esc(_shortModel(data.model_name || data.model))}${scannerBadge}${engineIndicator}${targetLine}`
         : data.status === 'paused'
@@ -2965,12 +2966,14 @@ async function pollLiveView(scanId) {
               : `<span style="color:var(--red);">&#10005;</span> Scan Error — ${esc(_shortModel(data.model_name || data.model))}${scannerBadge}${targetLine}`;
 
     const log = document.getElementById('live-scan-log');
-    if (data.progress && data.progress.length) {
-      log.textContent = data.progress.join('\n');
-    } else if (data.error) {
-      log.textContent = 'Error: ' + data.error;
+    if (log) {
+      if (data.progress && data.progress.length) {
+        log.textContent = data.progress.join('\n');
+      } else if (data.error) {
+        log.textContent = 'Error: ' + data.error;
+      }
+      log.scrollTop = log.scrollHeight;
     }
-    log.scrollTop = log.scrollHeight;
 
     const aiStatus = data.ai_status || '';
 
@@ -3001,7 +3004,8 @@ async function pollLiveView(scanId) {
         </div>
       </div>`;
 
-    document.getElementById('live-scan-stats').innerHTML = statsHtml;
+    const _lvStats = document.getElementById('live-scan-stats');
+    if (_lvStats) _lvStats.innerHTML = statsHtml;
 
     const aiPanel = document.getElementById('lv-ai-panel');
     if (aiPanel) aiPanel.style.display = 'block';
@@ -3025,11 +3029,12 @@ async function pollLiveView(scanId) {
 }
 
 function renderLiveView(live) {
-  if (live.current_phase) document.getElementById('lv-phase-text').textContent = live.current_phase;
-  document.getElementById('lv-tests-count').textContent = live.tests_total || 0;
+  const _rl = (id, val) => { const e = document.getElementById(id); if (e) e.textContent = val; };
+  if (live.current_phase) _rl('lv-phase-text', live.current_phase);
+  _rl('lv-tests-count', live.tests_total || 0);
   renderCrawledTree(live.crawled_urls || []);
-  document.getElementById('lv-findings-count').textContent = live.findings_total || 0;
-  document.getElementById('lv-phases-count').textContent = (live.phases || []).length;
+  _rl('lv-findings-count', live.findings_total || 0);
+  _rl('lv-phases-count', (live.phases || []).length);
 
   if (live.tests && live.tests.length) {
     _allLiveTests = _allLiveTests.concat(live.tests);
@@ -3088,9 +3093,9 @@ function renderLiveView(live) {
 
   const aiFindBadge = document.getElementById('lv-ai-findings-badge');
   if (aiFindBadge) {
-    const aiCount = live.findings_total || 0;
-    aiFindBadge.textContent = aiCount;
-    aiFindBadge.style.display = aiCount > 0 ? 'inline' : 'none';
+    const _aiCnt = live.findings_total || 0;
+    aiFindBadge.textContent = _aiCnt;
+    aiFindBadge.style.display = _aiCnt > 0 ? 'inline' : 'none';
   }
 
   const phasesBody = document.getElementById('lv-phases-body');
@@ -3296,13 +3301,13 @@ function renderCrawledTree(urls) {
   const el = document.getElementById('lv-crawled-body');
   const countEl = document.getElementById('lv-crawled-count');
   if (!urls || !urls.length) {
-    el.innerHTML = '<div style="padding:16px;color:var(--text2);font-size:12px;">No pages crawled yet — waiting for scan to discover pages...</div>';
-    countEl.textContent = '0';
+    if (el) el.innerHTML = '<div style="padding:16px;color:var(--text2);font-size:12px;">No pages crawled yet — waiting for scan to discover pages...</div>';
+    if (countEl) countEl.textContent = '0';
     return;
   }
   if (urls.length === _prevCrawledCount) return;
   _prevCrawledCount = urls.length;
-  countEl.textContent = urls.length;
+  if (countEl) countEl.textContent = urls.length;
 
   const urlMeta = {};
   const pageCount = {page: 0, api: 0, test: 0};
@@ -3418,10 +3423,10 @@ async function viewScan(scanId) {
       return;
     }
 
-    rv.style.display = 'block';
-    document.getElementById('result-title').innerHTML = '<span class="scanning-indicator"></span> Loading results...';
-    document.getElementById('result-stats').innerHTML = '';
-    document.getElementById('tab-comparison').innerHTML = '<div class="empty">Loading...</div>';
+    if (rv) rv.style.display = 'block';
+    const _rt = document.getElementById('result-title'); if (_rt) _rt.innerHTML = '<span class="scanning-indicator"></span> Loading results...';
+    const _rs = document.getElementById('result-stats'); if (_rs) _rs.innerHTML = '';
+    const _tc = document.getElementById('tab-comparison'); if (_tc) _tc.innerHTML = '<div class="empty">Loading...</div>';
 
     const resp = await fetch(`/api/results/${scanId}`);
     if (!resp.ok) { alert('Results not available yet — scan may still be processing.'); showList(); return; }
@@ -3437,39 +3442,40 @@ function showErrorView(scanId, data) {
   _retryScanId = scanId;
   _retryScanPhasesCompleted = data.phases_completed || 0;
   hideAllViews();
-  document.getElementById('error-view').style.display = 'block';
+  const _e = id => document.getElementById(id);
+  const evEl = _e('error-view');
+  if (evEl) evEl.style.display = 'block';
   const isCancelled = data.status === 'cancelled';
-  document.getElementById('error-title').innerHTML = `${isCancelled ? '⏹ Scan Cancelled' : '✕ Scan Error'} — ${esc(_shortModel(data.model_name || data.model) || scanId)}` +
-    (data.target ? `<div style="font-size:14px;font-weight:400;color:var(--accent2);margin-top:4px;"><a href="${esc(data.target)}" target="_blank" rel="noopener" style="color:var(--accent2);text-decoration:none;">${esc(data.target)}</a></div>` : '');
-  document.getElementById('error-title').style.color = isCancelled ? 'var(--yellow)' : 'var(--red)';
-
-  const error = data.error || (isCancelled ? 'Scan was stopped.' : 'An unexpected error occurred. Check the progress log for details.');
-  document.getElementById('error-message').textContent = error;
-  const errBox = document.getElementById('error-detail-box');
-  const errLabel = document.getElementById('error-detail-label');
-  if (isCancelled) {
-    errBox.style.background = 'rgba(234,179,8,0.1)';
-    errBox.style.border = '1px solid rgba(234,179,8,0.3)';
-    errLabel.style.color = 'var(--yellow)';
-    errLabel.textContent = 'Cancellation Details';
-  } else {
-    errBox.style.background = 'rgba(239,68,68,0.1)';
-    errBox.style.border = '1px solid rgba(239,68,68,0.3)';
-    errLabel.style.color = 'var(--red)';
-    errLabel.textContent = 'Error Details';
+  const titleEl = _e('error-title');
+  if (titleEl) {
+    titleEl.innerHTML = `${isCancelled ? '⏹ Scan Cancelled' : '✕ Scan Error'} — ${esc(_shortModel(data.model_name || data.model) || scanId)}` +
+      (data.target ? `<div style="font-size:14px;font-weight:400;color:var(--accent2);margin-top:4px;"><a href="${esc(data.target)}" target="_blank" rel="noopener" style="color:var(--accent2);text-decoration:none;">${esc(data.target)}</a></div>` : '');
+    titleEl.style.color = isCancelled ? 'var(--yellow)' : 'var(--red)';
   }
 
-  const retryBtn = document.getElementById('retry-scan-btn');
+  const error = data.error || (isCancelled ? 'Scan was stopped.' : 'An unexpected error occurred. Check the progress log for details.');
+  const msgEl = _e('error-message');
+  if (msgEl) msgEl.textContent = error;
+  const errBox = _e('error-detail-box');
+  const errLabel = _e('error-detail-label');
+  if (isCancelled) {
+    if (errBox) { errBox.style.background = 'rgba(234,179,8,0.1)'; errBox.style.border = '1px solid rgba(234,179,8,0.3)'; }
+    if (errLabel) { errLabel.style.color = 'var(--yellow)'; errLabel.textContent = 'Cancellation Details'; }
+  } else {
+    if (errBox) { errBox.style.background = 'rgba(239,68,68,0.1)'; errBox.style.border = '1px solid rgba(239,68,68,0.3)'; }
+    if (errLabel) { errLabel.style.color = 'var(--red)'; errLabel.textContent = 'Error Details'; }
+  }
+
+  const retryBtn = _e('retry-scan-btn');
   if (retryBtn) { retryBtn.disabled = false; retryBtn.textContent = '↻ Re-run From Scratch'; }
 
-  const contBtn = document.getElementById('continue-scan-btn');
-  const contPhase = document.getElementById('continue-phase-num');
+  const contBtn = _e('continue-scan-btn');
+  const contPhase = _e('continue-phase-num');
   if (_retryScanPhasesCompleted > 0) {
-    contBtn.style.display = 'inline-block';
-    contBtn.disabled = false;
-    contPhase.textContent = _retryScanPhasesCompleted + 1;
+    if (contBtn) { contBtn.style.display = 'inline-block'; contBtn.disabled = false; }
+    if (contPhase) contPhase.textContent = _retryScanPhasesCompleted + 1;
   } else {
-    contBtn.style.display = 'none';
+    if (contBtn) contBtn.style.display = 'none';
   }
 
   const errShowAi = true;
@@ -3497,14 +3503,15 @@ function showErrorView(scanId, data) {
     </div>`;
   }
 
-  document.getElementById('error-stats').innerHTML = errStatsHtml;
+  const errStatsEl = _e('error-stats');
+  if (errStatsEl) errStatsEl.innerHTML = errStatsHtml;
 
   const log = data.progress || [];
-  document.getElementById('error-log').textContent = log.length ? log.join('\n') : 'No progress log available.';
+  const errLogEl = _e('error-log');
+  if (errLogEl) errLogEl.textContent = log.length ? log.join('\n') : 'No progress log available.';
 
-  // Load partial findings if this scan has results
   const hasFindings = (data.findings_count && data.findings_count > 0) || data.result_file;
-  const findingsContainer = document.getElementById('error-findings');
+  const findingsContainer = _e('error-findings');
   if (hasFindings && findingsContainer) {
     findingsContainer.style.display = 'block';
     findingsContainer.innerHTML = '<div class="empty">Loading partial findings...</div>';
@@ -3583,7 +3590,8 @@ function renderResults(data) {
   const ic = triaged.filter(f=>f.verdict==='INCONCLUSIVE').length;
   const nf = triaged.filter(f=>f.verdict==='NOT_A_FINDING').length;
 
-  document.getElementById('result-title').innerHTML = `Results: ${esc(_shortModel(m.model) || 'Unknown Model')}` +
+  const _rtEl = document.getElementById('result-title');
+  if (_rtEl) _rtEl.innerHTML = `Results: ${esc(_shortModel(m.model) || 'Unknown Model')}` +
     (m.target ? `<div style="font-size:14px;font-weight:400;color:var(--accent2);margin-top:6px;display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
       <a href="${esc(m.target)}" target="_blank" style="color:var(--accent2);text-decoration:none;">${esc(m.target)}</a>
       ${m.scan_mode ? '<span class="badge" style="background:rgba(99,102,241,0.08);color:#6366f1;font-size:11px;">' + esc(m.scan_mode) + '</span>' : ''}
@@ -3659,7 +3667,8 @@ function renderResults(data) {
   </div>`;
   html += '</div>';
 
-  document.getElementById('result-stats').innerHTML = html;
+  const _rstEl = document.getElementById('result-stats');
+  if (_rstEl) _rstEl.innerHTML = html;
 
   currentTriagedFindings = data.triaged_findings || [];
   renderComparison(data);
@@ -3752,7 +3761,8 @@ document.addEventListener('click', function(e) {
 
 function renderComparison(data) {
   const el = document.getElementById('tab-comparison');
-  if (!data.triaged_findings.length) { el.innerHTML = '<div class="empty">No findings</div>'; return; }
+  if (!el) return;
+  if (!data.triaged_findings || !data.triaged_findings.length) { el.innerHTML = '<div class="empty">No findings</div>'; return; }
 
   window._lastComparisonData = data;
   window._lastCoverage = data.coverage || {};
@@ -3887,7 +3897,8 @@ async function editCvss(idx) {
 
 function renderCrawled(endpoints) {
   const el = document.getElementById('tab-crawled');
-  if (!endpoints.length) { el.innerHTML = '<div class="empty">No endpoints crawled</div>'; return; }
+  if (!el) return;
+  if (!endpoints || !endpoints.length) { el.innerHTML = '<div class="empty">No endpoints crawled</div>'; return; }
   el.innerHTML = `<p style="color:var(--text2);font-size:13px;margin-bottom:12px">${endpoints.length} unique endpoints discovered</p>
   <table><thead><tr><th>Method</th><th>URL</th><th>Status</th></tr></thead><tbody>` +
   endpoints.map(e => `<tr>
@@ -3899,7 +3910,8 @@ function renderCrawled(endpoints) {
 
 function renderPayloads(byEndpoint) {
   const el = document.getElementById('tab-payloads');
-  if (!byEndpoint.length) { el.innerHTML = '<div class="empty">No payload data</div>'; return; }
+  if (!el) return;
+  if (!byEndpoint || !byEndpoint.length) { el.innerHTML = '<div class="empty">No payload data</div>'; return; }
   const totalPayloads = byEndpoint.reduce((a,e) => a + e.payload_count, 0);
   const totalAnomalies = byEndpoint.reduce((a,e) => a + (e.anomaly_count||0), 0);
   el.innerHTML = `<p style="color:var(--text2);font-size:13px;margin-bottom:12px">${byEndpoint.length} endpoints tested with ${totalPayloads} total payloads` +
@@ -3937,7 +3949,8 @@ function renderPayloads(byEndpoint) {
 
 function renderAIRaw(findings) {
   const el = document.getElementById('tab-ai-raw');
-  if (!findings.length) { el.innerHTML = '<div class="empty">No findings</div>'; return; }
+  if (!el) return;
+  if (!findings || !findings.length) { el.innerHTML = '<div class="empty">No findings</div>'; return; }
   window._aiRawFindings = findings;
   el.innerHTML = `<table><thead><tr>
     <th style="width:30px;"></th><th>#</th><th>Finding</th><th>Severity</th><th>OWASP</th><th>CWE</th><th>URL</th><th>Parameter</th><th style="max-width:160px;">Evidence</th>
@@ -3959,7 +3972,8 @@ function renderAIRaw(findings) {
 
 function renderPhaseLog(phases) {
   const el = document.getElementById('tab-phase-log');
-  if (!phases.length) { el.innerHTML = '<div class="empty">No phase log</div>'; return; }
+  if (!el) return;
+  if (!phases || !phases.length) { el.innerHTML = '<div class="empty">No phase log</div>'; return; }
   el.innerHTML = `<table><thead><tr>
     <th>#</th><th>Phase</th><th>Tool Calls</th><th>Findings</th>
   </tr></thead><tbody>` +
@@ -3972,8 +3986,9 @@ function renderPhaseLog(phases) {
 }
 
 function renderOutOfScope(rawItems) {
-  const items = rawItems.filter(o => { try { const u = new URL(o.url); return !!u.hostname; } catch(e) { return false; } });
+  const items = (rawItems || []).filter(o => { try { const u = new URL(o.url); return !!u.hostname; } catch(e) { return false; } });
   const el = document.getElementById('tab-out-of-scope');
+  if (!el) return;
   const badge = document.getElementById('res-oos-badge');
   if (badge) { badge.textContent = items.length; badge.style.display = items.length ? 'inline' : 'none'; }
   if (!items.length) { el.innerHTML = '<div class="empty">No third-party URLs were encountered during the scan</div>'; return; }
