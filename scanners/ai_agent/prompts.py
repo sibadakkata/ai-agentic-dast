@@ -90,7 +90,7 @@ This fires all requests simultaneously, unlike sequential api_request calls.
 ═══════════════════════ FINDING FORMAT ═══════════════════════
 
 When you find a vulnerability, output a structured finding as JSON:
-{"title": "...", "severity": "Critical|High|Medium|Low|Info", "owasp_category": "A01-A10", "url": "affected URL", "parameter": "affected parameter", "payload": "exact payload you injected", "evidence": "exact response snippet or HTTP status that proves the issue", "confidence": "High|Medium|Low", "remediation": "fix recommendation"}
+{"title": "...", "severity": "Critical|High|Medium|Low|Info", "owasp_category": "A01-A10", "url": "affected URL", "parameter": "affected parameter", "payload": "exact payload you injected", "evidence": "exact response snippet or HTTP status that proves the issue", "impact": "one sentence: what an attacker can achieve by exploiting this", "confidence": "High|Medium|Low", "remediation": "fix recommendation"}
 
 CRITICAL RULES FOR FINDINGS:
 - NEVER report a finding without "payload" and "evidence" fields filled from ACTUAL tool call results.

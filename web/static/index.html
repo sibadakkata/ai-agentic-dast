@@ -4808,6 +4808,68 @@ function _cweRemediation(cwe, title) {
   return '';
 }
 
+function _findingImpact(f) {
+  if (f.impact && typeof f.impact === 'string' && f.impact.trim().length > 5) return f.impact.trim();
+  var t = (f.title || '').toLowerCase();
+  var sev = (f.severity || f.ai_severity || '').toLowerCase();
+  var cwe = (f.cwe_hint || f.cwe || '').toLowerCase();
+  if (sev === 'info' || sev === 'informational') return '';
+  var impacts = {
+    'sql injection': 'Attacker can read, modify, or delete database contents. May lead to full data breach or authentication bypass.',
+    'sqli': 'Attacker can read, modify, or delete database contents. May lead to full data breach or authentication bypass.',
+    'cross-site scripting': 'Attacker can execute JavaScript in victim browsers, steal session tokens, or redirect users to malicious sites.',
+    'xss': 'Attacker can execute JavaScript in victim browsers, steal session tokens, or redirect users to malicious sites.',
+    'csrf': 'Attacker can force authenticated users to perform actions (transfers, password changes) without their knowledge.',
+    'cross-site request forgery': 'Attacker can force authenticated users to perform actions (transfers, password changes) without their knowledge.',
+    'bola': 'Attacker can access or modify other users\' data by manipulating object IDs in API requests.',
+    'idor': 'Attacker can access or modify other users\' data by manipulating object IDs in API requests.',
+    'broken object': 'Attacker can access or modify other users\' data by manipulating object IDs in API requests.',
+    'ssrf': 'Attacker can make the server send requests to internal systems, potentially accessing cloud metadata or internal services.',
+    'server-side request': 'Attacker can make the server send requests to internal systems, potentially accessing cloud metadata or internal services.',
+    'path traversal': 'Attacker can read arbitrary files from the server, including config files, credentials, or source code.',
+    'directory traversal': 'Attacker can read arbitrary files from the server, including config files, credentials, or source code.',
+    'command injection': 'Attacker can execute OS commands on the server, leading to full system compromise.',
+    'remote code': 'Attacker can execute arbitrary code on the server, leading to full system takeover.',
+    'authentication bypass': 'Attacker can access protected resources without valid credentials.',
+    'brute': 'Attacker can guess credentials through repeated login attempts, compromising user accounts.',
+    'rate limit': 'Attacker can abuse the endpoint without throttling — enables brute-force, scraping, or denial of service.',
+    'session': 'Attacker can hijack or fixate user sessions, impersonating legitimate users.',
+    'token': 'Exposed tokens can be captured and reused for unauthorized access or session hijacking.',
+    'insecure cookie': 'Cookies without security flags can be intercepted (missing Secure) or accessed by scripts (missing HttpOnly), enabling session theft.',
+    'missing header': 'Browser-side protections are not enforced, leaving users vulnerable to clickjacking, XSS, or MIME-sniffing attacks.',
+    'missing security': 'Browser-side protections are not enforced, leaving users vulnerable to clickjacking, XSS, or MIME-sniffing attacks.',
+    'hsts': 'First-time visitors can be intercepted via HTTP before HTTPS redirect, enabling man-in-the-middle attacks.',
+    'clickjack': 'Attacker can overlay the page in an iframe, tricking users into clicking hidden actions (UI redressing).',
+    'x-frame': 'Attacker can overlay the page in an iframe, tricking users into clicking hidden actions (UI redressing).',
+    'csp': 'No Content Security Policy means injected scripts face no restrictions — amplifies any XSS vulnerability.',
+    'cors': 'Misconfigured CORS allows malicious sites to read sensitive API responses from authenticated users.',
+    'source map': 'Exposed source maps reveal original source code, internal logic, API keys, and developer comments to attackers.',
+    'outdated': 'Known CVEs in outdated libraries can be exploited with public exploit code.',
+    'vulnerable lib': 'Known CVEs in outdated libraries can be exploited with public exploit code.',
+    'information disclosure': 'Leaked internal details (paths, versions, stack traces) help attackers map the attack surface.',
+    'sensitive data': 'Exposed sensitive data (PII, credentials, tokens) can be used for identity theft or unauthorized access.',
+    'log injection': 'Attacker can inject fake log entries, corrupt audit trails, or trigger downstream vulnerabilities in log parsers.',
+    'open redirect': 'Attacker can redirect users to phishing sites using a trusted domain, stealing credentials.',
+    'jwt': 'Weak or misconfigured JWT tokens can be forged, enabling unauthorized access.',
+    'file upload': 'Attacker can upload malicious files (webshells), leading to remote code execution on the server.',
+    'deserialization': 'Attacker can execute arbitrary code by sending crafted serialized objects.',
+    'xml external': 'Attacker can read local files, perform SSRF, or cause denial of service via XML entity expansion.',
+    'xxe': 'Attacker can read local files, perform SSRF, or cause denial of service via XML entity expansion.',
+    'privilege': 'Attacker can elevate access from regular user to admin, accessing restricted functionality.',
+    'mass assignment': 'Attacker can modify protected fields (role, balance, admin flag) by adding extra parameters.',
+    'telemetry': 'Security tokens sent to third-party analytics can be harvested from network traffic or third-party logs.',
+    'sri': 'Without Subresource Integrity, a compromised CDN can inject malicious code into your pages.',
+    'subresource': 'Without Subresource Integrity, a compromised CDN can inject malicious code into your pages.',
+  };
+  for (var key in impacts) {
+    if (t.includes(key)) return impacts[key];
+  }
+  if (sev === 'critical' || sev === 'high') return 'This vulnerability could allow unauthorized access, data theft, or system compromise if exploited.';
+  if (sev === 'medium') return 'This issue could be leveraged as part of a larger attack chain or expose sensitive information.';
+  if (sev === 'low') return 'Low direct risk, but may provide attackers with useful information for further attacks.';
+  return '';
+}
+
 function showFindingDetail(idx) {
   const f = _allLiveFindings[idx];
   if (!f) return;
@@ -4843,6 +4905,15 @@ function showFindingDetail(idx) {
     evidenceHtml = `<div class="fdm-section">
       <div class="fdm-section-title">&#128270; Evidence</div>
       <div class="fdm-evidence">${esc(f.evidence)}</div>
+    </div>`;
+  }
+
+  let impactHtml = '';
+  var _impText = _findingImpact(f);
+  if (_impText) {
+    impactHtml = `<div class="fdm-section">
+      <div class="fdm-section-title">&#9889; Impact</div>
+      <div class="fdm-evidence" style="color:#dc2626;border-left:3px solid #dc2626;background:rgba(220,38,38,0.04);">${esc(_impText)}</div>
     </div>`;
   }
 
@@ -4905,6 +4976,7 @@ function showFindingDetail(idx) {
       </div>
       ${payloadHtml}
       ${evidenceHtml}
+      ${impactHtml}
       ${rrHtml}
       ${remediationHtml}
     </div>`;
@@ -4963,6 +5035,15 @@ function showCompletedFindingDetail(idx) {
     </div>`;
   }
 
+  let impactHtml2 = '';
+  var _impText2 = _findingImpact(f);
+  if (_impText2) {
+    impactHtml2 = `<div class="fdm-section">
+      <div class="fdm-section-title">&#9889; Impact</div>
+      <div class="fdm-evidence" style="color:#dc2626;border-left:3px solid #dc2626;background:rgba(220,38,38,0.04);">${esc(_impText2)}</div>
+    </div>`;
+  }
+
   let remediationHtml = '';
   var _remText2 = f.remediation || _cweRemediation(f.cwe_hint || f.cwe, f.title);
   if (_remText2) {
@@ -5000,6 +5081,7 @@ function showCompletedFindingDetail(idx) {
       </div>
       ${payloadHtml}
       ${evidenceHtml}
+      ${impactHtml2}
       ${rrHtml}
       ${triageHtml}
       ${remediationHtml}
@@ -5043,6 +5125,15 @@ function showAIRawFindingDetail(idx) {
     </div>`;
   }
 
+  let impactHtml3 = '';
+  var _impText3 = _findingImpact(f);
+  if (_impText3) {
+    impactHtml3 = `<div class="fdm-section">
+      <div class="fdm-section-title">&#9889; Impact</div>
+      <div class="fdm-evidence" style="color:#dc2626;border-left:3px solid #dc2626;background:rgba(220,38,38,0.04);">${esc(_impText3)}</div>
+    </div>`;
+  }
+
   let remediationHtml = '';
   var _remText3 = f.remediation || _cweRemediation(f.cwe_hint || f.cwe, f.title);
   if (_remText3) {
@@ -5072,6 +5163,7 @@ function showAIRawFindingDetail(idx) {
       </div>
       ${payloadHtml}
       ${evidenceHtml}
+      ${impactHtml3}
       ${rrHtml}
       ${remediationHtml}
     </div>`;

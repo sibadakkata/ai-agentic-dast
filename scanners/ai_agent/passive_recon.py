@@ -2249,6 +2249,57 @@ def _remediation_for(cwe: str, title: str = "") -> str:
     return ""
 
 
+_IMPACT_MAP = {
+    "sql": "Attacker can read, modify, or delete database contents, potentially leading to full data breach.",
+    "xss": "Attacker can execute JavaScript in victim browsers, steal session tokens, or redirect to malicious sites.",
+    "csrf": "Attacker can force authenticated users to perform unwanted actions without their knowledge.",
+    "source map": "Exposed source maps reveal original source code, internal logic, and developer comments to attackers.",
+    "hardcoded": "Leaked credentials or API keys can be used for unauthorized access to backend services.",
+    "secret": "Leaked credentials or API keys can be used for unauthorized access to backend services.",
+    "api key": "Leaked API keys can be used to consume services, exfiltrate data, or incur costs on behalf of the owner.",
+    "cookie": "Cookies without security flags can be intercepted or accessed by scripts, enabling session theft.",
+    "hsts": "First-time visitors can be intercepted via HTTP before HTTPS redirect, enabling man-in-the-middle attacks.",
+    "csp": "No Content Security Policy means injected scripts face no restrictions, amplifying any XSS vulnerability.",
+    "clickjack": "Attacker can overlay the page in an iframe, tricking users into clicking hidden actions.",
+    "frame": "Attacker can embed the page in an iframe on a malicious site for UI redressing attacks.",
+    "cors": "Misconfigured CORS allows malicious sites to read sensitive API responses from authenticated users.",
+    "token": "Exposed tokens can be captured and reused for unauthorized access or session hijacking.",
+    "telemetry": "Security tokens sent to third-party services can be harvested from network traffic or third-party logs.",
+    "log": "Sensitive data in logs can be accessed by anyone with log storage access, enabling session hijacking.",
+    "git": "Exposed Git repository reveals full source code history, credentials, and internal configuration.",
+    ".env": "Exposed environment file typically contains database credentials, API keys, and service secrets.",
+    "jwt": "Weak JWT configuration allows token forgery, enabling unauthorized access as any user.",
+    "sri": "Without Subresource Integrity, a compromised CDN can inject malicious code into your pages.",
+    "mixed content": "Mixed HTTP/HTTPS content can be intercepted and modified by network attackers.",
+    "redirect": "Missing HTTPS redirect allows network attackers to intercept traffic on first visit.",
+    "autocomplete": "Browsers may cache credentials on shared devices, exposing them to subsequent users.",
+    "cache": "Sensitive pages cached by proxies or browsers can be accessed by unauthorized users on shared devices.",
+    "referrer": "Sensitive URL parameters may leak to third-party sites via the Referer header.",
+    "permission": "Browser features (camera, mic, geolocation) are not restricted, increasing attack surface.",
+    "error": "Detailed error pages reveal internal paths, versions, or stack traces useful for further attacks.",
+    "version": "Exposed version information helps attackers find known CVEs for the specific software version.",
+    "dom sink": "Dangerous DOM sinks can be exploited for DOM-based XSS if attacker-controlled data reaches them.",
+    "internal": "Exposed internal URLs or IPs help attackers map the internal network for lateral movement.",
+    "form action": "Forms submitting to external domains may leak credentials or sensitive data to third parties.",
+    "api version": "Older API versions may lack security fixes, exposing known vulnerabilities.",
+    "sensitive": "Exposed sensitive files or data can be used for unauthorized access or further attacks.",
+}
+
+
+def _impact_for(title: str, severity: str) -> str:
+    tl = title.lower()
+    for key, impact in _IMPACT_MAP.items():
+        if key in tl:
+            return impact
+    if severity in ("Critical", "High"):
+        return "This vulnerability could allow unauthorized access, data theft, or system compromise if exploited."
+    if severity == "Medium":
+        return "This issue could be leveraged as part of a larger attack chain or expose sensitive information."
+    if severity == "Low":
+        return "Low direct risk, but may provide attackers with useful reconnaissance information."
+    return ""
+
+
 def _make_finding(title, severity, cwe, cvss, url, evidence, payload="", source="passive_recon") -> dict:
     return {
         "title": title,
@@ -2257,6 +2308,7 @@ def _make_finding(title, severity, cwe, cvss, url, evidence, payload="", source=
         "parameter": "",
         "payload": payload,
         "evidence": evidence,
+        "impact": _impact_for(title, severity),
         "owasp_category": "",
         "source": source,
         "cwe_hint": cwe,
