@@ -293,35 +293,49 @@ If you cannot determine the flow, use "form" and provide the best guess selector
 _AUTH_AGENT_SYSTEM = """You are an authentication agent controlling a browser via Playwright.
 Your goal: log into a web application using the provided credentials.
 
-At each step you receive the page HTML (trimmed) and the current URL.
+At each step you receive the page HTML (trimmed), visible text, current URL,
+and the history of your previous actions with their outcomes.
 Decide the SINGLE next action to take.
 
 Return ONLY valid JSON (no markdown):
 {
   "status": "action" | "success" | "need_mfa" | "need_captcha" | "failed",
   "action": "fill" | "click" | "wait" | "navigate" | null,
-  "selector": "CSS selector for the target element" or null,
-  "value": "text to fill" or null,
+  "selector": "CSS selector or locator string" or null,
+  "value": "text to fill or URL to navigate" or null,
   "reasoning": "one-line explanation of what you see and why you chose this action"
 }
 
-Rules:
+SELECTOR SYNTAX — you can use any of these:
+- CSS selectors:  #myId, [name="email"], input[type="password"], .login-btn
+- Label text:     label:Username or email     (matches input associated with that label)
+- Placeholder:    placeholder:Enter your email (matches input with that placeholder)
+- Role+name:      role:button[Sign In]         (matches button with accessible name)
+- Text content:   text:Use password            (matches element containing that text)
+IMPORTANT: If a CSS selector fails, try label:, placeholder:, or text: on the next step.
+
+ACTIONS:
 - "fill": fill a text/email/password field. Provide selector and value.
+  For value, use "USERNAME" for the username credential, "PASSWORD" for the password.
 - "click": click a button/link/checkbox. Provide selector, value is null.
 - "wait": wait 3 seconds for page to load/redirect. selector and value are null.
 - "navigate": navigate to a URL. Put the URL in "value", selector is null.
-- status="success": the page shows the authenticated application (not a login/SSO page).
+
+TERMINAL STATUSES (no action needed):
+- status="success": the page shows the authenticated app (not a login/SSO page).
 - status="need_mfa": you see an MFA/2FA/OTP code input (NOT a regular password field).
 - status="need_captcha": you see a CAPTCHA challenge (reCAPTCHA, hCaptcha, Turnstile, etc.).
+  Note: "This site is protected by reCAPTCHA" footer text is invisible reCAPTCHA v3 — NOT a CAPTCHA challenge.
 - status="failed": login clearly failed (e.g. account locked, invalid user, max retries).
 
-IMPORTANT:
-- For multi-step logins (email first, then password), fill the visible field and click the advance/continue button.
-- Do NOT try to fill a password field if it is not visible or present in the HTML.
-- If you see error messages like "invalid password", the previous attempt failed.
-- Prefer specific selectors: #id, [name=...], [data-testid=...] over generic ones.
+CRITICAL RULES:
+- For multi-step logins (email first, then password on next page), fill the visible field, then click the advance button.
+- Do NOT try to fill a password field if it is not present in the current HTML.
+- If the previous action FAILED, you MUST try a DIFFERENT selector. Never repeat a failed selector.
+- If CSS selectors keep failing, switch to label:/placeholder:/text: locators.
+- If you see a "Use password" or "Sign in with password" button, click it to reveal the password field.
 - If already on the target application (not a login page), return status="success".
-- NEVER return the actual password in the "reasoning" field."""
+- NEVER return the actual credentials in the "reasoning" field."""
 
 
 async def _get_page_context(page: Page, max_html: int = 10000) -> dict:
@@ -330,6 +344,7 @@ async def _get_page_context(page: Page, max_html: int = 10000) -> dict:
     title = ""
     html_snippet = ""
     visible_text = ""
+    form_inputs = ""
     try:
         title = await page.title() or ""
     except Exception:
@@ -341,16 +356,69 @@ async def _get_page_context(page: Page, max_html: int = 10000) -> dict:
         pass
     try:
         visible_text = await page.evaluate(
-            "() => document.body ? document.body.innerText.substring(0, 1500) : ''"
+            "() => document.body ? document.body.innerText.substring(0, 2000) : ''"
         )
+    except Exception:
+        pass
+    # Extract detailed info about interactive elements (inputs, buttons, links)
+    try:
+        form_inputs = await page.evaluate("""() => {
+            const results = [];
+            document.querySelectorAll('input, button, select, textarea, a[href]').forEach(el => {
+                const tag = el.tagName.toLowerCase();
+                const type = el.getAttribute('type') || '';
+                const name = el.getAttribute('name') || '';
+                const id = el.getAttribute('id') || '';
+                const placeholder = el.getAttribute('placeholder') || '';
+                const ariaLabel = el.getAttribute('aria-label') || '';
+                const text = el.innerText ? el.innerText.substring(0, 50).trim() : '';
+                const visible = el.offsetParent !== null || el.offsetWidth > 0;
+                const label = document.querySelector('label[for="' + id + '"]');
+                const labelText = label ? label.innerText.trim() : '';
+                if (!visible && tag !== 'input') return;
+                results.push(
+                    `<${tag} type="${type}" name="${name}" id="${id}" ` +
+                    `placeholder="${placeholder}" aria-label="${ariaLabel}" ` +
+                    `label="${labelText}" text="${text}" visible=${visible}>`
+                );
+            });
+            return results.join('\\n');
+        }""")
     except Exception:
         pass
     return {
         "url": url,
         "title": title,
         "html": html_snippet,
-        "visible_text": visible_text[:1500],
+        "visible_text": visible_text[:2000],
+        "form_inputs": form_inputs[:3000],
     }
+
+
+def _resolve_locator(page: Page, selector: str):
+    """Resolve a selector string into a Playwright Locator.
+
+    Supports CSS selectors and custom prefixes:
+    - label:Text        → page.get_by_label("Text")
+    - placeholder:Text  → page.get_by_placeholder("Text")
+    - role:button[Text] → page.get_by_role("button", name="Text")
+    - text:Text         → page.get_by_text("Text")
+    - Otherwise         → page.locator(selector)   (CSS)
+    """
+    sel = selector.strip()
+    if sel.startswith("label:"):
+        return page.get_by_label(sel[6:].strip())
+    if sel.startswith("placeholder:"):
+        return page.get_by_placeholder(sel[12:].strip())
+    if sel.startswith("text:"):
+        return page.get_by_text(sel[5:].strip()).first
+    if sel.startswith("role:"):
+        rest = sel[5:].strip()
+        match = re.match(r"(\w+)\[(.+)\]", rest)
+        if match:
+            return page.get_by_role(match.group(1), name=match.group(2))
+        return page.get_by_role(rest)
+    return page.locator(sel).first
 
 
 async def _llm_auth_agent_loop(
@@ -360,7 +428,7 @@ async def _llm_auth_agent_loop(
     model: str,
     on_progress: Callable | None = None,
     cancel_flag: Any = None,
-    max_steps: int = 12,
+    max_steps: int = 15,
 ) -> dict:
     """Drive the login flow step-by-step using the LLM.
 
@@ -372,7 +440,10 @@ async def _llm_auth_agent_loop(
     username = credentials.get("username", "")
     password = credentials.get("password", "")
     target_host = urlparse(target.url).hostname or ""
+    target_root = _extract_root_domain(target_host)
 
+    # Conversation history for the LLM
+    conversation: list[dict] = []
     steps_taken: list[dict] = []
     last_reasoning = ""
 
@@ -383,10 +454,12 @@ async def _llm_auth_agent_loop(
 
         ctx = await _get_page_context(page)
         current_host = urlparse(ctx["url"]).hostname or ""
+        current_root = _extract_root_domain(current_host)
 
-        # Quick check: already on target and not a login page
-        if current_host == target_host and not _is_login_url(ctx["url"]):
-            print(f"  [AUTH-AGENT] Step {step_i+1}: Already on target — success")
+        # Quick check: on target (or same root domain, not a login page) → success
+        if (current_host == target_host or current_root == target_root) \
+                and not _is_login_url(ctx["url"]):
+            print(f"  [AUTH-AGENT] Step {step_i+1}: On target ({current_host}) — success")
             return {"success": True, "need_mfa": False, "need_captcha": False,
                     "failed": False, "steps": steps_taken,
                     "last_reasoning": "Already on target application"}
@@ -396,15 +469,16 @@ async def _llm_auth_agent_loop(
             f"Page title: {ctx['title']}\n"
             f"Target URL: {target.url}\n"
             f"Credentials available: username={'yes' if username else 'no'}, "
-            f"password={'yes' if password else 'no'}\n"
-            f"Visible text (first 800 chars): {ctx['visible_text'][:800]}\n\n"
-            f"HTML:\n{ctx['html']}"
+            f"password={'yes' if password else 'no'}\n\n"
+            f"Interactive elements on page:\n{ctx['form_inputs']}\n\n"
+            f"Visible text (first 1000 chars):\n{ctx['visible_text'][:1000]}\n\n"
+            f"HTML (first 8000 chars):\n{ctx['html'][:8000]}"
         )
 
-        messages = [
-            {"role": "system", "content": _AUTH_AGENT_SYSTEM},
-            {"role": "user", "content": user_msg},
-        ]
+        # Build messages with full conversation history
+        messages = [{"role": "system", "content": _AUTH_AGENT_SYSTEM}]
+        messages.extend(conversation)
+        messages.append({"role": "user", "content": user_msg})
 
         try:
             resp = router.complete(model=model, messages=messages, max_tokens=400)
@@ -423,6 +497,10 @@ async def _llm_auth_agent_loop(
         except json.JSONDecodeError:
             logger.warning("LLM auth agent JSON parse failed: %s", raw_clean[:200])
             print(f"  [AUTH-AGENT] Bad JSON at step {step_i+1}, retrying...")
+            conversation.append({"role": "user", "content": user_msg})
+            conversation.append({"role": "assistant", "content": raw_clean})
+            conversation.append({"role": "user", "content":
+                "ERROR: Your response was not valid JSON. Return ONLY a JSON object."})
             continue
 
         status = decision.get("status", "action")
@@ -433,7 +511,8 @@ async def _llm_auth_agent_loop(
         last_reasoning = reasoning
 
         # Mask password in logs
-        log_value = "***" if value and value == password else (value[:30] if value else "")
+        log_value = "***" if value and value == password else (
+            "PASSWORD" if value == "PASSWORD" else (value[:30] if value else ""))
         print(f"  [AUTH-AGENT] Step {step_i+1}: status={status} action={action} "
               f"sel={selector} val={log_value} — {reasoning}")
 
@@ -456,36 +535,36 @@ async def _llm_auth_agent_loop(
                     "failed": True, "steps": steps_taken, "last_reasoning": reasoning}
 
         # Execute the action
+        action_result = "OK"
         try:
             if action == "fill" and selector:
                 fill_val = value or ""
                 # Resolve credential placeholders
-                if fill_val in ("{{username}}", "USERNAME", username) or \
-                   ("email" in (selector or "").lower() and fill_val == username):
+                if fill_val.upper() in ("USERNAME", "{{USERNAME}}"):
                     fill_val = username
-                elif fill_val in ("{{password}}", "PASSWORD", password) or \
-                     "password" in (selector or "").lower():
+                elif fill_val.upper() in ("PASSWORD", "{{PASSWORD}}"):
                     fill_val = password
-                # If the LLM says to fill a username/email field, use the username
-                if not fill_val and ("email" in selector.lower() or "user" in selector.lower()):
-                    fill_val = username
-                if not fill_val and "password" in selector.lower():
-                    fill_val = password
+                # Infer from selector context
+                if not fill_val:
+                    sel_lower = selector.lower()
+                    if any(k in sel_lower for k in ("email", "user", "login")):
+                        fill_val = username
+                    elif "password" in sel_lower:
+                        fill_val = password
+
+                loc = _resolve_locator(page, selector)
                 try:
-                    await page.fill(selector, fill_val, timeout=5000)
+                    await loc.fill(fill_val, timeout=5000)
                 except Exception:
                     # Fallback: click then type
-                    await page.click(selector, timeout=3000)
+                    await loc.click(timeout=3000)
+                    await asyncio.sleep(0.3)
                     await page.keyboard.type(fill_val, delay=30)
                 await asyncio.sleep(0.5)
 
             elif action == "click" and selector:
-                try:
-                    loc = page.locator(selector).first
-                    await loc.click(timeout=5000)
-                except Exception:
-                    # Fallback selectors for common buttons
-                    await page.keyboard.press("Enter")
+                loc = _resolve_locator(page, selector)
+                await loc.click(timeout=5000)
                 try:
                     await page.wait_for_load_state("networkidle", timeout=8000)
                 except Exception:
@@ -504,8 +583,23 @@ async def _llm_auth_agent_loop(
                 await asyncio.sleep(2)
 
         except Exception as e:
+            action_result = f"FAILED: {str(e)[:150]}"
             print(f"  [AUTH-AGENT] Action failed at step {step_i+1}: {e}")
-            # Continue — the LLM will see the new page state and adapt
+
+        # Record this exchange in conversation history so the LLM learns
+        conversation.append({"role": "user", "content": user_msg})
+        conversation.append({"role": "assistant", "content": raw_clean})
+        if action_result != "OK":
+            conversation.append({"role": "user", "content":
+                f"ACTION RESULT: {action_result}\n"
+                f"The selector '{selector}' did not work. Try a DIFFERENT approach — "
+                f"use label:, placeholder:, text:, or role: locators instead of CSS selectors."})
+        else:
+            conversation.append({"role": "user", "content": f"ACTION RESULT: {action_result}"})
+
+        # Trim conversation to avoid token overflow (keep last ~6 exchanges)
+        if len(conversation) > 18:
+            conversation = conversation[-18:]
 
     # Max steps reached
     print(f"  [AUTH-AGENT] Max steps ({max_steps}) reached without resolution")
