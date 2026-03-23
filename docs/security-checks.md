@@ -9,10 +9,10 @@ Complete reference of every security check the scanner performs. Organized by sc
 | Category | Count | LLM Cost | FP Risk |
 |----------|-------|----------|---------|
 | Passive Reconnaissance | 24 checks | $0 (deterministic) | Zero/Very Low |
-| Active Web Phases | 23 phases | LLM-driven | Low (context-aware) |
+| Active Web Phases | 25 phases | LLM-driven | Low (context-aware) |
 | Active API Phases | 15 phases | LLM-driven | Low (context-aware) |
 | Attack Chain Analysis | 1 phase (12 chain patterns) | LLM-driven | Low (must prove with evidence) |
-| **Total** | **63 check categories** | | |
+| **Total** | **65 check categories** | | |
 
 ---
 
@@ -83,7 +83,7 @@ These checks run before any LLM calls. They analyze the page, HTTP responses, co
 
 ---
 
-## Phase 2: Active Web Scanning (LLM-Driven, 23 Phases)
+## Phase 2: Active Web Scanning (LLM-Driven, 25 Phases)
 
 The LLM agent drives a real Chromium browser through each phase, crafting context-aware payloads from what it observes. No hardcoded payload lists.
 

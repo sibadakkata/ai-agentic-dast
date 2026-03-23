@@ -19,8 +19,10 @@ The scanner includes a single-page web UI for managing scans, viewing results, a
 | **Crawled Endpoints** | Full list of discovered links and API endpoints |
 | **Payloads by Endpoint** | Expandable view of every payload tested per endpoint |
 | **Phase Log** | Chronological breakdown of each scan phase with tool call and finding counts |
+| **Impact Statements** | LLM-generated business impact for each finding, with fallback from passive recon map |
 | **PDF Report** | Generate with full evidence: curl commands, response data, CVE/CVSS |
-| **Download Payloads** | Export all payloads tested (by phase) as JSON |
+| **Excel Report** | Export findings as XLSX with severity, CWE, CVSS, and evidence columns |
+| **Download Payloads** | Export all payloads tested per endpoint with request/response detail as JSON |
 | **Raw JSON** | Download full scan data for integration |
 | **Pause / Resume** | Pause to save cost, resume with no lost progress |
 | **Stop Scan** | Cancel — partial findings are saved |
@@ -41,6 +43,8 @@ The scanner includes a single-page web UI for managing scans, viewing results, a
 | **Vulnerability Focus** | `Full Scan`, or specific types | Full Scan | Limits phases to selected types |
 | **Scan Intensity** | `light`, `standard`, `deep` | `deep` | Payloads per input |
 | **Focus URLs** | List of URLs | (empty) | Specific pages to prioritize |
+| **Exclude URLs** | List of URLs/paths | (empty) | URLs the scanner must skip entirely |
+| **Second User (User B)** | Username + password | (empty) | Enables two-user BOLA/BFLA testing |
 
 ### Auto-Deep Rule
 

@@ -46,7 +46,11 @@ This loop runs up to 25 steps per phase. Every finding is then **triaged offline
 | **Active Scanning** | 25 web phases + 15 API phases: full OWASP Top 10 + context-aware checks (path traversal, XXE, race conditions, file upload, host header, session mgmt, HTTP smuggling) | [Web Scanning](docs/web-scanning.md) · [API Scanning](docs/api-scanning.md) |
 | **Triage Engine** | 3-layer evidence-based classification (TP/FP/Manual Review) with CWE/CVSS | [Triage Engine](docs/triage-engine.md) |
 | **Authentication** | Auto-detect form, SSO/OIDC, OAuth, API key, bearer — with session refresh | Multi-step OIDC, self-healing sessions |
+| **Two-User BOLA/BFLA** | Supply a second user (User B) to test horizontal privilege escalation and broken function-level auth | Automated IDOR testing across user contexts |
+| **Impact Statements** | LLM-generated business impact for every finding, with passive recon fallback | Contextual risk descriptions in reports |
+| **Scan Targeting** | Exclude URLs, focus on specific pages/areas, control scan intensity (light/standard/deep) | Fine-grained scan scope control |
 | **API Import** | Postman (v2.0/v2.1), OpenAPI/Swagger (2.0, 3.0, 3.1) | Baseline execution + hybrid fuzzing |
+| **Logout Protection** | 6-layer protection: URL patterns, selector blocking, href inspection, post-click recovery, LLM prompt rules, link filtering | Never accidentally destroys the session |
 | **Web UI** | Real-time scan progress, AI vs Triage comparison, PDF reports, scan management | [Web UI Guide](docs/web-ui.md) |
 | **REST API** | Full API for CI/CD integration — start, stop, pause, resume, results, reports | [API Reference](docs/rest-api.md) |
 | **MCP Server** | Model Context Protocol integration for Cursor, Claude Desktop | [MCP Guide](docs/mcp-server.md) |
@@ -133,7 +137,7 @@ uvicorn web.app:app --host 0.0.0.0 --port 8080
 │   ├── system-prompt-guide.md   #   ★ How the LLM system prompt & phases work
 │   ├── scanner-internals.md     #   ★ E2E scan flow, evidence, retries, context mgmt
 │   ├── contributing.md          #   ★ How to add phases, tools, optimize detection
-│   ├── security-checks.md       #   Complete reference: all 63 check categories
+│   ├── security-checks.md       #   Complete reference: all 65 check categories
 │   ├── triage-engine.md         #   Triage engine deep dive
 │   ├── api-scanning.md          #   How API scanning works (walkthrough)
 │   ├── web-scanning.md          #   How website scanning works
@@ -198,7 +202,7 @@ python scripts/run_regression_ec2.py --pytest # same, plus pytest tests/
 | [System Prompt Guide](docs/system-prompt-guide.md) | **How the LLM is instructed** — system prompt structure, phase prompts, payload methodology, finding format |
 | [Scanner Internals](docs/scanner-internals.md) | **E2E scan flow** — tool execution, evidence buffer, retry logic, context trimming, finding extraction |
 | [Contributing & Extending](docs/contributing.md) | **How to add new phases, tools, and optimize detection** — step-by-step guide for team members |
-| [Security Checks](docs/security-checks.md) | Complete reference of all 63 check categories — passive recon, web phases, API phases, CWE/OWASP coverage |
+| [Security Checks](docs/security-checks.md) | Complete reference of all 65 check categories — passive recon, web phases, API phases, CWE/OWASP coverage |
 | [Triage Engine](docs/triage-engine.md) | How TP/FP classification works, confidence scoring, CVSS adjustment |
 | [API Scanning](docs/api-scanning.md) | Step-by-step walkthrough with banking API example |
 | [Web Scanning](docs/web-scanning.md) | Browser-based scanning, SPA handling, 25 OWASP + context-aware phases |

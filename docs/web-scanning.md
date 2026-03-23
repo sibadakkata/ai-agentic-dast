@@ -21,7 +21,7 @@ The scanner handles Single Page Applications (React, Angular, Vue) with:
 - **Route interception** — Monitors client-side navigation and captures dynamically loaded resources
 - **Request interception from page load** — Captures all `.js` requests from the very start, including from iframes
 
-## 15 Website Scan Phases
+## 25 Website Scan Phases
 
 | # | Phase | What the Agent Does | Example |
 |---|-------|---------------------|---------|
@@ -51,9 +51,11 @@ The scanner restricts activity to the target domain and its subdomains:
 
 ## Session Protection
 
-Multi-layer logout protection prevents the LLM from accidentally logging out:
+6-layer logout protection prevents the LLM from accidentally destroying the session:
 
-1. **LLM prompt instructions** — Explicitly told not to click logout
-2. **URL/selector blocking** — Programmatic blocking of logout URLs and selectors
-3. **Post-click recovery** — If logout is triggered, automatic re-authentication
-4. **Session monitoring** — Detects auth loss (redirect to login page) and re-triggers auth
+1. **URL pattern matching** - Hardcoded list of logout URL patterns blocks navigation before it happens
+2. **Click selector blocking** - CSS selectors targeting logout elements are intercepted and blocked
+3. **Href inspection** - Before any click, the element's href is checked for logout keywords
+4. **Post-click recovery** - If a click navigates to a logout URL via JS redirect, the scanner navigates back
+5. **LLM prompt instructions** - System prompt explicitly forbids clicking logout/signout links
+6. **Link filtering** - Logout links are filtered out so the LLM never sees them as options

@@ -45,9 +45,17 @@ curl -s -u "$DAST_USER:$DAST_PASS" \
 | `target_url` | Yes | — | URL to scan |
 | `model` | No | Haiku 4.5 | Model ID from `/api/models` |
 | `scan_mode` | No | `both` | `website`, `api`, or `both` |
-| `username` | No | — | Login credentials |
-| `password` | No | — | Login credentials |
+| `username` | No | — | Login credentials (User A) |
+| `password` | No | — | Login credentials (User A) |
+| `username_b` | No | — | Second user credentials for BOLA/BFLA testing |
+| `password_b` | No | — | Second user credentials for BOLA/BFLA testing |
 | `auth_type` | No | `auto` | `auto`, `form`, `sso`, `oauth`, `api_key`, `bearer` |
+| `scan_scope` | No | `directory` | `url_only`, `directory`, or `full_site` |
+| `scan_intensity` | No | `deep` | `light`, `standard`, or `deep` — payloads per input |
+| `focus_urls` | No | `[]` | Specific URLs to prioritize during scanning |
+| `focus_areas` | No | `[]` | Vulnerability types to focus on (e.g. `["xss", "sqli"]`) |
+| `exclude_urls` | No | `[]` | URLs/paths the scanner must skip entirely |
+| `extra_domains` | No | `[]` | Additional domains to include in scope |
 | `api_imports` | No | `{}` | Map of import type to filename |
 
 **Response**: `{"scan_id": "scan_20260304_143022_a1b2c3", "status": "started"}`

@@ -134,7 +134,7 @@ All anomalous responses (not every response — only deviations) are batched int
 
 **Total cost for this endpoint**: ~$0.003 (plan + analysis).
 
-## Step 6: LLM Deep Scan (10 API Phases)
+## Step 6: LLM Deep Scan (15 API Phases)
 
 The LLM agent runs its full OWASP scan, **enriched** with baseline + fuzzing results:
 
