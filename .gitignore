@@ -5,6 +5,9 @@ config/targets.env
 *.pem
 
 # Results (generated at runtime)
+results/*.db
+results/*.db-wal
+results/*.db-shm
 results/raw/
 results/reports/
 results/normalized/

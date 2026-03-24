@@ -43,6 +43,8 @@ from scanners.ai_agent.model_discovery import (
 )
 from scripts.triage_engine import classify as triage_classify
 
+from starlette.middleware.gzip import GZipMiddleware
+
 app = FastAPI(
     title="AI Agentic Web Scanner",
     description="LLM-powered Dynamic Application Security Testing API. "
@@ -51,6 +53,8 @@ app = FastAPI(
     docs_url="/docs",
     redoc_url="/redoc",
 )
+
+app.add_middleware(GZipMiddleware, minimum_size=1000)
 
 @app.exception_handler(Exception)
 async def _global_exception_handler(request: Request, exc: Exception):
@@ -144,6 +148,9 @@ scandb.init()
 SCANS: dict[str, dict] = {}
 CANCEL_FLAGS: dict[str, threading.Event] = {}
 PAUSE_FLAGS: dict[str, threading.Event] = {}
+
+_RESULTS_CACHE: dict[str, dict] = {}
+_RESULTS_CACHE_MAX = 20
 
 import queue as _queue
 
@@ -345,6 +352,7 @@ threading.Thread(target=_autosave_loop, daemon=True, name="db-autosave").start()
 
 def _persist_scan_result(scan_id: str, data: dict):
     """Write full result JSON to SQLite (source of truth for API reads)."""
+    _RESULTS_CACHE.pop(scan_id, None)
     try:
         scandb.save_scan_result(scan_id, json.dumps(data, default=str))
     except Exception:
@@ -1941,6 +1949,7 @@ async def delete_scan(scan_id: str):
                 errors.append(f"cost ledger: {e}")
         result_file = SCANS[scan_id].get("result_file")
         del SCANS[scan_id]
+        _RESULTS_CACHE.pop(scan_id, None)
         try:
             scandb.delete_scan(scan_id)
         except Exception as e:
@@ -2018,9 +2027,16 @@ async def delete_all_scans():
 
 
 @app.get("/api/results/{scan_id}", tags=["Results"])
-async def get_results(scan_id: str):
+async def get_results(scan_id: str, request: Request):
     try:
-        return await _get_results_inner(scan_id)
+        data = await _get_results_inner(scan_id)
+        if isinstance(data, JSONResponse):
+            return data
+        if request.query_params.get("enc") == "b64":
+            import base64
+            payload = base64.b64encode(json.dumps(data, default=str).encode()).decode()
+            return JSONResponse({"_b64": payload})
+        return data
     except HTTPException:
         raise
     except Exception as e:
@@ -2028,6 +2044,17 @@ async def get_results(scan_id: str):
         return JSONResponse({"error": f"Failed to load results: {type(e).__name__}: {e}"}, status_code=500)
 
 async def _get_results_inner(scan_id: str):
+    cached = _RESULTS_CACHE.get(scan_id)
+    if cached:
+        overrides = SCANS[scan_id].get("cvss_overrides", {}) if scan_id in SCANS else {}
+        if overrides:
+            for fe in cached.get("triaged_findings", []):
+                key = f"{fe.get('title', '')}||{fe.get('url', '')}"
+                if key in overrides:
+                    fe["cvss_override"] = overrides[key]["cvss"]
+                    fe["cvss_override_note"] = overrides[key].get("note", "")
+        return cached
+
     data = _load_raw_result_dict(scan_id)
     if not data:
         return JSONResponse({"error": "Results not found"}, status_code=404)
@@ -2038,8 +2065,11 @@ async def _get_results_inner(scan_id: str):
     meta = data.get("metadata") or {}
     summary = data.get("summary", {})
 
+    _tl_index = _build_test_log_index(test_log)
+
     ai_findings = []
     triaged_findings = []
+    overrides = SCANS[scan_id].get("cvss_overrides", {}) if scan_id in SCANS else {}
     for f in findings:
         ai_findings.append({
             "title": f.get("title", ""),
@@ -2053,7 +2083,7 @@ async def _get_results_inner(scan_id: str):
             "remediation": f.get("remediation", ""),
             "request_response": f.get("request_response", []),
         })
-        triaged = triage_classify(f, test_log)
+        triaged = triage_classify(f, test_log, _index=_tl_index)
         final_sev = triaged.get("final_severity", "Info")
         finding_entry = {
             "title": triaged.get("title", ""),
@@ -2080,7 +2110,6 @@ async def _get_results_inner(scan_id: str):
             "verification_evidence": triaged.get("verification_evidence", ""),
         }
 
-        overrides = SCANS[scan_id].get("cvss_overrides", {}) if scan_id in SCANS else {}
         key = f"{triaged.get('title', '')}||{triaged.get('url', '')}"
         if key in overrides:
             finding_entry["cvss_override"] = overrides[key]["cvss"]
@@ -2090,7 +2119,7 @@ async def _get_results_inner(scan_id: str):
     crawled = _extract_crawled(summary, test_log)
     payloads_by_endpoint = _extract_payloads_by_endpoint(test_log)
 
-    return {
+    result = {
         "metadata": {
             "target": data.get("target", ""),
             "model": meta.get("model", ""),
@@ -2120,6 +2149,32 @@ async def _get_results_inner(scan_id: str):
         "payloads_by_endpoint": payloads_by_endpoint,
         "out_of_scope": data.get("out_of_scope", []),
     }
+
+    if len(_RESULTS_CACHE) >= _RESULTS_CACHE_MAX:
+        try:
+            _RESULTS_CACHE.pop(next(iter(_RESULTS_CACHE)))
+        except StopIteration:
+            pass
+    _RESULTS_CACHE[scan_id] = result
+    return result
+
+
+def _build_test_log_index(test_log: list) -> dict:
+    """Pre-index test_log entries by URL base path and pre-serialize request JSON."""
+    from collections import defaultdict
+    idx: dict[str, list] = defaultdict(list)
+    for t in test_log:
+        req = t.get("request", {})
+        if not isinstance(req, dict):
+            continue
+        t_url = req.get("url", "") or req.get("endpoint", "")
+        url_base = str(t_url).split("?")[0]
+        if not hasattr(t, "_req_json_lower"):
+            t["_req_json_lower"] = json.dumps(req, default=str).lower()
+        if url_base:
+            idx[url_base].append(t)
+        idx["__all__"].append(t)
+    return dict(idx)
 
 
 @app.get("/api/results/{scan_id}/download", tags=["Results"])
@@ -2166,6 +2221,7 @@ async def cvss_override(scan_id: str, request: Request):
 
     key = f"{title}||{url}"
     scan["cvss_overrides"][key] = {"cvss": cvss_value, "note": note}
+    _RESULTS_CACHE.pop(scan_id, None)
     _save_scan(scan_id)
 
     return {"status": "ok", "key": key, "cvss": cvss_value, "note": note}
