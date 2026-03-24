@@ -3428,11 +3428,22 @@ async function viewScan(scanId) {
     const _rs = document.getElementById('result-stats'); if (_rs) _rs.innerHTML = '';
     const _tc = document.getElementById('tab-comparison'); if (_tc) _tc.innerHTML = '<div class="empty">Loading...</div>';
 
-    const resp = await fetch(`/api/results/${scanId}`);
-    if (!resp.ok) { alert('Results not available yet — scan may still be processing.'); showList(); return; }
-    const data = await resp.json();
+    let data = null;
+    const maxRetries = 3;
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      try {
+        const resp = await fetch(`/api/results/${scanId}?_t=${Date.now()}`);
+        if (resp.ok) { data = await resp.json(); break; }
+        console.warn(`[viewScan] Results fetch attempt ${attempt}/${maxRetries} failed: HTTP ${resp.status}`);
+      } catch (fetchErr) {
+        console.warn(`[viewScan] Results fetch attempt ${attempt}/${maxRetries} error:`, fetchErr);
+      }
+      if (attempt < maxRetries) await new Promise(r => setTimeout(r, 1000 * attempt));
+    }
+    if (!data) { alert('Results could not be loaded after multiple attempts. This may be a network/proxy issue — try refreshing the page.'); showList(); return; }
     renderResults(data);
   } catch(e) {
+    console.error('[viewScan] Error:', e);
     alert('Could not load scan: ' + e.message);
     showList();
   }
