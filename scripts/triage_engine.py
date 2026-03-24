@@ -422,7 +422,7 @@ def _runtime_cwe(r: dict, title: str):
 # HELPER: extract evidence signals from finding + test logs
 # ══════════════════════════════════════════════════════════════════════
 
-def find_tests(finding, test_log, limit=5):
+def find_tests(finding, test_log, limit=5, _index=None):
     raw_url = finding.get("url", "") or ""
     if isinstance(raw_url, list):
         raw_url = raw_url[0] if raw_url else ""
@@ -432,7 +432,28 @@ def find_tests(finding, test_log, limit=5):
         param = param[0] if param else ""
     if isinstance(param, dict):
         param = json.dumps(param, default=str)
-    param = str(param)
+    param = str(param).lower()
+
+    if _index is not None:
+        candidates = _index.get(url, []) if url else _index.get("__all__", [])
+        if not candidates and url:
+            candidates = _index.get("__all__", [])
+        matched = []
+        for t in candidates:
+            req = t.get("request", {})
+            if not isinstance(req, dict):
+                continue
+            t_url = req.get("url", "") or req.get("endpoint", "")
+            score = 0
+            if url and url in t_url:
+                score += 3
+            if param and param in t.get("_req_json_lower", ""):
+                score += 2
+            if score > 0:
+                matched.append((score, t))
+        matched.sort(key=lambda x: -x[0])
+        return [m[1] for m in matched[:limit]]
+
     matched = []
     for t in test_log:
         req = t.get("request", {})
@@ -442,7 +463,7 @@ def find_tests(finding, test_log, limit=5):
         score = 0
         if url and url in t_url:
             score += 3
-        if param and param.lower() in json.dumps(req, default=str).lower():
+        if param and param in json.dumps(req, default=str).lower():
             score += 2
         if score > 0:
             matched.append((score, t))
@@ -759,14 +780,14 @@ def _resolve_inconclusive(finding, title, confidence, statuses, bodies,
 # LAYER 1 + 2 + 3: Main classify function
 # ══════════════════════════════════════════════════════════════════════
 
-def classify(finding, test_log):
+def classify(finding, test_log, _index=None):
     """Universal triage: classify any scanner finding from any target.
     Returns dict with verdict, severity, CVE/CWE, evidence, steps, cvss_rationale, etc."""
-    r = _classify_inner(finding, test_log)
+    r = _classify_inner(finding, test_log, _index=_index)
     title = _safe_str(finding.get("title", "")).lower()
     ev_raw = finding.get("evidence", "") or ""
     evidence = str(ev_raw).lower() if not isinstance(ev_raw, (dict, list)) else json.dumps(ev_raw).lower()
-    tests = find_tests(finding, test_log)
+    tests = find_tests(finding, test_log, _index=_index)
     statuses = get_statuses(tests)
     bodies = get_response_bodies(tests)
     _adjust_cvss(r, finding, statuses, bodies, evidence, title)
@@ -789,7 +810,7 @@ def _safe_str(val, default=""):
     return str(val) if val else default
 
 
-def _classify_inner(finding, test_log):
+def _classify_inner(finding, test_log, _index=None):
     """Core classification logic."""
     title = _safe_str(finding.get("title", "")).lower()
     ev_raw = finding.get("evidence", "") or ""
@@ -798,7 +819,7 @@ def _classify_inner(finding, test_log):
     url = _safe_str(finding.get("url", ""))
     payload = _safe_str(finding.get("payload", ""))
 
-    tests = find_tests(finding, test_log)
+    tests = find_tests(finding, test_log, _index=_index)
     statuses = get_statuses(tests)
     bodies = get_response_bodies(tests)
     all_redirects = all(s in (301, 302, 303, 307, 308) for s in statuses) if statuses else False
