@@ -3432,8 +3432,12 @@ async function viewScan(scanId) {
     const maxRetries = 3;
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
       try {
-        const resp = await fetch(`/api/results/${scanId}?_t=${Date.now()}`);
-        if (resp.ok) { data = await resp.json(); break; }
+        const resp = await fetch(`/api/results/${scanId}?enc=b64&_t=${Date.now()}`);
+        if (resp.ok) {
+          const raw = await resp.json();
+          data = raw._b64 ? JSON.parse(atob(raw._b64)) : raw;
+          break;
+        }
         console.warn(`[viewScan] Results fetch attempt ${attempt}/${maxRetries} failed: HTTP ${resp.status}`);
       } catch (fetchErr) {
         console.warn(`[viewScan] Results fetch attempt ${attempt}/${maxRetries} error:`, fetchErr);

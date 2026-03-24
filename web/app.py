@@ -43,6 +43,8 @@ from scanners.ai_agent.model_discovery import (
 )
 from scripts.triage_engine import classify as triage_classify
 
+from starlette.middleware.gzip import GZipMiddleware
+
 app = FastAPI(
     title="AI Agentic Web Scanner",
     description="LLM-powered Dynamic Application Security Testing API. "
@@ -51,6 +53,8 @@ app = FastAPI(
     docs_url="/docs",
     redoc_url="/redoc",
 )
+
+app.add_middleware(GZipMiddleware, minimum_size=1000)
 
 @app.exception_handler(Exception)
 async def _global_exception_handler(request: Request, exc: Exception):
@@ -2023,9 +2027,16 @@ async def delete_all_scans():
 
 
 @app.get("/api/results/{scan_id}", tags=["Results"])
-async def get_results(scan_id: str):
+async def get_results(scan_id: str, request: Request):
     try:
-        return await _get_results_inner(scan_id)
+        data = await _get_results_inner(scan_id)
+        if isinstance(data, JSONResponse):
+            return data
+        if request.query_params.get("enc") == "b64":
+            import base64
+            payload = base64.b64encode(json.dumps(data, default=str).encode()).decode()
+            return JSONResponse({"_b64": payload})
+        return data
     except HTTPException:
         raise
     except Exception as e:
