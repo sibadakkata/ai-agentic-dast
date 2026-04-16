@@ -26,6 +26,19 @@ from .tools import TOOL_DEFINITIONS, ScanTools
 logger = logging.getLogger(__name__)
 
 MAX_MSG_RESULT_CHARS = 1500
+
+
+def _s(val) -> str:
+    """Safely coerce any value to str — LLMs sometimes return dicts/lists where strings are expected."""
+    if val is None:
+        return ""
+    if isinstance(val, str):
+        return val
+    if isinstance(val, dict):
+        return "" if not val else str(val)
+    if isinstance(val, (list, tuple)):
+        return "" if not val else str(val)
+    return str(val)
 TRIM_TARGET_TOKENS = 40000
 
 
@@ -448,14 +461,14 @@ def _match_evidence_to_finding(finding: dict, evidence: list[dict]):
     """
     if not evidence:
         return
-    f_url = (finding.get("url") or "").lower()
-    f_payload = (finding.get("payload") or "").lower()
+    f_url = _s(finding.get("url")).lower()
+    f_payload = _s(finding.get("payload")).lower()
 
     scored: list[tuple[int, dict]] = []
     for ev in evidence:
         score = 0
-        ev_url = (ev.get("url") or "").lower()
-        ev_payload = (ev.get("payload") or "").lower()
+        ev_url = _s(ev.get("url")).lower()
+        ev_payload = _s(ev.get("payload")).lower()
         if f_url and ev_url and (f_url in ev_url or ev_url in f_url):
             score += 2
         if f_payload and ev_payload and f_payload in ev_payload:
@@ -484,11 +497,277 @@ def _format_passive_for_llm(passive_findings: list[dict]) -> str:
     lines = ["## Passive Reconnaissance Results (pre-scan, no LLM)",
              f"Found {len(passive_findings)} issue(s) via deterministic checks:"]
     for f in passive_findings:
-        lines.append(f"- [{f['severity']}] {f['title']} @ {f['url']}")
+        lines.append(f"- [{_s(f.get('severity'))}] {_s(f.get('title'))} @ {_s(f.get('url'))}")
         if f.get("evidence"):
-            lines.append(f"  Evidence: {f['evidence'][:200]}")
+            lines.append(f"  Evidence: {_s(f['evidence'])[:200]}")
     lines.append("\nUse these findings to prioritize your active scanning. "
                  "For JS sink findings, attempt to prove exploitability by tracing user-controlled data into those sinks.")
+    return "\n".join(lines)
+
+
+_TECH_PROBE_PATHS: dict[str, dict] = {
+    "Adobe Experience Manager (AEM)": {
+        "label": "Adobe Experience Manager (AEM)",
+        "paths": [
+            ("/libs/granite/security/currentuser.json", "User info servlet — leaks internal user paths"),
+            ("/crx/de/index.jsp", "CRX DE content explorer — full repository access"),
+            ("/crx/explorer/browser/index.jsp", "CRX repository browser"),
+            ("/system/console", "Apache Felix OSGi console — full server control"),
+            ("/system/console/bundles", "OSGi bundle listing"),
+            ("/system/console/configMgr", "OSGi configuration manager"),
+            ("/bin/querybuilder.json", "QueryBuilder servlet — content enumeration"),
+            ("/bin/querybuilder.json?path=/content&p.limit=10", "QueryBuilder with content query"),
+            ("/content.json", "Root content tree as JSON"),
+            ("/content.infinity.json", "Full content tree dump"),
+            ("/.json", "Sling default JSON export of root"),
+            ("/content/dam.json", "DAM assets as JSON"),
+            ("/content/dam.tidy.-1.json", "DAM deep JSON export via tidy selector"),
+            ("/etc/packages.json", "AEM package listing"),
+            ("/etc/replication.json", "Replication agent config"),
+            ("/libs/granite/core/content/login.html", "Granite login page (confirms AEM)"),
+            ("/libs/granite/security/userinfo.json", "Extended user information"),
+            ("/libs/granite/ui/content/shell.html", "Granite UI shell"),
+            ("/libs/cq/search/content/querydebug.html", "Query debug console"),
+            ("/system/sling/cqform/defaultlogin.html", "Sling default login form"),
+            ("/bin/receive", "Replication receiver endpoint"),
+            ("/bin/replicate.json", "Replication trigger endpoint"),
+            ("/home/users.json", "User home directory listing"),
+            ("/home/groups.json", "Group home directory listing"),
+            ("/etc/reports/diskusage.html", "Disk usage report"),
+            ("/libs/granite/security/content/admin.html", "Granite admin console"),
+        ],
+    },
+    "WordPress": {
+        "label": "WordPress",
+        "paths": [
+            ("/wp-login.php", "WordPress login page"),
+            ("/wp-admin/", "WordPress admin dashboard"),
+            ("/wp-json/wp/v2/users", "REST API user enumeration"),
+            ("/wp-json/wp/v2/posts", "REST API posts listing"),
+            ("/?rest_route=/wp/v2/users", "REST API user enum (pretty permalinks off)"),
+            ("/xmlrpc.php", "XML-RPC interface (brute-force, pingback attacks)"),
+            ("/wp-config.php.bak", "Backup of config file with DB credentials"),
+            ("/wp-config.php~", "Editor backup of config file"),
+            ("/.wp-config.php.swp", "Vim swap file for config"),
+            ("/wp-content/debug.log", "Debug log with sensitive errors"),
+            ("/wp-content/uploads/", "Uploads directory listing"),
+            ("/readme.html", "WordPress version disclosure"),
+            ("/wp-includes/version.php", "Version file"),
+            ("/wp-cron.php", "WP-Cron endpoint"),
+            ("/?author=1", "Author enumeration via redirect"),
+        ],
+    },
+    "Drupal": {
+        "label": "Drupal",
+        "paths": [
+            ("/user/login", "Drupal login page"),
+            ("/admin/", "Admin dashboard"),
+            ("/CHANGELOG.txt", "Version disclosure"),
+            ("/core/CHANGELOG.txt", "Drupal 8+ version disclosure"),
+            ("/core/install.php", "Installation script"),
+            ("/update.php", "Update script"),
+            ("/xmlrpc.php", "XML-RPC interface"),
+            ("/sites/default/files/", "Default files directory"),
+            ("/sites/default/settings.php", "Settings file"),
+            ("/node/1", "First content node"),
+            ("/jsonapi/node/article", "JSON API content listing"),
+            ("/jsonapi/user/user", "JSON API user enumeration"),
+            ("/?q=user/password", "Password reset form (user enumeration)"),
+        ],
+    },
+    "Django": {
+        "label": "Django",
+        "paths": [
+            ("/admin/", "Django admin panel"),
+            ("/admin/login/", "Django admin login"),
+            ("/__debug__/", "Django Debug Toolbar"),
+            ("/api/", "API root"),
+            ("/static/admin/", "Admin static assets (confirms Django)"),
+            ("/media/", "Media file directory"),
+            ("/settings/", "Possible settings exposure"),
+        ],
+    },
+    "Ruby on Rails": {
+        "label": "Ruby on Rails",
+        "paths": [
+            ("/rails/info/properties", "Rails environment info"),
+            ("/rails/info/routes", "Route listing"),
+            ("/rails/mailers", "Mailer previews"),
+            ("/sidekiq/", "Sidekiq dashboard"),
+            ("/admin/", "Admin panel"),
+            ("/assets/", "Asset pipeline"),
+        ],
+    },
+    "Sitecore": {
+        "label": "Sitecore",
+        "paths": [
+            ("/sitecore/login", "Sitecore login page"),
+            ("/sitecore/admin/", "Sitecore admin tools"),
+            ("/sitecore/shell/", "Sitecore shell"),
+            ("/sitecore/debug/", "Debug pages"),
+            ("/-/speak/v1/bundles/", "Sitecore SPEAK UI"),
+            ("/sitecore/api/ssc/", "Sitecore Services Client API"),
+        ],
+    },
+    "Magento": {
+        "label": "Magento",
+        "paths": [
+            ("/admin/", "Magento admin (default path)"),
+            ("/magento_version", "Version disclosure"),
+            ("/downloader/", "Magento Connect Manager"),
+            ("/app/etc/local.xml", "Config file with DB credentials"),
+            ("/var/export/", "Data export directory"),
+            ("/var/log/system.log", "System log file"),
+            ("/api/rest/products", "REST API products"),
+        ],
+    },
+    "TYPO3": {
+        "label": "TYPO3",
+        "paths": [
+            ("/typo3/", "TYPO3 backend login"),
+            ("/typo3/install.php", "Install tool"),
+            ("/typo3conf/LocalConfiguration.php", "Configuration file"),
+            ("/typo3temp/", "Temporary files directory"),
+            ("/fileadmin/", "File admin directory"),
+        ],
+    },
+    "Shopify": {
+        "label": "Shopify",
+        "paths": [
+            ("/admin/", "Shopify admin"),
+            ("/cart.json", "Cart data as JSON"),
+            ("/products.json", "Products listing"),
+            ("/collections.json", "Collections listing"),
+            ("/meta.json", "Shop metadata"),
+        ],
+    },
+    "ASP.NET": {
+        "label": "ASP.NET",
+        "paths": [
+            ("/elmah.axd", "ELMAH error log viewer"),
+            ("/trace.axd", "ASP.NET trace viewer"),
+            ("/web.config", "ASP.NET config file"),
+            ("/_layouts/viewlsts.aspx", "SharePoint list view"),
+        ],
+    },
+    "Laravel (PHP)": {
+        "label": "Laravel",
+        "paths": [
+            ("/.env", "Environment file with secrets"),
+            ("/telescope", "Laravel Telescope debug dashboard"),
+            ("/horizon", "Laravel Horizon queue dashboard"),
+            ("/storage/logs/laravel.log", "Application log file"),
+            ("/nova/login", "Laravel Nova admin"),
+        ],
+    },
+    "Next.js": {
+        "label": "Next.js",
+        "paths": [
+            ("/_next/data/", "Next.js data directory"),
+            ("/api/", "API routes"),
+            ("/_error", "Custom error page"),
+        ],
+    },
+}
+
+
+def _get_tech_probe_paths(techs: dict) -> list[str]:
+    """Build probe-path sections for detected technologies."""
+    sections: list[str] = []
+    for tech_name in techs:
+        probe = _TECH_PROBE_PATHS.get(tech_name)
+        if not probe:
+            for key, val in _TECH_PROBE_PATHS.items():
+                if key.lower() in tech_name.lower() or tech_name.lower() in key.lower():
+                    probe = val
+                    break
+        if not probe:
+            continue
+        sections.append(f"### {probe['label']} — Probe these paths:")
+        for path, desc in probe["paths"]:
+            sections.append(f"  - `GET {path}` — {desc}")
+        sections.append("")
+    return sections
+
+
+def _build_tech_context_prompt(tech_fingerprint: dict) -> str:
+    """Build LLM prompt section from detected technology fingerprints.
+
+    Instead of hardcoding vulnerability checks for each technology, we tell
+    the LLM what we detected and rely on its training knowledge to generate
+    context-aware security tests autonomously.
+    """
+    techs = tech_fingerprint.get("technologies", {})
+    if not techs:
+        return ""
+
+    lines = [
+        "## Detected Technology Stack",
+        "The following technologies were fingerprinted during passive reconnaissance:",
+        "",
+    ]
+    by_category: dict[str, list[str]] = {}
+    for name, info in techs.items():
+        cat = info.get("category", "other") or "other"
+        conf = info.get("confidence", "medium")
+        evidence = info.get("evidence", "")
+        entry = f"  - **{name}** (confidence: {conf}) — {evidence}"
+        by_category.setdefault(cat, []).append(entry)
+
+    category_labels = {
+        "cms": "Content Management System",
+        "framework": "Application Framework",
+        "web_server": "Web Server",
+        "language": "Programming Language",
+        "cdn": "CDN / Edge",
+        "proxy": "Reverse Proxy",
+        "hosting": "Hosting Platform",
+        "runtime": "Application Runtime",
+        "analytics": "Analytics / Marketing",
+        "ecommerce": "E-Commerce Platform",
+        "static_site": "Static Site Generator",
+    }
+    for cat, entries in by_category.items():
+        label = category_labels.get(cat, cat.replace("_", " ").title())
+        lines.append(f"**{label}:**")
+        lines.extend(entries)
+        lines.append("")
+
+    # Inject technology-specific probe paths
+    probe_sections = _get_tech_probe_paths(techs)
+    if probe_sections:
+        lines.append("## MANDATORY: Technology-Specific Path Probing")
+        lines.append("")
+        lines.append(
+            "Based on the detected technologies, you MUST probe the following paths "
+            "using the `api_request` tool (GET requests). For each path, report what "
+            "you find: a 200 response with content is a confirmed finding; a 302 redirect "
+            "to an error/login page means the path exists but is partially protected "
+            "(still worth reporting as information disclosure); 403/404 means properly blocked."
+        )
+        lines.append("")
+        lines.extend(probe_sections)
+        lines.append("")
+
+    lines.extend([
+        "## IMPORTANT: Context-Aware Security Testing",
+        "",
+        "In addition to the mandatory paths above, use your knowledge of these "
+        "technologies to guide your testing:",
+        "",
+        "1. **Known misconfiguration patterns**: Test for common misconfigurations specific to "
+        "each detected technology (e.g., exposed debug modes, default credentials, "
+        "unrestricted management interfaces).",
+        "",
+        "2. **Version-specific vulnerabilities**: If you can identify the version (from headers, "
+        "meta tags, JS files, or error pages), check for known CVEs affecting that version.",
+        "",
+        "3. **Stack interaction issues**: Look for security issues arising from how the detected "
+        "technologies interact (e.g., CDN cache poisoning, proxy header injection, CMS plugin vulnerabilities).",
+        "",
+        "Do NOT limit yourself to generic OWASP checks — leverage your specific knowledge of "
+        "the detected technologies to find issues a generic scanner would miss.",
+    ])
     return "\n".join(lines)
 
 
@@ -906,6 +1185,7 @@ async def run_scan(
         p = _next_phase()
         _cb("phase_start", {"phase": p, "total": 0, "name": "Passive Reconnaissance", "id": "passive_recon"})
         current_host = urlparse(page.url or "").hostname or ""
+        tech_fingerprint = {}
         if current_host != target_host and target_host:
             print(f"  [PASSIVE] SKIPPING — browser on {current_host}, not target {target_host}")
             print(f"  [PASSIVE] Will retry after LLM navigates to target")
@@ -915,7 +1195,7 @@ async def run_scan(
         else:
             print("  [PASSIVE] Running passive reconnaissance...")
             try:
-                passive_findings = await run_passive_recon(
+                passive_result = await run_passive_recon(
                     page=page,
                     http_client=http_client,
                     target_url=target.url,
@@ -923,8 +1203,16 @@ async def run_scan(
                     on_progress=_passive_progress,
                     network_js_urls=network_js_urls,
                 )
+                if isinstance(passive_result, tuple):
+                    passive_findings, tech_fingerprint = passive_result
+                else:
+                    passive_findings = passive_result
                 findings.extend(passive_findings)
-                print(f"  [PASSIVE] Done: {len(passive_findings)} findings")
+                if tech_fingerprint.get("technologies"):
+                    tech_names = ", ".join(tech_fingerprint["technologies"].keys())
+                    print(f"  [PASSIVE] Done: {len(passive_findings)} findings | Detected: {tech_names}")
+                else:
+                    print(f"  [PASSIVE] Done: {len(passive_findings)} findings")
             except Exception as e:
                 passive_findings = []
                 print(f"  [PASSIVE] Failed (non-fatal): {e}")
@@ -1055,15 +1343,54 @@ async def run_scan(
         if passive_findings:
             passive_summary = _format_passive_for_llm(passive_findings)
             system_prompt += "\n\n" + passive_summary
+        if tech_fingerprint and tech_fingerprint.get("technologies"):
+            system_prompt += "\n\n" + _build_tech_context_prompt(tech_fingerprint)
         if baseline_context:
             system_prompt += "\n\n" + baseline_context
         if body_fuzz_context:
             system_prompt += "\n\n" + body_fuzz_context
+
+        # ── Workflow Replay + Context ──
+        workflow_replayed = False
+        if getattr(target, "workflow_id", None):
+            from .workflow import load_workflow, replay_workflow, build_workflow_prompt
+            wf = load_workflow(target.workflow_id)
+            if wf:
+                print(f"  [WORKFLOW] Loaded workflow: {wf.name} ({len(wf.steps)} steps)")
+                _cb("phase_start", {"phase": 0, "total": 0, "name": f"Workflow Replay: {wf.name}", "id": "workflow_replay"})
+                wf_vars = {"username": (target.credentials or {}).get("username", ""),
+                           "password": (target.credentials or {}).get("password", "")}
+                try:
+                    wf_result = await replay_workflow(
+                        page, wf, variables=wf_vars,
+                        on_step=lambda idx, step, st: _cb("workflow_step", {"step": idx, "action": step.action, "status": st}),
+                    )
+                    workflow_replayed = wf_result.success
+                    status = "completed" if wf_result.success else f"failed at step {wf_result.failed_step}"
+                    print(f"  [WORKFLOW] Replay {status}: {wf_result.steps_completed}/{wf_result.steps_total} steps")
+                    if wf_result.adapted_steps:
+                        print(f"  [WORKFLOW] LLM adapted steps: {wf_result.adapted_steps}")
+                except Exception as e:
+                    print(f"  [WORKFLOW] Replay failed: {e}")
+                    logger.warning("Workflow replay failed: %s", e, exc_info=True)
+                _cb("phase_end", {"phase": 0, "name": f"Workflow Replay: {wf.name}",
+                                  "tool_calls": wf.steps.__len__(), "findings": 0})
+                system_prompt += "\n\n" + build_workflow_prompt(wf)
+            else:
+                print(f"  [WORKFLOW] Workflow {target.workflow_id} not found — skipping")
+
+        if getattr(target, "business_flow", None) and not getattr(target, "workflow_id", None):
+            from .workflow import Workflow, build_workflow_prompt
+            nl_wf = Workflow(name="User-Defined Business Flow", description=target.business_flow)
+            system_prompt += "\n\n" + build_workflow_prompt(nl_wf)
+            print(f"  [WORKFLOW] Natural language flow injected: {target.business_flow[:100]}")
+
         messages: list[dict] = [{"role": "system", "content": system_prompt}]
 
         has_baseline = bool(baseline_context)
         has_body_fuzz = bool(body_fuzz_context)
-        extra_phases = (1 if has_baseline else 0) + (1 if has_body_fuzz else 0)
+        has_workflow = workflow_replayed or bool(getattr(target, "business_flow", None))
+        extra_phases = (1 if has_baseline else 0) + (1 if has_body_fuzz else 0) + (1 if workflow_replayed else 0)
         total_phases = len(phases) + 1 + extra_phases  # +1 verification
         print(f"  [SCAN] Starting {len(phases)} scan phases + verification...")
         _cb("scan_start", {"total_phases": total_phases})
@@ -1518,7 +1845,7 @@ async def run_scan(
                 try:
                     print("  [PASSIVE-2] Re-running passive recon on authenticated page...")
                     _cb("phase_start", {"phase": 0, "total": 0, "name": "Passive Recon (post-auth)", "id": "passive_recon_2"})
-                    p2_findings = await run_passive_recon(
+                    p2_result = await run_passive_recon(
                         page=page,
                         http_client=http_client,
                         target_url=target.url,
@@ -1526,6 +1853,12 @@ async def run_scan(
                         on_progress=_passive_progress,
                         network_js_urls=network_js_urls,
                     )
+                    if isinstance(p2_result, tuple):
+                        p2_findings, p2_tech = p2_result
+                        if p2_tech.get("technologies"):
+                            tech_fingerprint = {**tech_fingerprint, **p2_tech} if tech_fingerprint else p2_tech
+                    else:
+                        p2_findings = p2_result
                     existing_titles = {f.get("title", "") + f.get("url", "") for f in findings}
                     new_p2 = [f for f in p2_findings if f.get("title", "") + f.get("url", "") not in existing_titles]
                     findings.extend(new_p2)
@@ -1615,8 +1948,8 @@ def _extract_json_objects(text: str):
 
 def _has_evidence(obj: dict) -> bool:
     """Return True if the finding has real proof — a non-empty payload or evidence field."""
-    payload = (obj.get("payload") or "").strip()
-    evidence = (obj.get("evidence") or "").strip()
+    payload = _s(obj.get("payload")).strip()
+    evidence = _s(obj.get("evidence")).strip()
     return bool(payload) or bool(evidence)
 
 
@@ -1792,14 +2125,14 @@ def save_results(
     severity_counts = {"Critical": 0, "High": 0, "Medium": 0, "Low": 0, "Info": 0}
     owasp_counts: dict[str, int] = {}
     for f in findings:
-        sev = f.get("severity", "Info")
+        sev = _s(f.get("severity") or "Info")
         for key in severity_counts:
             if key.lower() == sev.lower():
                 severity_counts[key] += 1
                 break
         else:
             severity_counts["Info"] += 1
-        cat = f.get("owasp_category", "Unknown")
+        cat = _s(f.get("owasp_category") or "Unknown")
         owasp_counts[cat] = owasp_counts.get(cat, 0) + 1
 
     metrics = scan_metrics or {}
