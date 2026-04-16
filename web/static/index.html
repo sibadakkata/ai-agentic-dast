@@ -295,9 +295,10 @@ tr:hover td { background:rgba(79,70,229,0.03); }
 .fdm-rr-pane-label { display:flex; align-items:center; gap:6px; padding:6px 12px; background:rgba(99,102,241,0.04); font-size:10px; font-weight:700; text-transform:uppercase; letter-spacing:0.6px; color:#7c8aaa; }
 .fdm-rr-pane-label .rr-copy-btn { margin-left:auto; background:transparent; border:1px solid rgba(99,102,241,0.3); color:#7c8aaa; border-radius:4px; padding:2px 8px; font-size:10px; cursor:pointer; transition:all 0.15s; }
 .fdm-rr-pane-label .rr-copy-btn:hover { background:rgba(99,102,241,0.15); color:#a5b4fc; }
-.fdm-rr-raw { padding:10px 14px; white-space:pre-wrap; word-break:break-all; max-height:250px; overflow-y:auto; user-select:text; -webkit-user-select:text; }
+.fdm-rr-raw { padding:10px 14px; white-space:pre-wrap; word-break:break-all; max-height:400px; overflow-y:auto; user-select:text; -webkit-user-select:text; }
 .fdm-rr-raw.rr-req { color:#f97316; }
 .fdm-rr-raw.rr-resp { color:#8b949e; }
+.fdm-rr-raw .rr-highlight { background:#7c3aed33; color:#c084fc; border-radius:2px; padding:0 2px; font-weight:700; }
 
 .live-phase-row { display:grid; grid-template-columns:44px 1fr 80px 80px; gap:10px; padding:10px 16px; border-bottom:1px solid var(--border); font-size:13px; align-items:center; }
 .live-phase-num { font-weight:700; color:var(--accent2); }
@@ -4808,7 +4809,11 @@ function _dedupRrs(rrs) {
 function _buildRrHtml(rrs) {
   if (!rrs || !rrs.length) return '';
   rrs = _dedupRrs(rrs);
-  let html = `<div class="fdm-section"><div class="fdm-section-title">&#128274; Request / Response Evidence (${rrs.length} tool call${rrs.length > 1 ? 's' : ''})</div>`;
+  var hasFullCapture = rrs.some(function(rr) { return rr.http_exchange && rr.http_exchange.request; });
+  var rrTitle = hasFullCapture
+    ? '&#128274; HTTP Traffic Capture (' + rrs.length + ' exchange' + (rrs.length > 1 ? 's' : '') + ')'
+    : '&#128274; Request / Response Evidence (' + rrs.length + ' tool call' + (rrs.length > 1 ? 's' : '') + ')';
+  let html = `<div class="fdm-section"><div class="fdm-section-title">${rrTitle}</div>`;
   rrs.forEach((rr, idx) => {
     const st = (rr.status || '') + '';
     const stClass = st.startsWith('2') ? 's2xx' : (st.startsWith('4') || st.startsWith('5')) ? (st.startsWith('4') ? 's4xx' : 's5xx') : '';
@@ -4833,15 +4838,26 @@ function _buildRrHtml(rrs) {
       <div class="fdm-rr-body">`;
 
     if (reqRaw) {
+      var hasExchange = rr.http_exchange && rr.http_exchange.request;
+      var reqLabel = hasExchange ? 'Request (full capture)' : 'Request';
       html += `<div class="fdm-rr-pane">
-        <div class="fdm-rr-pane-label">Request <button class="rr-copy-btn" onclick="_rrCopy('${reqId}')">Copy</button></div>
+        <div class="fdm-rr-pane-label">${reqLabel} <button class="rr-copy-btn" onclick="_rrCopy('${reqId}')">Copy</button></div>
         <div class="fdm-rr-raw rr-req" id="${reqId}">${esc(reqRaw)}</div>
       </div>`;
     }
     if (respRaw) {
+      var respEscaped = esc(respRaw);
+      var payloadStr = rr.payload || '';
+      if (payloadStr && payloadStr.length >= 3) {
+        var payloadEsc = esc(payloadStr);
+        var re = new RegExp(payloadEsc.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g');
+        respEscaped = respEscaped.replace(re, '<mark class="rr-highlight">' + payloadEsc + '</mark>');
+      }
+      var hasExchange = rr.http_exchange && rr.http_exchange.response;
+      var fullLabel = hasExchange ? 'Response (full capture)' : 'Response';
       html += `<div class="fdm-rr-pane">
-        <div class="fdm-rr-pane-label">Response <button class="rr-copy-btn" onclick="_rrCopy('${respId}')">Copy</button></div>
-        <div class="fdm-rr-raw rr-resp" id="${respId}">${esc(respRaw)}</div>
+        <div class="fdm-rr-pane-label">${fullLabel} <button class="rr-copy-btn" onclick="_rrCopy('${respId}')">Copy</button></div>
+        <div class="fdm-rr-raw rr-resp" id="${respId}">${respEscaped}</div>
       </div>`;
     }
     html += `</div></div>`;
@@ -4852,6 +4868,22 @@ function _buildRrHtml(rrs) {
 
 function _buildRawRequest(rr) {
   if (!rr) return '';
+  var ex = rr.http_exchange;
+  if (ex && ex.request) {
+    var r = ex.request;
+    var lines = [];
+    var path = r.url || '/';
+    try { var u = new URL(r.url); path = u.pathname + (u.search || ''); } catch(e) {}
+    var host = '';
+    try { host = new URL(r.url).host; } catch(e) {}
+    lines.push((r.method || 'GET') + ' ' + path + ' HTTP/1.1');
+    if (host && !(r.headers && (r.headers['host'] || r.headers['Host']))) lines.push('Host: ' + host);
+    if (r.headers && typeof r.headers === 'object') {
+      Object.entries(r.headers).forEach(function(kv) { lines.push(kv[0] + ': ' + kv[1]); });
+    }
+    if (r.body) { lines.push(''); lines.push(r.body); }
+    return lines.join('\n');
+  }
   var lines = [];
   var method = (rr.tool || rr.method || 'GET').toUpperCase().replace(/^(API_REQUEST|FUZZ_PARAMETER|NAVIGATE|INJECT_PAYLOAD).*$/i, function(m) {
     return rr.http_method || (rr.payload ? 'POST' : 'GET');
@@ -4884,6 +4916,26 @@ function _isHtmlBoilerplate(text) {
 
 function _buildRawResponse(rr) {
   if (!rr) return '';
+  var ex = rr.http_exchange;
+  if (ex && ex.response) {
+    var resp = ex.response;
+    var lines = [];
+    if (resp.status_code) lines.push('HTTP/1.1 ' + resp.status_code);
+    if (resp.headers && typeof resp.headers === 'object') {
+      Object.entries(resp.headers).forEach(function(kv) { lines.push(kv[0] + ': ' + kv[1]); });
+    }
+    var body = resp.body || '';
+    if (body && _isHtmlBoilerplate(body)) {
+      lines.push('');
+      lines.push('[HTML page — not shown (' + body.length + ' chars)]');
+      var titleMatch = body.match(/<title[^>]*>([^<]{1,80})<\/title>/i);
+      if (titleMatch) lines.push('Page title: ' + titleMatch[1].trim());
+    } else if (body) {
+      lines.push('');
+      lines.push(body);
+    }
+    return lines.join('\n');
+  }
   var lines = [];
   var st = rr.status || '';
   if (st) lines.push('HTTP/1.1 ' + st);

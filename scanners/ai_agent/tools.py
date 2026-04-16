@@ -29,6 +29,37 @@ logger = logging.getLogger(__name__)
 
 BODY_SNIPPET_LEN = 1500
 HTML_SNIPPET_LEN = 4000
+HTTP_EXCHANGE_BODY_MAX = 8192
+
+
+def _build_http_exchange(
+    *,
+    method: str,
+    url: str,
+    request_headers: dict | None = None,
+    request_body: str | None = None,
+    status_code: int | None = None,
+    response_headers: dict | None = None,
+    response_body: str | None = None,
+) -> dict:
+    """Build a full HTTP exchange record (Burp/Acunetix-style)."""
+    req_hdrs = dict(request_headers) if request_headers else {}
+    resp_hdrs = dict(response_headers) if response_headers else {}
+    resp_body_str = (response_body or "")[:HTTP_EXCHANGE_BODY_MAX]
+    req_body_str = (request_body or "")[:HTTP_EXCHANGE_BODY_MAX]
+    return {
+        "request": {
+            "method": (method or "GET").upper(),
+            "url": url or "",
+            "headers": req_hdrs,
+            "body": req_body_str,
+        },
+        "response": {
+            "status_code": status_code,
+            "headers": resp_hdrs,
+            "body": resp_body_str,
+        },
+    }
 
 _SQL_ERROR_PATTERNS = (
     "sqlite", "sql syntax", "sql error", "mysql", "ora-", "pg_query",
@@ -331,9 +362,16 @@ class ScanTools:
             except Exception:
                 pass
             resp_body = ""
+            resp_headers: dict = {}
             try:
                 if response:
                     resp_body = await response.text()
+                    resp_headers = await response.all_headers()
+            except Exception:
+                pass
+            req_headers: dict = {}
+            try:
+                req_headers = await request.all_headers()
             except Exception:
                 pass
             self._network_log.append({
@@ -342,6 +380,15 @@ class ScanTools:
                 "status": status,
                 "request_body": _truncate(req_body, 1000),
                 "response_snippet": _truncate(resp_body),
+                "http_exchange": _build_http_exchange(
+                    method=method,
+                    url=url,
+                    request_headers=req_headers,
+                    request_body=req_body,
+                    status_code=status,
+                    response_headers=resp_headers,
+                    response_body=resp_body,
+                ),
             })
         except Exception as e:
             logger.debug("Failed to log request: %s", e)
@@ -831,6 +878,8 @@ class ScanTools:
             hdrs = dict(headers) if headers else {}
             if auth_token:
                 hdrs.setdefault("Authorization", f"Bearer {auth_token}")
+            merged_hdrs = dict(self._http_client.headers)
+            merged_hdrs.update(hdrs)
             start = time.perf_counter()
             resp = await self._http_client.request(
                 method=method.upper(),
@@ -840,15 +889,22 @@ class ScanTools:
             )
             elapsed = (time.perf_counter() - start) * 1000
             resp_body = resp.text
-            selected_headers = dict(resp.headers)
-            for k in list(selected_headers):
-                if k.lower() not in ("content-type", "content-length", "x-", "set-cookie"):
-                    del selected_headers[k]
             result = {
                 "status": resp.status_code,
-                "headers": selected_headers,
+                "headers": {k: v for k, v in resp.headers.items()
+                            if k.lower() in ("content-type", "content-length", "set-cookie")
+                            or k.lower().startswith("x-")},
                 "body_snippet": _truncate(resp_body),
                 "timing_ms": round(elapsed, 2),
+                "http_exchange": _build_http_exchange(
+                    method=method,
+                    url=url,
+                    request_headers=merged_hdrs,
+                    request_body=body,
+                    status_code=resp.status_code,
+                    response_headers=dict(resp.headers),
+                    response_body=resp_body,
+                ),
             }
             signals = _extract_vuln_signals(resp_body, resp.status_code, payload=body or "")
             if signals:
@@ -911,28 +967,36 @@ class ScanTools:
             return {"error": f"URL out of scope (not in target domain): {endpoint}", "skipped": True}
         results = []
         hdrs = dict(headers) if headers else {}
+        base_req_hdrs = dict(self._http_client.headers)
+        base_req_hdrs.update(hdrs)
         for payload in payloads:
             effective_payload = f"{baseline_value}{payload}" if baseline_value else payload
             try:
                 start = time.perf_counter()
+                actual_url = endpoint
+                actual_body: str | None = None
+                actual_hdrs = dict(base_req_hdrs)
                 if param_location == "query":
                     parsed = urlparse(endpoint)
                     qs = parse_qs(parsed.query, keep_blank_values=True)
                     qs[param_name] = [effective_payload]
                     new_query = urlencode(qs, doseq=True)
-                    url = urlunparse((parsed.scheme, parsed.netloc, parsed.path, parsed.params, new_query, parsed.fragment))
-                    resp = await self._http_client.request(method.upper(), url, headers=hdrs or None)
+                    actual_url = urlunparse((parsed.scheme, parsed.netloc, parsed.path, parsed.params, new_query, parsed.fragment))
+                    resp = await self._http_client.request(method.upper(), actual_url, headers=hdrs or None)
                 elif param_location == "header":
                     fuzz_hdrs = dict(hdrs)
                     fuzz_hdrs[param_name] = effective_payload
+                    actual_hdrs.update(fuzz_hdrs)
                     resp = await self._http_client.request(method.upper(), endpoint, headers=fuzz_hdrs)
                 elif param_location == "path":
-                    fuzzed_url = endpoint.replace(f"{{{param_name}}}", effective_payload)
-                    resp = await self._http_client.request(method.upper(), fuzzed_url, headers=hdrs or None)
+                    actual_url = endpoint.replace(f"{{{param_name}}}", effective_payload)
+                    resp = await self._http_client.request(method.upper(), actual_url, headers=hdrs or None)
                 else:
                     mutated = _mutate_json_field(original_body, param_name, effective_payload)
+                    actual_body = mutated
                     content_hdrs = dict(hdrs)
                     content_hdrs.setdefault("Content-Type", "application/json")
+                    actual_hdrs.update(content_hdrs)
                     resp = await self._http_client.request(
                         method.upper(), endpoint, headers=content_hdrs, content=mutated,
                     )
@@ -951,6 +1015,15 @@ class ScanTools:
                     "anomaly": anomaly,
                     "reflected": reflected,
                     "timing_ms": round(elapsed_ms, 1),
+                    "http_exchange": _build_http_exchange(
+                        method=method,
+                        url=actual_url,
+                        request_headers=actual_hdrs,
+                        request_body=actual_body,
+                        status_code=resp.status_code,
+                        response_headers=dict(resp.headers),
+                        response_body=body,
+                    ),
                 }
                 if matched_indicators:
                     result_entry["error_indicators"] = matched_indicators[:5]

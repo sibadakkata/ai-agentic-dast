@@ -191,9 +191,20 @@ def _sanitize_all_messages(messages):
     return messages
 
 
+def _strip_exchanges(obj):
+    """Remove http_exchange from tool results before sending to the LLM."""
+    if isinstance(obj, dict):
+        out = {k: _strip_exchanges(v) for k, v in obj.items() if k != "http_exchange"}
+        return out
+    if isinstance(obj, list):
+        return [_strip_exchanges(item) for item in obj]
+    return obj
+
+
 def _cap_result(result: dict) -> str:
     """Serialize tool result and cap its size for message history."""
-    raw = json.dumps(result, default=str)
+    clean = _strip_exchanges(result)
+    raw = json.dumps(clean, default=str)
     if len(raw) <= MAX_MSG_RESULT_CHARS:
         return raw
     return raw[:MAX_MSG_RESULT_CHARS] + '..."}'
@@ -324,14 +335,17 @@ def _capture_evidence(
                     flags.append("ERROR")
             except (ValueError, TypeError):
                 pass
-            evidence.append({
+            entry = {
                 "tool": f"fuzz_parameter[{param}]",
                 "url": ep_url,
                 "payload": r_payload,
                 "status": r_status,
                 "flags": " ".join(flags),
                 "evidence": r_body[:200],
-            })
+            }
+            if r.get("http_exchange"):
+                entry["http_exchange"] = r["http_exchange"]
+            evidence.append(entry)
         return
 
     status = full_result.get("status", "")
@@ -383,14 +397,17 @@ def _capture_evidence(
     except (ValueError, TypeError):
         pass
 
-    evidence.append({
+    entry = {
         "tool": tool,
         "url": url,
         "payload": payload,
         "status": str(status),
         "flags": " ".join(flags),
         "evidence": snippet[:200],
-    })
+    }
+    if isinstance(full_result, dict) and full_result.get("http_exchange"):
+        entry["http_exchange"] = full_result["http_exchange"]
+    evidence.append(entry)
 
 
 def _format_evidence_buffer(evidence: list[dict]) -> str:
@@ -1355,10 +1372,9 @@ async def run_scan(
 
                     findings.extend(new_f)
                     for f in new_f:
-                        finding_data = dict(f)
-                        finding_data["phase"] = phase.name
-                        _match_evidence_to_finding(finding_data, phase_evidence)
-                        _cb("finding", finding_data)
+                        f["phase"] = phase.name
+                        _match_evidence_to_finding(f, phase_evidence)
+                        _cb("finding", f)
                     break
 
             phase_new_findings = len(findings) - phase_findings_before
@@ -1469,10 +1485,9 @@ async def run_scan(
                                 pass
                         findings.extend(retry_f)
                         for f in retry_f:
-                            fd = dict(f)
-                            fd["phase"] = f"{phase.name} (retry)"
-                            _match_evidence_to_finding(fd, phase_evidence_retry or phase_evidence)
-                            _cb("finding", fd)
+                            f["phase"] = f"{phase.name} (retry)"
+                            _match_evidence_to_finding(f, phase_evidence_retry or phase_evidence)
+                            _cb("finding", f)
                         break
                 retry_new = len(findings) - retry_findings_before
                 phase_new_findings += retry_new
