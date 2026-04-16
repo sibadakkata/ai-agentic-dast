@@ -188,8 +188,27 @@ _THIRD_PARTY_JS_DOMAINS = (
 )
 
 
-def _is_third_party_js(url: str, target_url: str) -> bool:
-    """Return True if a JS URL belongs to a known third-party vendor, not the target."""
+def _extract_org_domains(target_url: str) -> set[str]:
+    """Extract the set of 'organisation' base domains for a target.
+
+    For ``stage.lifelock.norton.com`` this returns ``{"norton.com"}``.
+    The caller can extend this with ``extra_domains`` from scan config.
+    """
+    host = (urlparse(target_url).hostname or "").lower()
+    parts = host.split(".")
+    base = ".".join(parts[-2:]) if len(parts) >= 2 else host
+    return {base}
+
+
+def _is_third_party_js(url: str, target_url: str,
+                        extra_domains: set[str] | None = None) -> bool:
+    """Return True if a JS URL does NOT belong to the target organisation.
+
+    Uses same-origin check (base domain match) instead of an allowlist so
+    we never accidentally analyse vendor JS that isn't in our static list.
+    Falls back to the known-vendor list only for edge-case CDN-hosted
+    first-party JS (e.g. jsdelivr serving the target's own bundles — rare).
+    """
     try:
         host = (urlparse(url).hostname or "").lower()
         target_host = (urlparse(target_url).hostname or "").lower()
@@ -197,19 +216,26 @@ def _is_third_party_js(url: str, target_url: str) -> bool:
         return False
     if not host:
         return False
+
     target_parts = target_host.split(".")
     target_base = ".".join(target_parts[-2:]) if len(target_parts) >= 2 else target_host
     host_parts = host.split(".")
     host_base = ".".join(host_parts[-2:]) if len(host_parts) >= 2 else host
+
+    # Same base domain → first-party
     if host_base == target_base or host == target_host:
         return False
-    for tp in _THIRD_PARTY_JS_DOMAINS:
-        if host == tp or host.endswith("." + tp):
-            return True
-        tp_base = ".".join(tp.split(".")[-2:]) if "." in tp else tp
-        if host_base == tp_base:
-            return True
-    return False
+
+    # Extra allowed domains from scan config (e.g. nortonlifelock.com)
+    if extra_domains:
+        for ed in extra_domains:
+            ed_parts = ed.lower().split(".")
+            ed_base = ".".join(ed_parts[-2:]) if len(ed_parts) >= 2 else ed.lower()
+            if host_base == ed_base:
+                return False
+
+    # Everything else is third-party — no allowlist needed
+    return True
 
 # Headers whose values should never appear in telemetry payloads
 _SENSITIVE_HEADERS = (
@@ -1224,11 +1250,10 @@ async def _check_telemetry_token_leakage(page, target_url: str) -> list[dict]:
             samples = [f"{n}={_redact(v)}" for n, v in leaked[:5]]
             findings.append(_make_finding(
                 "Security Tokens Written to Application Logs (Client-Side Telemetry)",
-                "High", "CWE-532", 6.5, req_url,
-                f"POST to logging endpoint contains {len(leaked)} security token(s) "
-                f"in the request body. Leaked: {', '.join(samples)}. "
-                f"Anyone with log access (SIEM, support tooling, log aggregation, "
-                f"compromised log storage) can extract these for session hijacking "
+                "High", "CWE-532", 6.5, target_url,
+                f"The application sends {len(leaked)} security token(s) to "
+                f"logging endpoint {req_url}. Leaked: {', '.join(samples)}. "
+                f"Anyone with log access can extract these for session hijacking "
                 f"or CSRF bypass.",
                 payload=f"Token keys: {', '.join(names)}",
                 source="passive_recon",
@@ -1240,7 +1265,7 @@ async def _check_telemetry_token_leakage(page, target_url: str) -> list[dict]:
         if jwts and req_url not in already_reported_urls:
             findings.append(_make_finding(
                 "JWT Token Leaked to Logging Endpoint",
-                "High", "CWE-532", 6.5, req_url,
+                "High", "CWE-532", 6.5, target_url,
                 f"A JSON Web Token (JWT) was found in the body of a POST to "
                 f"{req_url}: {_redact(jwts[0])}. JWTs typically contain "
                 f"authentication claims and can be replayed to impersonate users.",
@@ -1254,9 +1279,9 @@ async def _check_telemetry_token_leakage(page, target_url: str) -> list[dict]:
         if header_refs and req_url not in already_reported_urls:
             findings.append(_make_finding(
                 "Sensitive HTTP Headers Referenced in Telemetry Payload",
-                "Medium", "CWE-532", 5.3, req_url,
-                f"The POST body to {req_url} references sensitive HTTP "
-                f"header names ({', '.join(header_refs)}), indicating the app "
+                "Medium", "CWE-532", 5.3, target_url,
+                f"The application sends sensitive HTTP header names "
+                f"({', '.join(header_refs)}) to {req_url}, indicating the app "
                 f"logs request headers that may include security tokens. "
                 f"Verify values are redacted before persistence.",
                 payload=f"Headers: {', '.join(header_refs)}",
@@ -1270,9 +1295,9 @@ async def _check_telemetry_token_leakage(page, target_url: str) -> list[dict]:
             redacted_kv = [f"{k}={_redact(v)}" for k, v in sensitive_kv[:5]]
             findings.append(_make_finding(
                 "Sensitive Key-Value Pairs in Telemetry JSON Payload",
-                "High", "CWE-532", 6.5, req_url,
-                f"The JSON body sent to {req_url} contains sensitive keys with "
-                f"credential-like values: {', '.join(redacted_kv)}. These can "
+                "High", "CWE-532", 6.5, target_url,
+                f"The application sends sensitive keys with credential-like values "
+                f"to {req_url}: {', '.join(redacted_kv)}. These can "
                 f"be harvested from log storage for account takeover.",
                 payload=f"Keys: {', '.join(k for k, _ in sensitive_kv[:5])}",
                 source="passive_recon",
@@ -1286,7 +1311,7 @@ async def _check_telemetry_token_leakage(page, target_url: str) -> list[dict]:
                 samples_qs = [f"{n}={_redact(v)}" for n, v in leaked_in_qs[:3]]
                 findings.append(_make_finding(
                     "Security Tokens in Telemetry URL Query Parameters",
-                    "High", "CWE-598", 6.5, req_url,
+                    "High", "CWE-598", 6.5, target_url,
                     f"Token values appear in the URL query string of a telemetry "
                     f"request to {req_url}: {', '.join(samples_qs)}. Query strings "
                     f"are logged by web servers, proxies, and CDNs, exposing tokens "
@@ -1299,10 +1324,11 @@ async def _check_telemetry_token_leakage(page, target_url: str) -> list[dict]:
         if _has_serialized_headers(body) and req_url not in already_reported_urls:
             findings.append(_make_finding(
                 "Full HTTP Request Headers Serialized in Telemetry Payload",
-                "Medium", "CWE-532", 5.3, req_url,
-                f"The POST body to {req_url} contains a serialized HTTP headers "
-                f"object with security-sensitive header names. This pattern indicates "
-                f"the application logs complete request metadata including auth tokens.",
+                "Medium", "CWE-532", 5.3, target_url,
+                f"The application sends serialized HTTP headers "
+                f"to {req_url} with security-sensitive header names. This pattern "
+                f"indicates the application logs complete request metadata including "
+                f"auth tokens.",
                 source="passive_recon",
             ))
 
@@ -1321,8 +1347,8 @@ async def _check_telemetry_token_leakage(page, target_url: str) -> list[dict]:
             sev = "Critical" if is_third_party_analytics else "High"
             findings.append(_make_finding(
                 f"Security Tokens Sent to Third-Party Domain ({req_host})",
-                sev, "CWE-359", 7.5 if sev == "Critical" else 6.5, req["url"],
-                f"Token values from the authenticated session are sent to "
+                sev, "CWE-359", 7.5 if sev == "Critical" else 6.5, target_url,
+                f"The application sends token values from the authenticated session to "
                 f"third-party domain {req_host}: {', '.join(samples)}. "
                 f"This exposes credentials to external parties and violates "
                 f"the principle of least privilege.",
@@ -1334,8 +1360,8 @@ async def _check_telemetry_token_leakage(page, target_url: str) -> list[dict]:
         if jwts and not leaked:
             findings.append(_make_finding(
                 f"JWT Token Sent to Third-Party Domain ({req_host})",
-                "High", "CWE-359", 6.5, req["url"],
-                f"A JWT was found in a POST body sent to {req_host}: "
+                "High", "CWE-359", 6.5, target_url,
+                f"The application sends a JWT to third-party domain {req_host}: "
                 f"{_redact(jwts[0])}. Auth tokens should never leave "
                 f"the origin domain.",
                 payload=f"Third-party: {req_host}",
@@ -1371,18 +1397,19 @@ async def _check_telemetry_token_leakage(page, target_url: str) -> list[dict]:
                     samples_r = [f"{n}={_redact(v)}" for n, v in leaked_in_resp[:3]]
                     findings.append(_make_finding(
                         "Logging Endpoint Response Exposes Security Tokens",
-                        "High", "CWE-532", 7.5, ep_url,
-                        f"GET {ep_url} returns previously logged data containing "
-                        f"security tokens: {', '.join(samples_r)}. An attacker who "
-                        f"accesses this endpoint can harvest active session credentials.",
+                        "High", "CWE-532", 7.5, target_url,
+                        f"A logging endpoint used by the application ({ep_url}) "
+                        f"returns previously logged data containing security tokens: "
+                        f"{', '.join(samples_r)}. An attacker who accesses this "
+                        f"endpoint can harvest active session credentials.",
                         source="passive_recon",
                     ))
                 elif jwts_in_resp:
                     findings.append(_make_finding(
                         "Logging Endpoint Response Contains JWT Tokens",
-                        "High", "CWE-532", 7.5, ep_url,
-                        f"GET {ep_url} returns data containing a JWT: "
-                        f"{_redact(jwts_in_resp[0])}.",
+                        "High", "CWE-532", 7.5, target_url,
+                        f"A logging endpoint used by the application ({ep_url}) "
+                        f"returns data containing a JWT: {_redact(jwts_in_resp[0])}.",
                         source="passive_recon",
                     ))
         except Exception:
@@ -1390,15 +1417,15 @@ async def _check_telemetry_token_leakage(page, target_url: str) -> list[dict]:
 
     # === TC-12: Report discovered telemetry endpoints with no body capture ===
     if not captured_telemetry and perf_telemetry:
-        for ep_url in perf_telemetry[:5]:
-            findings.append(_make_finding(
-                "Telemetry/Logging Endpoint Detected — Manual Review Recommended",
-                "Info", "CWE-532", 0.0, ep_url,
-                f"The application sends data to logging endpoint {ep_url}. "
-                f"Could not intercept request body for automated token analysis. "
-                f"Manually inspect POST bodies for sensitive token leakage.",
-                source="passive_recon",
-            ))
+        ep_list = ", ".join(perf_telemetry[:5])
+        findings.append(_make_finding(
+            "Telemetry/Logging Endpoints Detected — Manual Review Recommended",
+            "Info", "CWE-532", 0.0, target_url,
+            f"The application sends data to {len(perf_telemetry)} logging endpoint(s): "
+            f"{ep_list}. Could not intercept request bodies for automated token analysis. "
+            f"Manually inspect POST bodies for sensitive token leakage.",
+            source="passive_recon",
+        ))
 
     return findings
 
@@ -1408,11 +1435,17 @@ async def _check_telemetry_token_leakage(page, target_url: str) -> list[dict]:
 # ══════════════════════════════════════════════════════════════════════
 
 async def _check_cookie_security(page, target_url: str) -> list[dict]:
-    """Audit every cookie for Secure, HttpOnly, SameSite flags."""
+    """Audit cookies set by the target domain for Secure, HttpOnly, SameSite flags.
+
+    Third-party cookies (set by analytics/tracking domains) are excluded — they
+    are not actionable by the target owner.
+    """
     findings = []
     try:
         cookies = await page.context.cookies()
         target_host = urlparse(target_url).hostname or ""
+        target_parts = target_host.split(".")
+        target_base = ".".join(target_parts[-2:]) if len(target_parts) >= 2 else target_host
         is_https = target_url.startswith("https")
 
         session_kw = ("session", "sess", "sid", "auth", "token", "jwt",
@@ -1420,6 +1453,13 @@ async def _check_cookie_security(page, target_url: str) -> list[dict]:
                       "aspsession", "connect", "sso", "oidc")
 
         for c in cookies:
+            cookie_domain = (c.get("domain", "") or "").lower().lstrip(".")
+            if cookie_domain:
+                cd_parts = cookie_domain.split(".")
+                cookie_base = ".".join(cd_parts[-2:]) if len(cd_parts) >= 2 else cookie_domain
+                if cookie_base != target_base:
+                    continue
+
             name = c.get("name", "")
             name_lower = name.lower()
             is_session = any(kw in name_lower for kw in session_kw)
