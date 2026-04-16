@@ -136,6 +136,17 @@ async def _verify_or_redirect(request: Request, credentials: HTTPBasicCredential
 
 app.mount("/static", StaticFiles(directory=Path(__file__).parent / "static"), name="static")
 
+
+@app.middleware("http")
+async def _no_cache_static(request: Request, call_next):
+    response = await call_next(request)
+    if request.url.path.startswith("/static") or request.url.path in ("/", "/login"):
+        response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
+    return response
+
+
 BASE = Path(__file__).resolve().parent.parent
 RAW_DIR = BASE / "results" / "raw"
 REPORTS_DIR = BASE / "results" / "reports"

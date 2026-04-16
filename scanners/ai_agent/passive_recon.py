@@ -690,6 +690,7 @@ async def _check_sensitive_files(http_client, base_url: str) -> list[dict]:
         try:
             url = f"{base_url.rstrip('/')}/{path}"
             resp = await http_client.get(url, timeout=8.0, follow_redirects=False)
+            exchange = _exchange_from_httpx(resp)
 
             if resp.status_code == 200 and len(resp.content) > 10:
                 body = resp.text[:300]
@@ -700,6 +701,7 @@ async def _check_sensitive_files(http_client, base_url: str) -> list[dict]:
                         severity, cwe, cvss, url,
                         f"{desc}. Content: {body[:100]}",
                         source="passive_recon",
+                        http_exchange=exchange,
                     ))
                 elif path == ".env" and ("=" in body and not body.strip().startswith("<")):
                     findings.append(_make_finding(
@@ -707,6 +709,7 @@ async def _check_sensitive_files(http_client, base_url: str) -> list[dict]:
                         severity, cwe, cvss, url,
                         f"{desc}. Preview: {body[:80]}...",
                         source="passive_recon",
+                        http_exchange=exchange,
                     ))
                 elif path == ".git/config" and "[core]" in body:
                     findings.append(_make_finding(
@@ -714,12 +717,14 @@ async def _check_sensitive_files(http_client, base_url: str) -> list[dict]:
                         severity, cwe, cvss, url,
                         f"{desc}. Content: {body[:120]}",
                         source="passive_recon",
+                        http_exchange=exchange,
                     ))
                 elif path == ".DS_Store" and b"\x00\x00\x00\x01Bud1" in resp.content[:8]:
                     findings.append(_make_finding(
                         f"macOS .DS_Store File Accessible",
                         severity, cwe, cvss, url, desc,
                         source="passive_recon",
+                        http_exchange=exchange,
                     ))
                 elif path in ("robots.txt", "sitemap.xml"):
                     interesting = _extract_interesting_paths(body, path)
@@ -729,6 +734,7 @@ async def _check_sensitive_files(http_client, base_url: str) -> list[dict]:
                             "Info", cwe, 0.0, url,
                             f"Discovered paths: {', '.join(interesting[:10])}",
                             source="passive_recon",
+                            http_exchange=exchange,
                         ))
                 elif desc and not body.strip().startswith("<!DOCTYPE") and not body.strip().startswith("<html"):
                     findings.append(_make_finding(
@@ -736,6 +742,7 @@ async def _check_sensitive_files(http_client, base_url: str) -> list[dict]:
                         severity, cwe, cvss, url,
                         f"{desc}. Content preview: {body[:80]}...",
                         source="passive_recon",
+                        http_exchange=exchange,
                     ))
 
         except Exception as e:
@@ -772,6 +779,7 @@ async def _check_security_headers(http_client, target_url: str) -> list[dict]:
 
     try:
         resp = await http_client.get(target_url, timeout=10.0)
+        exchange = _exchange_from_httpx(resp)
         headers_lower = {k.lower(): v for k, v in resp.headers.items()}
 
         missing = []
@@ -786,6 +794,7 @@ async def _check_security_headers(http_client, target_url: str) -> list[dict]:
                 f"The following recommended security headers are absent: {', '.join(missing)}. "
                 "These are defense-in-depth measures that mitigate various attack vectors.",
                 source="passive_recon",
+                http_exchange=exchange,
             ))
 
         for header in _VERSION_HEADERS:
@@ -797,6 +806,7 @@ async def _check_security_headers(http_client, target_url: str) -> list[dict]:
                     f"Response header '{header}: {value}' discloses technology stack. "
                     "Aids attacker reconnaissance.",
                     source="passive_recon",
+                    http_exchange=exchange,
                 ))
 
     except Exception as e:
@@ -1531,6 +1541,7 @@ async def _check_cors_misconfiguration(http_client, target_url: str) -> list[dic
             headers={"Origin": evil_origin},
             timeout=10.0,
         )
+        exchange = _exchange_from_httpx(resp)
         hdrs = {k.lower(): v for k, v in resp.headers.items()}
         acao = hdrs.get("access-control-allow-origin", "")
         acac = hdrs.get("access-control-allow-credentials", "").lower()
@@ -1543,6 +1554,7 @@ async def _check_cors_misconfiguration(http_client, target_url: str) -> list[dic
                 "Access-Control-Allow-Credentials: true. Any website can make "
                 "authenticated cross-origin requests and read responses.",
                 source="passive_recon",
+                http_exchange=exchange,
             ))
         elif acao == evil_origin:
             sev = "High" if acac == "true" else "Medium"
@@ -1555,6 +1567,7 @@ async def _check_cors_misconfiguration(http_client, target_url: str) -> list[dic
                 + (". With credentials enabled, attacker can steal user data." if acac == "true"
                    else ". Without credentials, impact is limited."),
                 source="passive_recon",
+                http_exchange=exchange,
             ))
         elif acao == "null":
             findings.append(_make_finding(
@@ -1563,6 +1576,7 @@ async def _check_cors_misconfiguration(http_client, target_url: str) -> list[dic
                 "Access-Control-Allow-Origin: null. Sandboxed iframes and "
                 "data: URIs send Origin: null, enabling cross-origin attacks.",
                 source="passive_recon",
+                http_exchange=exchange,
             ))
     except Exception as e:
         logger.debug("CORS check failed: %s", e)
@@ -1846,6 +1860,7 @@ async def _check_referrer_policy(http_client, target_url: str) -> list[dict]:
     findings = []
     try:
         resp = await http_client.get(target_url, timeout=10.0)
+        exchange = _exchange_from_httpx(resp)
         hdrs = {k.lower(): v for k, v in resp.headers.items()}
         rp = hdrs.get("referrer-policy", "").lower().strip()
 
@@ -1857,6 +1872,7 @@ async def _check_referrer_policy(http_client, target_url: str) -> list[dict]:
                 "(including query parameters with tokens) may be sent to third-party "
                 "sites via Referer header. Set to 'strict-origin-when-cross-origin' or 'no-referrer'.",
                 source="passive_recon",
+                http_exchange=exchange,
             ))
         elif rp in ("unsafe-url", "no-referrer-when-downgrade"):
             findings.append(_make_finding(
@@ -1866,6 +1882,7 @@ async def _check_referrer_policy(http_client, target_url: str) -> list[dict]:
                 f"path and query parameters) to third-party sites. Tokens or "
                 f"sensitive data in URLs will leak. Use 'strict-origin-when-cross-origin'.",
                 source="passive_recon",
+                http_exchange=exchange,
             ))
     except Exception as e:
         logger.debug("Referrer-Policy check failed: %s", e)
@@ -1877,6 +1894,7 @@ async def _check_permissions_policy(http_client, target_url: str) -> list[dict]:
     findings = []
     try:
         resp = await http_client.get(target_url, timeout=10.0)
+        exchange = _exchange_from_httpx(resp)
         hdrs = {k.lower(): v for k, v in resp.headers.items()}
         pp = hdrs.get("permissions-policy", "")
         fp = hdrs.get("feature-policy", "")
@@ -1889,6 +1907,7 @@ async def _check_permissions_policy(http_client, target_url: str) -> list[dict]:
                 "Browser features like camera, microphone, geolocation, and payment "
                 "API are not restricted. Set Permissions-Policy to disable unused features.",
                 source="passive_recon",
+                http_exchange=exchange,
             ))
         elif fp and not pp:
             findings.append(_make_finding(
@@ -1897,6 +1916,7 @@ async def _check_permissions_policy(http_client, target_url: str) -> list[dict]:
                 f"Feature-Policy header present but Permissions-Policy (the replacement) "
                 f"is missing. Feature-Policy is deprecated and ignored by modern browsers.",
                 source="passive_recon",
+                http_exchange=exchange,
             ))
     except Exception as e:
         logger.debug("Permissions-Policy check failed: %s", e)
@@ -2044,6 +2064,7 @@ async def _check_https_redirect(http_client, target_url: str) -> list[dict]:
     try:
         http_url = target_url.replace("https://", "http://", 1)
         resp = await http_client.get(http_url, timeout=10.0, follow_redirects=False)
+        exchange = _exchange_from_httpx(resp)
 
         if resp.status_code in (301, 302, 307, 308):
             location = resp.headers.get("location", "")
@@ -2055,6 +2076,7 @@ async def _check_https_redirect(http_client, target_url: str) -> list[dict]:
                         f"HTTP redirects to HTTPS using {resp.status_code} ({location[:100]}). "
                         f"Use 301 (permanent) for SEO and browser caching of the redirect.",
                         source="passive_recon",
+                        http_exchange=exchange,
                     ))
             else:
                 findings.append(_make_finding(
@@ -2063,6 +2085,7 @@ async def _check_https_redirect(http_client, target_url: str) -> list[dict]:
                     f"HTTP version redirects to {location[:100]} which is not HTTPS. "
                     f"First request is unencrypted and vulnerable to MitM downgrade.",
                     source="passive_recon",
+                    http_exchange=exchange,
                 ))
         elif resp.status_code == 200:
             findings.append(_make_finding(
@@ -2071,6 +2094,7 @@ async def _check_https_redirect(http_client, target_url: str) -> list[dict]:
                 "The HTTP version of the site returns content (HTTP 200) without "
                 "redirecting to HTTPS. Users accessing via HTTP have no transport encryption.",
                 source="passive_recon",
+                http_exchange=exchange,
             ))
     except Exception as e:
         logger.debug("HTTPS redirect check failed: %s", e)
@@ -2105,12 +2129,14 @@ async def _check_hsts_preload(http_client, target_url: str) -> list[dict]:
             issues.append("Missing includeSubDomains — subdomains can be accessed over HTTP")
 
         if issues:
+            exchange = _exchange_from_httpx(resp)
             findings.append(_make_finding(
                 f"HSTS Header Incomplete ({len(issues)} issue(s))",
                 "Low", "CWE-319", 2.1, target_url,
                 f"HSTS present but could be strengthened: {'; '.join(issues)}. "
                 f"Current value: {hsts[:150]}",
                 source="passive_recon",
+                http_exchange=exchange,
             ))
     except Exception as e:
         logger.debug("HSTS preload check failed: %s", e)
@@ -2158,6 +2184,7 @@ async def _check_error_pages(http_client, target_url: str) -> list[dict]:
                     f"Error page (HTTP {resp.status_code}) reveals: {', '.join(disclosed)}. "
                     f"Attackers use this to fingerprint the tech stack and craft targeted attacks.",
                     source="passive_recon",
+                    http_exchange=_exchange_from_httpx(resp),
                 ))
                 break
         except Exception:
@@ -2188,6 +2215,7 @@ async def _check_clickjacking(http_client, target_url: str) -> list[dict]:
                     "trick users into clicking hidden UI elements (clickjacking). "
                     "Set X-Frame-Options: DENY or CSP frame-ancestors 'self'.",
                     source="passive_recon",
+                    http_exchange=_exchange_from_httpx(resp),
                 ))
     except Exception as e:
         logger.debug("Clickjacking check failed: %s", e)
@@ -2300,8 +2328,37 @@ def _impact_for(title: str, severity: str) -> str:
     return ""
 
 
-def _make_finding(title, severity, cwe, cvss, url, evidence, payload="", source="passive_recon") -> dict:
-    return {
+def _exchange_from_httpx(resp) -> dict:
+    """Build an http_exchange dict from an httpx Response."""
+    try:
+        req = resp.request
+        req_hdrs = dict(req.headers) if req.headers else {}
+        resp_hdrs = dict(resp.headers) if resp.headers else {}
+        body = ""
+        try:
+            body = resp.text[:8192]
+        except Exception:
+            pass
+        return {
+            "request": {
+                "method": req.method,
+                "url": str(req.url),
+                "headers": req_hdrs,
+                "body": (req.content or b"").decode("utf-8", errors="replace")[:8192],
+            },
+            "response": {
+                "status_code": resp.status_code,
+                "headers": resp_hdrs,
+                "body": body,
+            },
+        }
+    except Exception:
+        return {}
+
+
+def _make_finding(title, severity, cwe, cvss, url, evidence, payload="",
+                  source="passive_recon", http_exchange=None) -> dict:
+    finding = {
         "title": title,
         "severity": severity,
         "url": url,
@@ -2316,3 +2373,14 @@ def _make_finding(title, severity, cwe, cvss, url, evidence, payload="", source=
         "finding_type": "passive_recon",
         "remediation": _remediation_for(cwe, title),
     }
+    if http_exchange:
+        finding["request_response"] = [{
+            "tool": "passive_recon",
+            "url": url,
+            "payload": payload,
+            "status": str(http_exchange.get("response", {}).get("status_code", "")),
+            "flags": "",
+            "evidence": evidence[:200] if evidence else "",
+            "http_exchange": http_exchange,
+        }]
+    return finding
