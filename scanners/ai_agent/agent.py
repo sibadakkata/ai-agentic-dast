@@ -505,6 +505,76 @@ def _format_passive_for_llm(passive_findings: list[dict]) -> str:
     return "\n".join(lines)
 
 
+def _build_tech_context_prompt(tech_fingerprint: dict) -> str:
+    """Build LLM prompt section from detected technology fingerprints.
+
+    Instead of hardcoding vulnerability checks for each technology, we tell
+    the LLM what we detected and rely on its training knowledge to generate
+    context-aware security tests autonomously.
+    """
+    techs = tech_fingerprint.get("technologies", {})
+    if not techs:
+        return ""
+
+    lines = [
+        "## Detected Technology Stack",
+        "The following technologies were fingerprinted during passive reconnaissance:",
+        "",
+    ]
+    by_category: dict[str, list[str]] = {}
+    for name, info in techs.items():
+        cat = info.get("category", "other") or "other"
+        conf = info.get("confidence", "medium")
+        evidence = info.get("evidence", "")
+        entry = f"  - **{name}** (confidence: {conf}) — {evidence}"
+        by_category.setdefault(cat, []).append(entry)
+
+    category_labels = {
+        "cms": "Content Management System",
+        "framework": "Application Framework",
+        "web_server": "Web Server",
+        "language": "Programming Language",
+        "cdn": "CDN / Edge",
+        "proxy": "Reverse Proxy",
+        "hosting": "Hosting Platform",
+        "runtime": "Application Runtime",
+        "analytics": "Analytics / Marketing",
+        "ecommerce": "E-Commerce Platform",
+        "static_site": "Static Site Generator",
+    }
+    for cat, entries in by_category.items():
+        label = category_labels.get(cat, cat.replace("_", " ").title())
+        lines.append(f"**{label}:**")
+        lines.extend(entries)
+        lines.append("")
+
+    lines.extend([
+        "## IMPORTANT: Context-Aware Security Testing",
+        "",
+        "You MUST use your knowledge of these specific technologies to guide your testing:",
+        "",
+        "1. **Technology-specific paths**: Check for default admin panels, debug endpoints, "
+        "configuration pages, and management consoles known for the detected stack.",
+        "",
+        "2. **Known misconfiguration patterns**: Test for common misconfigurations specific to "
+        "each detected technology (e.g., exposed .git directories, debug modes, default credentials, "
+        "unrestricted management interfaces).",
+        "",
+        "3. **Version-specific vulnerabilities**: If you can identify the version (from headers, "
+        "meta tags, JS files, or error pages), check for known CVEs affecting that version.",
+        "",
+        "4. **Stack interaction issues**: Look for security issues arising from how the detected "
+        "technologies interact (e.g., CDN cache poisoning, proxy header injection, CMS plugin vulnerabilities).",
+        "",
+        "5. **Technology-specific information disclosure**: Each platform has characteristic "
+        "paths and endpoints that may leak sensitive information. Probe them.",
+        "",
+        "Do NOT limit yourself to generic OWASP checks — leverage your specific knowledge of "
+        "the detected technologies to find issues a generic scanner would miss.",
+    ])
+    return "\n".join(lines)
+
+
 def _hosts_match(current_host: str, target_host: str) -> bool:
     """Check if current host matches target — exact match or same root domain.
     e.g., my.norton.com matches norton.com, login.norton.com matches my.norton.com."""
@@ -919,6 +989,7 @@ async def run_scan(
         p = _next_phase()
         _cb("phase_start", {"phase": p, "total": 0, "name": "Passive Reconnaissance", "id": "passive_recon"})
         current_host = urlparse(page.url or "").hostname or ""
+        tech_fingerprint = {}
         if current_host != target_host and target_host:
             print(f"  [PASSIVE] SKIPPING — browser on {current_host}, not target {target_host}")
             print(f"  [PASSIVE] Will retry after LLM navigates to target")
@@ -928,7 +999,7 @@ async def run_scan(
         else:
             print("  [PASSIVE] Running passive reconnaissance...")
             try:
-                passive_findings = await run_passive_recon(
+                passive_result = await run_passive_recon(
                     page=page,
                     http_client=http_client,
                     target_url=target.url,
@@ -936,8 +1007,16 @@ async def run_scan(
                     on_progress=_passive_progress,
                     network_js_urls=network_js_urls,
                 )
+                if isinstance(passive_result, tuple):
+                    passive_findings, tech_fingerprint = passive_result
+                else:
+                    passive_findings = passive_result
                 findings.extend(passive_findings)
-                print(f"  [PASSIVE] Done: {len(passive_findings)} findings")
+                if tech_fingerprint.get("technologies"):
+                    tech_names = ", ".join(tech_fingerprint["technologies"].keys())
+                    print(f"  [PASSIVE] Done: {len(passive_findings)} findings | Detected: {tech_names}")
+                else:
+                    print(f"  [PASSIVE] Done: {len(passive_findings)} findings")
             except Exception as e:
                 passive_findings = []
                 print(f"  [PASSIVE] Failed (non-fatal): {e}")
@@ -1068,6 +1147,8 @@ async def run_scan(
         if passive_findings:
             passive_summary = _format_passive_for_llm(passive_findings)
             system_prompt += "\n\n" + passive_summary
+        if tech_fingerprint and tech_fingerprint.get("technologies"):
+            system_prompt += "\n\n" + _build_tech_context_prompt(tech_fingerprint)
         if baseline_context:
             system_prompt += "\n\n" + baseline_context
         if body_fuzz_context:
@@ -1568,7 +1649,7 @@ async def run_scan(
                 try:
                     print("  [PASSIVE-2] Re-running passive recon on authenticated page...")
                     _cb("phase_start", {"phase": 0, "total": 0, "name": "Passive Recon (post-auth)", "id": "passive_recon_2"})
-                    p2_findings = await run_passive_recon(
+                    p2_result = await run_passive_recon(
                         page=page,
                         http_client=http_client,
                         target_url=target.url,
@@ -1576,6 +1657,12 @@ async def run_scan(
                         on_progress=_passive_progress,
                         network_js_urls=network_js_urls,
                     )
+                    if isinstance(p2_result, tuple):
+                        p2_findings, p2_tech = p2_result
+                        if p2_tech.get("technologies"):
+                            tech_fingerprint = {**tech_fingerprint, **p2_tech} if tech_fingerprint else p2_tech
+                    else:
+                        p2_findings = p2_result
                     existing_titles = {f.get("title", "") + f.get("url", "") for f in findings}
                     new_p2 = [f for f in p2_findings if f.get("title", "") + f.get("url", "") not in existing_titles]
                     findings.extend(new_p2)
