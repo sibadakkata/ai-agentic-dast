@@ -1372,10 +1372,9 @@ async def run_scan(
 
                     findings.extend(new_f)
                     for f in new_f:
-                        finding_data = dict(f)
-                        finding_data["phase"] = phase.name
-                        _match_evidence_to_finding(finding_data, phase_evidence)
-                        _cb("finding", finding_data)
+                        f["phase"] = phase.name
+                        _match_evidence_to_finding(f, phase_evidence)
+                        _cb("finding", f)
                     break
 
             phase_new_findings = len(findings) - phase_findings_before
@@ -1486,10 +1485,9 @@ async def run_scan(
                                 pass
                         findings.extend(retry_f)
                         for f in retry_f:
-                            fd = dict(f)
-                            fd["phase"] = f"{phase.name} (retry)"
-                            _match_evidence_to_finding(fd, phase_evidence_retry or phase_evidence)
-                            _cb("finding", fd)
+                            f["phase"] = f"{phase.name} (retry)"
+                            _match_evidence_to_finding(f, phase_evidence_retry or phase_evidence)
+                            _cb("finding", f)
                         break
                 retry_new = len(findings) - retry_findings_before
                 phase_new_findings += retry_new
