@@ -3373,8 +3373,6 @@ function renderPhaseBreakdown(container, live) {
       phaseNum = phaseData.phase;
     } else if (isCurrent && currentPhaseNum) {
       phaseNum = currentPhaseNum;
-    } else if (phaseData && phaseData.phase === 0) {
-      phaseNum = '—';
     } else {
       phaseNum = idx + 1;
     }

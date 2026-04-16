@@ -1275,7 +1275,8 @@ async def run_scan(
         if api_endpoints:
             from .baseline_executor import run_baseline, format_baseline_for_llm
             print(f"  [BASELINE] Running happy path for {len(api_endpoints)} API endpoints...")
-            _cb("phase_start", {"phase": 0, "total": 0, "name": "API Baseline (Happy Path)", "id": "baseline"})
+            p = _next_phase()
+            _cb("phase_start", {"phase": p, "total": 0, "name": "API Baseline (Happy Path)", "id": "baseline"})
 
             def _baseline_progress(event, data):
                 if event == "baseline_request":
@@ -1308,7 +1309,7 @@ async def run_scan(
             successful = sum(1 for r in baseline_results if r.success)
             print(f"  [BASELINE] Done: {successful}/{len(baseline_results)} succeeded")
             _cb("phase_end", {
-                "phase": 0, "name": "API Baseline (Happy Path)",
+                "phase": p, "name": "API Baseline (Happy Path)",
                 "tool_calls": len(baseline_results) * 2,
                 "findings": 0,
             })
@@ -1327,7 +1328,8 @@ async def run_scan(
             if post_endpoints:
                 fuzz_mode = "hybrid (LLM-planned)" if router else "static"
                 print(f"  [BODY-FUZZ] Fuzzing {len(post_endpoints)} endpoint(s) — {fuzz_mode} mode...")
-                _cb("phase_start", {"phase": 0, "total": 0, "name": f"Body Fuzzing ({fuzz_mode})", "id": "body_fuzz"})
+                p = _next_phase()
+                _cb("phase_start", {"phase": p, "total": 0, "name": f"Body Fuzzing ({fuzz_mode})", "id": "body_fuzz"})
                 all_fuzz_results = []
                 all_llm_findings = []
                 for br in post_endpoints:
@@ -1381,7 +1383,7 @@ async def run_scan(
                     })
 
                 _cb("phase_end", {
-                    "phase": 0, "name": f"Body Fuzzing ({fuzz_mode})",
+                    "phase": p, "name": f"Body Fuzzing ({fuzz_mode})",
                     "tool_calls": len(all_fuzz_results), "findings": anomalies + llm_issues,
                 })
                 metrics["total_tool_calls"] += len(all_fuzz_results)
@@ -1405,7 +1407,8 @@ async def run_scan(
             wf = load_workflow(target.workflow_id)
             if wf:
                 print(f"  [WORKFLOW] Loaded workflow: {wf.name} ({len(wf.steps)} steps)")
-                _cb("phase_start", {"phase": 0, "total": 0, "name": f"Workflow Replay: {wf.name}", "id": "workflow_replay"})
+                p = _next_phase()
+                _cb("phase_start", {"phase": p, "total": 0, "name": f"Workflow Replay: {wf.name}", "id": "workflow_replay"})
                 wf_vars = {"username": (target.credentials or {}).get("username", ""),
                            "password": (target.credentials or {}).get("password", "")}
                 try:
@@ -1421,7 +1424,7 @@ async def run_scan(
                 except Exception as e:
                     print(f"  [WORKFLOW] Replay failed: {e}")
                     logger.warning("Workflow replay failed: %s", e, exc_info=True)
-                _cb("phase_end", {"phase": 0, "name": f"Workflow Replay: {wf.name}",
+                _cb("phase_end", {"phase": p, "name": f"Workflow Replay: {wf.name}",
                                   "tool_calls": wf.steps.__len__(), "findings": 0})
                 system_prompt += "\n\n" + build_workflow_prompt(wf)
             else:
@@ -1438,14 +1441,12 @@ async def run_scan(
         has_baseline = bool(baseline_context)
         has_body_fuzz = bool(body_fuzz_context)
         has_workflow = workflow_replayed or bool(getattr(target, "business_flow", None))
-        extra_phases = (1 if has_baseline else 0) + (1 if has_body_fuzz else 0) + (1 if workflow_replayed else 0)
-        total_phases = len(phases) + 1 + extra_phases  # +1 verification
+        total_phases = _phase_seq + len(phases) + 2  # pre-LLM + LLM phases + post-auth passive + verification
         print(f"  [SCAN] Starting {len(phases)} scan phases + verification...")
         _cb("scan_start", {"total_phases": total_phases})
-        phase_offset = extra_phases
         for phase_idx, phase in enumerate(phases):
             _check_cancel()
-            phase_num = phase_idx + 1 + phase_offset
+            phase_num = _next_phase()
             if start_from_phase > 0 and phase_idx < start_from_phase:
                 print(f"  [{phase_num}/{total_phases}] Phase: {phase.name} — skipped (already completed)")
                 _cb("phase_start", {"phase": phase_num, "total": total_phases, "name": f"{phase.name} (skipped)", "id": phase.id})
@@ -1904,7 +1905,8 @@ async def run_scan(
             if phase_idx == 0:
                 try:
                     print("  [PASSIVE-2] Re-running passive recon on authenticated page...")
-                    _cb("phase_start", {"phase": 0, "total": 0, "name": "Passive Recon (post-auth)", "id": "passive_recon_2"})
+                    p2_num = _next_phase()
+                    _cb("phase_start", {"phase": p2_num, "total": 0, "name": "Passive Recon (post-auth)", "id": "passive_recon_2"})
                     p2_result = await run_passive_recon(
                         page=page,
                         http_client=http_client,
@@ -1923,7 +1925,7 @@ async def run_scan(
                     new_p2 = [f for f in p2_findings if f.get("title", "") + f.get("url", "") not in existing_titles]
                     findings.extend(new_p2)
                     print(f"  [PASSIVE-2] Done: {len(p2_findings)} total, {len(new_p2)} new findings")
-                    _cb("phase_end", {"phase": 0, "name": "Passive Recon (post-auth)",
+                    _cb("phase_end", {"phase": p2_num, "name": "Passive Recon (post-auth)",
                                       "tool_calls": 0, "findings": len(new_p2)})
                     if new_p2:
                         p2_summary = _format_passive_for_llm(new_p2)
@@ -1939,7 +1941,8 @@ async def run_scan(
         # ── Runtime Verification Phase (no LLM, replays payloads) ──
         _check_cancel()
         if findings:
-            _cb("phase_start", {"phase": total_phases, "total": total_phases, "name": "Runtime Verification", "id": "verification"})
+            verify_num = _next_phase()
+            _cb("phase_start", {"phase": verify_num, "total": total_phases, "name": "Runtime Verification", "id": "verification"})
             print("  [VERIFY] Replaying payloads to confirm findings...")
             try:
                 from scripts.runtime_verifier import verify_all_findings
@@ -1982,7 +1985,7 @@ async def run_scan(
                 print(f"  [VERIFY] Verification failed (non-fatal): {e}")
                 logger.warning("Runtime verification failed: %s", e, exc_info=True)
 
-            _cb("phase_end", {"phase": len(phases), "name": "Runtime Verification",
+            _cb("phase_end", {"phase": verify_num, "name": "Runtime Verification",
                               "tool_calls": len(findings), "findings": 0})
 
         auth_session.stop_monitor()
