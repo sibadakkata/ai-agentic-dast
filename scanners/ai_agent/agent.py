@@ -505,6 +505,191 @@ def _format_passive_for_llm(passive_findings: list[dict]) -> str:
     return "\n".join(lines)
 
 
+_TECH_PROBE_PATHS: dict[str, dict] = {
+    "Adobe Experience Manager (AEM)": {
+        "label": "Adobe Experience Manager (AEM)",
+        "paths": [
+            ("/libs/granite/security/currentuser.json", "User info servlet — leaks internal user paths"),
+            ("/crx/de/index.jsp", "CRX DE content explorer — full repository access"),
+            ("/crx/explorer/browser/index.jsp", "CRX repository browser"),
+            ("/system/console", "Apache Felix OSGi console — full server control"),
+            ("/system/console/bundles", "OSGi bundle listing"),
+            ("/system/console/configMgr", "OSGi configuration manager"),
+            ("/bin/querybuilder.json", "QueryBuilder servlet — content enumeration"),
+            ("/bin/querybuilder.json?path=/content&p.limit=10", "QueryBuilder with content query"),
+            ("/content.json", "Root content tree as JSON"),
+            ("/content.infinity.json", "Full content tree dump"),
+            ("/.json", "Sling default JSON export of root"),
+            ("/content/dam.json", "DAM assets as JSON"),
+            ("/content/dam.tidy.-1.json", "DAM deep JSON export via tidy selector"),
+            ("/etc/packages.json", "AEM package listing"),
+            ("/etc/replication.json", "Replication agent config"),
+            ("/libs/granite/core/content/login.html", "Granite login page (confirms AEM)"),
+            ("/libs/granite/security/userinfo.json", "Extended user information"),
+            ("/libs/granite/ui/content/shell.html", "Granite UI shell"),
+            ("/libs/cq/search/content/querydebug.html", "Query debug console"),
+            ("/system/sling/cqform/defaultlogin.html", "Sling default login form"),
+            ("/bin/receive", "Replication receiver endpoint"),
+            ("/bin/replicate.json", "Replication trigger endpoint"),
+            ("/home/users.json", "User home directory listing"),
+            ("/home/groups.json", "Group home directory listing"),
+            ("/etc/reports/diskusage.html", "Disk usage report"),
+            ("/libs/granite/security/content/admin.html", "Granite admin console"),
+        ],
+    },
+    "WordPress": {
+        "label": "WordPress",
+        "paths": [
+            ("/wp-login.php", "WordPress login page"),
+            ("/wp-admin/", "WordPress admin dashboard"),
+            ("/wp-json/wp/v2/users", "REST API user enumeration"),
+            ("/wp-json/wp/v2/posts", "REST API posts listing"),
+            ("/?rest_route=/wp/v2/users", "REST API user enum (pretty permalinks off)"),
+            ("/xmlrpc.php", "XML-RPC interface (brute-force, pingback attacks)"),
+            ("/wp-config.php.bak", "Backup of config file with DB credentials"),
+            ("/wp-config.php~", "Editor backup of config file"),
+            ("/.wp-config.php.swp", "Vim swap file for config"),
+            ("/wp-content/debug.log", "Debug log with sensitive errors"),
+            ("/wp-content/uploads/", "Uploads directory listing"),
+            ("/readme.html", "WordPress version disclosure"),
+            ("/wp-includes/version.php", "Version file"),
+            ("/wp-cron.php", "WP-Cron endpoint"),
+            ("/?author=1", "Author enumeration via redirect"),
+        ],
+    },
+    "Drupal": {
+        "label": "Drupal",
+        "paths": [
+            ("/user/login", "Drupal login page"),
+            ("/admin/", "Admin dashboard"),
+            ("/CHANGELOG.txt", "Version disclosure"),
+            ("/core/CHANGELOG.txt", "Drupal 8+ version disclosure"),
+            ("/core/install.php", "Installation script"),
+            ("/update.php", "Update script"),
+            ("/xmlrpc.php", "XML-RPC interface"),
+            ("/sites/default/files/", "Default files directory"),
+            ("/sites/default/settings.php", "Settings file"),
+            ("/node/1", "First content node"),
+            ("/jsonapi/node/article", "JSON API content listing"),
+            ("/jsonapi/user/user", "JSON API user enumeration"),
+            ("/?q=user/password", "Password reset form (user enumeration)"),
+        ],
+    },
+    "Django": {
+        "label": "Django",
+        "paths": [
+            ("/admin/", "Django admin panel"),
+            ("/admin/login/", "Django admin login"),
+            ("/__debug__/", "Django Debug Toolbar"),
+            ("/api/", "API root"),
+            ("/static/admin/", "Admin static assets (confirms Django)"),
+            ("/media/", "Media file directory"),
+            ("/settings/", "Possible settings exposure"),
+        ],
+    },
+    "Ruby on Rails": {
+        "label": "Ruby on Rails",
+        "paths": [
+            ("/rails/info/properties", "Rails environment info"),
+            ("/rails/info/routes", "Route listing"),
+            ("/rails/mailers", "Mailer previews"),
+            ("/sidekiq/", "Sidekiq dashboard"),
+            ("/admin/", "Admin panel"),
+            ("/assets/", "Asset pipeline"),
+        ],
+    },
+    "Sitecore": {
+        "label": "Sitecore",
+        "paths": [
+            ("/sitecore/login", "Sitecore login page"),
+            ("/sitecore/admin/", "Sitecore admin tools"),
+            ("/sitecore/shell/", "Sitecore shell"),
+            ("/sitecore/debug/", "Debug pages"),
+            ("/-/speak/v1/bundles/", "Sitecore SPEAK UI"),
+            ("/sitecore/api/ssc/", "Sitecore Services Client API"),
+        ],
+    },
+    "Magento": {
+        "label": "Magento",
+        "paths": [
+            ("/admin/", "Magento admin (default path)"),
+            ("/magento_version", "Version disclosure"),
+            ("/downloader/", "Magento Connect Manager"),
+            ("/app/etc/local.xml", "Config file with DB credentials"),
+            ("/var/export/", "Data export directory"),
+            ("/var/log/system.log", "System log file"),
+            ("/api/rest/products", "REST API products"),
+        ],
+    },
+    "TYPO3": {
+        "label": "TYPO3",
+        "paths": [
+            ("/typo3/", "TYPO3 backend login"),
+            ("/typo3/install.php", "Install tool"),
+            ("/typo3conf/LocalConfiguration.php", "Configuration file"),
+            ("/typo3temp/", "Temporary files directory"),
+            ("/fileadmin/", "File admin directory"),
+        ],
+    },
+    "Shopify": {
+        "label": "Shopify",
+        "paths": [
+            ("/admin/", "Shopify admin"),
+            ("/cart.json", "Cart data as JSON"),
+            ("/products.json", "Products listing"),
+            ("/collections.json", "Collections listing"),
+            ("/meta.json", "Shop metadata"),
+        ],
+    },
+    "ASP.NET": {
+        "label": "ASP.NET",
+        "paths": [
+            ("/elmah.axd", "ELMAH error log viewer"),
+            ("/trace.axd", "ASP.NET trace viewer"),
+            ("/web.config", "ASP.NET config file"),
+            ("/_layouts/viewlsts.aspx", "SharePoint list view"),
+        ],
+    },
+    "Laravel (PHP)": {
+        "label": "Laravel",
+        "paths": [
+            ("/.env", "Environment file with secrets"),
+            ("/telescope", "Laravel Telescope debug dashboard"),
+            ("/horizon", "Laravel Horizon queue dashboard"),
+            ("/storage/logs/laravel.log", "Application log file"),
+            ("/nova/login", "Laravel Nova admin"),
+        ],
+    },
+    "Next.js": {
+        "label": "Next.js",
+        "paths": [
+            ("/_next/data/", "Next.js data directory"),
+            ("/api/", "API routes"),
+            ("/_error", "Custom error page"),
+        ],
+    },
+}
+
+
+def _get_tech_probe_paths(techs: dict) -> list[str]:
+    """Build probe-path sections for detected technologies."""
+    sections: list[str] = []
+    for tech_name in techs:
+        probe = _TECH_PROBE_PATHS.get(tech_name)
+        if not probe:
+            for key, val in _TECH_PROBE_PATHS.items():
+                if key.lower() in tech_name.lower() or tech_name.lower() in key.lower():
+                    probe = val
+                    break
+        if not probe:
+            continue
+        sections.append(f"### {probe['label']} — Probe these paths:")
+        for path, desc in probe["paths"]:
+            sections.append(f"  - `GET {path}` — {desc}")
+        sections.append("")
+    return sections
+
+
 def _build_tech_context_prompt(tech_fingerprint: dict) -> str:
     """Build LLM prompt section from detected technology fingerprints.
 
@@ -548,26 +733,37 @@ def _build_tech_context_prompt(tech_fingerprint: dict) -> str:
         lines.extend(entries)
         lines.append("")
 
+    # Inject technology-specific probe paths
+    probe_sections = _get_tech_probe_paths(techs)
+    if probe_sections:
+        lines.append("## MANDATORY: Technology-Specific Path Probing")
+        lines.append("")
+        lines.append(
+            "Based on the detected technologies, you MUST probe the following paths "
+            "using the `api_request` tool (GET requests). For each path, report what "
+            "you find: a 200 response with content is a confirmed finding; a 302 redirect "
+            "to an error/login page means the path exists but is partially protected "
+            "(still worth reporting as information disclosure); 403/404 means properly blocked."
+        )
+        lines.append("")
+        lines.extend(probe_sections)
+        lines.append("")
+
     lines.extend([
         "## IMPORTANT: Context-Aware Security Testing",
         "",
-        "You MUST use your knowledge of these specific technologies to guide your testing:",
+        "In addition to the mandatory paths above, use your knowledge of these "
+        "technologies to guide your testing:",
         "",
-        "1. **Technology-specific paths**: Check for default admin panels, debug endpoints, "
-        "configuration pages, and management consoles known for the detected stack.",
-        "",
-        "2. **Known misconfiguration patterns**: Test for common misconfigurations specific to "
-        "each detected technology (e.g., exposed .git directories, debug modes, default credentials, "
+        "1. **Known misconfiguration patterns**: Test for common misconfigurations specific to "
+        "each detected technology (e.g., exposed debug modes, default credentials, "
         "unrestricted management interfaces).",
         "",
-        "3. **Version-specific vulnerabilities**: If you can identify the version (from headers, "
+        "2. **Version-specific vulnerabilities**: If you can identify the version (from headers, "
         "meta tags, JS files, or error pages), check for known CVEs affecting that version.",
         "",
-        "4. **Stack interaction issues**: Look for security issues arising from how the detected "
+        "3. **Stack interaction issues**: Look for security issues arising from how the detected "
         "technologies interact (e.g., CDN cache poisoning, proxy header injection, CMS plugin vulnerabilities).",
-        "",
-        "5. **Technology-specific information disclosure**: Each platform has characteristic "
-        "paths and endpoints that may leak sensitive information. Probe them.",
         "",
         "Do NOT limit yourself to generic OWASP checks — leverage your specific knowledge of "
         "the detected technologies to find issues a generic scanner would miss.",
