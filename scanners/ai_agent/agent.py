@@ -505,6 +505,53 @@ def _format_passive_for_llm(passive_findings: list[dict]) -> str:
     return "\n".join(lines)
 
 
+def _build_findings_context(findings: list[dict], phase_id: str) -> str:
+    """Build a compact findings summary for cross-phase context injection.
+
+    Gives the LLM awareness of what has been found so far, enabling it to
+    leverage earlier discoveries for deeper exploitation and chaining.
+    """
+    if not findings:
+        return ""
+    by_sev: dict[str, list[dict]] = {}
+    for f in findings:
+        sev = _s(f.get("severity", "info")).lower()
+        by_sev.setdefault(sev, []).append(f)
+
+    lines = [
+        "## Findings Discovered So Far (from prior phases)",
+        f"Total: {len(findings)} finding(s)",
+    ]
+    for sev in ("critical", "high", "medium", "low", "info"):
+        group = by_sev.get(sev, [])
+        if not group:
+            continue
+        lines.append(f"\n### {sev.upper()} ({len(group)})")
+        for i, f in enumerate(group[:15], 1):
+            url = _s(f.get("url", ""))
+            title = _s(f.get("title", ""))
+            payload = _s(f.get("payload", ""))
+            param = _s(f.get("parameter", ""))
+            entry = f"  {i}. {title}"
+            if url:
+                entry += f" @ {url}"
+            if param:
+                entry += f" [param: {param}]"
+            if payload:
+                entry += f" [payload: {payload[:80]}]"
+            lines.append(entry)
+        if len(group) > 15:
+            lines.append(f"  ... and {len(group) - 15} more")
+
+    lines.append(
+        "\n**EXPLOIT CHAINING**: Look for combinations of the above findings "
+        "that could be chained for higher impact. If you see an opportunity, "
+        "use the `chain_exploit` tool to declare and execute the chain step-by-step. "
+        "You can also call `get_findings_so_far` at any time to review the full list."
+    )
+    return "\n".join(lines)
+
+
 _TECH_PROBE_PATHS: dict[str, dict] = {
     "Adobe Experience Manager (AEM)": {
         "label": "Adobe Experience Manager (AEM)",
@@ -1062,6 +1109,7 @@ async def run_scan(
             cancel_flag=cancel_flag,
             exclude_urls=getattr(target, "exclude_urls", None) or [],
         )
+        tools.set_findings_ref(findings)
 
         # ── Authenticate User B for BOLA/BFLA two-user testing ──────
         user_b_auth_header: dict = {}
@@ -1227,7 +1275,8 @@ async def run_scan(
         if api_endpoints:
             from .baseline_executor import run_baseline, format_baseline_for_llm
             print(f"  [BASELINE] Running happy path for {len(api_endpoints)} API endpoints...")
-            _cb("phase_start", {"phase": 0, "total": 0, "name": "API Baseline (Happy Path)", "id": "baseline"})
+            p = _next_phase()
+            _cb("phase_start", {"phase": p, "total": 0, "name": "API Baseline (Happy Path)", "id": "baseline"})
 
             def _baseline_progress(event, data):
                 if event == "baseline_request":
@@ -1260,7 +1309,7 @@ async def run_scan(
             successful = sum(1 for r in baseline_results if r.success)
             print(f"  [BASELINE] Done: {successful}/{len(baseline_results)} succeeded")
             _cb("phase_end", {
-                "phase": 0, "name": "API Baseline (Happy Path)",
+                "phase": p, "name": "API Baseline (Happy Path)",
                 "tool_calls": len(baseline_results) * 2,
                 "findings": 0,
             })
@@ -1279,7 +1328,8 @@ async def run_scan(
             if post_endpoints:
                 fuzz_mode = "hybrid (LLM-planned)" if router else "static"
                 print(f"  [BODY-FUZZ] Fuzzing {len(post_endpoints)} endpoint(s) — {fuzz_mode} mode...")
-                _cb("phase_start", {"phase": 0, "total": 0, "name": f"Body Fuzzing ({fuzz_mode})", "id": "body_fuzz"})
+                p = _next_phase()
+                _cb("phase_start", {"phase": p, "total": 0, "name": f"Body Fuzzing ({fuzz_mode})", "id": "body_fuzz"})
                 all_fuzz_results = []
                 all_llm_findings = []
                 for br in post_endpoints:
@@ -1333,7 +1383,7 @@ async def run_scan(
                     })
 
                 _cb("phase_end", {
-                    "phase": 0, "name": f"Body Fuzzing ({fuzz_mode})",
+                    "phase": p, "name": f"Body Fuzzing ({fuzz_mode})",
                     "tool_calls": len(all_fuzz_results), "findings": anomalies + llm_issues,
                 })
                 metrics["total_tool_calls"] += len(all_fuzz_results)
@@ -1357,7 +1407,8 @@ async def run_scan(
             wf = load_workflow(target.workflow_id)
             if wf:
                 print(f"  [WORKFLOW] Loaded workflow: {wf.name} ({len(wf.steps)} steps)")
-                _cb("phase_start", {"phase": 0, "total": 0, "name": f"Workflow Replay: {wf.name}", "id": "workflow_replay"})
+                p = _next_phase()
+                _cb("phase_start", {"phase": p, "total": 0, "name": f"Workflow Replay: {wf.name}", "id": "workflow_replay"})
                 wf_vars = {"username": (target.credentials or {}).get("username", ""),
                            "password": (target.credentials or {}).get("password", "")}
                 try:
@@ -1373,7 +1424,7 @@ async def run_scan(
                 except Exception as e:
                     print(f"  [WORKFLOW] Replay failed: {e}")
                     logger.warning("Workflow replay failed: %s", e, exc_info=True)
-                _cb("phase_end", {"phase": 0, "name": f"Workflow Replay: {wf.name}",
+                _cb("phase_end", {"phase": p, "name": f"Workflow Replay: {wf.name}",
                                   "tool_calls": wf.steps.__len__(), "findings": 0})
                 system_prompt += "\n\n" + build_workflow_prompt(wf)
             else:
@@ -1390,14 +1441,12 @@ async def run_scan(
         has_baseline = bool(baseline_context)
         has_body_fuzz = bool(body_fuzz_context)
         has_workflow = workflow_replayed or bool(getattr(target, "business_flow", None))
-        extra_phases = (1 if has_baseline else 0) + (1 if has_body_fuzz else 0) + (1 if workflow_replayed else 0)
-        total_phases = len(phases) + 1 + extra_phases  # +1 verification
+        total_phases = _phase_seq + len(phases) + 2  # pre-LLM + LLM phases + post-auth passive + verification
         print(f"  [SCAN] Starting {len(phases)} scan phases + verification...")
         _cb("scan_start", {"total_phases": total_phases})
-        phase_offset = extra_phases
         for phase_idx, phase in enumerate(phases):
             _check_cancel()
-            phase_num = phase_idx + 1 + phase_offset
+            phase_num = _next_phase()
             if start_from_phase > 0 and phase_idx < start_from_phase:
                 print(f"  [{phase_num}/{total_phases}] Phase: {phase.name} — skipped (already completed)")
                 _cb("phase_start", {"phase": phase_num, "total": total_phases, "name": f"{phase.name} (skipped)", "id": phase.id})
@@ -1410,16 +1459,28 @@ async def run_scan(
             _cb("phase_start", {"phase": phase_num, "total": total_phases, "name": phase.name, "id": phase.id})
 
             phase_prompt = phase.prompt
+
+            # ── Cross-phase findings context ──
             if phase.id == "attack_chain_analysis" and findings:
                 summary_lines = []
                 for i, f in enumerate(findings, 1):
                     line = f"{i}. [{f.get('severity','?')}] {f.get('title','?')} @ {f.get('url','?')}"
+                    param = f.get("parameter", "")
+                    pl = f.get("payload", "")
+                    if param:
+                        line += f" [param: {param}]"
+                    if pl:
+                        line += f" [payload: {pl[:100]}]"
                     ev = f.get("evidence", "")
                     if ev:
-                        line += f" — {ev[:150]}"
+                        line += f" — {ev[:200]}"
                     summary_lines.append(line)
                 findings_text = "\n".join(summary_lines) if summary_lines else "(no findings yet)"
                 phase_prompt = phase_prompt.replace("{findings_summary}", findings_text)
+            elif phase_idx > 0 and findings:
+                ctx = _build_findings_context(findings, phase.id)
+                if ctx:
+                    phase_prompt += "\n\n" + ctx
 
             # Inject User B context into BOLA/authorization phases
             bola_web_placeholder = "{bola_user_b_web}"
@@ -1844,7 +1905,8 @@ async def run_scan(
             if phase_idx == 0:
                 try:
                     print("  [PASSIVE-2] Re-running passive recon on authenticated page...")
-                    _cb("phase_start", {"phase": 0, "total": 0, "name": "Passive Recon (post-auth)", "id": "passive_recon_2"})
+                    p2_num = _next_phase()
+                    _cb("phase_start", {"phase": p2_num, "total": 0, "name": "Passive Recon (post-auth)", "id": "passive_recon_2"})
                     p2_result = await run_passive_recon(
                         page=page,
                         http_client=http_client,
@@ -1863,7 +1925,7 @@ async def run_scan(
                     new_p2 = [f for f in p2_findings if f.get("title", "") + f.get("url", "") not in existing_titles]
                     findings.extend(new_p2)
                     print(f"  [PASSIVE-2] Done: {len(p2_findings)} total, {len(new_p2)} new findings")
-                    _cb("phase_end", {"phase": 0, "name": "Passive Recon (post-auth)",
+                    _cb("phase_end", {"phase": p2_num, "name": "Passive Recon (post-auth)",
                                       "tool_calls": 0, "findings": len(new_p2)})
                     if new_p2:
                         p2_summary = _format_passive_for_llm(new_p2)
@@ -1879,7 +1941,8 @@ async def run_scan(
         # ── Runtime Verification Phase (no LLM, replays payloads) ──
         _check_cancel()
         if findings:
-            _cb("phase_start", {"phase": total_phases, "total": total_phases, "name": "Runtime Verification", "id": "verification"})
+            verify_num = _next_phase()
+            _cb("phase_start", {"phase": verify_num, "total": total_phases, "name": "Runtime Verification", "id": "verification"})
             print("  [VERIFY] Replaying payloads to confirm findings...")
             try:
                 from scripts.runtime_verifier import verify_all_findings
@@ -1922,7 +1985,7 @@ async def run_scan(
                 print(f"  [VERIFY] Verification failed (non-fatal): {e}")
                 logger.warning("Runtime verification failed: %s", e, exc_info=True)
 
-            _cb("phase_end", {"phase": len(phases), "name": "Runtime Verification",
+            _cb("phase_end", {"phase": verify_num, "name": "Runtime Verification",
                               "tool_calls": len(findings), "findings": 0})
 
         auth_session.stop_monitor()
@@ -2094,10 +2157,23 @@ def trim_context(messages: list[dict], max_tokens: int = TRIM_TARGET_TOKENS) -> 
         return _repair_tool_pairs(kept)
 
     last_start = phase_boundaries[-1]
-    summary = {
-        "role": "user",
-        "content": "[Previous phases completed and summarized to fit token budget. Continue scanning with fresh context.]",
-    }
+
+    # Scan the system prompt for a findings context block to preserve across trims.
+    # The findings context is injected into phase prompts by _build_findings_context
+    # and is critical for exploit chaining — it must survive aggressive trimming.
+    findings_block = ""
+    for m in messages[1:last_start]:
+        c = m.get("content", "") if m.get("role") == "user" else ""
+        if "## Findings Discovered So Far" in c:
+            start = c.index("## Findings Discovered So Far")
+            findings_block = c[start:]
+            break
+
+    summary_text = "[Previous phases completed and summarized to fit token budget. Continue scanning with fresh context.]"
+    if findings_block:
+        summary_text += "\n\n" + findings_block
+
+    summary = {"role": "user", "content": summary_text}
     kept.append(summary)
     kept.extend(messages[last_start:])
 

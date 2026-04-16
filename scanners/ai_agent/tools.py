@@ -196,6 +196,12 @@ class ScanTools:
         self._excluded_hits: list[str] = []
         self._network_log: list[dict] = []
         self._ws_connections: dict[str, Any] = {}
+        self._findings_ref: list[dict] = []
+        self._chain_results: list[dict] = []
+
+    def set_findings_ref(self, findings: list[dict]) -> None:
+        """Bind the shared findings list so tools can read it."""
+        self._findings_ref = findings
         self._intercept_pattern: str | None = None
         if self._page:
             self._page.on("requestfinished", lambda req: asyncio.ensure_future(self._log_request(req)))
@@ -293,6 +299,131 @@ class ScanTools:
                      "sign-out", "sign_out", "disconnect")
         return any(kw in lower for kw in logout_kw)
 
+    async def get_findings_so_far(self) -> dict:
+        """Return a summary of all findings discovered in the scan so far."""
+        if not self._findings_ref:
+            return {"total": 0, "findings": [], "message": "No findings discovered yet."}
+        by_sev: dict[str, int] = {}
+        items = []
+        for f in self._findings_ref:
+            sev = (f.get("severity") or "info").lower()
+            by_sev[sev] = by_sev.get(sev, 0) + 1
+            items.append({
+                "title": f.get("title", ""),
+                "severity": f.get("severity", ""),
+                "url": f.get("url", ""),
+                "parameter": f.get("parameter", ""),
+                "payload": (f.get("payload") or "")[:100],
+                "owasp": f.get("owasp_category", ""),
+                "phase": f.get("phase", ""),
+            })
+        return {
+            "total": len(self._findings_ref),
+            "by_severity": by_sev,
+            "findings": items,
+        }
+
+    async def chain_exploit(self, chain_name: str, steps: list, target_url: str = "") -> dict:
+        """Execute a multi-step exploit chain. Each step uses an existing tool.
+
+        The agent declares the chain (name + ordered steps) and this tool
+        executes each step sequentially, collecting evidence at every stage.
+        If any step fails, the chain stops and reports partial results.
+        """
+        if not steps:
+            return {"error": "No steps provided. Provide at least 2 steps for a chain."}
+        if len(steps) < 2:
+            return {"error": "A chain requires at least 2 steps. For single actions use the tool directly."}
+
+        chain_evidence: list[dict] = []
+        chain_success = True
+        failed_step = -1
+
+        for idx, step in enumerate(steps):
+            tool_name = step.get("tool", "")
+            tool_args = step.get("args", {})
+            description = step.get("description", f"Step {idx + 1}")
+            expect = step.get("expect", "")
+
+            if not tool_name:
+                chain_evidence.append({
+                    "step": idx + 1, "description": description,
+                    "status": "SKIPPED", "reason": "No tool specified",
+                })
+                continue
+
+            if tool_name in ("chain_exploit", "get_findings_so_far"):
+                chain_evidence.append({
+                    "step": idx + 1, "description": description,
+                    "status": "SKIPPED", "reason": f"Cannot nest {tool_name} inside a chain",
+                })
+                continue
+
+            try:
+                result = await self.execute(tool_name, json.dumps(tool_args))
+            except Exception as e:
+                chain_evidence.append({
+                    "step": idx + 1, "tool": tool_name, "description": description,
+                    "status": "ERROR", "error": str(e),
+                })
+                chain_success = False
+                failed_step = idx + 1
+                break
+
+            is_error = isinstance(result, dict) and result.get("error")
+            status_code = result.get("status") if isinstance(result, dict) else None
+            body_snippet = ""
+            if isinstance(result, dict):
+                body_snippet = (result.get("body_snippet") or result.get("body") or
+                                result.get("content") or result.get("text") or "")
+                if isinstance(body_snippet, str) and len(body_snippet) > 500:
+                    body_snippet = body_snippet[:500] + "..."
+
+            step_record = {
+                "step": idx + 1,
+                "tool": tool_name,
+                "description": description,
+                "status": "ERROR" if is_error else "OK",
+                "status_code": status_code,
+                "body_snippet": body_snippet,
+            }
+            if is_error:
+                step_record["error"] = result.get("error", "")
+                chain_success = False
+                failed_step = idx + 1
+                chain_evidence.append(step_record)
+                break
+
+            if expect:
+                step_record["expectation"] = expect
+                body_lower = str(body_snippet).lower()
+                if expect.lower() not in body_lower and str(status_code) != str(expect):
+                    step_record["expectation_met"] = False
+                    step_record["status"] = "UNEXPECTED"
+                else:
+                    step_record["expectation_met"] = True
+
+            chain_evidence.append(step_record)
+
+        chain_result = {
+            "chain_name": chain_name,
+            "total_steps": len(steps),
+            "steps_completed": len(chain_evidence),
+            "chain_success": chain_success,
+            "evidence": chain_evidence,
+        }
+        if not chain_success:
+            chain_result["failed_at_step"] = failed_step
+            chain_result["verdict"] = "CHAIN BROKEN — partial exploitation achieved"
+        else:
+            chain_result["verdict"] = "CHAIN COMPLETE — all steps succeeded"
+            chain_result["action_required"] = (
+                "This chain succeeded end-to-end. Report it as a single finding with "
+                "severity based on the COMBINED impact. Include all step evidence."
+            )
+        self._chain_results.append(chain_result)
+        return chain_result
+
     def _is_cancelled(self) -> bool:
         return self._cancel_flag is not None and self._cancel_flag.is_set()
 
@@ -334,6 +465,8 @@ class ScanTools:
             "test_auth_bypass": self.test_auth_bypass,
             "test_method_override": self.test_method_override,
             "test_token_security": self.test_token_security,
+            "get_findings_so_far": self.get_findings_so_far,
+            "chain_exploit": self.chain_exploit,
         }
 
         handler = handlers.get(function_name)
@@ -1646,6 +1779,67 @@ TOOL_DEFINITIONS = [
                     "headers": {"type": "object", "description": "Additional headers"},
                 },
                 "required": ["endpoint", "token"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_findings_so_far",
+            "description": "Retrieve all findings discovered in prior phases. Use to review what has been found and identify chaining opportunities.",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "chain_exploit",
+            "description": (
+                "Execute a multi-step exploit chain. Declare the chain name and an ordered list of steps. "
+                "Each step specifies a tool and its args. Steps run sequentially; if any step fails the chain "
+                "stops and partial results are returned. Use this when you identify 2+ vulnerabilities that "
+                "combine for higher impact (e.g. XSS + steal session cookie, SSRF + read cloud metadata, "
+                "IDOR + no rate limit for mass exfiltration). Report the chain as a single Critical/High finding."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "chain_name": {
+                        "type": "string",
+                        "description": "Descriptive name for the chain (e.g. 'XSS to Session Hijack')",
+                    },
+                    "target_url": {
+                        "type": "string",
+                        "description": "Primary target URL for the chain",
+                    },
+                    "steps": {
+                        "type": "array",
+                        "description": "Ordered list of exploit steps",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "tool": {
+                                    "type": "string",
+                                    "description": "Tool name to call (e.g. api_request, navigate, inject_payload, fuzz_parameter)",
+                                },
+                                "args": {
+                                    "type": "object",
+                                    "description": "Arguments to pass to the tool",
+                                },
+                                "description": {
+                                    "type": "string",
+                                    "description": "What this step does in the chain",
+                                },
+                                "expect": {
+                                    "type": "string",
+                                    "description": "Expected indicator of success (status code or string in body)",
+                                },
+                            },
+                            "required": ["tool", "args", "description"],
+                        },
+                    },
+                },
+                "required": ["chain_name", "steps"],
             },
         },
     },

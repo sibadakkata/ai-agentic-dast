@@ -172,7 +172,12 @@ Runs **after all other phases complete**. Receives a summary of every finding di
 | **Brute Force** | Timing enumeration (valid users) + no rate limit | High — confirmed users + password spray |
 | **Auth Bypass via Old API** | API version downgrade + missing auth on old version | High — access without authentication |
 
-The LLM **attempts to execute** each applicable chain, not just theorize. Only proven chains with evidence are reported.
+The LLM **attempts to execute** each applicable chain using the `chain_exploit` tool, not just theorize. Only proven chains with evidence are reported.
+
+**Multi-step chaining tools:**
+- `get_findings_so_far` — lets the LLM query all findings discovered across prior phases
+- `chain_exploit` — declares an ordered sequence of steps (each using existing tools) and executes them end-to-end, collecting evidence at each step
+- Cross-phase context injection ensures every phase after the first sees a summary of prior discoveries
 
 ---
 
@@ -180,7 +185,7 @@ The LLM **attempts to execute** each applicable chain, not just theorize. Only p
 
 | Step | What It Does |
 |------|-------------|
-| **Runtime Verification** | Replays exact attack payloads against live target — verdicts: CONFIRMED / DISPROVED / INCONCLUSIVE |
+| **Runtime Verification** | Replays exact attack payloads against live target — verdicts: CONFIRMED / DISPROVED / INCONCLUSIVE. Exploit chains are replayed end-to-end with step outputs carried forward |
 | **Triage Engine** | 3-layer evidence-based classification: passive recon (auto-TP) → evidence rules → confidence scoring |
 | **CVE Enrichment** | Live lookup against NVD + OSV.dev for detected library versions |
 | **CVSS Adjustment** | Context-aware scoring: runtime-verified findings scored higher, false positives set to 0.0 |

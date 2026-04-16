@@ -22,7 +22,7 @@ The scanner is built around a **single LLM agent** that drives a real browser an
 │   └────┬─────┘  └────┬─────┘  └────┬─────┘  └──────┬───────┘  │
 │        │              │             │                │          │
 │   ┌────▼──────────────▼─────────────▼────────────────▼───────┐ │
-│   │                    TOOL LAYER (28 tools)                  │ │
+│   │                    TOOL LAYER (30 tools)                  │ │
 │   │  Browser: navigate, click, fill, screenshot               │ │
 │   │  Injection: inject_payload, fuzz_parameter                │ │
 │   │  Observation: get_page_source, get_cookies, get_network   │ │
@@ -158,9 +158,21 @@ The core scanning logic follows an **Observe-Think-Act-Analyze-Plan** cycle:
 | 14 | `api_content_type` | Content-Type Confusion & HTTP Smuggling | JSON↔XML↔form parser + CL.TE/TE.CL | ✓ |
 | 15 | `api_method_override` | HTTP Method Override | X-HTTP-Method-Override bypass | ✓ |
 
-### Attack Chain Phase (1)
+### Attack Chain Phase (1) — Multi-Step Exploit Chaining
 
-`attack_chain_analysis` — runs after all phases, combines findings into exploit chains (e.g. XSS + non-HttpOnly cookie → session hijack).
+`attack_chain_analysis` — runs after all vulnerability discovery phases, reviews every finding discovered so far, and attempts to combine them into multi-step exploit chains.
+
+**How it works:**
+1. **Cross-phase context injection** — after each LLM phase, a compact summary of all findings discovered so far is injected into the next phase's prompt, giving the LLM awareness of what has already been found
+2. **`get_findings_so_far` tool** — the LLM can query the full findings list at any point during a phase to plan chaining strategies
+3. **`chain_exploit` tool** — the LLM declares an ordered list of steps (each using an existing tool like `api_request`, `navigate`, etc.) and the engine executes them sequentially, collecting evidence at each step
+4. **Chain verification** — the runtime verifier replays chain steps end-to-end against the live target to confirm exploitability
+
+**Example chain patterns:**
+- XSS + non-HttpOnly cookie → session hijack
+- SSRF → internal metadata → credential theft → admin access
+- SQL injection → data extraction → privilege escalation
+- IDOR + mass assignment → horizontal privilege escalation
 
 ### Reliability Mechanisms
 
@@ -174,7 +186,7 @@ The core scanning logic follows an **Observe-Think-Act-Analyze-Plan** cycle:
 
 > Deep dive on these mechanisms: [Scanner Internals](scanner-internals.md)
 
-## Tool System (28 Tools)
+## Tool System (30 Tools)
 
 | Category | Tools | Purpose |
 |----------|-------|---------|
@@ -186,6 +198,7 @@ The core scanning logic follows an **Observe-Think-Act-Analyze-Plan** cycle:
 | **API** | `api_request`, `api_request_raw`, `fuzz_parameter`, `replay_with_modification` | HTTP requests, fuzzing, response comparison |
 | **Discovery** | `get_api_endpoints` | List imported/discovered API endpoints |
 | **Auth Testing** | `test_auth_bypass`, `test_method_override`, `test_token_security` | Auth bypass, method override, JWT manipulation |
+| **Exploit Chaining** | `get_findings_so_far`, `chain_exploit` | Query prior findings, execute multi-step attack chains |
 
 ## Authentication Module
 

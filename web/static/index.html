@@ -228,6 +228,18 @@ tr:hover td { background:rgba(79,70,229,0.03); }
 .phase-header .phase-arrow { transition:transform 0.2s; font-size:10px; color:var(--text2); margin-left:8px; }
 .phase-header.expanded .phase-arrow { transform:rotate(90deg); }
 .phase-detail { display:none; border-top:1px solid var(--border); }
+
+.cat-group { border:1px solid var(--border); border-radius:8px; margin-bottom:8px; overflow:hidden; }
+.cat-header { display:flex; justify-content:space-between; align-items:center; padding:10px 16px; background:var(--surface); cursor:pointer; user-select:none; transition:background 0.1s; }
+.cat-header:hover { background:var(--surface2); }
+.cat-header .cat-label { font-weight:700; font-size:13px; color:var(--text); display:flex; align-items:center; gap:8px; }
+.cat-header .cat-label .cat-id { color:var(--accent); font-size:12px; font-weight:800; letter-spacing:0.3px; }
+.cat-header .cat-counts { display:flex; gap:10px; font-size:11px; color:var(--text2); align-items:center; }
+.cat-header .cat-counts .sev-count { padding:2px 8px; border-radius:10px; font-weight:600; font-size:10px; }
+.cat-header .cat-arrow { transition:transform 0.2s; font-size:10px; color:var(--text2); margin-left:8px; }
+.cat-header.expanded .cat-arrow { transform:rotate(90deg); }
+.cat-body { display:none; border-top:1px solid var(--border); }
+.cat-body.open { display:block; }
 .phase-detail.open { display:block; }
 .tool-group { border-bottom:1px solid var(--border); }
 .tool-group-header { display:flex; align-items:center; gap:8px; padding:8px 16px; background:var(--surface2); cursor:pointer; font-size:12px; transition:background 0.1s; }
@@ -3373,8 +3385,6 @@ function renderPhaseBreakdown(container, live) {
       phaseNum = phaseData.phase;
     } else if (isCurrent && currentPhaseNum) {
       phaseNum = currentPhaseNum;
-    } else if (phaseData && phaseData.phase === 0) {
-      phaseNum = '—';
     } else {
       phaseNum = idx + 1;
     }
@@ -3937,7 +3947,6 @@ var _triageCols = {
   triage:   {label:'Triage Sev',default:true},
   verdict:  {label:'Verdict',   default:true},
   verified: {label:'Verified',  default:false},
-  owasp:    {label:'OWASP',     default:false},
   cwe:      {label:'CWE',       default:true},
   cvss:     {label:'CVSS',      default:true},
   confidence:{label:'Confidence',default:false},
@@ -4046,7 +4055,6 @@ function renderComparison(data) {
     c.triage ? '<th>Triage Sev</th>' : '',
     c.verdict ? '<th>Verdict</th>' : '',
     c.verified ? '<th>Verified</th>' : '',
-    c.owasp ? '<th>OWASP</th>' : '',
     c.cwe ? '<th>CWE</th>' : '',
     c.cvss ? '<th>CVSS</th>' : '',
     c.confidence ? '<th>Confidence</th>' : '',
@@ -4054,8 +4062,7 @@ function renderComparison(data) {
     c.reason ? '<th style="max-width:220px;">Reason</th>' : '',
   ].filter(Boolean).join('');
 
-  el.innerHTML = vSummary + sourceFilterHtml + toolbarHtml + `<table><thead><tr>${thRow}</tr></thead><tbody>` +
-  filtered.map((f, i) => {
+  function _compRow(f, rowNum) {
     const vText = f.verdict === 'MANUAL_REVIEW' ? 'Needs Review'
       : f.verdict === 'UNVERIFIED' ? 'Not Verified'
       : f.verdict === 'INCONCLUSIVE' ? 'Inconclusive'
@@ -4071,24 +4078,51 @@ function renderComparison(data) {
       : 'color:var(--text2);';
     const realIdx = data.triaged_findings.indexOf(f);
     const hasEvidence = f.payload || f.evidence || (f.request_response && f.request_response.length);
-    const tdArr = [
+    return [
       c._arrow ? `<td style="text-align:center;">${hasEvidence ? '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--accent2)" stroke-width="2" style="vertical-align:-2px;"><path d="M9 18l6-6-6-6"/></svg>' : ''}</td>` : '',
-      c.num ? `<td>${i+1}</td>` : '',
+      c.num ? `<td>${rowNum}</td>` : '',
       c.finding ? `<td><strong>${esc(f.title)}</strong><br><span style="font-size:11px;color:var(--text2);word-break:break-all;">${esc(f.url||'')}</span></td>` : '',
       (c.source && hasSources) ? `<td>${sourceBadge(f.source||'ai')}</td>` : '',
       c.ai_sev ? `<td><span class="severity sev-${f.ai_severity?.toLowerCase()}">${f.ai_severity}</span></td>` : '',
       c.triage ? `<td><span class="severity sev-${(f.final_severity||'').toLowerCase().replace(/\s+/g,'')}">${f.final_severity||'-'}</span></td>` : '',
       c.verdict ? `<td><span class="verdict v-${f.verdict?.toLowerCase()}">${f.verdict?.replace(/_/g,' ').toLowerCase().replace(/\b\w/g,x=>x.toUpperCase())}</span></td>` : '',
       c.verified ? `<td style="font-size:11px;font-weight:600;${vColor}">${vText}</td>` : '',
-      c.owasp ? `<td style="font-size:11px">${esc(f.owasp_category||'')}</td>` : '',
       c.cwe ? `<td style="font-size:11px">${_cweLink(f.cwe)}</td>` : '',
       c.cvss ? `<td style="font-size:11px">${_cvssLink(f.cvss_override != null ? f.cvss_override : f.cvss, f.cvss_rationale, f.cvss_vector)}${f.cvss_override != null ? '<span style="font-size:9px;color:var(--accent2);" title="Manually overridden"> *</span>' : ''}<span class="cvss-edit" onclick="event.stopPropagation();editCvss(${realIdx})" style="cursor:pointer;font-size:10px;color:var(--text2);margin-left:3px;" title="Override CVSS">&#9998;</span></td>` : '',
       c.confidence ? `<td style="font-size:11px">${esc(f.confidence||'-')}</td>` : '',
       c.parameter ? `<td style="font-size:11px;word-break:break-all;">${esc(f.parameter||'-')}</td>` : '',
       c.reason ? `<td style="font-size:11px;max-width:220px;line-height:1.5;word-break:break-word;white-space:normal;">${esc((f.reason||'').length > 120 ? f.reason.substring(0,120)+'…' : (f.reason||''))}</td>` : '',
     ].filter(Boolean).join('');
-    return `<tr onclick="showCompletedFindingDetail(${realIdx})" style="cursor:pointer;" title="Click to view evidence">${tdArr}</tr>`;
-  }).join('') + '</tbody></table>';
+  }
+
+  var groups = _groupByCategory(filtered, 'owasp_category');
+  var catKeys = Object.keys(groups).sort(_catSort);
+  var rowNum = 0;
+  var groupsHtml = catKeys.map(function(cat) {
+    var items = groups[cat];
+    var title = _CAT_TITLES[cat] || 'Other Findings';
+    var catLabel = cat !== 'Other' ? '<span class="cat-id">' + cat + '</span> ' + esc(title) : esc(title);
+    var rows = items.map(function(item) {
+      rowNum++;
+      var realIdx = data.triaged_findings.indexOf(item.f);
+      return '<tr onclick="showCompletedFindingDetail(' + realIdx + ')" style="cursor:pointer;" title="Click to view evidence">' + _compRow(item.f, rowNum) + '</tr>';
+    }).join('');
+    return '<div class="cat-group">' +
+      '<div class="cat-header" onclick="toggleCatGroup(this)">' +
+        '<span class="cat-label">' + catLabel + '</span>' +
+        '<span class="cat-counts">' +
+          '<span style="font-weight:700;">' + items.length + ' finding' + (items.length !== 1 ? 's' : '') + '</span>' +
+          _sevCounts(items) +
+          '<span class="cat-arrow">&#9654;</span>' +
+        '</span>' +
+      '</div>' +
+      '<div class="cat-body">' +
+        '<table><thead><tr>' + thRow + '</tr></thead><tbody>' + rows + '</tbody></table>' +
+      '</div>' +
+    '</div>';
+  }).join('');
+
+  el.innerHTML = vSummary + sourceFilterHtml + toolbarHtml + groupsHtml;
 }
 
 async function editCvss(idx) {
@@ -4173,22 +4207,50 @@ function renderAIRaw(findings) {
   if (!el) return;
   if (!findings || !findings.length) { el.innerHTML = '<div class="empty">No findings</div>'; return; }
   window._aiRawFindings = findings;
-  el.innerHTML = `<table><thead><tr>
-    <th style="width:30px;"></th><th>#</th><th>Finding</th><th>Severity</th><th>OWASP</th><th>CWE</th><th>URL</th><th>Parameter</th><th style="max-width:160px;">Evidence</th>
-  </tr></thead><tbody>` +
-  findings.map((f, i) => {
+
+  var thRow = '<th style="width:30px;"></th><th>#</th><th>Finding</th><th>Severity</th><th>CWE</th><th>URL</th><th>Parameter</th><th style="max-width:160px;">Evidence</th>';
+
+  function _rawRow(f, rowNum, origIdx) {
     const hasDetail = f.payload || f.evidence || (f.request_response && f.request_response.length);
-    return `<tr onclick="showAIRawFindingDetail(${i})" style="cursor:pointer;" title="Click to view evidence">
-    <td style="text-align:center;">${hasDetail ? '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--accent2)" stroke-width="2" style="vertical-align:-2px;"><path d="M9 18l6-6-6-6"/></svg>' : ''}</td>
-    <td>${i+1}</td>
-    <td><strong>${esc(f.title)}</strong></td>
-    <td><span class="severity sev-${f.severity?.toLowerCase()}">${f.severity}</span></td>
-    <td style="font-size:11px">${esc(f.owasp||'')}</td>
-    <td style="font-size:11px">${_cweLink(f.cwe_hint||f.cwe)}</td>
-    <td style="word-break:break-all;font-size:11px;max-width:200px">${esc(f.url||'')}</td>
-    <td style="font-size:11px">${esc(f.parameter||'')}</td>
-    <td style="font-size:11px;max-width:160px">${esc(String(typeof f.evidence==='object'?JSON.stringify(f.evidence):f.evidence||'').substring(0,80))}${String(typeof f.evidence==='object'?JSON.stringify(f.evidence):f.evidence||'').length > 80 ? '...' : ''}</td>
-  </tr>`;}).join('') + '</tbody></table>';
+    return '<tr onclick="showAIRawFindingDetail(' + origIdx + ')" style="cursor:pointer;" title="Click to view evidence">' +
+      '<td style="text-align:center;">' + (hasDetail ? '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--accent2)" stroke-width="2" style="vertical-align:-2px;"><path d="M9 18l6-6-6-6"/></svg>' : '') + '</td>' +
+      '<td>' + rowNum + '</td>' +
+      '<td><strong>' + esc(f.title) + '</strong></td>' +
+      '<td><span class="severity sev-' + (f.severity||'').toLowerCase() + '">' + (f.severity||'-') + '</span></td>' +
+      '<td style="font-size:11px">' + _cweLink(f.cwe_hint||f.cwe) + '</td>' +
+      '<td style="word-break:break-all;font-size:11px;max-width:200px">' + esc(f.url||'') + '</td>' +
+      '<td style="font-size:11px">' + esc(f.parameter||'') + '</td>' +
+      '<td style="font-size:11px;max-width:160px">' + esc(String(typeof f.evidence==='object'?JSON.stringify(f.evidence):f.evidence||'').substring(0,80)) + (String(typeof f.evidence==='object'?JSON.stringify(f.evidence):f.evidence||'').length > 80 ? '...' : '') + '</td>' +
+    '</tr>';
+  }
+
+  var groups = _groupByCategory(findings, 'owasp');
+  var catKeys = Object.keys(groups).sort(_catSort);
+  var rowNum = 0;
+  var groupsHtml = catKeys.map(function(cat) {
+    var items = groups[cat];
+    var title = _CAT_TITLES[cat] || 'Other Findings';
+    var catLabel = cat !== 'Other' ? '<span class="cat-id">' + cat + '</span> ' + esc(title) : esc(title);
+    var rows = items.map(function(item) {
+      rowNum++;
+      return _rawRow(item.f, rowNum, item.origIdx);
+    }).join('');
+    return '<div class="cat-group">' +
+      '<div class="cat-header" onclick="toggleCatGroup(this)">' +
+        '<span class="cat-label">' + catLabel + '</span>' +
+        '<span class="cat-counts">' +
+          '<span style="font-weight:700;">' + items.length + ' finding' + (items.length !== 1 ? 's' : '') + '</span>' +
+          _sevCounts(items) +
+          '<span class="cat-arrow">&#9654;</span>' +
+        '</span>' +
+      '</div>' +
+      '<div class="cat-body">' +
+        '<table><thead><tr>' + thRow + '</tr></thead><tbody>' + rows + '</tbody></table>' +
+      '</div>' +
+    '</div>';
+  }).join('');
+
+  el.innerHTML = groupsHtml;
 }
 
 function renderPhaseLog(phases) {
@@ -4243,6 +4305,57 @@ function switchTab(name) {
 function toggleExpand(el) {
   el.classList.toggle('open');
   el.nextElementSibling.classList.toggle('open');
+}
+
+function toggleCatGroup(el) {
+  el.classList.toggle('expanded');
+  var body = el.nextElementSibling;
+  if (body) body.classList.toggle('open');
+}
+
+var _CAT_TITLES = {
+  'A01': 'Broken Access Control',
+  'A02': 'Cryptographic Failures',
+  'A03': 'Injection',
+  'A04': 'Insecure Design',
+  'A05': 'Security Misconfiguration',
+  'A06': 'Vulnerable Components',
+  'A07': 'Authentication Failures',
+  'A08': 'Software & Data Integrity',
+  'A09': 'Logging & Monitoring',
+  'A10': 'Server-Side Request Forgery',
+};
+
+function _catSort(a, b) {
+  var order = ['A01','A02','A03','A04','A05','A06','A07','A08','A09','A10','Other'];
+  return (order.indexOf(a) === -1 ? 99 : order.indexOf(a)) - (order.indexOf(b) === -1 ? 99 : order.indexOf(b));
+}
+
+function _groupByCategory(findings, catKey) {
+  var groups = {};
+  findings.forEach(function(f, origIdx) {
+    var raw = f[catKey] || '';
+    var cat = (typeof raw === 'string' ? raw : String(raw)).substring(0, 3).toUpperCase();
+    if (!/^A\d{2}$/.test(cat)) cat = 'Other';
+    if (!groups[cat]) groups[cat] = [];
+    groups[cat].push({f: f, origIdx: origIdx});
+  });
+  return groups;
+}
+
+function _sevCounts(items) {
+  var c = {critical:0, high:0, medium:0, low:0, info:0};
+  items.forEach(function(item) {
+    var s = ((item.f.severity || item.f.final_severity || '') + '').toLowerCase();
+    if (c[s] !== undefined) c[s]++;
+  });
+  var parts = [];
+  if (c.critical) parts.push('<span class="sev-count" style="background:rgba(220,38,38,0.1);color:var(--red);">' + c.critical + ' Critical</span>');
+  if (c.high) parts.push('<span class="sev-count" style="background:rgba(234,88,12,0.1);color:var(--orange);">' + c.high + ' High</span>');
+  if (c.medium) parts.push('<span class="sev-count" style="background:rgba(217,119,6,0.1);color:var(--yellow);">' + c.medium + ' Medium</span>');
+  if (c.low) parts.push('<span class="sev-count" style="background:rgba(37,99,235,0.1);color:var(--blue);">' + c.low + ' Low</span>');
+  if (c.info) parts.push('<span class="sev-count" style="background:rgba(107,114,128,0.1);color:var(--text2);">' + c.info + ' Info</span>');
+  return parts.join('');
 }
 
 var _rptScansCache = [];
@@ -5302,7 +5415,7 @@ function showFindingDetail(idx) {
     ['Phase', esc(f.phase || f.source || '-')],
     ['URL', `<a href="${esc(f.url || '')}" target="_blank" style="color:var(--accent2);word-break:break-all;">${esc(f.url || '-')}</a>`],
     ['Parameter', esc(f.parameter || '-')],
-    ['OWASP', esc(f.owasp_category || '-')],
+    ['Category', esc(f.owasp_category || '-')],
     ['CWE', _cweLink(f.cwe_hint)],
     ['Confidence', esc(f.confidence || '-')],
   ];
@@ -5420,7 +5533,7 @@ function showCompletedFindingDetail(idx) {
     ['Verdict', `<span class="verdict v-${(f.verdict||'').toLowerCase()}">${esc((f.verdict||'').replace(/_/g,' '))}</span>`],
     ['URL', `<a href="${esc(f.url || '')}" target="_blank" style="color:var(--accent2);word-break:break-all;">${esc(f.url || '-')}</a>`],
     ['Parameter', esc(f.parameter || '-')],
-    ['OWASP', esc(f.owasp_category || '-')],
+    ['Category', esc(f.owasp_category || '-')],
     ['CWE', _cweLink(f.cwe)],
     ['CVSS', _cvssLink(f.cvss_override != null ? f.cvss_override : f.cvss, f.cvss_rationale, f.cvss_vector) + (f.cvss_override != null ? ' <span style="font-size:10px;color:var(--accent2);">(override)</span>' : '')],
     ['Confidence', esc(f.confidence || '-')],
@@ -5520,7 +5633,7 @@ function showAIRawFindingDetail(idx) {
     ['Severity', `<span class="severity ${sevClass}">${esc(f.severity || 'Info')}</span>`],
     ['URL', `<a href="${esc(f.url || '')}" target="_blank" style="color:var(--accent2);word-break:break-all;">${esc(f.url || '-')}</a>`],
     ['Parameter', esc(f.parameter || '-')],
-    ['OWASP', esc(f.owasp || '-')],
+    ['Category', esc(f.owasp || '-')],
     ['CWE', _cweLink(f.cwe_hint || f.cwe)],
     ['Confidence', esc(f.confidence || '-')],
   ].forEach(([label, value]) => {
