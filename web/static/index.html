@@ -3075,6 +3075,84 @@ let lvFindingOffset = 0;
 let lvPollInterval = null;
 let _allLiveTests = [];
 let _allLiveFindings = [];
+var _liveCatGroups = {};
+
+function _getLiveCatKey(f) {
+  var raw = f.owasp_category || f.owasp || '';
+  var cat = (typeof raw === 'string' ? raw : String(raw)).substring(0, 3).toUpperCase();
+  if (!/^A\d{2}$/.test(cat)) cat = 'Other';
+  return cat;
+}
+
+function _ensureLiveCatGroup(container, cat) {
+  if (_liveCatGroups[cat]) return _liveCatGroups[cat];
+
+  var title = _CAT_TITLES[cat] || 'Other Findings';
+  var catLabel = cat !== 'Other' ? '<span class="cat-id">' + cat + '</span> ' + esc(title) : esc(title);
+
+  var group = document.createElement('div');
+  group.className = 'cat-group';
+  group.setAttribute('data-cat', cat);
+
+  var header = document.createElement('div');
+  header.className = 'cat-header';
+  header.onclick = function() { toggleCatGroup(this); };
+  header.innerHTML =
+    '<span class="cat-label">' + catLabel + '</span>' +
+    '<span class="cat-counts">' +
+      '<span class="lv-cat-count" style="font-weight:700;">0 findings</span>' +
+      '<span class="lv-cat-sevs"></span>' +
+      '<span class="cat-arrow">&#9654;</span>' +
+    '</span>';
+
+  var body = document.createElement('div');
+  body.className = 'cat-body';
+
+  group.appendChild(header);
+  group.appendChild(body);
+
+  var order = ['A01','A02','A03','A04','A05','A06','A07','A08','A09','A10','Other'];
+  var catIdx = order.indexOf(cat);
+  if (catIdx === -1) catIdx = 99;
+  var inserted = false;
+  var existing = container.querySelectorAll('.cat-group');
+  for (var i = 0; i < existing.length; i++) {
+    var eCat = existing[i].getAttribute('data-cat');
+    var eIdx = order.indexOf(eCat);
+    if (eIdx === -1) eIdx = 99;
+    if (catIdx < eIdx) {
+      container.insertBefore(group, existing[i]);
+      inserted = true;
+      break;
+    }
+  }
+  if (!inserted) container.appendChild(group);
+
+  _liveCatGroups[cat] = { group: group, header: header, body: body, items: [] };
+  return _liveCatGroups[cat];
+}
+
+function _updateLiveCatHeader(catData) {
+  var n = catData.items.length;
+  var countEl = catData.header.querySelector('.lv-cat-count');
+  if (countEl) countEl.textContent = n + ' finding' + (n !== 1 ? 's' : '');
+
+  var sevsEl = catData.header.querySelector('.lv-cat-sevs');
+  if (sevsEl) {
+    var c = {critical:0, high:0, medium:0, low:0, info:0};
+    catData.items.forEach(function(f) {
+      var s = ((f.severity || '') + '').toLowerCase();
+      if (c[s] !== undefined) c[s]++;
+    });
+    var parts = [];
+    if (c.critical) parts.push('<span class="sev-count" style="background:rgba(220,38,38,0.1);color:var(--red);">' + c.critical + ' Critical</span>');
+    if (c.high) parts.push('<span class="sev-count" style="background:rgba(234,88,12,0.1);color:var(--orange);">' + c.high + ' High</span>');
+    if (c.medium) parts.push('<span class="sev-count" style="background:rgba(217,119,6,0.1);color:var(--yellow);">' + c.medium + ' Medium</span>');
+    if (c.low) parts.push('<span class="sev-count" style="background:rgba(37,99,235,0.1);color:var(--blue);">' + c.low + ' Low</span>');
+    if (c.info) parts.push('<span class="sev-count" style="background:rgba(107,114,128,0.1);color:var(--text2);">' + c.info + ' Info</span>');
+    sevsEl.innerHTML = parts.join('');
+  }
+}
 
 function openLiveView(scanId) {
   navigateTo('scans');
@@ -3083,6 +3161,7 @@ function openLiveView(scanId) {
   lvFindingOffset = 0;
   _allLiveTests = [];
   _allLiveFindings = [];
+  _liveCatGroups = {};
   _prevPhaseRender = '';
   const _lv = id => document.getElementById(id);
   const _lvSet = (id, prop, val) => { const e = _lv(id); if (e) e[prop] = val; };
@@ -3293,6 +3372,11 @@ function renderLiveView(live) {
     live.findings.forEach(f => {
       const idx = _allLiveFindings.length;
       _allLiveFindings.push(f);
+
+      var cat = _getLiveCatKey(f);
+      var catData = _ensureLiveCatGroup(findingsBody, cat);
+      catData.items.push(f);
+
       const row = document.createElement('div');
       row.className = 'live-finding-row';
       row.onclick = () => showFindingDetail(idx);
@@ -3303,10 +3387,10 @@ function renderLiveView(live) {
         <div class="live-finding-url" title="${esc(f.url)}">${esc(f.url)}</div>
         <div class="live-finding-phase">${esc(f.phase || '')}</div>
         <div class="live-finding-chevron">&#9656;</div>`;
-      findingsBody.appendChild(row);
+      catData.body.appendChild(row);
+      _updateLiveCatHeader(catData);
     });
     lvFindingOffset += live.findings.length;
-    findingsBody.parentElement.scrollTop = findingsBody.parentElement.scrollHeight;
   }
 
   const aiFindBadge = document.getElementById('lv-ai-findings-badge');
