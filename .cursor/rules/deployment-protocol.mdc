@@ -12,6 +12,15 @@ This applies to all remote operations:
 - `ssh` to run `docker cp`, `docker restart`, or any command on the server
 - Any action that modifies the running production/staging environment
 
+## Running Scan Protection
+
+**NEVER deploy (docker cp, docker restart, or any container modification) while a scan is running.**
+
+Before ANY deployment:
+1. Check for active scans: `curl -s http://localhost:8080/api/scans | python3 -c "import json,sys; scans=json.load(sys.stdin); active=[s for s in scans if s.get('status') in ('running','starting')]; print(f'{len(active)} active scan(s)'); [print(f'  - {s[\"id\"]}: {s[\"status\"]}') for s in active]"`
+2. If ANY scan is running: **STOP. Do NOT deploy.** Inform the user and wait for the scan to complete or for the user to explicitly stop it.
+3. Only proceed with deployment when zero scans are active.
+
 ## Git Branching Protocol
 
 **NEVER push directly to `master`.** All code changes must go through a feature branch and PR.
@@ -32,3 +41,4 @@ This applies to all remote operations:
 - Never chain local edits with deployment in one step
 - Never assume "deploy" is implied when the user says "fix" or "update"
 - Never deploy as part of a verification/testing step without asking
+- **Never deploy while a scan is running** — always check first, wait or ask user to stop the scan

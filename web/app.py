@@ -200,8 +200,10 @@ def _schedule_force_cancel(scan_id: str):
     t.start()
 
 
-def _normalize_severity(raw: str) -> str:
+def _normalize_severity(raw) -> str:
     """Normalize AI-generated severity strings to standard levels."""
+    if not isinstance(raw, str):
+        raw = str(raw) if raw else ""
     s = raw.lower().strip()
     if "critical" in s:
         return "Critical"
@@ -216,8 +218,10 @@ def _normalize_severity(raw: str) -> str:
     return raw.title()
 
 
-def _normalize_verdict(raw: str) -> str:
+def _normalize_verdict(raw) -> str:
     """Map raw AI verdicts to standard triage verdicts."""
+    if not isinstance(raw, str):
+        raw = str(raw) if raw else ""
     v = raw.upper().strip()
     _MAP = {
         "CONFIRMED": "TRUE_POSITIVE",
@@ -695,7 +699,8 @@ async def _get_dashboard_inner():
         else:
             for f in findings:
                 total_findings += 1
-                raw_sev = (f.get("severity") or f.get("final_severity") or "Info").strip()
+                raw_sev_val = f.get("severity") or f.get("final_severity") or "Info"
+                raw_sev = (raw_sev_val if isinstance(raw_sev_val, str) else str(raw_sev_val)).strip()
                 sev = _normalize_severity(raw_sev)
                 if sev and sev not in ("Not Exploitable", "TBD", ""):
                     severity_breakdown[sev] = severity_breakdown.get(sev, 0) + 1
@@ -999,6 +1004,252 @@ async def upload_api_spec(
     return {"filename": safe_name, "size": len(contents)}
 
 
+# ── Workflow / Business Logic Recorder endpoints ─────────────────────────
+
+from scanners.ai_agent.workflow import (
+    Workflow, WorkflowStep, WorkflowRecorder,
+    save_workflow, load_workflow, list_workflows, delete_workflow,
+)
+
+WORKFLOW_RECORDERS: dict[str, dict] = {}
+
+
+@app.get("/api/workflows", tags=["Workflows"])
+async def get_workflows():
+    """List all saved workflows."""
+    return list_workflows()
+
+
+@app.get("/api/workflow/{workflow_id}", tags=["Workflows"])
+async def get_workflow(workflow_id: str):
+    wf = load_workflow(workflow_id)
+    if not wf:
+        raise HTTPException(status_code=404, detail="Workflow not found")
+    return wf.to_dict()
+
+
+@app.post("/api/workflow", tags=["Workflows"])
+async def create_workflow(request: Request):
+    """Create or update a workflow from JSON (manual or recorded)."""
+    body = await request.json()
+    wf = Workflow.from_dict(body)
+    wf_id = save_workflow(wf)
+    return {"id": wf_id, "name": wf.name, "steps_count": len(wf.steps)}
+
+
+@app.delete("/api/workflow/{workflow_id}", tags=["Workflows"])
+async def remove_workflow(workflow_id: str):
+    if delete_workflow(workflow_id):
+        return {"deleted": True}
+    raise HTTPException(status_code=404, detail="Workflow not found")
+
+
+@app.post("/api/workflow/record/start", tags=["Workflows"])
+async def start_recording(request: Request):
+    """Start a workflow recording session with an interactive browser."""
+    body = await request.json()
+    target_url = body.get("target_url", "").strip()
+    name = body.get("name", "").strip()
+    if not target_url:
+        raise HTTPException(status_code=400, detail="target_url required")
+
+    recorder = WorkflowRecorder(target_url=target_url, name=name)
+    session_id = recorder.workflow.id
+
+    session = {
+        "recorder": recorder,
+        "screenshot_b64": "",
+        "events": __import__("queue").Queue(),
+        "active": threading.Event(),
+        "done": threading.Event(),
+        "viewport": (1280, 720),
+        "page": None,
+        "browser_context": None,
+    }
+    WORKFLOW_RECORDERS[session_id] = session
+
+    async def _launch_browser():
+        from playwright.async_api import async_playwright
+        pw = await async_playwright().start()
+        browser = await pw.chromium.launch(headless=True)
+        context = await browser.new_context(viewport={"width": 1280, "height": 720})
+        page = await context.new_page()
+        session["page"] = page
+        session["browser_context"] = context
+        session["_pw"] = pw
+        session["_browser"] = browser
+
+        try:
+            await page.goto(target_url, wait_until="domcontentloaded", timeout=30000)
+        except Exception:
+            pass
+
+        session["active"].set()
+
+        while session["active"].is_set() and not session["done"].is_set():
+            try:
+                raw = await page.screenshot(type="jpeg", quality=55)
+                session["screenshot_b64"] = __import__("base64").b64encode(raw).decode("ascii")
+            except Exception:
+                pass
+
+            events_q = session["events"]
+            while not events_q.empty():
+                try:
+                    evt = events_q.get_nowait()
+                except Exception:
+                    break
+                if evt.get("type") == "mark_test_point":
+                    recorder.record_event(evt, page.url)
+                elif evt.get("type") == "done":
+                    session["done"].set()
+                    break
+                else:
+                    from scanners.ai_agent.auth import _apply_browser_event
+                    await _apply_browser_event(page, evt, {"width": 1280, "height": 720})
+                    _translate_to_step(recorder, evt, page)
+
+            await asyncio.sleep(0.25)
+
+        session["active"].clear()
+
+    import threading as _thr
+    def _run_browser():
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            loop.run_until_complete(_launch_browser())
+        finally:
+            loop.close()
+
+    t = _thr.Thread(target=_run_browser, daemon=True)
+    t.start()
+
+    return {"session_id": session_id, "name": name, "target_url": target_url}
+
+
+def _translate_to_step(recorder: WorkflowRecorder, evt: dict, page) -> None:
+    """Translate a raw browser event into a recorded workflow step."""
+    etype = evt.get("type", "")
+    page_url = page.url if page else ""
+
+    if etype == "click":
+        x = evt.get("x", 0)
+        y = evt.get("y", 0)
+        recorder.record_event({
+            "type": "click",
+            "selector": f"coords:{x:.4f},{y:.4f}",
+            "text": "",
+        }, page_url)
+
+    elif etype == "type":
+        text = evt.get("text", "")
+        if text:
+            recorder.record_event({
+                "type": "fill",
+                "selector": "active_element",
+                "value": text,
+            }, page_url)
+
+    elif etype == "keypress":
+        key = evt.get("key", "")
+        if key in ("Enter", "Tab", "Escape"):
+            recorder.record_event({"type": "keypress", "key": key}, page_url)
+
+
+@app.post("/api/workflow/record/{session_id}/stop", tags=["Workflows"])
+async def stop_recording(session_id: str, request: Request):
+    """Stop recording and save the workflow."""
+    session = WORKFLOW_RECORDERS.get(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Recording session not found")
+
+    body = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
+    description = body.get("description", "")
+
+    session["done"].set()
+    await asyncio.sleep(1)
+
+    recorder = session["recorder"]
+    wf = recorder.finish(description=description)
+    wf_id = save_workflow(wf)
+
+    if session.get("_browser"):
+        try:
+            import asyncio as _aio
+            loop = _aio.new_event_loop()
+            loop.run_until_complete(session["_browser"].close())
+            loop.run_until_complete(session["_pw"].stop())
+            loop.close()
+        except Exception:
+            pass
+
+    WORKFLOW_RECORDERS.pop(session_id, None)
+    return {"id": wf_id, "name": wf.name, "steps_count": len(wf.steps), "test_points": wf.test_points}
+
+
+@app.websocket("/ws/workflow/{session_id}/browser")
+async def workflow_recorder_ws(websocket: WebSocket, session_id: str):
+    """WebSocket for workflow recorder — streams screenshots, receives events."""
+    await websocket.accept()
+    session = WORKFLOW_RECORDERS.get(session_id)
+    if not session:
+        await websocket.send_json({"type": "error", "message": "No recording session found"})
+        await websocket.close(code=1008)
+        return
+
+    for _ in range(60):
+        if session["active"].is_set():
+            break
+        await asyncio.sleep(0.5)
+    else:
+        await websocket.send_json({"type": "error", "message": "Browser launch timeout"})
+        await websocket.close(code=1008)
+        return
+
+    last_hash = None
+    try:
+        async def _send_screenshots():
+            nonlocal last_hash
+            while session["active"].is_set() and not session["done"].is_set():
+                shot = session.get("screenshot_b64", "")
+                if shot:
+                    h = hash(shot)
+                    if h != last_hash:
+                        recorder = session["recorder"]
+                        await websocket.send_json({
+                            "type": "screenshot",
+                            "data": shot,
+                            "viewport": list(session["viewport"]),
+                            "steps_count": len(recorder.workflow.steps),
+                            "current_url": session["page"].url if session.get("page") else "",
+                        })
+                        last_hash = h
+                await asyncio.sleep(0.3)
+            await websocket.send_json({"type": "done"})
+
+        async def _receive_events():
+            while session["active"].is_set() and not session["done"].is_set():
+                try:
+                    data = await asyncio.wait_for(websocket.receive_json(), timeout=1.0)
+                    session["events"].put(data)
+                except asyncio.TimeoutError:
+                    continue
+                except WebSocketDisconnect:
+                    break
+
+        await asyncio.gather(_send_screenshots(), _receive_events())
+    except WebSocketDisconnect:
+        pass
+    except Exception as e:
+        logger.warning("Workflow recorder WS error: %s", e)
+    finally:
+        try:
+            await websocket.close()
+        except Exception:
+            pass
+
+
 def _resolve_api_imports(api_imports: dict) -> tuple[dict, dict | None]:
     """Resolve uploaded API import filenames to parsed endpoint registry + summary.
 
@@ -1150,6 +1401,8 @@ async def start_scan(request: Request):
     focus_areas = body.get("focus_areas", []) or []
     exclude_urls = body.get("exclude_urls", []) or []
     scan_intensity = body.get("scan_intensity", "deep")
+    workflow_id = body.get("workflow_id", "").strip() or None
+    business_flow = body.get("business_flow", "").strip() or None
     if scan_intensity not in ("light", "standard", "deep"):
         scan_intensity = "deep"
     if focus_areas:
@@ -1184,6 +1437,8 @@ async def start_scan(request: Request):
         "focus_areas": focus_areas,
         "exclude_urls": exclude_urls,
         "scan_intensity": scan_intensity,
+        "workflow_id": workflow_id,
+        "business_flow": business_flow,
         "auth_type": auth_type,
         "_username": username,
         "_password": password,
@@ -1197,20 +1452,20 @@ async def start_scan(request: Request):
     thread = threading.Thread(
         target=_run_scan_in_thread,
         args=(scan_id, target_url, username, password, model, scan_mode, auth_type, api_imports, extra_domains, cancel_flag, pause_flag),
-        kwargs={"scan_scope": scan_scope, "focus_urls": focus_urls, "focus_areas": focus_areas, "scan_intensity": scan_intensity, "exclude_urls": exclude_urls, "username_b": username_b, "password_b": password_b, "interactive_session": interactive_session},
+        kwargs={"scan_scope": scan_scope, "focus_urls": focus_urls, "focus_areas": focus_areas, "scan_intensity": scan_intensity, "exclude_urls": exclude_urls, "username_b": username_b, "password_b": password_b, "interactive_session": interactive_session, "workflow_id": workflow_id, "business_flow": business_flow},
         daemon=True,
     )
     thread.start()
     return {"scan_id": scan_id, "status": "started"}
 
 
-def _run_scan_in_thread(scan_id, target_url, username, password, model, scan_mode, auth_type, api_imports=None, extra_domains=None, cancel_flag=None, pause_flag=None, start_from_phase=0, initial_findings=None, scan_scope="directory", focus_urls=None, focus_areas=None, scan_intensity="deep", exclude_urls=None, username_b="", password_b="", interactive_session=None):
+def _run_scan_in_thread(scan_id, target_url, username, password, model, scan_mode, auth_type, api_imports=None, extra_domains=None, cancel_flag=None, pause_flag=None, start_from_phase=0, initial_findings=None, scan_scope="directory", focus_urls=None, focus_areas=None, scan_intensity="deep", exclude_urls=None, username_b="", password_b="", interactive_session=None, workflow_id=None, business_flow=None):
     """Run scan in a separate thread with its own event loop so the main UI stays responsive."""
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     try:
         loop.run_until_complete(
-            _run_scan_task(scan_id, target_url, username, password, model, scan_mode, auth_type, api_imports, extra_domains, cancel_flag, pause_flag, start_from_phase, initial_findings, scan_scope=scan_scope, focus_urls=focus_urls, focus_areas=focus_areas, scan_intensity=scan_intensity, exclude_urls=exclude_urls, username_b=username_b, password_b=password_b, interactive_session=interactive_session)
+            _run_scan_task(scan_id, target_url, username, password, model, scan_mode, auth_type, api_imports, extra_domains, cancel_flag, pause_flag, start_from_phase, initial_findings, scan_scope=scan_scope, focus_urls=focus_urls, focus_areas=focus_areas, scan_intensity=scan_intensity, exclude_urls=exclude_urls, username_b=username_b, password_b=password_b, interactive_session=interactive_session, workflow_id=workflow_id, business_flow=business_flow)
         )
     finally:
         loop.close()
@@ -1219,7 +1474,7 @@ def _run_scan_in_thread(scan_id, target_url, username, password, model, scan_mod
         INTERACTIVE_BROWSERS.pop(scan_id, None)
 
 
-async def _run_scan_task(scan_id, target_url, username, password, model, scan_mode, auth_type, api_imports=None, extra_domains=None, cancel_flag=None, pause_flag=None, start_from_phase=0, initial_findings=None, scan_scope="directory", focus_urls=None, focus_areas=None, scan_intensity="deep", exclude_urls=None, username_b="", password_b="", interactive_session=None):
+async def _run_scan_task(scan_id, target_url, username, password, model, scan_mode, auth_type, api_imports=None, extra_domains=None, cancel_flag=None, pause_flag=None, start_from_phase=0, initial_findings=None, scan_scope="directory", focus_urls=None, focus_areas=None, scan_intensity="deep", exclude_urls=None, username_b="", password_b="", interactive_session=None, workflow_id=None, business_flow=None):
     try:
         scan = SCANS[scan_id]
         scan["progress"].append("Initializing LLM router...")
@@ -1377,6 +1632,8 @@ async def _run_scan_task(scan_id, target_url, username, password, model, scan_mo
             "focus_areas": focus_areas or [],
             "exclude_urls": exclude_urls or [],
             "scan_intensity": scan_intensity,
+            "workflow_id": workflow_id,
+            "business_flow": business_flow,
         }
         if username_b or password_b:
             target_dict["credentials_b"] = {"username": username_b, "password": password_b}
@@ -2490,10 +2747,11 @@ def _pdf_font(pdf, style="", size=10):
 
 def _finding_sev(f: dict) -> str:
     """Resolve severity from triaged finding — triage stores it in final_severity/scanner_severity."""
-    return (f.get("final_severity")
-            or f.get("severity")
-            or f.get("scanner_severity")
-            or "Info")
+    raw = (f.get("final_severity")
+           or f.get("severity")
+           or f.get("scanner_severity")
+           or "Info")
+    return raw if isinstance(raw, str) else str(raw)
 
 
 _SEV_COLORS = {
@@ -2781,7 +3039,8 @@ async def generate_compliance_report(scan_id: str, framework: str):
         # ── OWASP bucketing (used by all frameworks) ──
         owasp_findings: dict[str, list] = {}
         for f in classified:
-            cat = (f.get("owasp") or f.get("owasp_category") or "")[:3].upper()
+            cat_raw = f.get("owasp") or f.get("owasp_category") or ""
+            cat = (cat_raw if isinstance(cat_raw, str) else str(cat_raw))[:3].upper()
             if cat and cat in [f"A{i:02d}" for i in range(1, 11)]:
                 owasp_findings.setdefault(cat, []).append(f)
             elif cat:
@@ -2811,8 +3070,8 @@ async def generate_compliance_report(scan_id: str, framework: str):
                 _pdf_font(pdf, "", 7)
                 for mf in matched[:5]:
                     sev = _finding_sev(mf)
-                    ftitle = mf.get("title", "Untitled")[:80]
-                    verdict = mf.get("verdict", "")
+                    ftitle = str(mf.get("title") or "Untitled")[:80]
+                    verdict = str(mf.get("verdict") or "")
                     v_tag = f" [{verdict}]" if verdict and verdict != "TRUE_POSITIVE" else ""
                     color = _SEV_COLORS.get(sev, (100, 116, 139))
                     pdf.set_text_color(*color)
@@ -2859,7 +3118,7 @@ async def generate_compliance_report(scan_id: str, framework: str):
                 _pdf_font(pdf, "", 7)
                 for mf in matched[:3]:
                     sev = _finding_sev(mf)
-                    ftitle = mf.get("title", "Untitled")[:80]
+                    ftitle = str(mf.get("title") or "Untitled")[:80]
                     color = _SEV_COLORS.get(sev, (100, 116, 139))
                     pdf.set_text_color(*color)
                     pdf.set_x(18)
@@ -2938,11 +3197,11 @@ async def generate_compliance_report(scan_id: str, framework: str):
                 if pdf.get_y() > 245:
                     pdf.add_page()
                 sev = _finding_sev(f)
-                title = f.get("title", "Untitled")[:100]
-                verdict = f.get("verdict", "")
-                owasp_cat = f.get("owasp") or f.get("owasp_category") or ""
-                url = f.get("url", "")
-                param = f.get("parameter", "")
+                title = str(f.get("title") or "Untitled")[:100]
+                verdict = str(f.get("verdict") or "")
+                owasp_cat = str(f.get("owasp") or f.get("owasp_category") or "")
+                url = str(f.get("url") or "")
+                param = str(f.get("parameter") or "")
                 payload = str(f.get("payload") or "")[:150]
                 evidence = str(f.get("scanner_evidence") or f.get("evidence") or "")[:250]
                 remediation = str(f.get("remediation") or f.get("dev_action") or "")[:250]

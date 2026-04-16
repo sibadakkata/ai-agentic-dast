@@ -73,6 +73,8 @@ class ScanTarget:
     scan_intensity: str = "deep"         # light | standard | deep
     exclude_urls: list[str] | None = None  # URLs/paths to skip during crawl and scan
     credentials_b: dict | None = None    # optional User B for BOLA/BFLA two-user testing
+    workflow_id: str | None = None       # saved workflow ID to replay before/during scan
+    business_flow: str | None = None     # natural-language business flow description
 
 
 def _resolve_env_vars(obj: Any) -> Any:
@@ -1219,4 +1221,6 @@ def load_targets_from_dict(t: dict) -> ScanTarget:
         scan_intensity=t.get("scan_intensity", "deep"),
         exclude_urls=t.get("exclude_urls") or None,
         credentials_b=creds_b,
+        workflow_id=t.get("workflow_id") or None,
+        business_flow=t.get("business_flow") or None,
     )

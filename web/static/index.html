@@ -799,6 +799,29 @@ input:focus-visible, select:focus-visible, textarea:focus-visible { outline:none
         </div>
       </div>
     </div>
+    <!-- Business Logic Workflow -->
+    <div class="form-section" style="margin-top:16px;">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;">
+        <label style="font-weight:600;font-size:13px;color:var(--text1);margin:0;">Business Logic Workflow <span style="font-weight:400;color:var(--text2);font-size:11px;">(optional)</span></label>
+        <button type="button" class="btn btn-sm btn-outline" onclick="openWorkflowManager()" style="font-size:11px;padding:3px 10px;">Manage Workflows</button>
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
+        <div class="form-group" style="margin:0;">
+          <label style="font-size:11px;">Saved Workflow</label>
+          <select id="workflow-select" style="font-size:12px;">
+            <option value="">None — autonomous scan</option>
+          </select>
+        </div>
+        <div class="form-group" style="margin:0;">
+          <label style="font-size:11px;">Or Describe Flow (natural language)</label>
+          <textarea id="business-flow" rows="2" placeholder="e.g. Login → Navigate to admin panel → Create new user → Assign role → Verify permissions" style="font-size:12px;resize:vertical;"></textarea>
+        </div>
+      </div>
+      <div style="font-size:11px;color:var(--text2);margin-top:4px;">
+        Record a browser workflow or describe the business flow in plain English. The AI agent will follow these steps and test for security vulnerabilities at each point.
+      </div>
+    </div>
+
     <div class="actions">
       <button type="button" class="btn btn-sm btn-primary" id="start-scan-btn" onclick="startScan()">Start Scan</button>
       <button type="button" class="btn btn-sm btn-outline" onclick="testConnectivity()">Test Connectivity</button>
@@ -2059,6 +2082,8 @@ async function confirmPlan() {
     api_imports: _aiApiImports || {},
     extra_domains: p.extra_domains || [],
     exclude_urls: p.exclude_urls || [],
+    workflow_id: document.getElementById('workflow-select').value || '',
+    business_flow: (document.getElementById('business-flow').value || '').trim(),
   };
   if (ubEl && ubEl.value.trim()) body.username_b = ubEl.value.trim();
   if (pbEl && pbEl.value.trim()) body.password_b = pbEl.value.trim();
@@ -2496,6 +2521,143 @@ function _extractBaseUrl(text, type) {
   }
 })();
 
+// ── Workflow Manager ─────────────────────────────────────────────────────
+async function loadWorkflowSelect() {
+  try {
+    const resp = await fetch('/api/workflows');
+    if (!resp.ok) return;
+    const wfs = await resp.json();
+    const sel = document.getElementById('workflow-select');
+    if (!sel) return;
+    const cur = sel.value;
+    sel.innerHTML = '<option value="">None — autonomous scan</option>';
+    wfs.forEach(function(wf) {
+      const opt = document.createElement('option');
+      opt.value = wf.id;
+      opt.textContent = wf.name + ' (' + wf.steps_count + ' steps)';
+      sel.appendChild(opt);
+    });
+    if (cur) sel.value = cur;
+  } catch(e) { console.warn('loadWorkflowSelect:', e); }
+}
+
+function openWorkflowManager() {
+  var overlay = document.getElementById('workflow-mgr-overlay');
+  if (!overlay) {
+    overlay = document.createElement('div');
+    overlay.id = 'workflow-mgr-overlay';
+    overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.7);z-index:9000;display:flex;align-items:center;justify-content:center;';
+    overlay.innerHTML = `<div style="background:var(--card);border:1px solid var(--border);border-radius:12px;width:700px;max-width:90vw;max-height:85vh;overflow:auto;padding:24px;">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;">
+        <h3 style="margin:0;font-size:16px;">Business Logic Workflows</h3>
+        <button onclick="document.getElementById('workflow-mgr-overlay').style.display='none'" style="background:none;border:none;color:var(--text2);font-size:20px;cursor:pointer;">&times;</button>
+      </div>
+      <div style="display:flex;gap:8px;margin-bottom:16px;">
+        <button class="btn btn-sm btn-primary" onclick="openWorkflowCreator()">+ Create Workflow</button>
+        <button class="btn btn-sm btn-outline" onclick="refreshWorkflowList()">Refresh</button>
+      </div>
+      <div id="workflow-mgr-list" style="font-size:13px;">Loading...</div>
+    </div>`;
+    document.body.appendChild(overlay);
+  }
+  overlay.style.display = 'flex';
+  refreshWorkflowList();
+}
+
+async function refreshWorkflowList() {
+  var el = document.getElementById('workflow-mgr-list');
+  if (!el) return;
+  try {
+    const resp = await fetch('/api/workflows');
+    const wfs = await resp.json();
+    if (!wfs.length) { el.innerHTML = '<div style="color:var(--text2);text-align:center;padding:24px;">No workflows saved yet. Create one to get started.</div>'; return; }
+    var html = '<div style="display:flex;flex-direction:column;gap:8px;">';
+    wfs.forEach(function(wf) {
+      html += `<div style="background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:12px;">
+        <div style="display:flex;justify-content:space-between;align-items:center;">
+          <div>
+            <div style="font-weight:600;font-size:13px;">${esc(wf.name)}</div>
+            <div style="font-size:11px;color:var(--text2);margin-top:2px;">${esc(wf.target_url || '')} &middot; ${wf.steps_count} steps${wf.test_points.length ? ' &middot; ' + wf.test_points.length + ' test points' : ''}</div>
+            ${wf.description ? '<div style="font-size:11px;color:var(--text2);margin-top:4px;">' + esc(wf.description.substring(0, 150)) + '</div>' : ''}
+          </div>
+          <div style="display:flex;gap:6px;">
+            <button class="btn btn-sm btn-outline" onclick="deleteWorkflow('${wf.id}')" style="font-size:11px;padding:3px 8px;color:#ef4444;border-color:#ef4444;">Delete</button>
+          </div>
+        </div>
+      </div>`;
+    });
+    html += '</div>';
+    el.innerHTML = html;
+    loadWorkflowSelect();
+  } catch(e) { el.innerHTML = '<div style="color:#ef4444;">Failed to load workflows: ' + e.message + '</div>'; }
+}
+
+async function deleteWorkflow(id) {
+  if (!confirm('Delete this workflow?')) return;
+  await fetch('/api/workflow/' + id, { method: 'DELETE' });
+  refreshWorkflowList();
+  loadWorkflowSelect();
+}
+
+function openWorkflowCreator() {
+  var overlay = document.getElementById('workflow-mgr-overlay');
+  if (overlay) overlay.style.display = 'none';
+  var creator = document.getElementById('workflow-creator-overlay');
+  if (!creator) {
+    creator = document.createElement('div');
+    creator.id = 'workflow-creator-overlay';
+    creator.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.7);z-index:9100;display:flex;align-items:center;justify-content:center;';
+    creator.innerHTML = `<div style="background:var(--card);border:1px solid var(--border);border-radius:12px;width:600px;max-width:90vw;max-height:85vh;overflow:auto;padding:24px;">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;">
+        <h3 style="margin:0;font-size:16px;">Create Workflow</h3>
+        <button onclick="document.getElementById('workflow-creator-overlay').style.display='none'" style="background:none;border:none;color:var(--text2);font-size:20px;cursor:pointer;">&times;</button>
+      </div>
+      <div class="form-group"><label>Workflow Name</label><input id="wf-create-name" placeholder="e.g. User Registration Flow, Admin Role Assignment" style="font-size:13px;"></div>
+      <div class="form-group"><label>Target URL</label><input id="wf-create-url" placeholder="https://example.com" style="font-size:13px;"></div>
+      <div class="form-group"><label>Description (natural language)</label><textarea id="wf-create-desc" rows="3" placeholder="Describe the business flow in plain English. e.g. Login as admin → Create a new user → Assign editor role → Verify user can edit content" style="font-size:13px;resize:vertical;"></textarea></div>
+      <div class="form-group"><label>Steps (JSON, optional — or use recorder)</label><textarea id="wf-create-steps" rows="4" placeholder='[{"action":"navigate","value":"https://..."},{"action":"click","selector":"#add-to-cart"}]' style="font-size:12px;font-family:var(--font-mono);resize:vertical;"></textarea></div>
+      <div class="form-group"><label>Test Points (comma-separated)</label><input id="wf-create-tp" placeholder="e.g. after-login, role-assignment, form-submission, access-control" style="font-size:13px;"></div>
+      <div style="display:flex;gap:8px;margin-top:16px;">
+        <button class="btn btn-sm btn-primary" onclick="saveNewWorkflow()">Save Workflow</button>
+        <button class="btn btn-sm btn-outline" onclick="document.getElementById('workflow-creator-overlay').style.display='none'">Cancel</button>
+      </div>
+    </div>`;
+    document.body.appendChild(creator);
+  }
+  creator.style.display = 'flex';
+  var urlField = document.getElementById('target-url');
+  if (urlField && urlField.value) document.getElementById('wf-create-url').value = urlField.value;
+}
+
+async function saveNewWorkflow() {
+  var name = document.getElementById('wf-create-name').value.trim();
+  var url = document.getElementById('wf-create-url').value.trim();
+  var desc = document.getElementById('wf-create-desc').value.trim();
+  var stepsRaw = document.getElementById('wf-create-steps').value.trim();
+  var tpRaw = document.getElementById('wf-create-tp').value.trim();
+  if (!name) { alert('Name is required'); return; }
+  var steps = [];
+  if (stepsRaw) {
+    try { steps = JSON.parse(stepsRaw); } catch(e) { alert('Invalid JSON in steps: ' + e.message); return; }
+  }
+  var testPoints = tpRaw ? tpRaw.split(',').map(function(s) { return s.trim(); }).filter(Boolean) : [];
+  var body = { name: name, target_url: url, description: desc, steps: steps, test_points: testPoints };
+  try {
+    var resp = await fetch('/api/workflow', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) });
+    if (resp.ok) {
+      document.getElementById('workflow-creator-overlay').style.display = 'none';
+      openWorkflowManager();
+      loadWorkflowSelect();
+    } else {
+      var d = await resp.json().catch(function() { return {}; });
+      alert('Failed: ' + (d.error || d.detail || resp.statusText));
+    }
+  } catch(e) { alert('Error: ' + e.message); }
+}
+
+// Load workflows dropdown on page init
+loadWorkflowSelect();
+
 async function startScan() {
   const url = document.getElementById('target-url').value.trim();
   if (!url) { _showAlert('Missing Input', 'Enter a target URL or upload a Postman/OpenAPI file.'); return; }
@@ -2542,6 +2704,8 @@ async function startScan() {
     api_imports: api_imports,
     extra_domains: extraDomains,
     exclude_urls: (document.getElementById('exclude-urls').value || '').trim().split('\n').map(u => u.trim()).filter(Boolean),
+    workflow_id: document.getElementById('workflow-select').value || '',
+    business_flow: (document.getElementById('business-flow').value || '').trim(),
   };
   if (usernameB || passwordB) {
     body.username_b = usernameB;

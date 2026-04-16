@@ -26,6 +26,19 @@ from .tools import TOOL_DEFINITIONS, ScanTools
 logger = logging.getLogger(__name__)
 
 MAX_MSG_RESULT_CHARS = 1500
+
+
+def _s(val) -> str:
+    """Safely coerce any value to str — LLMs sometimes return dicts/lists where strings are expected."""
+    if val is None:
+        return ""
+    if isinstance(val, str):
+        return val
+    if isinstance(val, dict):
+        return "" if not val else str(val)
+    if isinstance(val, (list, tuple)):
+        return "" if not val else str(val)
+    return str(val)
 TRIM_TARGET_TOKENS = 40000
 
 
@@ -448,14 +461,14 @@ def _match_evidence_to_finding(finding: dict, evidence: list[dict]):
     """
     if not evidence:
         return
-    f_url = (finding.get("url") or "").lower()
-    f_payload = (finding.get("payload") or "").lower()
+    f_url = _s(finding.get("url")).lower()
+    f_payload = _s(finding.get("payload")).lower()
 
     scored: list[tuple[int, dict]] = []
     for ev in evidence:
         score = 0
-        ev_url = (ev.get("url") or "").lower()
-        ev_payload = (ev.get("payload") or "").lower()
+        ev_url = _s(ev.get("url")).lower()
+        ev_payload = _s(ev.get("payload")).lower()
         if f_url and ev_url and (f_url in ev_url or ev_url in f_url):
             score += 2
         if f_payload and ev_payload and f_payload in ev_payload:
@@ -484,9 +497,9 @@ def _format_passive_for_llm(passive_findings: list[dict]) -> str:
     lines = ["## Passive Reconnaissance Results (pre-scan, no LLM)",
              f"Found {len(passive_findings)} issue(s) via deterministic checks:"]
     for f in passive_findings:
-        lines.append(f"- [{f['severity']}] {f['title']} @ {f['url']}")
+        lines.append(f"- [{_s(f.get('severity'))}] {_s(f.get('title'))} @ {_s(f.get('url'))}")
         if f.get("evidence"):
-            lines.append(f"  Evidence: {f['evidence'][:200]}")
+            lines.append(f"  Evidence: {_s(f['evidence'])[:200]}")
     lines.append("\nUse these findings to prioritize your active scanning. "
                  "For JS sink findings, attempt to prove exploitability by tracing user-controlled data into those sinks.")
     return "\n".join(lines)
@@ -1059,11 +1072,48 @@ async def run_scan(
             system_prompt += "\n\n" + baseline_context
         if body_fuzz_context:
             system_prompt += "\n\n" + body_fuzz_context
+
+        # ── Workflow Replay + Context ──
+        workflow_replayed = False
+        if getattr(target, "workflow_id", None):
+            from .workflow import load_workflow, replay_workflow, build_workflow_prompt
+            wf = load_workflow(target.workflow_id)
+            if wf:
+                print(f"  [WORKFLOW] Loaded workflow: {wf.name} ({len(wf.steps)} steps)")
+                _cb("phase_start", {"phase": 0, "total": 0, "name": f"Workflow Replay: {wf.name}", "id": "workflow_replay"})
+                wf_vars = {"username": (target.credentials or {}).get("username", ""),
+                           "password": (target.credentials or {}).get("password", "")}
+                try:
+                    wf_result = await replay_workflow(
+                        page, wf, variables=wf_vars,
+                        on_step=lambda idx, step, st: _cb("workflow_step", {"step": idx, "action": step.action, "status": st}),
+                    )
+                    workflow_replayed = wf_result.success
+                    status = "completed" if wf_result.success else f"failed at step {wf_result.failed_step}"
+                    print(f"  [WORKFLOW] Replay {status}: {wf_result.steps_completed}/{wf_result.steps_total} steps")
+                    if wf_result.adapted_steps:
+                        print(f"  [WORKFLOW] LLM adapted steps: {wf_result.adapted_steps}")
+                except Exception as e:
+                    print(f"  [WORKFLOW] Replay failed: {e}")
+                    logger.warning("Workflow replay failed: %s", e, exc_info=True)
+                _cb("phase_end", {"phase": 0, "name": f"Workflow Replay: {wf.name}",
+                                  "tool_calls": wf.steps.__len__(), "findings": 0})
+                system_prompt += "\n\n" + build_workflow_prompt(wf)
+            else:
+                print(f"  [WORKFLOW] Workflow {target.workflow_id} not found — skipping")
+
+        if getattr(target, "business_flow", None) and not getattr(target, "workflow_id", None):
+            from .workflow import Workflow, build_workflow_prompt
+            nl_wf = Workflow(name="User-Defined Business Flow", description=target.business_flow)
+            system_prompt += "\n\n" + build_workflow_prompt(nl_wf)
+            print(f"  [WORKFLOW] Natural language flow injected: {target.business_flow[:100]}")
+
         messages: list[dict] = [{"role": "system", "content": system_prompt}]
 
         has_baseline = bool(baseline_context)
         has_body_fuzz = bool(body_fuzz_context)
-        extra_phases = (1 if has_baseline else 0) + (1 if has_body_fuzz else 0)
+        has_workflow = workflow_replayed or bool(getattr(target, "business_flow", None))
+        extra_phases = (1 if has_baseline else 0) + (1 if has_body_fuzz else 0) + (1 if workflow_replayed else 0)
         total_phases = len(phases) + 1 + extra_phases  # +1 verification
         print(f"  [SCAN] Starting {len(phases)} scan phases + verification...")
         _cb("scan_start", {"total_phases": total_phases})
@@ -1615,8 +1665,8 @@ def _extract_json_objects(text: str):
 
 def _has_evidence(obj: dict) -> bool:
     """Return True if the finding has real proof — a non-empty payload or evidence field."""
-    payload = (obj.get("payload") or "").strip()
-    evidence = (obj.get("evidence") or "").strip()
+    payload = _s(obj.get("payload")).strip()
+    evidence = _s(obj.get("evidence")).strip()
     return bool(payload) or bool(evidence)
 
 
@@ -1792,14 +1842,14 @@ def save_results(
     severity_counts = {"Critical": 0, "High": 0, "Medium": 0, "Low": 0, "Info": 0}
     owasp_counts: dict[str, int] = {}
     for f in findings:
-        sev = f.get("severity", "Info")
+        sev = _s(f.get("severity") or "Info")
         for key in severity_counts:
             if key.lower() == sev.lower():
                 severity_counts[key] += 1
                 break
         else:
             severity_counts["Info"] += 1
-        cat = f.get("owasp_category", "Unknown")
+        cat = _s(f.get("owasp_category") or "Unknown")
         owasp_counts[cat] = owasp_counts.get(cat, 0) + 1
 
     metrics = scan_metrics or {}
