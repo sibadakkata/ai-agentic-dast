@@ -62,9 +62,9 @@ svg text, svg tspan { font-family: 'Inter', -apple-system, BlinkMacSystemFont, s
 .form-group { display:flex; flex-direction:column; gap:7px; }
 .form-group.full { grid-column:1 / -1; }
 label { font-size:12px; font-weight:600; text-transform:uppercase; letter-spacing:0.6px; color:var(--text2); }
-input, select { background:var(--surface2); border:1px solid var(--border); border-radius:8px; padding:11px 14px; color:var(--text); font-size:14px; font-family:inherit; outline:none; transition:border-color 0.2s, box-shadow 0.2s; }
-input:focus, select:focus { border-color:var(--accent); box-shadow:0 0 0 3px rgba(79,70,229,0.08); }
-input::placeholder { color:#9ca3af; }
+input, select, textarea { background:var(--surface2); border:1px solid var(--border); border-radius:8px; padding:11px 14px; color:var(--text); font-size:14px; font-family:inherit; outline:none; transition:border-color 0.2s, box-shadow 0.2s; }
+input:focus, select:focus, textarea:focus { border-color:var(--accent); box-shadow:0 0 0 3px rgba(79,70,229,0.08); }
+input::placeholder, textarea::placeholder { color:#9ca3af; }
 
 /* ===== BUTTONS ===== */
 .btn { padding:10px 24px; border-radius:8px; border:none; font-size:14px; font-weight:600; font-family:inherit; cursor:pointer; transition:all 0.15s; }
@@ -2547,7 +2547,7 @@ function openWorkflowManager() {
     overlay = document.createElement('div');
     overlay.id = 'workflow-mgr-overlay';
     overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.7);z-index:9000;display:flex;align-items:center;justify-content:center;';
-    overlay.innerHTML = `<div style="background:var(--card);border:1px solid var(--border);border-radius:12px;width:700px;max-width:90vw;max-height:85vh;overflow:auto;padding:24px;">
+    overlay.innerHTML = `<div style="background:var(--surface);border:1px solid var(--border);border-radius:12px;width:700px;max-width:90vw;max-height:85vh;overflow:auto;padding:24px;box-shadow:0 20px 60px rgba(0,0,0,0.3);">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;">
         <h3 style="margin:0;font-size:16px;">Business Logic Workflows</h3>
         <button onclick="document.getElementById('workflow-mgr-overlay').style.display='none'" style="background:none;border:none;color:var(--text2);font-size:20px;cursor:pointer;">&times;</button>
@@ -2607,7 +2607,7 @@ function openWorkflowCreator() {
     creator = document.createElement('div');
     creator.id = 'workflow-creator-overlay';
     creator.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.7);z-index:9100;display:flex;align-items:center;justify-content:center;';
-    creator.innerHTML = `<div style="background:var(--card);border:1px solid var(--border);border-radius:12px;width:600px;max-width:90vw;max-height:85vh;overflow:auto;padding:24px;">
+    creator.innerHTML = `<div style="background:var(--surface);border:1px solid var(--border);border-radius:12px;width:600px;max-width:90vw;max-height:85vh;overflow:auto;padding:24px;box-shadow:0 20px 60px rgba(0,0,0,0.3);">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;">
         <h3 style="margin:0;font-size:16px;">Create Workflow</h3>
         <button onclick="document.getElementById('workflow-creator-overlay').style.display='none'" style="background:none;border:none;color:var(--text2);font-size:20px;cursor:pointer;">&times;</button>
