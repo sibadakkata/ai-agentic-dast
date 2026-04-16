@@ -505,6 +505,53 @@ def _format_passive_for_llm(passive_findings: list[dict]) -> str:
     return "\n".join(lines)
 
 
+def _build_findings_context(findings: list[dict], phase_id: str) -> str:
+    """Build a compact findings summary for cross-phase context injection.
+
+    Gives the LLM awareness of what has been found so far, enabling it to
+    leverage earlier discoveries for deeper exploitation and chaining.
+    """
+    if not findings:
+        return ""
+    by_sev: dict[str, list[dict]] = {}
+    for f in findings:
+        sev = _s(f.get("severity", "info")).lower()
+        by_sev.setdefault(sev, []).append(f)
+
+    lines = [
+        "## Findings Discovered So Far (from prior phases)",
+        f"Total: {len(findings)} finding(s)",
+    ]
+    for sev in ("critical", "high", "medium", "low", "info"):
+        group = by_sev.get(sev, [])
+        if not group:
+            continue
+        lines.append(f"\n### {sev.upper()} ({len(group)})")
+        for i, f in enumerate(group[:15], 1):
+            url = _s(f.get("url", ""))
+            title = _s(f.get("title", ""))
+            payload = _s(f.get("payload", ""))
+            param = _s(f.get("parameter", ""))
+            entry = f"  {i}. {title}"
+            if url:
+                entry += f" @ {url}"
+            if param:
+                entry += f" [param: {param}]"
+            if payload:
+                entry += f" [payload: {payload[:80]}]"
+            lines.append(entry)
+        if len(group) > 15:
+            lines.append(f"  ... and {len(group) - 15} more")
+
+    lines.append(
+        "\n**EXPLOIT CHAINING**: Look for combinations of the above findings "
+        "that could be chained for higher impact. If you see an opportunity, "
+        "use the `chain_exploit` tool to declare and execute the chain step-by-step. "
+        "You can also call `get_findings_so_far` at any time to review the full list."
+    )
+    return "\n".join(lines)
+
+
 _TECH_PROBE_PATHS: dict[str, dict] = {
     "Adobe Experience Manager (AEM)": {
         "label": "Adobe Experience Manager (AEM)",
@@ -1062,6 +1109,7 @@ async def run_scan(
             cancel_flag=cancel_flag,
             exclude_urls=getattr(target, "exclude_urls", None) or [],
         )
+        tools.set_findings_ref(findings)
 
         # ── Authenticate User B for BOLA/BFLA two-user testing ──────
         user_b_auth_header: dict = {}
@@ -1410,16 +1458,28 @@ async def run_scan(
             _cb("phase_start", {"phase": phase_num, "total": total_phases, "name": phase.name, "id": phase.id})
 
             phase_prompt = phase.prompt
+
+            # ── Cross-phase findings context ──
             if phase.id == "attack_chain_analysis" and findings:
                 summary_lines = []
                 for i, f in enumerate(findings, 1):
                     line = f"{i}. [{f.get('severity','?')}] {f.get('title','?')} @ {f.get('url','?')}"
+                    param = f.get("parameter", "")
+                    pl = f.get("payload", "")
+                    if param:
+                        line += f" [param: {param}]"
+                    if pl:
+                        line += f" [payload: {pl[:100]}]"
                     ev = f.get("evidence", "")
                     if ev:
-                        line += f" — {ev[:150]}"
+                        line += f" — {ev[:200]}"
                     summary_lines.append(line)
                 findings_text = "\n".join(summary_lines) if summary_lines else "(no findings yet)"
                 phase_prompt = phase_prompt.replace("{findings_summary}", findings_text)
+            elif phase_idx > 0 and findings:
+                ctx = _build_findings_context(findings, phase.id)
+                if ctx:
+                    phase_prompt += "\n\n" + ctx
 
             # Inject User B context into BOLA/authorization phases
             bola_web_placeholder = "{bola_user_b_web}"
@@ -2094,10 +2154,23 @@ def trim_context(messages: list[dict], max_tokens: int = TRIM_TARGET_TOKENS) -> 
         return _repair_tool_pairs(kept)
 
     last_start = phase_boundaries[-1]
-    summary = {
-        "role": "user",
-        "content": "[Previous phases completed and summarized to fit token budget. Continue scanning with fresh context.]",
-    }
+
+    # Scan the system prompt for a findings context block to preserve across trims.
+    # The findings context is injected into phase prompts by _build_findings_context
+    # and is critical for exploit chaining — it must survive aggressive trimming.
+    findings_block = ""
+    for m in messages[1:last_start]:
+        c = m.get("content", "") if m.get("role") == "user" else ""
+        if "## Findings Discovered So Far" in c:
+            start = c.index("## Findings Discovered So Far")
+            findings_block = c[start:]
+            break
+
+    summary_text = "[Previous phases completed and summarized to fit token budget. Continue scanning with fresh context.]"
+    if findings_block:
+        summary_text += "\n\n" + findings_block
+
+    summary = {"role": "user", "content": summary_text}
     kept.append(summary)
     kept.extend(messages[last_start:])
 

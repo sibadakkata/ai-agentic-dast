@@ -1000,6 +1000,102 @@ def _find_verifier(title: str):
 
 
 # ──────────────────────────────────────────────────────────────────────
+# Chain Verification — replays multi-step exploit chains
+# ──────────────────────────────────────────────────────────────────────
+
+async def verify_chain_finding(
+    client: httpx.AsyncClient,
+    finding: dict,
+) -> dict:
+    """Verify a chain finding by replaying each step's HTTP request sequentially.
+
+    Chain findings store their step evidence in request_response or chain_evidence.
+    We replay each HTTP step and confirm the end-to-end chain still holds.
+    """
+    chain_evidence = finding.get("chain_evidence") or []
+    req_resp = finding.get("request_response") or []
+
+    replay_steps = []
+    for step in chain_evidence:
+        if not isinstance(step, dict):
+            continue
+        if step.get("status") not in ("OK", "UNEXPECTED"):
+            continue
+        tool = step.get("tool", "")
+        if tool in ("api_request", "api_request_raw", "replay_with_modification"):
+            replay_steps.append(step)
+
+    if not replay_steps and req_resp:
+        for rr in req_resp:
+            if isinstance(rr, dict) and rr.get("request"):
+                replay_steps.append(rr)
+
+    if len(replay_steps) < 2:
+        return {**finding, **_result(
+            "INCONCLUSIVE", "chain_replay",
+            f"Chain has {len(replay_steps)} replayable HTTP step(s), need >= 2 for chain verification."
+        )}
+
+    step_results = []
+    chain_ok = True
+    for idx, step in enumerate(replay_steps):
+        args = step.get("args", step.get("request", {}))
+        if not isinstance(args, dict):
+            step_results.append({"step": idx + 1, "status": "SKIP", "reason": "No request data"})
+            continue
+
+        method = (args.get("method") or "GET").upper()
+        url = args.get("url", "")
+        if not url:
+            step_results.append({"step": idx + 1, "status": "SKIP", "reason": "No URL"})
+            continue
+
+        req_headers = args.get("headers", {})
+        body = args.get("body")
+
+        try:
+            resp = await client.request(method, url, headers=req_headers, content=body, timeout=VERIFY_TIMEOUT)
+            step_results.append({
+                "step": idx + 1,
+                "method": method,
+                "url": url,
+                "status_code": resp.status_code,
+                "body_length": len(resp.text),
+                "body_snippet": resp.text[:200],
+            })
+        except Exception as e:
+            step_results.append({"step": idx + 1, "status": "ERROR", "error": str(e)})
+            chain_ok = False
+            break
+
+    if chain_ok and len(step_results) >= 2:
+        all_ok = all(s.get("status_code", 0) < 500 and s.get("status") != "ERROR" for s in step_results)
+        if all_ok:
+            return {**finding, **_result(
+                "CONFIRMED", "chain_replay",
+                f"Chain replayed {len(step_results)} steps end-to-end successfully.",
+                {"steps": step_results},
+            )}
+
+    return {**finding, **_result(
+        "INCONCLUSIVE", "chain_replay",
+        f"Chain replay: {len(step_results)}/{len(replay_steps)} steps completed.",
+        {"steps": step_results},
+    )}
+
+
+def _is_chain_finding(finding: dict) -> bool:
+    """Detect whether a finding represents an exploit chain."""
+    title = (finding.get("title") or "").lower()
+    chain_kw = ("chain", "→", "->", " to ", " via ", " + ", "escalat")
+    if any(kw in title for kw in chain_kw):
+        return True
+    if finding.get("chain_evidence"):
+        return True
+    return False
+
+
+# ──────────────────────────────────────────────────────────────────────
 # Public API
 # ──────────────────────────────────────────────────────────────────────
 
@@ -1010,7 +1106,15 @@ async def verify_finding(
     """Verify a single finding by replaying against the live target.
 
     Returns the finding dict enriched with verification_ keys.
+    Chain findings are routed to the chain replay verifier.
     """
+    if _is_chain_finding(finding):
+        try:
+            return await verify_chain_finding(client, finding)
+        except Exception as e:
+            logger.warning("Chain verification failed for '%s': %s", finding.get("title", "?"), e)
+            return {**finding, **_result("INCONCLUSIVE", "chain_replay", f"Chain verification error: {e}")}
+
     title = finding.get("title", "") or ""
     verifier = _find_verifier(title)
 
