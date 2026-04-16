@@ -2,7 +2,7 @@
 
 LLM-powered Dynamic Application Security Testing (DAST) scanner that works against **any website, API, or SPA**.
 
-A single LLM agent drives a real Chromium browser and HTTP client through the OWASP Top 10, crafting context-aware payloads, interpreting responses, and reporting findings — all autonomously.
+A single LLM agent drives a real Chromium browser and HTTP client through the OWASP Top 10, crafting context-aware payloads, interpreting responses, and reporting findings — all autonomously. The agent can chain multiple individual vulnerabilities into multi-step exploit sequences, similar to how a manual pentester escalates access.
 
 ## Architecture
 
@@ -15,6 +15,11 @@ A single LLM agent drives a real Chromium browser and HTTP client through the OW
 │  │  (auto-     │   │   Recon      │   │  (25 web + 15 API phases)  │ │
 │  │  detect)    │   │ (24 checks)  │   │                            │ │
 │  └─────────────┘   └──────────────┘   └─────────────┬──────────────┘ │
+│                                                      │                │
+│                                        ┌─────────────▼──────────────┐ │
+│                                        │  Attack Chain Analysis      │ │
+│                                        │  (multi-step exploit chains)│ │
+│                                        └─────────────┬──────────────┘ │
 │                                                      │                │
 │  ┌─────────────┐   ┌──────────────┐                  ▼                │
 │  │   Report    │◀──│   Triage     │◀──┌──────────────────────────┐   │
@@ -32,7 +37,7 @@ Each scan phase runs a continuous **Observe → Think → Act → Analyze → Pl
 
 1. **Observe** — Agent reads current context: HTTP responses, page source, cookies, network logs, prior findings
 2. **Think** — LLM reasons about attack surface, tech stack, and plausible vulnerabilities
-3. **Act** — LLM calls tools (28 available: navigate, inject, fuzz, API request, token testing, etc.)
+3. **Act** — LLM calls tools (30 available: navigate, inject, fuzz, API request, token testing, exploit chaining, etc.)
 4. **Analyze** — Tool results are interpreted: does the response indicate a vulnerability?
 5. **Plan** — LLM decides next action: go deeper, try different parameter, or conclude phase
 
@@ -56,6 +61,8 @@ This loop runs up to 25 steps per phase. Every finding is then **triaged offline
 | **MCP Server** | Model Context Protocol integration for Cursor, Claude Desktop | [MCP Guide](docs/mcp-server.md) |
 | **Reports** | Three-stage evidence: AI Agent → Runtime Verification → Triage verdict | PDF, Excel, JSON export |
 | **Cost Control** | Pause/resume scans, stop early, per-scan cost tracking | Real-time cost display in UI |
+| **Multi-Step Exploit Chaining** | Combines individual findings into attack chains (e.g. XSS + cookie theft → session hijack, SSRF → internal API → data exfiltration) | Cross-phase context, `chain_exploit` tool |
+| **Category-Grouped Results** | Findings displayed by category (Injection, Access Control, etc.) with collapsible sections and severity breakdown | Comparison and AI Raw Findings tabs |
 
 ## Quick Start
 
@@ -106,6 +113,9 @@ uvicorn web.app:app --host 0.0.0.0 --port 8080
 │  5. LLM DEEP SCAN (25 web + 15 API phases)                         │
 │     OWASP Top 10 + context-aware: race, upload, host header, etc.  │
 ├─────────────────────────────────────────────────────────────────────┤
+│  5b. ATTACK CHAIN ANALYSIS                                          │
+│     Combine findings into multi-step exploit chains                 │
+├─────────────────────────────────────────────────────────────────────┤
 │  6. RUNTIME VERIFICATION                                            │
 │     Replay payloads against live target → CONFIRMED / DISPROVED     │
 ├─────────────────────────────────────────────────────────────────────┤
@@ -152,7 +162,7 @@ uvicorn web.app:app --host 0.0.0.0 --port 8080
 │   ├── passive_recon.py         #   Deterministic passive checks
 │   ├── llm_config.py            #   LLM routing & cost tracking
 │   ├── prompts.py               #   System + phase prompts
-│   ├── tools.py                 #   28 tools (browser, API, WebSocket)
+│   ├── tools.py                 #   30 tools (browser, API, WebSocket, chaining)
 │   ├── api_import.py            #   Postman/OpenAPI parsers
 │   ├── baseline_executor.py     #   API baseline & variable chaining
 │   └── body_fuzzer.py           #   Hybrid body fuzzer

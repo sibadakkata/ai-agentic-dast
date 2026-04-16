@@ -16,6 +16,7 @@ The scanner includes a single-page web UI for managing scans, viewing results, a
 | **API Imports** | Upload Postman Collection or OpenAPI/Swagger spec |
 | **Live Progress** | Real-time tool calls, payloads, responses, and findings as the scan runs |
 | **AI vs Triage** | Side-by-side comparison of AI severity vs evidence-based triage verdict |
+| **Category-Grouped Findings** | Both Comparison and AI Raw Findings tabs group results by category (Injection, Access Control, etc.) with collapsible sections showing finding count and severity breakdown per category |
 | **Crawled Endpoints** | Full list of discovered links and API endpoints |
 | **Payloads by Endpoint** | Expandable view of every payload tested per endpoint |
 | **Phase Log** | Chronological breakdown of each scan phase with tool call and finding counts |
@@ -54,6 +55,14 @@ When you select specific vulnerability types (e.g. XSS + SQLi), the scanner auto
 
 - **Manual form** — Configure all settings directly. "Full Scan" with Deep intensity by default.
 - **AI Planner** — Type a natural-language instruction (e.g. "quick XSS scan on example.com/login"). The LLM parses it into a structured plan. Review and confirm.
+
+### Business Logic Recorder
+
+Available in both Manual and AI modes:
+
+- **Record a workflow** — Record browser interactions (login → add to cart → checkout) that the scanner replays and tests
+- **Describe a flow** — Write a natural language description of the business flow for the AI to follow
+- **Use saved workflows** — Select a previously recorded workflow from the dropdown
 
 ## Authentication
 

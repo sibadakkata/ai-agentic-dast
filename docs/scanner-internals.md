@@ -42,13 +42,19 @@ User clicks "Start Scan" (UI or API)
 │  7. LLM PHASE LOOP (main scan)                          │
 │     For each phase from get_phases():                   │
 │       a. Inject phase prompt into conversation          │
-│       b. LLM loop: complete() → tool_calls → execute() │
-│       c. Capture evidence for security tool calls       │
-│       d. Enforce minimum security calls                 │
-│       e. Extract findings when LLM stops                │
-│       f. Evidence grounding check                       │
-│       g. Retry if 0 findings and phase is retryable     │
-│       h. Trim context if needed                         │
+│       b. Inject cross-phase findings context (phase 2+) │
+│       c. LLM loop: complete() → tool_calls → execute() │
+│       d. Capture evidence for security tool calls       │
+│       e. Enforce minimum security calls                 │
+│       f. Extract findings when LLM stops                │
+│       g. Evidence grounding check                       │
+│       h. Retry if 0 findings and phase is retryable     │
+│       i. Trim context if needed                         │
+├─────────────────────────────────────────────────────────┤
+│  7b. ATTACK CHAIN ANALYSIS                               │
+│      LLM reviews all findings from prior phases         │
+│      Combines into multi-step exploit chains via        │
+│      chain_exploit tool → sequential execution          │
 ├─────────────────────────────────────────────────────────┤
 │  8. RUNTIME VERIFICATION                                 │
 │     Replay payloads against live target                  │
@@ -70,7 +76,7 @@ User clicks "Start Scan" (UI or API)
 
 ### Architecture
 
-`ScanTools` wraps Playwright's `Page` and `httpx.AsyncClient` into 28 security-testing tools that the LLM can call.
+`ScanTools` wraps Playwright's `Page` and `httpx.AsyncClient` into 30 security-testing tools that the LLM can call.
 
 ```
 LLM decides to call tool
@@ -119,7 +125,7 @@ TOOL_DEFINITIONS = [
             }
         }
     },
-    # ... 27 more tools
+    # ... 29 more tools (including chain_exploit, get_findings_so_far)
 ]
 ```
 
@@ -371,6 +377,15 @@ After all LLM phases complete, payloads from findings are replayed against the l
    - Check if the vulnerability indicator is still present in the response
 2. Mark each finding: `CONFIRMED` (still exploitable) or `DISPROVED` (no longer reproduces)
 3. This provides a second layer of evidence beyond the LLM's initial test
+
+### Chain Verification
+
+Exploit chain findings (produced by `chain_exploit`) receive specialized verification:
+
+1. Each step in the chain is replayed sequentially against the live target
+2. Step outputs (cookies, tokens, IDs) are carried forward to subsequent steps
+3. The chain is marked `CONFIRMED` only if all steps succeed end-to-end
+4. Partial success is recorded with per-step evidence for manual review
 
 ---
 
