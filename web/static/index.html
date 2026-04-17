@@ -4503,6 +4503,76 @@ var _OWASP_TITLES = {
   'A10': 'Server-Side Request Forgery',
 };
 
+var _PCI_DSS_TITLES = {
+  '2': 'Secure Configurations',
+  '3': 'Protect Stored Data',
+  '4': 'Strong Cryptography in Transit',
+  '6': 'Secure Systems & Software',
+  '7': 'Restrict Access by Need to Know',
+  '8': 'Identify & Authenticate Access',
+  '10': 'Log & Monitor All Access',
+  '11': 'Test Security Regularly',
+};
+
+var _CAT_TO_PCI = {
+  'SQL Injection': '6', 'Cross-Site Scripting': '6', 'Command Injection': '6',
+  'Template Injection': '6', 'XML External Entity': '6', 'Path Traversal': '6',
+  'Cross-Site Request Forgery': '6', 'Open Redirect': '6', 'File Upload': '6',
+  'Race Condition': '6', 'Deserialization': '6', 'Prototype Pollution': '6',
+  'HTTP Protocol Issues': '6', 'Exploit Chains': '6', 'API Version Issues': '6',
+  'CORS Misconfiguration': '6', 'Content Security Policy': '6',
+  'Host Header Injection': '6', 'Security Headers': '6',
+  'Source Map Exposure': '6', 'HTML Comment Disclosure': '6',
+  'Information Disclosure': '6', 'DNS & Subdomain': '6',
+  'WebSocket Security': '6', 'Vulnerable Components': '6',
+  'Timing & Enumeration': '6',
+  'Server-Side Request Forgery': '11',
+  'Broken Access Control': '7', 'Mass Assignment': '7',
+  'Token & JWT Security': '8', 'Authentication & Session': '8',
+  'Cookie Security': '8', 'Rate Limiting': '8',
+  'Hardcoded Secrets': '3', 'Data Exposure': '3',
+  'Mixed Content': '4', 'Subresource Integrity': '4',
+  'Logging & Telemetry': '10',
+};
+
+var _SANS25 = {
+  '787': 'Out-of-bounds Write', '79': 'Cross-Site Scripting',
+  '89': 'SQL Injection', '416': 'Use After Free',
+  '78': 'OS Command Injection', '20': 'Improper Input Validation',
+  '125': 'Out-of-bounds Read', '22': 'Path Traversal',
+  '352': 'Cross-Site Request Forgery', '434': 'Unrestricted File Upload',
+  '862': 'Missing Authorization', '476': 'NULL Pointer Dereference',
+  '287': 'Improper Authentication', '190': 'Integer Overflow',
+  '502': 'Deserialization of Untrusted Data', '77': 'Command Injection',
+  '119': 'Buffer Overflow', '798': 'Hard-coded Credentials',
+  '918': 'Server-Side Request Forgery', '306': 'Missing Auth for Critical Function',
+  '362': 'Race Condition', '269': 'Improper Privilege Management',
+  '94': 'Code Injection', '863': 'Incorrect Authorization',
+  '276': 'Incorrect Default Permissions',
+};
+
+var _SANS25_RANK = ['787','79','89','416','78','20','125','22','352','434','862','476','287','190','502','77','119','798','918','306','362','269','94','863','276'];
+
+var _CAT_TO_CWE = {
+  'SQL Injection': '89', 'Cross-Site Scripting': '79',
+  'Command Injection': '78', 'Template Injection': '94',
+  'Server-Side Request Forgery': '918', 'Path Traversal': '22',
+  'Cross-Site Request Forgery': '352', 'File Upload': '434',
+  'Broken Access Control': '862', 'Token & JWT Security': '287',
+  'Authentication & Session': '287', 'Hardcoded Secrets': '798',
+  'Race Condition': '362', 'Deserialization': '502',
+};
+
+function _extractCWE(f) {
+  var raw = f.cwe || f.cwe_hint || '';
+  if (typeof raw === 'number') return String(raw);
+  var m = String(raw).match(/CWE[- ]?(\d+)/i);
+  if (m) return m[1];
+  m = String(raw).match(/^(\d+)$/);
+  if (m) return m[1];
+  return '';
+}
+
 var _groupByMode = 'category';
 try { var _saved = localStorage.getItem('dast_group_by'); if (_saved) _groupByMode = _saved; } catch(e) {}
 
@@ -4518,7 +4588,7 @@ function setGroupBy(mode) {
 }
 
 function _grpButtonsHtml() {
-  var modes = [['category','Category'],['owasp','OWASP'],['severity','Severity']];
+  var modes = [['category','Issue Category'],['owasp','OWASP'],['severity','Severity'],['pci_dss','PCI DSS'],['sans25','SANS 25']];
   var html = '<div style="display:inline-flex;gap:2px;border:1px solid var(--border);border-radius:6px;overflow:hidden;margin-left:8px;">';
   modes.forEach(function(m) {
     var active = _groupByMode === m[0];
@@ -4548,6 +4618,20 @@ function _sevSort(a, b) {
   return ai - bi;
 }
 
+function _pciSort(a, b) {
+  if (a === 'Other') return 1;
+  if (b === 'Other') return -1;
+  return parseInt(a) - parseInt(b);
+}
+
+function _sans25Sort(a, b) {
+  if (a === 'Other') return 1;
+  if (b === 'Other') return -1;
+  var ai = _SANS25_RANK.indexOf(a); if (ai === -1) ai = 99;
+  var bi = _SANS25_RANK.indexOf(b); if (bi === -1) bi = 99;
+  return ai - bi;
+}
+
 function _getGroupKey(f) {
   if (_groupByMode === 'owasp') {
     var raw = f.owasp_category || f.owasp || '';
@@ -4561,6 +4645,18 @@ function _getGroupKey(f) {
     if (_SEV_ORDER.indexOf(s) === -1) s = 'Other';
     return s;
   }
+  if (_groupByMode === 'pci_dss') {
+    var cat = _inferFindingType(f);
+    return _CAT_TO_PCI[cat] || 'Other';
+  }
+  if (_groupByMode === 'sans25') {
+    var cweNum = _extractCWE(f);
+    if (cweNum && _SANS25[cweNum]) return cweNum;
+    var cat = _inferFindingType(f);
+    var inferred = _CAT_TO_CWE[cat];
+    if (inferred && _SANS25[inferred]) return inferred;
+    return 'Other';
+  }
   return _inferFindingType(f);
 }
 
@@ -4568,12 +4664,20 @@ function _getGroupLabel(key) {
   if (_groupByMode === 'owasp' && key !== 'Other') {
     return '<span class="cat-id">' + key + '</span> ' + esc(_OWASP_TITLES[key] || key);
   }
+  if (_groupByMode === 'pci_dss' && key !== 'Other') {
+    return '<span class="cat-id">Req ' + key + '</span> ' + esc(_PCI_DSS_TITLES[key] || key);
+  }
+  if (_groupByMode === 'sans25' && key !== 'Other') {
+    return '<span class="cat-id">CWE-' + key + '</span> ' + esc(_SANS25[key] || key);
+  }
   return esc(key);
 }
 
 function _getGroupSorter() {
   if (_groupByMode === 'owasp') return _owaspSort;
   if (_groupByMode === 'severity') return _sevSort;
+  if (_groupByMode === 'pci_dss') return _pciSort;
+  if (_groupByMode === 'sans25') return _sans25Sort;
   return _catSort;
 }
 
