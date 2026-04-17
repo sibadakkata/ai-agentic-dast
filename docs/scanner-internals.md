@@ -2,7 +2,7 @@
 
 [← Back to README](../README.md)
 
-Deep dive into the scan engine: tool execution, evidence tracking, retry logic, context management, and finding extraction.
+Deep dive into the scan engine: tool execution, evidence tracking, evidence summary, context management, and finding extraction.
 
 ---
 
@@ -48,7 +48,7 @@ User clicks "Start Scan" (UI or API)
 │       e. Enforce minimum security calls                 │
 │       f. Extract findings when LLM stops                │
 │       g. Evidence grounding check                       │
-│       h. Retry if 0 findings and phase is retryable     │
+│       h. Evidence summary if 0 findings but evidence    │
 │       i. Trim context if needed                         │
 ├─────────────────────────────────────────────────────────┤
 │  7b. ATTACK CHAIN ANALYSIS                               │
@@ -190,7 +190,7 @@ Security tool call executed
               │
               ▼
   Used by:
-  1. _format_evidence_buffer() → retry prompts
+  1. _format_evidence_buffer() → evidence summary prompt
   2. _match_evidence_to_finding() → attach request/response to findings
   3. Evidence grounding check → reject unproven findings
 ```
@@ -214,22 +214,47 @@ When the LLM reports findings, each finding's `payload` and `evidence` fields ar
 
 ---
 
-## Retry Mechanism
+## Evidence Summary (Zero-Finding Recovery)
 
-### Phase Retry (`_RETRY_PHASES`)
+When a phase completes with 0 reported findings but the evidence buffer shows security tools were called, a single follow-up LLM call reviews the collected evidence to recover any missed vulnerabilities.
 
-Certain critical phases get a second chance if they find 0 vulnerabilities but have evidence of testing:
+This replaces the earlier retry mechanism, which re-ran the entire phase loop with full tool access — effectively doubling cost and sometimes re-testing the same payloads.
 
-**Retryable phases:**
-`web_a03_sqli`, `web_a03_xss`, `web_a03_cmdi`, `web_a03_ssti`, `web_a03_path_traversal`, `web_a03_xxe`, `web_a01`, `web_a07`, `web_a10`, `api_injection`, `api_ssrf`, `api_authz`
+### How It Works
 
-**Retry flow:**
-1. Phase completes with 0 findings
-2. Check evidence buffer — were security tools actually called?
-3. If yes: build a retry prompt with the full evidence buffer
-4. Retry prompt includes: "Analyze what was tested, what failed, try different endpoints/techniques"
-5. Run another `max_steps` loop with full tool access
-6. Merge any retry findings into the main findings list
+```
+Phase completes with 0 findings
+         │
+         ▼
+┌─────────────────────────────────┐
+│  Evidence buffer non-empty?      │
+│  (security tools were called)    │
+├─────────┬───────────────────────┘
+│  No     │  Yes
+│  ▼      │  ▼
+│ Done    │ Build summary prompt with
+│         │ full evidence buffer
+│         │         │
+│         │         ▼
+│         │ Single LLM call (no tools)
+│         │ "Review evidence, output any
+│         │  confirmed vulnerabilities as
+│         │  JSON findings"
+│         │         │
+│         │         ▼
+│         │ extract_findings() on response
+│         │ Merge recovered findings
+└─────────┴───────────────────────┘
+```
+
+### Why This Is Better
+
+| | Old Retry | Evidence Summary |
+|---|---|---|
+| **LLM calls** | Full `max_steps` loop (up to 25 tool calls) | Single completion call |
+| **Tool access** | Full tools — may re-test same payloads | No tools — analysis only |
+| **Cost** | ~2x the phase cost | ~$0.001–$0.01 |
+| **UI confusion** | Showed as "Retry Phase" with separate numbering | Invisible — findings appear under the original phase |
 
 ### Minimum Security Calls (`_MIN_SECURITY_CALLS`)
 

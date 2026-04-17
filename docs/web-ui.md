@@ -16,7 +16,7 @@ The scanner includes a single-page web UI for managing scans, viewing results, a
 | **API Imports** | Upload Postman Collection or OpenAPI/Swagger spec |
 | **Live Progress** | Real-time tool calls, payloads, responses, and findings as the scan runs |
 | **AI vs Triage** | Side-by-side comparison of AI severity vs evidence-based triage verdict |
-| **Category-Grouped Findings** | Both Comparison and AI Raw Findings tabs group results by category (Injection, Access Control, etc.) with collapsible sections showing finding count and severity breakdown per category |
+| **Findings Grouping (Group by)** | All findings tabs (Live, Comparison, AI Raw) support five grouping modes selectable via a "Group by" toolbar: **Issue Category** (default — inferred vulnerability type like SQL Injection, XSS, etc.), **OWASP** (A01–A10 codes), **Severity** (Critical/High/Medium/Low/Info), **PCI DSS** (v4.0 requirements 3–11), and **SANS 25** (CWE Top 25). Each group is collapsible with a finding count and severity chip breakdown |
 | **Crawled Endpoints** | Full list of discovered links and API endpoints |
 | **Payloads by Endpoint** | Expandable view of every payload tested per endpoint |
 | **Phase Log** | Chronological breakdown of each scan phase with tool call and finding counts |

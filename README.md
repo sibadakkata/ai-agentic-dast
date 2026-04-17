@@ -62,7 +62,9 @@ This loop runs up to 25 steps per phase. Every finding is then **triaged offline
 | **Reports** | Three-stage evidence: AI Agent → Runtime Verification → Triage verdict | PDF, Excel, JSON export |
 | **Cost Control** | Pause/resume scans, stop early, per-scan cost tracking | Real-time cost display in UI |
 | **Multi-Step Exploit Chaining** | Combines individual findings into attack chains (e.g. XSS + cookie theft → session hijack, SSRF → internal API → data exfiltration) | Cross-phase context, `chain_exploit` tool |
-| **Category-Grouped Results** | Findings displayed by category (Injection, Access Control, etc.) with collapsible sections and severity breakdown | Comparison and AI Raw Findings tabs |
+| **Findings Grouping** | Group findings by Issue Category, OWASP Top 10 code, Severity, PCI DSS requirement, or SANS/CWE Top 25 — with a "Group by" selector, collapsible sections, and per-group severity breakdown | All tabs: Live, Comparison, AI Raw Findings |
+| **Evidence Summary** | When an LLM phase reports 0 findings but collected evidence, a single follow-up LLM call reviews the evidence to recover any missed vulnerabilities — lightweight replacement for the old retry loop | Reduces cost, removes duplicate payloads |
+| **Deploy Safety** | Pre-deployment check detects active/paused scans and aborts `deploy.sh` before overwriting a running scanner | `scripts/check_scan_active.py`, integrated in `deploy.sh` |
 
 ## Quick Start
 
@@ -170,7 +172,8 @@ uvicorn web.app:app --host 0.0.0.0 --port 8080
 │   ├── triage_engine.py         #   3-layer triage engine
 │   ├── cve_lookup.py            #   NVD + OSV.dev CVE lookup
 │   ├── report_generator.py      #   PDF report generator
-│   └── excel_exporter.py        #   Excel report exporter
+│   ├── excel_exporter.py        #   Excel report exporter
+│   └── check_scan_active.py     #   Pre-deploy scan-active safety check
 ├── web/
 │   ├── app.py                   #   FastAPI backend
 │   ├── db.py                    #   SQLite persistence
@@ -210,7 +213,7 @@ python scripts/run_regression_ec2.py --pytest # same, plus pytest tests/
 |----------|-------------|
 | [Architecture](docs/architecture.md) | AI agent design, LLM loop, tool system, phase orchestration |
 | [System Prompt Guide](docs/system-prompt-guide.md) | **How the LLM is instructed** — system prompt structure, phase prompts, payload methodology, finding format |
-| [Scanner Internals](docs/scanner-internals.md) | **E2E scan flow** — tool execution, evidence buffer, retry logic, context trimming, finding extraction |
+| [Scanner Internals](docs/scanner-internals.md) | **E2E scan flow** — tool execution, evidence buffer, evidence summary, context trimming, finding extraction |
 | [Contributing & Extending](docs/contributing.md) | **How to add new phases, tools, and optimize detection** — step-by-step guide for team members |
 | [Security Checks](docs/security-checks.md) | Complete reference of all 65 check categories — passive recon, web phases, API phases, CWE/OWASP coverage |
 | [Triage Engine](docs/triage-engine.md) | How TP/FP classification works, confidence scoring, CVSS adjustment |
