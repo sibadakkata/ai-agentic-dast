@@ -4451,6 +4451,7 @@ var _FINDING_TYPE_RULES = [
   [/rate.?limit|throttl/i, 'Rate Limiting'],
   [/cors|cross.?origin/i, 'CORS Misconfiguration'],
   [/csp|content.?security.?policy/i, 'Content Security Policy'],
+  [/host.?header/i, 'Host Header Injection'],
   [/header|hsts|x-frame|clickjack|x-content-type|referrer.?policy|permissions.?policy|cache.?control/i, 'Security Headers'],
   [/source.?map/i, 'Source Map Exposure'],
   [/hardcoded|secret|password.?in|api.?key.?in|token.?in.?source|credential.?in/i, 'Hardcoded Secrets'],
@@ -4459,7 +4460,6 @@ var _FINDING_TYPE_RULES = [
   [/file.?upload|unrestrict.?upload/i, 'File Upload'],
   [/race.?condition|concurren/i, 'Race Condition'],
   [/mass.?assign/i, 'Mass Assignment'],
-  [/host.?header/i, 'Host Header Injection'],
   [/websocket|ws.?inject/i, 'WebSocket Security'],
   [/mixed.?content|http.?resource/i, 'Mixed Content'],
   [/sri|subresource.?integrity/i, 'Subresource Integrity'],
@@ -4591,7 +4591,7 @@ function _groupFindings(findings) {
 function _sevCounts(items) {
   var c = {critical:0, high:0, medium:0, low:0, info:0};
   items.forEach(function(item) {
-    var s = ((item.f.severity || item.f.final_severity || '') + '').toLowerCase();
+    var s = ((item.f.final_severity || item.f.severity || '') + '').toLowerCase();
     if (c[s] !== undefined) c[s]++;
   });
   var parts = [];
