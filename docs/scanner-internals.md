@@ -226,27 +226,39 @@ End-of-phase recovery now takes one of two forms depending on the phase. The
 agent does **not** choose between the two dynamically — the branch is decided
 by whether the phase belongs to `_ACTIVE_RETRY_PHASES`.
 
-### Branch A — Active retry with tool calls (15 high-impact phases)
+### Branch A — Active retry with tool calls (20 high-impact phases)
 
 For these phases the first pass is often not enough to surface the core
 vulnerability class (e.g. the auth phase discovered a password-reset issue but
-never actually brute-forced credentials). A second, tool-enabled pass is run
-with a phase-tailored retry prompt that tells the LLM exactly what to try,
-seeded with the evidence collected so far.
+never actually brute-forced credentials; the file-upload phase confirmed an
+upload but never proved execution). A second, tool-enabled pass is run with a
+phase-tailored retry prompt that tells the LLM exactly what to try, seeded
+with the evidence collected so far.
 
 Active-retry phases (defined in `_ACTIVE_RETRY_PHASES`):
 
 ```
-web_a01              api_authz
-web_a07              api_auth
-web_a10              web_bfla
-web_a03_sqli         api_bfla
-web_a03_xss          api_injection
-web_a03_cmdi         api_ssrf
-web_a03_ssti
-web_a03_path_traversal
-web_a03_xxe
+Access Control / Authorization       Injection (A03)
+  web_a01                              web_a03_sqli
+  api_authz                            web_a03_xss
+  web_bfla                             web_a03_cmdi
+  api_bfla                             web_a03_ssti
+                                       web_a03_path_traversal
+Authentication                         web_a03_xxe
+  web_a07                              api_injection
+  api_auth
+                                     SSRF
+High-impact misc                       web_a10
+  web_file_upload                      api_ssrf
+  web_password_reset
+  web_session_mgmt                   API-only
+  api_mass_assign
+  api_data_exposure
 ```
+
+Tailored retry prompts live in `_RETRY_PROMPTS` under these keys:
+`access_control`, `auth`, `sqli`, `xss`, `injection`, `ssrf`, `file_upload`,
+`password_reset`, `session_mgmt`, `mass_assign`, `data_exposure`.
 
 ### Branch B — Evidence summary (all other phases)
 

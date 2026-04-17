@@ -1774,6 +1774,8 @@ async def run_scan(
                 "web_a03_ssti", "web_a03_path_traversal", "web_a03_xxe",
                 "api_injection", "api_ssrf", "api_authz",
                 "api_auth", "web_bfla", "api_bfla",
+                "web_file_upload", "web_password_reset", "web_session_mgmt",
+                "api_mass_assign", "api_data_exposure",
             }
             _RETRY_PROMPTS = {
                 "access_control": (
@@ -1863,6 +1865,119 @@ async def run_scan(
                     "5. Different URL schemes: file://, gopher://, dict://\n"
                     "DO NOT give up. Try at least 3 more approaches."
                 ),
+                "file_upload": (
+                    "RETRY — Phase '{name}' has not proven RCE via file upload. "
+                    "Review the evidence below and actually exploit the upload:\n\n"
+                    "{evidence}\n\n"
+                    "YOU MUST TRY (use api_request or form submission — then fetch the "
+                    "uploaded file back with navigate/api_request and inspect the response):\n"
+                    "1. Executable extensions: upload .php / .asp / .aspx / .jsp / .jspx / "
+                    ".cgi / .pl / .py with benign content and try to hit the returned URL. "
+                    "If the server executes it, that's CRITICAL RCE.\n"
+                    "2. Double-extension & null-byte bypass: shell.php.jpg, shell.asp;.jpg, "
+                    "shell.php%00.jpg, shell.phtml, shell.phar — MIME-check bypass is weak.\n"
+                    "3. Content-Type confusion: send Content-Type: image/jpeg but payload is "
+                    "<?php system($_GET['c']); ?> — verify execution by fetching ?c=id.\n"
+                    "4. Polyglot files: valid PNG/JPEG header + trailing PHP payload; SVG "
+                    "with embedded <script>/<foreignObject> for stored XSS.\n"
+                    "5. Path traversal in filename: ../../../var/www/html/shell.php, "
+                    "..\\..\\webroot\\shell.aspx — can you overwrite files outside the upload dir?\n"
+                    "6. Oversized / zip-bomb / nested archive to probe DoS & unsafe unzip.\n"
+                    "REPORT: on confirmed execution, emit 'Arbitrary File Upload → RCE' "
+                    "(Critical). DO NOT settle for 'upload accepted' without proving execution."
+                ),
+                "password_reset": (
+                    "RETRY — Phase '{name}' has not completed password-reset abuse testing. "
+                    "Review the evidence below and test every class below:\n\n"
+                    "{evidence}\n\n"
+                    "YOU MUST TRY (use only the scan's own email; never hit third-party addresses):\n"
+                    "1. Account enumeration: diff the response (body, status, size, timing) "
+                    "between a known-valid email and a random one. Any visible diff = enumeration.\n"
+                    "2. Host-header poisoning: resend the reset request with "
+                    "Host: attacker.evil and X-Forwarded-Host: attacker.evil — if a reset "
+                    "link or body comes back referencing attacker.evil, that's account takeover.\n"
+                    "3. Token entropy / reuse / expiry: capture a token, request another reset "
+                    "and check if the old one still works (no invalidation = bad). Inspect token "
+                    "length, charset, predictability.\n"
+                    "4. Missing old-password check on the reset completion endpoint — can you "
+                    "POST a new password to the reset endpoint without the token, or with a "
+                    "guessed/expired token?\n"
+                    "5. Parameter pollution / JSON smuggling: {{\"email\":[\"victim@x\", \"attacker@y\"]}} "
+                    "or CR/LF injection in the email field to split the recipient.\n"
+                    "6. Race condition: send 2 reset requests concurrently and see whether both "
+                    "tokens validate.\n"
+                    "REPORT host-header takeover as 'Password Reset Host Header Injection' "
+                    "(High), token reuse as 'Password Reset Token Not Invalidated' (High)."
+                ),
+                "session_mgmt": (
+                    "RETRY — Phase '{name}' has not proven a session-management defect. "
+                    "Review the evidence and test each class below with get_cookies / api_request:\n\n"
+                    "{evidence}\n\n"
+                    "YOU MUST TRY:\n"
+                    "1. Session fixation: get the session cookie BEFORE login, log in, get it "
+                    "AFTER login, compare. Same value = fixation (High).\n"
+                    "2. Cookie flags: for every session/auth cookie, verify HttpOnly, Secure "
+                    "and SameSite. Missing flags on an auth cookie are each separate findings.\n"
+                    "3. Session in URL: check whether the token appears in any query string, "
+                    "fragment, or Location header — leaks via Referer & logs.\n"
+                    "4. Logout / privilege change invalidation: change password (or role, if "
+                    "possible) and verify the PREVIOUS token stops working. If it still works, "
+                    "that's 'Session Not Invalidated on Credential Change' (High).\n"
+                    "5. Concurrent-session / token reuse: a stolen token should not survive "
+                    "logout — test it. Long-lived JWTs with no exp claim are a finding.\n"
+                    "6. Entropy & predictability: assess token length and charset; extremely "
+                    "short or sequential tokens are brute-forceable.\n"
+                    "DO NOT click the logout button. Inspect via get_cookies, "
+                    "get_local_storage and api_request only."
+                ),
+                "mass_assign": (
+                    "RETRY — Phase '{name}' has not confirmed mass assignment. "
+                    "Review the evidence and do not stop at 'request accepted' — you must "
+                    "GET the resource back and prove the privileged field was persisted:\n\n"
+                    "{evidence}\n\n"
+                    "YOU MUST TRY (use api_request for every POST/PUT/PATCH):\n"
+                    "1. Privilege escalation fields: inject {{\"role\":\"admin\"}}, "
+                    "{{\"isAdmin\":true}}, {{\"admin\":1}}, {{\"permissions\":[\"*\"]}}, "
+                    "{{\"userType\":\"admin\"}}, {{\"is_staff\":true}} into user-create / "
+                    "user-update / register bodies, then GET the resource and confirm.\n"
+                    "2. Financial fields: {{\"price\":0}}, {{\"discount\":100}}, "
+                    "{{\"balance\":999999}}, {{\"credits\":999999}}, {{\"isPaid\":true}} "
+                    "on order/payment/product endpoints.\n"
+                    "3. State fields: {{\"verified\":true}}, {{\"active\":true}}, "
+                    "{{\"emailVerified\":true}}, {{\"kycStatus\":\"approved\"}}.\n"
+                    "4. Ownership takeover: {{\"ownerId\":<other-user>}}, "
+                    "{{\"userId\":<other-user>}}, {{\"email\":\"attacker@x\"}}.\n"
+                    "5. Schema inference: GET a resource, copy every field name from the "
+                    "response, and send them all back in the update body — this often "
+                    "surfaces read-only fields the API silently accepts.\n"
+                    "REPORT as 'Mass Assignment — Privilege Escalation to admin' (Critical) "
+                    "or 'Mass Assignment — Price Tampering' (High) with before/after JSON proof."
+                ),
+                "data_exposure": (
+                    "RETRY — Phase '{name}' has not enumerated excessive data exposure. "
+                    "Review the evidence and go deeper — don't stop at 'response looks normal':\n\n"
+                    "{evidence}\n\n"
+                    "YOU MUST TRY:\n"
+                    "1. UI-vs-API diff: for profile/orders/settings, compare what the UI renders "
+                    "to what the API returns. Every extra field (password_hash, salt, "
+                    "internal_id, ssn, phone, 2fa_secret, apiKey, stripe_customer_id) is a finding.\n"
+                    "2. List/search endpoints: /api/users, /api/users?limit=1000, "
+                    "/api/search?q=*, /api/admin/users — do unauthenticated or low-priv roles "
+                    "retrieve other users' PII?\n"
+                    "3. Sensitive-field probe: scan every JSON response you've collected for "
+                    "'password', 'hash', 'salt', 'token', 'secret', 'api_key', 'private_key', "
+                    "'ssn', 'credit_card', 'cvv', 'pin', 'otp'. Any hit = finding.\n"
+                    "4. Verbose errors: trigger errors (bad JSON, missing fields, bad types) "
+                    "and capture stack traces, SQL snippets, file paths, hostnames.\n"
+                    "5. Debug/introspection endpoints: /api/debug, /actuator/*, /graphql "
+                    "with IntrospectionQuery, /api/swagger, /api/openapi — do they leak internal "
+                    "schema or config?\n"
+                    "6. ID enumeration: for every endpoint that takes an id, sweep a small "
+                    "range (id-5 … id+5) and diff the responses — leaking other users' data is "
+                    "both BOLA and data exposure.\n"
+                    "REPORT each leaked sensitive field/endpoint as its own finding with the "
+                    "offending response body as evidence."
+                ),
             }
             _PHASE_TO_PROMPT_KEY = {
                 "web_a01": "access_control", "api_authz": "access_control",
@@ -1873,6 +1988,11 @@ async def run_scan(
                 "web_a03_cmdi": "injection", "web_a03_ssti": "injection",
                 "web_a03_path_traversal": "injection", "web_a03_xxe": "injection",
                 "web_a10": "ssrf", "api_ssrf": "ssrf",
+                "web_file_upload": "file_upload",
+                "web_password_reset": "password_reset",
+                "web_session_mgmt": "session_mgmt",
+                "api_mass_assign": "mass_assign",
+                "api_data_exposure": "data_exposure",
             }
 
             _PHASE_CORE_KEYWORDS: dict[str, tuple[str, ...]] = {
@@ -1943,6 +2063,37 @@ async def run_scan(
                 "api_ssrf": (
                     "ssrf", "server-side request forgery", "internal network",
                     "cloud metadata", "169.254.169.254",
+                ),
+                "web_file_upload": (
+                    "arbitrary file upload", "unrestricted file upload",
+                    "file upload rce", "remote code execution", "rce via upload",
+                    "webshell", "web shell", "php shell", "jsp shell",
+                    "executable upload", "double extension",
+                ),
+                "web_password_reset": (
+                    "password reset host header", "host header injection",
+                    "account takeover", "reset token reuse", "reset token not invalidated",
+                    "predictable reset token", "account enumeration",
+                    "password reset poisoning", "missing old password",
+                ),
+                "web_session_mgmt": (
+                    "session fixation", "session not invalidated",
+                    "session token in url", "missing httponly", "missing secure flag",
+                    "missing samesite", "insecure cookie", "session reuse",
+                    "long-lived session", "predictable session",
+                ),
+                "api_mass_assign": (
+                    "mass assignment", "privilege escalation to admin",
+                    "role=admin", "isadmin", "price tampering",
+                    "ownership takeover", "parameter tampering escalation",
+                    "unauthorized field modification",
+                ),
+                "api_data_exposure": (
+                    "excessive data exposure", "sensitive data exposure",
+                    "pii leak", "password hash in response", "api key in response",
+                    "secret in response", "verbose error", "stack trace exposed",
+                    "debug endpoint", "internal id leak", "internal field leak",
+                    "unfiltered list endpoint",
                 ),
             }
 
