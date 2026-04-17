@@ -298,7 +298,7 @@ def _load_scans_from_disk():
         if bootstrap_cost > 0:
             scandb.set_cost_ledger(bootstrap_cost)
 
-_TRANSIENT_KEYS = frozenset({"live_tests", "live_findings", "live_phases", "live_crawled", "live_forms", "live_tool_calls", "live_out_of_scope", "live_tokens", "live_llm_calls", "live_cost", "live_phase_tools", "_router"})
+_TRANSIENT_KEYS = frozenset({"live_tests", "live_findings", "live_phases", "live_crawled", "live_forms", "live_tool_calls", "live_out_of_scope", "live_tokens", "live_llm_calls", "live_cost", "live_phase_tools", "_router", "_findings_seen"})
 _SECRET_KEYS = frozenset({"_password"})
 
 
@@ -306,6 +306,56 @@ def _clean_scan_for_db(info: dict) -> dict:
     """Strip transient/secret keys from a scan dict before persisting."""
     return {k: v for k, v in info.items()
             if k not in _TRANSIENT_KEYS and k not in _SECRET_KEYS}
+
+
+def _finding_key(f: dict) -> tuple | None:
+    """Build a stable dedup key for a finding.
+
+    Two findings are treated as the same if they share (title, url, parameter).
+    Returns None if the finding has no usable key (shouldn't happen in practice
+    but keeps us safe against malformed payloads).
+    """
+    if not isinstance(f, dict):
+        return None
+    title = (f.get("title") or "").strip().lower()
+    if not title:
+        return None
+    url = (
+        f.get("url")
+        or f.get("endpoint")
+        or f.get("location")
+        or f.get("affected_url")
+        or ""
+    )
+    if isinstance(url, str):
+        url = url.strip().lower()
+    else:
+        url = str(url)
+    param = (
+        f.get("parameter")
+        or f.get("param")
+        or f.get("field")
+        or ""
+    )
+    if isinstance(param, str):
+        param = param.strip().lower()
+    return (title, url, param)
+
+
+def _dedupe_findings(findings: list[dict]) -> tuple[list[dict], set]:
+    """Return (deduped_list, seen_keys_set) preserving the first occurrence order."""
+    out: list[dict] = []
+    seen: set = set()
+    for f in findings or []:
+        key = _finding_key(f)
+        if key is None:
+            out.append(f)
+            continue
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(f)
+    return out, seen
 
 
 def _save_scan(scan_id: str):
@@ -1524,7 +1574,9 @@ async def _run_scan_task(scan_id, target_url, username, password, model, scan_mo
         scan["progress"].append("Initializing LLM router...")
         scan["live_phases"] = []
         scan["live_tests"] = []
-        scan["live_findings"] = list(initial_findings) if initial_findings else []
+        seeded, _seen = _dedupe_findings(initial_findings or [])
+        scan["live_findings"] = seeded
+        scan["_findings_seen"] = _seen
         scan["live_crawled"] = []
         scan["live_forms"] = 0
         scan["live_tool_calls"] = 0
@@ -1588,7 +1640,14 @@ async def _run_scan_task(scan_id, target_url, username, password, model, scan_mo
                 if scan["live_tool_calls"] % 10 == 0:
                     _save_scan(scan_id)
             elif event == "finding":
-                scan["live_findings"].append(dict(data))
+                f = dict(data)
+                key = _finding_key(f)
+                seen = scan.setdefault("_findings_seen", set())
+                if key is not None and key in seen:
+                    return
+                if key is not None:
+                    seen.add(key)
+                scan["live_findings"].append(f)
             elif event == "crawl":
                 url = data.get("url", "")
                 ctype = data.get("type", "page")
