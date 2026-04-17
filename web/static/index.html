@@ -4476,9 +4476,15 @@ var _FINDING_TYPE_RULES = [
 ];
 
 function _inferFindingType(f) {
-  var title = (f.title || '') + ' ' + (f.phase || '');
+  var title = f.title || '';
   for (var i = 0; i < _FINDING_TYPE_RULES.length; i++) {
     if (_FINDING_TYPE_RULES[i][0].test(title)) return _FINDING_TYPE_RULES[i][1];
+  }
+  var phase = f.phase || '';
+  if (phase) {
+    for (var i = 0; i < _FINDING_TYPE_RULES.length; i++) {
+      if (_FINDING_TYPE_RULES[i][0].test(phase)) return _FINDING_TYPE_RULES[i][1];
+    }
   }
   return 'Other';
 }
