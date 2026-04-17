@@ -566,6 +566,50 @@ def _cheapest_model() -> str:
     return min(models, key=lambda m: m.get("input_cost_per_m", float("inf")))["id"]
 
 
+_LITELLM_DIRECT_PREFIXES = (
+    "bedrock/", "vertex_ai/", "sagemaker/", "ollama/", "openai/",
+    "anthropic/", "azure/", "huggingface/", "together_ai/", "cohere/",
+    "groq/", "mistral/", "gemini/", "deepseek/",
+)
+
+
+def _resolve_model_id(model: str) -> str:
+    """Map a user-supplied model string to a valid litellm model ID.
+
+    Accepts:
+      - a real id like 'bedrock/us.anthropic.claude-haiku-4-5-...'
+      - a display name like 'Claude Haiku 4.5 (recommended)'
+      - a short alias like 'haiku', 'sonnet', 'claude-haiku-4-5'
+      - empty / unknown → falls back to the cheapest model
+
+    Never returns a string without a litellm provider prefix, so litellm
+    can always parse it. Prevents 'LLM Provider NOT provided' errors when
+    callers pass the friendly name instead of the id.
+    """
+    models = _get_models()
+    if not model or not isinstance(model, str):
+        return _cheapest_model()
+    m = model.strip()
+    if not m:
+        return _cheapest_model()
+    for entry in models:
+        if entry.get("id") == m:
+            return m
+    low = m.lower()
+    for entry in models:
+        if (entry.get("name") or "").strip().lower() == low:
+            return entry["id"]
+    for entry in models:
+        name = (entry.get("name") or "").lower()
+        mid = (entry.get("id") or "").lower()
+        if low and (low in name or low in mid):
+            return entry["id"]
+    if m.startswith(_LITELLM_DIRECT_PREFIXES):
+        return m
+    logger.warning("Unknown model '%s' — falling back to %s", m, _cheapest_model())
+    return _cheapest_model()
+
+
 def _run_model_discovery_bg():
     """Run model discovery in a background thread (non-blocking)."""
     global _last_discovery_time
@@ -1385,7 +1429,7 @@ async def start_scan(request: Request):
     password = body.get("password", "").strip()
     username_b = body.get("username_b", "").strip()
     password_b = body.get("password_b", "").strip()
-    model = body.get("model", "claude-haiku-4-5-20251001")
+    model = _resolve_model_id(body.get("model", ""))
     scan_mode_raw = body.get("scan_mode", "both")
     _MODE_MAP = {"standard": "both", "quick": "both", "deep": "both",
                  "full": "both", "web": "website", "site": "website"}
@@ -1480,7 +1524,7 @@ async def _run_scan_task(scan_id, target_url, username, password, model, scan_mo
         scan["progress"].append("Initializing LLM router...")
         scan["live_phases"] = []
         scan["live_tests"] = []
-        scan["live_findings"] = []
+        scan["live_findings"] = list(initial_findings) if initial_findings else []
         scan["live_crawled"] = []
         scan["live_forms"] = 0
         scan["live_tool_calls"] = 0
@@ -2074,7 +2118,7 @@ async def retry_scan(scan_id: str, request: Request):
         pass
 
     scan_mode = overrides.get("scan_mode") or params["scan_mode"]
-    model = overrides.get("model") or params["model"]
+    model = _resolve_model_id(overrides.get("model") or params["model"])
     force_restart = overrides.get("force_restart", False)
 
     start_from = 0
@@ -2147,7 +2191,7 @@ async def rescan(scan_id: str, request: Request):
         pass
 
     scan_mode = overrides.get("scan_mode") or params["scan_mode"]
-    model = overrides.get("model") or params["model"]
+    model = _resolve_model_id(overrides.get("model") or params["model"])
 
     new_id = f"scan_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
     cancel_flag = threading.Event()
