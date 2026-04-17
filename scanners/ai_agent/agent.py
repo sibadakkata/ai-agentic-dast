@@ -1875,31 +1875,100 @@ async def run_scan(
                 "web_a10": "ssrf", "api_ssrf": "ssrf",
             }
 
-            _AUTH_RETRY_PHASES = {"web_a07", "api_auth"}
-            _CRED_FINDING_KEYWORDS = (
-                "default credential", "weak password", "credential stuffing",
-                "brute force successful", "admin:admin", "login bypass",
-                "authentication bypass", "auth bypass", "cracked password",
-                "sql injection authentication", "valid credentials",
-                "default password accepted", "credentials accepted",
-            )
+            _PHASE_CORE_KEYWORDS: dict[str, tuple[str, ...]] = {
+                "web_a07": (
+                    "default credential", "weak password", "credential stuffing",
+                    "brute force successful", "admin:admin", "login bypass",
+                    "authentication bypass", "auth bypass", "cracked password",
+                    "sql injection authentication", "valid credentials",
+                    "default password", "credentials accepted",
+                ),
+                "api_auth": (
+                    "default credential", "weak password", "credential stuffing",
+                    "brute force successful", "admin:admin", "login bypass",
+                    "authentication bypass", "auth bypass", "valid credentials",
+                    "default password", "credentials accepted", "broken token",
+                    "jwt alg", "jwt none", "missing authentication",
+                ),
+                "web_a01": (
+                    "broken access", "access control", "forced browsing", "idor",
+                    "authorization bypass", "privilege escalation", "admin panel",
+                    "horizontal escalation", "vertical escalation", "role bypass",
+                    "method tampering", "parameter pollution",
+                ),
+                "api_authz": (
+                    "bola", "broken object level", "idor", "authorization bypass",
+                    "horizontal escalation", "vertical escalation", "access control",
+                    "role bypass", "privilege escalation",
+                ),
+                "web_bfla": (
+                    "bfla", "broken function level", "function level authorization",
+                    "privilege escalation", "role bypass", "admin function",
+                ),
+                "api_bfla": (
+                    "bfla", "broken function level", "function level authorization",
+                    "privilege escalation", "role bypass", "admin endpoint",
+                ),
+                "web_a03_sqli": (
+                    "sql injection", "sqli", "blind sql", "union-based",
+                    "boolean-based", "time-based sql", "error-based sql",
+                ),
+                "web_a03_xss": (
+                    "xss", "cross-site scripting", "reflected script",
+                    "stored script", "dom-based xss", "script injection",
+                ),
+                "web_a03_cmdi": (
+                    "command injection", "os command", "shell injection",
+                    "remote code execution", "rce",
+                ),
+                "web_a03_ssti": (
+                    "template injection", "ssti", "server-side template",
+                ),
+                "web_a03_path_traversal": (
+                    "path traversal", "directory traversal", "lfi",
+                    "local file inclusion", "arbitrary file read",
+                ),
+                "web_a03_xxe": (
+                    "xxe", "xml external entity", "external entity",
+                ),
+                "api_injection": (
+                    "sql injection", "sqli", "command injection",
+                    "xss", "cross-site scripting", "template injection",
+                    "xxe", "path traversal", "nosql injection", "ldap injection",
+                ),
+                "web_a10": (
+                    "ssrf", "server-side request forgery", "internal network",
+                    "cloud metadata", "169.254.169.254",
+                ),
+                "api_ssrf": (
+                    "ssrf", "server-side request forgery", "internal network",
+                    "cloud metadata", "169.254.169.254",
+                ),
+            }
 
-            def _phase_has_credential_finding() -> bool:
+            def _phase_has_core_finding() -> bool:
+                keywords = _PHASE_CORE_KEYWORDS.get(phase.id)
+                if not keywords:
+                    return phase_new_findings > 0
                 for f in findings[phase_findings_before:]:
-                    text = ((f.get("title") or "") + " "
-                            + (f.get("description") or "")).lower()
-                    if any(kw in text for kw in _CRED_FINDING_KEYWORDS):
+                    text = (
+                        (f.get("title") or "") + " "
+                        + (f.get("description") or "") + " "
+                        + (f.get("vulnerability_type") or "") + " "
+                        + (f.get("category") or "")
+                    ).lower()
+                    if any(kw in text for kw in keywords):
                         return True
                 return False
 
-            _auth_retry_needed = (
-                phase.id in _AUTH_RETRY_PHASES
-                and not _phase_has_credential_finding()
+            _core_class_missing = (
+                phase.id in _PHASE_CORE_KEYWORDS
+                and not _phase_has_core_finding()
                 and phase_evidence
             )
 
             if (phase.id in _ACTIVE_RETRY_PHASES
-                    and (phase_new_findings == 0 or _auth_retry_needed)
+                    and (phase_new_findings == 0 or _core_class_missing)
                     and phase_evidence
                     and not getattr(phase, "_retried", False)):
                 phase._retried = True
@@ -1908,9 +1977,15 @@ async def run_scan(
                 retry_prompt = _RETRY_PROMPTS[prompt_key].format(
                     name=phase.name, evidence=evidence_text
                 )
-                logger.info("Phase %s: 0 findings with %d evidence records, running active retry",
-                            phase.name, len(phase_evidence))
-                print(f" [RETRY] {phase.name}: 0 findings, retrying with tool calls...")
+                _retry_reason = (
+                    "zero findings" if phase_new_findings == 0
+                    else "no core-class finding"
+                )
+                logger.info(
+                    "Phase %s: retry triggered (%s) with %d evidence records",
+                    phase.name, _retry_reason, len(phase_evidence),
+                )
+                print(f" [RETRY] {phase.name}: {_retry_reason}, retrying with tool calls...")
                 _cb("phase_start", {"phase": phase_num, "total": total_phases,
                                     "name": f"{phase.name} (retry)", "id": f"{phase.id}_retry"})
                 messages.append({"role": "user", "content": retry_prompt})
