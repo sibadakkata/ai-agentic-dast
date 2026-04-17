@@ -5,9 +5,32 @@ alwaysApply: true
 
 # Deployment Protocol
 
-**NEVER deploy code to the EC2 instance (or any remote server) without explicitly asking the user first and receiving their approval.**
+> **STOP-AND-ASK RULE (non-negotiable):** Before running ANY `scp`, `ssh ... docker cp`, `ssh ... docker restart`, or anything that touches the EC2 instance, you MUST ask the user "Deploy to EC2 now?" and wait for an explicit **yes**. Silence, a thumbs-up on the code change, or approval of the diff is NOT deploy approval.
 
-This applies to all remote operations:
+**NEVER deploy code to the EC2 instance (or any remote server) without explicitly asking the user first and receiving their approval — for EVERY deploy, not just the first one in a session.**
+
+## What counts as "deploying"
+
+All of these require a fresh ask-first, even if the user already approved a previous deploy in the same conversation:
+
+- `scp <anything> ubuntu@...` — uploading a file to the EC2 host
+- `ssh ubuntu@... "docker cp ..."` — copying into the container
+- `ssh ubuntu@... "docker restart ..."` — restarting the container
+- `ssh ubuntu@... "docker exec ..."` — running anything inside the container that modifies state (but read-only checks like `check_scan_active.py` are fine)
+- Any action that modifies the running production/staging environment
+
+## How to ask
+
+Use a concrete question with the exact files and target, e.g.:
+
+> "I've fixed X in `web/app.py` and `scanners/ai_agent/agent.py` (committed as `<sha>`). Ready to deploy to `18.117.143.222` and restart the container. Deploy now?"
+
+Then WAIT for a yes. Do not proceed on:
+- Assumed consent from earlier in the session ("you said deploy earlier")
+- Verbs that sound related but aren't approval ("fix", "update", "commit", "merge")
+- A reply that only addresses the code ("looks good", "ship it" when said about the diff, not deploy — ambiguous, re-ask if unsure)
+
+## This applies to all remote operations:
 - `scp` to upload files
 - `ssh` to run `docker cp`, `docker restart`, or any command on the server
 - Any action that modifies the running production/staging environment
@@ -48,6 +71,8 @@ Before ANY deployment:
 - Never push directly to `master` — always use a feature branch + PR
 - Never merge a PR without user approval
 - Never chain local edits with deployment in one step
-- Never assume "deploy" is implied when the user says "fix" or "update"
+- Never assume "deploy" is implied when the user says "fix", "update", "commit", or "merge"
 - Never deploy as part of a verification/testing step without asking
+- Never treat prior deploy approval in the same conversation as approval for a new deploy
+- Never say "deploying now" and then deploy — that is announcing, not asking
 - **Never deploy while a scan is running** — always check first, wait or ask user to stop the scan

@@ -4632,11 +4632,33 @@ function _sans25Sort(a, b) {
   return ai - bi;
 }
 
+var _CAT_TO_OWASP = {
+  'SQL Injection': 'A03', 'Cross-Site Scripting': 'A03', 'Command Injection': 'A03',
+  'Template Injection': 'A03', 'XML External Entity': 'A03', 'Path Traversal': 'A03',
+  'Broken Access Control': 'A01', 'Authentication & Session': 'A07',
+  'Token & JWT Security': 'A07', 'Cookie Security': 'A02',
+  'Security Headers': 'A05', 'CORS Misconfiguration': 'A05',
+  'Content Security Policy': 'A05', 'Host Header Injection': 'A05',
+  'Server-Side Request Forgery': 'A10', 'Information Disclosure': 'A01',
+  'Vulnerable Components': 'A06', 'Data Exposure': 'A01', 'Hardcoded Secrets': 'A02',
+  'File Upload': 'A04', 'Race Condition': 'A04', 'Mass Assignment': 'A04',
+  'Open Redirect': 'A01', 'Cross-Site Request Forgery': 'A01',
+  'Rate Limiting': 'A07', 'Source Map Exposure': 'A05',
+  'Subresource Integrity': 'A08', 'Mixed Content': 'A02',
+  'Prototype Pollution': 'A08', 'Deserialization': 'A08',
+  'HTTP Protocol Issues': 'A05', 'WebSocket Security': 'A03',
+  'Logging & Telemetry': 'A09', 'HTML Comment Disclosure': 'A05',
+  'Timing & Enumeration': 'A07', 'Exploit Chains': 'A01',
+};
+
 function _getGroupKey(f) {
   if (_groupByMode === 'owasp') {
     var raw = f.owasp_category || f.owasp || '';
     var code = (typeof raw === 'string' ? raw : String(raw)).substring(0, 3).toUpperCase();
-    if (!/^A\d{2}$/.test(code)) return 'Other';
+    if (!/^A\d{2}$/.test(code)) {
+      var inferred = _CAT_TO_OWASP[_inferFindingType(f)];
+      return inferred || 'Other';
+    }
     return code;
   }
   if (_groupByMode === 'severity') {
