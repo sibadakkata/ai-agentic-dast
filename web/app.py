@@ -301,9 +301,91 @@ def _load_scans_from_disk():
 _TRANSIENT_KEYS = frozenset({"live_tests", "live_findings", "live_phases", "live_crawled", "live_forms", "live_tool_calls", "live_out_of_scope", "live_tokens", "live_llm_calls", "live_cost", "live_phase_tools", "_router", "_findings_seen"})
 _SECRET_KEYS = frozenset({"_password"})
 
+_CRAWLED_PERSIST_CAP = 500
+
+
+def _max_num(a, b):
+    """Return the larger of two numeric values, tolerating None/non-numeric."""
+    try:
+        av = float(a) if a is not None else None
+    except (TypeError, ValueError):
+        av = None
+    try:
+        bv = float(b) if b is not None else None
+    except (TypeError, ValueError):
+        bv = None
+    if av is None:
+        return b
+    if bv is None:
+        return a
+    return a if av >= bv else b
+
+
+def _snapshot_live_metrics(info: dict) -> None:
+    """Promote transient ``live_*`` metrics into persisted counterparts in place.
+
+    This is the single guarantee that a scan which errors, is stopped, pauses,
+    or is killed by a container restart still retains its latest cost, token,
+    call counters, and structured summaries in the database. Counters use
+    ``max()`` so a clean finalization (which writes permanent fields directly)
+    never regresses from a stale ``live_*`` value.
+
+    Runs on every ``_save_scan`` via ``_clean_scan_for_db``.
+    """
+    try:
+        lc = info.get("live_cost")
+        if lc is not None:
+            info["cost"] = _max_num(info.get("cost"), lc)
+
+        lt = info.get("live_tokens")
+        if lt is not None:
+            info["total_tokens"] = _max_num(info.get("total_tokens"), lt)
+
+        ll = info.get("live_llm_calls")
+        if ll is not None:
+            info["llm_calls"] = _max_num(info.get("llm_calls"), ll)
+
+        lto = info.get("live_tool_calls")
+        if lto is not None:
+            info["total_tool_calls"] = _max_num(info.get("total_tool_calls"), lto)
+
+        lp = info.get("live_phases")
+        if isinstance(lp, list):
+            info["phases_completed"] = _max_num(info.get("phases_completed"), len(lp))
+            info["phases"] = lp
+
+        lf = info.get("live_findings")
+        if isinstance(lf, list):
+            info["findings_count"] = _max_num(info.get("findings_count"), len(lf))
+
+        lpt = info.get("live_phase_tools")
+        if isinstance(lpt, dict):
+            info["phase_tools"] = lpt
+
+        lcr = info.get("live_crawled")
+        if isinstance(lcr, list):
+            info["pages_crawled"] = _max_num(info.get("pages_crawled"), len(lcr))
+            info["crawled_urls"] = lcr[-_CRAWLED_PERSIST_CAP:] if len(lcr) > _CRAWLED_PERSIST_CAP else list(lcr)
+
+        loo = info.get("live_out_of_scope")
+        if isinstance(loo, list):
+            info["out_of_scope_urls"] = loo
+
+        lfo = info.get("live_forms")
+        if lfo is not None:
+            info["forms_count"] = _max_num(info.get("forms_count"), lfo)
+    except Exception:
+        logger.debug("snapshot_live_metrics failed", exc_info=True)
+
 
 def _clean_scan_for_db(info: dict) -> dict:
-    """Strip transient/secret keys from a scan dict before persisting."""
+    """Strip transient/secret keys from a scan dict before persisting.
+
+    Snapshots ``live_*`` metrics into persisted fields first so errored,
+    stopped, paused, or crashed scans retain their latest counters and
+    structured summaries in the DB.
+    """
+    _snapshot_live_metrics(info)
     return {k: v for k, v in info.items()
             if k not in _TRANSIENT_KEYS and k not in _SECRET_KEYS}
 
@@ -408,6 +490,13 @@ def _autosave_loop():
                     batch[sid] = _clean_scan_for_db(info)
             if batch:
                 scandb.upsert_all(batch)
+            for sid in to_flush:
+                info = SCANS.get(sid)
+                if info and info.get("live_findings"):
+                    try:
+                        _persist_partial_findings(sid, info)
+                    except Exception:
+                        logger.debug("autosave partial-findings flush failed for %s", sid, exc_info=True)
         except Exception:
             logger.exception("Auto-save failed for %d scans", len(to_flush))
 
@@ -1649,6 +1738,12 @@ async def _run_scan_task(scan_id, target_url, username, password, model, scan_mo
                 if key is not None:
                     seen.add(key)
                 scan["live_findings"].append(f)
+                # Intra-phase checkpoint: persist every 5 new findings so a
+                # mid-phase crash doesn't lose findings discovered since the
+                # last phase_end. phase_end still persists on boundaries.
+                if len(scan["live_findings"]) % 5 == 0:
+                    _save_scan(scan_id)
+                    _persist_partial_findings(scan_id, scan)
             elif event == "crawl":
                 url = data.get("url", "")
                 ctype = data.get("type", "page")
