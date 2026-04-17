@@ -1767,8 +1767,239 @@ async def run_scan(
 
             phase_new_findings = len(findings) - phase_findings_before
 
-            # ── Evidence summary: if 0 findings but evidence exists, one LLM call ──
-            if phase_new_findings == 0 and phase_evidence:
+            # ── Post-phase recovery: active retry OR passive evidence summary ──
+            _ACTIVE_RETRY_PHASES = {
+                "web_a01", "web_a07", "web_a10",
+                "web_a03_sqli", "web_a03_xss", "web_a03_cmdi",
+                "web_a03_ssti", "web_a03_path_traversal", "web_a03_xxe",
+                "api_injection", "api_ssrf", "api_authz",
+                "api_auth", "web_bfla", "api_bfla",
+            }
+            _RETRY_PROMPTS = {
+                "access_control": (
+                    "RETRY — Phase '{name}' found 0 vulnerabilities. "
+                    "Review your test results below and try DIFFERENT approaches:\n\n"
+                    "{evidence}\n\n"
+                    "YOU MUST TRY:\n"
+                    "1. Forced browsing: /admin, /admin/users, /api/admin, /internal, /debug, "
+                    "/manage, /dashboard, /settings, /actuator, /api/v1/users\n"
+                    "2. IDOR: change numeric IDs (id-1, id+1, id=0), try UUIDs, access other users' resources\n"
+                    "3. Method tampering: GET→POST, POST→PUT, GET→DELETE on sensitive endpoints\n"
+                    "4. Parameter pollution: add ?admin=true, ?role=admin, ?debug=1\n"
+                    "5. Try endpoints you haven't tested yet\n"
+                    "DO NOT give up. Try at least 3 more approaches."
+                ),
+                "auth": (
+                    "RETRY — Phase '{name}' has NOT completed credential testing yet. "
+                    "Review the evidence below and perform credential discovery now:\n\n"
+                    "{evidence}\n\n"
+                    "YOU MUST TRY (use api_request to POST directly to the login endpoint(s), "
+                    "NOT inject_payload — many apps only validate via JSON/REST):\n"
+                    "1. Default credentials — try EACH of these pairs:\n"
+                    "   admin:admin, admin:password, admin:admin123, admin:123456,\n"
+                    "   administrator:administrator, root:root, test:test, guest:guest, user:user\n"
+                    "2. Email-format usernames — try:\n"
+                    "   admin@<target-host>:admin123, admin@juice-sh.op:admin123,\n"
+                    "   test@test.com:test123, admin@example.com:password\n"
+                    "3. SQL injection auth bypass in the email/username field:\n"
+                    "   {{\"email\":\"admin' --\",\"password\":\"x\"}}\n"
+                    "   {{\"email\":\"' OR 1=1 --\",\"password\":\"x\"}}\n"
+                    "   {{\"username\":\"\\\" OR \\\"1\\\"=\\\"1\",\"password\":\"x\"}}\n"
+                    "4. Token manipulation: remove Authorization header, invalid token, JWT alg:none\n"
+                    "5. Brute force resistance: send 5+ rapid wrong-password attempts, check for lockout\n\n"
+                    "A successful login (200 + token/session returned) with a guessed password MUST\n"
+                    "be reported as 'Default Credentials Accepted: <user>:<pass>' (High severity).\n"
+                    "A successful SQLi bypass MUST be reported as 'SQL Injection Authentication\n"
+                    "Bypass' (Critical severity). DO NOT give up before testing at least 10 credential pairs."
+                ),
+                "sqli": (
+                    "RETRY — Phase '{name}' found 0 vulnerabilities. "
+                    "Review your test results below and try DIFFERENT approaches:\n\n"
+                    "{evidence}\n\n"
+                    "YOU MUST TRY:\n"
+                    "1. Use baseline_value with fuzz_parameter — without it, payloads like ' won't "
+                    "trigger errors in SQL LIKE clauses. Set baseline_value='test'\n"
+                    "2. Try DB-specific blind payloads: SLEEP(5), pg_sleep(5), WAITFOR DELAY\n"
+                    "3. Try UNION-based: ' UNION SELECT NULL-- with increasing NULLs\n"
+                    "4. Try api_request with manually crafted SQL payloads in URL params and body\n"
+                    "5. Test DIFFERENT endpoints you haven't tried (login, search, profile, API)\n"
+                    "6. Look at error messages for DB type hints (PostgreSQL, MySQL, SQLite, MSSQL)\n"
+                    "DO NOT give up. Try at least 3 more approaches."
+                ),
+                "xss": (
+                    "RETRY — Phase '{name}' found 0 vulnerabilities. "
+                    "Review your test results below and try DIFFERENT approaches:\n\n"
+                    "{evidence}\n\n"
+                    "YOU MUST TRY:\n"
+                    "1. Test ALL reflection points: search boxes, URL params, form fields, headers\n"
+                    "2. Try different encodings: URL-encode, double-encode, HTML entities\n"
+                    "3. Try event handlers: <img src=x onerror=alert(1)>, <svg onload=alert(1)>\n"
+                    "4. Try DOM-based: check if URL fragments/params are written to innerHTML\n"
+                    "5. Try CSP bypass if CSP is present: use existing trusted domains\n"
+                    "DO NOT give up. Try at least 3 more approaches."
+                ),
+                "injection": (
+                    "RETRY — Phase '{name}' found 0 vulnerabilities. "
+                    "Review your test results below and try DIFFERENT approaches:\n\n"
+                    "{evidence}\n\n"
+                    "YOU MUST TRY:\n"
+                    "1. Different separators: ;, |, &&, ||, `, $(), %0a for command injection\n"
+                    "2. Blind techniques: sleep/ping for CMDI, {{7*7}} for SSTI, "
+                    "../../etc/passwd for path traversal\n"
+                    "3. Different template engines: Jinja2, Twig, Freemarker, Handlebars\n"
+                    "4. Different file targets: /etc/passwd, /etc/hosts, C:\\Windows\\win.ini\n"
+                    "5. Try inputs you haven't tested and different encoding/bypass techniques\n"
+                    "DO NOT give up. Try at least 3 more approaches."
+                ),
+                "ssrf": (
+                    "RETRY — Phase '{name}' found 0 vulnerabilities. "
+                    "Review your test results below and try DIFFERENT approaches:\n\n"
+                    "{evidence}\n\n"
+                    "YOU MUST TRY:\n"
+                    "1. Cloud metadata: http://169.254.169.254/latest/meta-data/\n"
+                    "2. Internal probing: http://localhost, http://127.0.0.1, http://[::1]\n"
+                    "3. URL params you haven't tested: ?url=, ?redirect=, ?callback=, ?next=\n"
+                    "4. Redirect chains: use your own URL that 302-redirects to internal targets\n"
+                    "5. Different URL schemes: file://, gopher://, dict://\n"
+                    "DO NOT give up. Try at least 3 more approaches."
+                ),
+            }
+            _PHASE_TO_PROMPT_KEY = {
+                "web_a01": "access_control", "api_authz": "access_control",
+                "web_bfla": "access_control", "api_bfla": "access_control",
+                "web_a07": "auth", "api_auth": "auth",
+                "web_a03_sqli": "sqli", "api_injection": "sqli",
+                "web_a03_xss": "xss",
+                "web_a03_cmdi": "injection", "web_a03_ssti": "injection",
+                "web_a03_path_traversal": "injection", "web_a03_xxe": "injection",
+                "web_a10": "ssrf", "api_ssrf": "ssrf",
+            }
+
+            _AUTH_RETRY_PHASES = {"web_a07", "api_auth"}
+            _CRED_FINDING_KEYWORDS = (
+                "default credential", "weak password", "credential stuffing",
+                "brute force successful", "admin:admin", "login bypass",
+                "authentication bypass", "auth bypass", "cracked password",
+                "sql injection authentication", "valid credentials",
+                "default password accepted", "credentials accepted",
+            )
+
+            def _phase_has_credential_finding() -> bool:
+                for f in findings[phase_findings_before:]:
+                    text = ((f.get("title") or "") + " "
+                            + (f.get("description") or "")).lower()
+                    if any(kw in text for kw in _CRED_FINDING_KEYWORDS):
+                        return True
+                return False
+
+            _auth_retry_needed = (
+                phase.id in _AUTH_RETRY_PHASES
+                and not _phase_has_credential_finding()
+                and phase_evidence
+            )
+
+            if (phase.id in _ACTIVE_RETRY_PHASES
+                    and (phase_new_findings == 0 or _auth_retry_needed)
+                    and phase_evidence
+                    and not getattr(phase, "_retried", False)):
+                phase._retried = True
+                evidence_text = _format_evidence_buffer(phase_evidence)
+                prompt_key = _PHASE_TO_PROMPT_KEY.get(phase.id, "injection")
+                retry_prompt = _RETRY_PROMPTS[prompt_key].format(
+                    name=phase.name, evidence=evidence_text
+                )
+                logger.info("Phase %s: 0 findings with %d evidence records, running active retry",
+                            phase.name, len(phase_evidence))
+                print(f" [RETRY] {phase.name}: 0 findings, retrying with tool calls...")
+                _cb("phase_start", {"phase": phase_num, "total": total_phases,
+                                    "name": f"{phase.name} (retry)", "id": f"{phase.id}_retry"})
+                messages.append({"role": "user", "content": retry_prompt})
+                phase_evidence_retry: list[dict] = []
+                retry_findings_before = len(findings)
+                retry_tool_calls = 0
+                for retry_step in range(phase.max_steps):
+                    _check_cancel()
+                    try:
+                        _sanitize_all_messages(messages)
+                        messages = _repair_tool_pairs(messages)
+                        response = router.complete(model=model, messages=messages,
+                                                   tools=TOOL_DEFINITIONS, cancel_flag=cancel_flag)
+                    except (ContentFiltered, ContextWindowExceeded, MalformedMessages):
+                        break
+                    except ScanCancelled:
+                        raise
+                    _check_cancel()
+                    if not response or not getattr(response, "choices", None):
+                        break
+                    msg = response.choices[0].message
+                    msg_dict = msg.model_dump() if hasattr(msg, "model_dump") else dict(msg)
+                    msg_dict = _sanitize_message(msg_dict)
+                    messages.append(msg_dict)
+                    tool_calls = msg_dict.get("tool_calls") or getattr(msg, "tool_calls", None) or []
+                    if tool_calls:
+                        for tc in tool_calls:
+                            _check_cancel()
+                            tc_id = tc.get("id") if isinstance(tc, dict) else getattr(tc, "id", "")
+                            fn = tc.get("function") if isinstance(tc, dict) else getattr(tc, "function", {})
+                            fn_name = fn.get("name") if isinstance(fn, dict) else getattr(fn, "name", "")
+                            fn_name = _sanitize_tool_name(fn_name)
+                            fn_args = fn.get("arguments") if isinstance(fn, dict) else getattr(fn, "arguments", "{}")
+                            result = await tools.execute(fn_name, fn_args)
+                            retry_tool_calls += 1
+                            metrics["total_tool_calls"] += 1
+                            messages.append({"role": "tool", "tool_call_id": tc_id,
+                                             "content": _cap_result(result)})
+                            try:
+                                args_parsed = json.loads(fn_args) if isinstance(fn_args, str) else fn_args
+                            except Exception:
+                                args_parsed = {"raw": fn_args}
+                            resp_summary = {
+                                k: v for k, v in result.items()
+                                if k in ("status", "url", "error", "reflected", "anomaly", "body_snippet", "results", "accessible", "title", "forms")
+                            } if isinstance(result, dict) else str(result)[:200]
+                            _cb("tool_call", {
+                                "phase": f"{phase.name} (retry)",
+                                "tool": fn_name,
+                                "request": {k: str(v)[:300] for k, v in args_parsed.items()} if isinstance(args_parsed, dict) else str(args_parsed)[:400],
+                                "response": {k: str(v)[:200] for k, v in resp_summary.items()} if isinstance(resp_summary, dict) else str(resp_summary)[:400],
+                            })
+                            is_sec = fn_name in SECURITY_TEST_TOOLS
+                            if not is_sec and fn_name == "navigate":
+                                nav_url = (args_parsed.get("url") or "") if isinstance(args_parsed, dict) else ""
+                                if any(m in nav_url for m in _INJECTION_MARKERS):
+                                    is_sec = True
+                            if is_sec:
+                                metrics["test_log"].append({"phase": phase.id, "tool": fn_name,
+                                                            "request": args_parsed, "response_summary": resp_summary})
+                                _capture_evidence(phase_evidence_retry, fn_name, args_parsed, resp_summary, result)
+                        if retry_tool_calls % 5 == 0 and _estimate_tokens(messages) > TRIM_TARGET_TOKENS:
+                            messages = trim_context(messages, max_tokens=TRIM_TARGET_TOKENS)
+                    else:
+                        content = msg_dict.get("content") or ""
+                        retry_f = extract_findings(str(content))
+                        if not retry_f and phase_evidence_retry:
+                            ev_text = _format_evidence_buffer(phase_evidence_retry)
+                            messages.append({"role": "user", "content": ev_text})
+                            try:
+                                ev_resp = router.complete(model=model, messages=messages, tools=[], cancel_flag=cancel_flag)
+                                if ev_resp and getattr(ev_resp, "choices", None):
+                                    retry_f = extract_findings(str(ev_resp.choices[0].message.content or ""))
+                            except Exception:
+                                pass
+                        findings.extend(retry_f)
+                        for f in retry_f:
+                            f["phase"] = f"{phase.name} (retry)"
+                            _match_evidence_to_finding(f, phase_evidence_retry or phase_evidence)
+                            _cb("finding", f)
+                        break
+                retry_new = len(findings) - retry_findings_before
+                phase_new_findings += retry_new
+                phase_tool_calls += retry_tool_calls
+                print(f" [RETRY] {retry_tool_calls} tool calls, {retry_new} findings")
+                _cb("phase_end", {"phase": phase_num, "name": f"{phase.name} (retry)",
+                                  "tool_calls": retry_tool_calls, "findings": retry_new})
+
+            elif phase_new_findings == 0 and phase_evidence:
                 summary_prompt = (
                     f"Phase '{phase.name}' completed with 0 vulnerabilities reported, "
                     "but you performed security tests. Review the evidence below and "
