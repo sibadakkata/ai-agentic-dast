@@ -1018,17 +1018,17 @@ input:focus-visible, select:focus-visible, textarea:focus-visible { outline:none
 
       <div class="tabs">
         <div class="tab active" onclick="switchTab('comparison')">AI vs Triage</div>
+        <div class="tab" onclick="switchTab('ai-raw')">AI Raw Findings</div>
         <div class="tab" onclick="switchTab('crawled')">Crawled Endpoints</div>
         <div class="tab" onclick="switchTab('payloads')">Payloads by Endpoint</div>
-        <div class="tab" onclick="switchTab('ai-raw')">AI Raw Findings</div>
         <div class="tab" onclick="switchTab('phase-log')">Phase Log</div>
         <div class="tab" onclick="switchTab('out-of-scope')">Out of Scope <span id="res-oos-badge" class="badge" style="background:var(--red);color:#fff;margin-left:4px;font-size:9px;padding:1px 5px;border-radius:8px;display:none;">0</span></div>
       </div>
 
       <div class="tab-content active" id="tab-comparison"></div>
+      <div class="tab-content" id="tab-ai-raw"></div>
       <div class="tab-content" id="tab-crawled"></div>
       <div class="tab-content" id="tab-payloads"></div>
-      <div class="tab-content" id="tab-ai-raw"></div>
       <div class="tab-content" id="tab-phase-log"></div>
       <div class="tab-content" id="tab-out-of-scope"></div>
     </div>
@@ -4589,12 +4589,12 @@ function setGroupBy(mode) {
 
 function _grpButtonsHtml() {
   var modes = [['category','Issue Category'],['owasp','OWASP'],['severity','Severity'],['pci_dss','PCI DSS'],['sans25','SANS 25']];
-  var html = '<span style="font-size:11px;font-weight:600;color:var(--text2);margin-right:6px;">Group by</span><div style="display:inline-flex;gap:2px;border:1px solid var(--border);border-radius:6px;overflow:hidden;">';
+  var html = '<div style="display:inline-flex;align-items:center;gap:6px;"><span style="font-size:11px;font-weight:600;color:var(--text2);">Group by</span><div style="display:inline-flex;gap:2px;border:1px solid var(--border);border-radius:6px;overflow:hidden;">';
   modes.forEach(function(m) {
     var active = _groupByMode === m[0];
     html += '<button class="grp-btn' + (active ? ' active' : '') + '" data-grp="' + m[0] + '" onclick="setGroupBy(\'' + m[0] + '\')">' + m[1] + '</button>';
   });
-  html += '</div>';
+  html += '</div></div>';
   return html;
 }
 
