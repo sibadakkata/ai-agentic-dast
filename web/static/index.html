@@ -240,6 +240,9 @@ tr:hover td { background:rgba(79,70,229,0.03); }
 .cat-header.expanded .cat-arrow { transform:rotate(90deg); }
 .cat-body { display:none; border-top:1px solid var(--border); }
 .cat-body.open { display:block; }
+.grp-btn { padding:4px 10px; font-size:11px; font-weight:600; font-family:inherit; border:none; cursor:pointer; transition:all 0.15s; background:var(--surface2); color:var(--text2); }
+.grp-btn:hover { background:var(--surface); }
+.grp-btn.active { background:var(--accent) !important; color:#fff !important; }
 .phase-detail.open { display:block; }
 .tool-group { border-bottom:1px solid var(--border); }
 .tool-group-header { display:flex; align-items:center; gap:8px; padding:8px 16px; background:var(--surface2); cursor:pointer; font-size:12px; transition:background 0.1s; }
@@ -3126,10 +3129,8 @@ function _rebuildLiveFindings() {
   var container = document.getElementById('lv-findings-body');
   if (!container || !_allLiveFindings.length) return;
   _liveCatGroups = {};
-  var toolbar = container.querySelector('.lv-grp-toolbar');
   container.innerHTML = '';
-  if (toolbar) container.appendChild(toolbar);
-  else _addLiveGrpToolbar(container);
+  _addLiveGrpToolbar(container);
 
   _allLiveFindings.forEach(function(f, idx) {
     var cat = _getLiveCatKey(f);
@@ -4521,9 +4522,7 @@ function _grpButtonsHtml() {
   var html = '<div style="display:inline-flex;gap:2px;border:1px solid var(--border);border-radius:6px;overflow:hidden;margin-left:8px;">';
   modes.forEach(function(m) {
     var active = _groupByMode === m[0];
-    html += '<button class="grp-btn" data-grp="' + m[0] + '" onclick="setGroupBy(\'' + m[0] + '\')" style="padding:4px 10px;font-size:11px;font-weight:600;font-family:inherit;border:none;cursor:pointer;transition:all 0.15s;' +
-      (active ? 'background:var(--accent);color:#fff;' : 'background:var(--surface2);color:var(--text2);') +
-    '">' + m[1] + '</button>';
+    html += '<button class="grp-btn' + (active ? ' active' : '') + '" data-grp="' + m[0] + '" onclick="setGroupBy(\'' + m[0] + '\')">' + m[1] + '</button>';
   });
   html += '</div>';
   return html;
