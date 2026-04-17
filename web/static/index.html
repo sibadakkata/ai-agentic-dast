@@ -3078,17 +3078,11 @@ let _allLiveFindings = [];
 var _liveCatGroups = {};
 
 function _getLiveCatKey(f) {
-  var raw = f.owasp_category || f.owasp || '';
-  var cat = (typeof raw === 'string' ? raw : String(raw)).substring(0, 3).toUpperCase();
-  if (!/^A\d{2}$/.test(cat)) cat = 'Other';
-  return cat;
+  return _inferFindingType(f);
 }
 
 function _ensureLiveCatGroup(container, cat) {
   if (_liveCatGroups[cat]) return _liveCatGroups[cat];
-
-  var title = _CAT_TITLES[cat] || 'Other Findings';
-  var catLabel = cat !== 'Other' ? '<span class="cat-id">' + cat + '</span> ' + esc(title) : esc(title);
 
   var group = document.createElement('div');
   group.className = 'cat-group';
@@ -3098,7 +3092,7 @@ function _ensureLiveCatGroup(container, cat) {
   header.className = 'cat-header';
   header.onclick = function() { toggleCatGroup(this); };
   header.innerHTML =
-    '<span class="cat-label">' + catLabel + '</span>' +
+    '<span class="cat-label">' + esc(cat) + '</span>' +
     '<span class="cat-counts">' +
       '<span class="lv-cat-count" style="font-weight:700;">0 findings</span>' +
       '<span class="lv-cat-sevs"></span>' +
@@ -3111,16 +3105,11 @@ function _ensureLiveCatGroup(container, cat) {
   group.appendChild(header);
   group.appendChild(body);
 
-  var order = ['A01','A02','A03','A04','A05','A06','A07','A08','A09','A10','Other'];
-  var catIdx = order.indexOf(cat);
-  if (catIdx === -1) catIdx = 99;
   var inserted = false;
   var existing = container.querySelectorAll('.cat-group');
   for (var i = 0; i < existing.length; i++) {
     var eCat = existing[i].getAttribute('data-cat');
-    var eIdx = order.indexOf(eCat);
-    if (eIdx === -1) eIdx = 99;
-    if (catIdx < eIdx) {
+    if (_catSort(cat, eCat) < 0) {
       container.insertBefore(group, existing[i]);
       inserted = true;
       break;
@@ -4179,13 +4168,12 @@ function renderComparison(data) {
     ].filter(Boolean).join('');
   }
 
-  var groups = _groupByCategory(filtered, 'owasp_category');
+  var groups = _groupByCategory(filtered);
   var catKeys = Object.keys(groups).sort(_catSort);
   var rowNum = 0;
   var groupsHtml = catKeys.map(function(cat) {
     var items = groups[cat];
-    var title = _CAT_TITLES[cat] || 'Other Findings';
-    var catLabel = cat !== 'Other' ? '<span class="cat-id">' + cat + '</span> ' + esc(title) : esc(title);
+    var catLabel = esc(cat);
     var rows = items.map(function(item) {
       rowNum++;
       var realIdx = data.triaged_findings.indexOf(item.f);
@@ -4308,13 +4296,12 @@ function renderAIRaw(findings) {
     '</tr>';
   }
 
-  var groups = _groupByCategory(findings, 'owasp');
+  var groups = _groupByCategory(findings);
   var catKeys = Object.keys(groups).sort(_catSort);
   var rowNum = 0;
   var groupsHtml = catKeys.map(function(cat) {
     var items = groups[cat];
-    var title = _CAT_TITLES[cat] || 'Other Findings';
-    var catLabel = cat !== 'Other' ? '<span class="cat-id">' + cat + '</span> ' + esc(title) : esc(title);
+    var catLabel = esc(cat);
     var rows = items.map(function(item) {
       rowNum++;
       return _rawRow(item.f, rowNum, item.origIdx);
@@ -4397,30 +4384,67 @@ function toggleCatGroup(el) {
   if (body) body.classList.toggle('open');
 }
 
-var _CAT_TITLES = {
-  'A01': 'Broken Access Control',
-  'A02': 'Cryptographic Failures',
-  'A03': 'Injection',
-  'A04': 'Insecure Design',
-  'A05': 'Security Misconfiguration',
-  'A06': 'Vulnerable Components',
-  'A07': 'Authentication Failures',
-  'A08': 'Software & Data Integrity',
-  'A09': 'Logging & Monitoring',
-  'A10': 'Server-Side Request Forgery',
-};
+var _FINDING_TYPE_RULES = [
+  [/sql.?inject|sqli|blind.?sql/i, 'SQL Injection'],
+  [/cross.?site.?script|xss|reflected.?script|stored.?script|dom.?sink/i, 'Cross-Site Scripting'],
+  [/command.?inject|os.?inject|cmdi|rce|remote.?code/i, 'Command Injection'],
+  [/ssti|template.?inject/i, 'Template Injection'],
+  [/xxe|xml.?external/i, 'XML External Entity'],
+  [/ssrf|server.?side.?request/i, 'Server-Side Request Forgery'],
+  [/path.?travers|directory.?travers|lfi|local.?file/i, 'Path Traversal'],
+  [/csrf|cross.?site.?request.?forg/i, 'Cross-Site Request Forgery'],
+  [/open.?redirect/i, 'Open Redirect'],
+  [/idor|insecure.?direct|bola|broken.?object/i, 'Broken Access Control'],
+  [/bfla|broken.?function|privilege.?escalat|horizontal.?access|vertical.?access/i, 'Broken Access Control'],
+  [/access.?control|unauthori[zs]ed.?access|forbidden.?bypass/i, 'Broken Access Control'],
+  [/jwt|json.?web.?token|token.?manipul|alg.?none/i, 'Token & JWT Security'],
+  [/auth.?bypass|authentication.?fail|brute.?force|credential|login.?bypass|account.?lock|password.?reset|session.?fixat|session.?manag/i, 'Authentication & Session'],
+  [/cookie.?(security|flag|httponly|secure|samesite)/i, 'Cookie Security'],
+  [/rate.?limit|throttl/i, 'Rate Limiting'],
+  [/cors|cross.?origin/i, 'CORS Misconfiguration'],
+  [/csp|content.?security.?policy/i, 'Content Security Policy'],
+  [/header|hsts|x-frame|clickjack|x-content-type|referrer.?policy|permissions.?policy|cache.?control/i, 'Security Headers'],
+  [/source.?map/i, 'Source Map Exposure'],
+  [/hardcoded|secret|password.?in|api.?key.?in|token.?in.?source|credential.?in/i, 'Hardcoded Secrets'],
+  [/internal.?url|internal.?ip|information.?disclos|stack.?trace|debug|error.?page|version.?disclos/i, 'Information Disclosure'],
+  [/email.?expos|pii|data.?leak|data.?expos|sensitive.?data/i, 'Data Exposure'],
+  [/file.?upload|unrestrict.?upload/i, 'File Upload'],
+  [/race.?condition|concurren/i, 'Race Condition'],
+  [/mass.?assign/i, 'Mass Assignment'],
+  [/host.?header/i, 'Host Header Injection'],
+  [/websocket|ws.?inject/i, 'WebSocket Security'],
+  [/mixed.?content|http.?resource/i, 'Mixed Content'],
+  [/sri|subresource.?integrity/i, 'Subresource Integrity'],
+  [/html.?comment|comment.?disclosure/i, 'HTML Comment Disclosure'],
+  [/telemetry|logging|monitor/i, 'Logging & Telemetry'],
+  [/vulnerable.?component|outdated|library.?version|cve-/i, 'Vulnerable Components'],
+  [/chain|multi.?step|exploit.?chain/i, 'Exploit Chains'],
+  [/prototype.?pollut/i, 'Prototype Pollution'],
+  [/crlf|http.?smuggl|content.?type.?confus/i, 'HTTP Protocol Issues'],
+  [/api.?version|downgrade/i, 'API Version Issues'],
+  [/dns|subdomain/i, 'DNS & Subdomain'],
+  [/deseriali[sz]/i, 'Deserialization'],
+  [/timing|enumerat/i, 'Timing & Enumeration'],
+];
 
-function _catSort(a, b) {
-  var order = ['A01','A02','A03','A04','A05','A06','A07','A08','A09','A10','Other'];
-  return (order.indexOf(a) === -1 ? 99 : order.indexOf(a)) - (order.indexOf(b) === -1 ? 99 : order.indexOf(b));
+function _inferFindingType(f) {
+  var title = (f.title || '') + ' ' + (f.phase || '');
+  for (var i = 0; i < _FINDING_TYPE_RULES.length; i++) {
+    if (_FINDING_TYPE_RULES[i][0].test(title)) return _FINDING_TYPE_RULES[i][1];
+  }
+  return 'Other';
 }
 
-function _groupByCategory(findings, catKey) {
+function _catSort(a, b) {
+  if (a === 'Other') return 1;
+  if (b === 'Other') return -1;
+  return a.localeCompare(b);
+}
+
+function _groupByCategory(findings) {
   var groups = {};
   findings.forEach(function(f, origIdx) {
-    var raw = f[catKey] || '';
-    var cat = (typeof raw === 'string' ? raw : String(raw)).substring(0, 3).toUpperCase();
-    if (!/^A\d{2}$/.test(cat)) cat = 'Other';
+    var cat = _inferFindingType(f);
     if (!groups[cat]) groups[cat] = [];
     groups[cat].push({f: f, origIdx: origIdx});
   });
