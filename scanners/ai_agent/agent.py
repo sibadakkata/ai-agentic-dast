@@ -1464,14 +1464,14 @@ async def run_scan(
             if phase.id == "attack_chain_analysis" and findings:
                 summary_lines = []
                 for i, f in enumerate(findings, 1):
-                    line = f"{i}. [{f.get('severity','?')}] {f.get('title','?')} @ {f.get('url','?')}"
-                    param = f.get("parameter", "")
-                    pl = f.get("payload", "")
+                    line = f"{i}. [{_s(f.get('severity','?'))}] {_s(f.get('title','?'))} @ {_s(f.get('url','?'))}"
+                    param = _s(f.get("parameter", ""))
+                    pl = _s(f.get("payload", ""))
                     if param:
                         line += f" [param: {param}]"
                     if pl:
                         line += f" [payload: {pl[:100]}]"
-                    ev = f.get("evidence", "")
+                    ev = _s(f.get("evidence", ""))
                     if ev:
                         line += f" — {ev[:200]}"
                     summary_lines.append(line)
