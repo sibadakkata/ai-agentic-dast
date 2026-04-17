@@ -16,10 +16,19 @@ This applies to all remote operations:
 
 **NEVER deploy (docker cp, docker restart, or any container modification) while a scan is running.**
 
+Scan state lives entirely in process memory (LLM conversation, browser session, findings buffer). A container restart kills the process and loses all in-flight state. Pause-deploy-resume does NOT work.
+
 Before ANY deployment:
-1. Check for active scans: `curl -s http://localhost:8080/api/scans | python3 -c "import json,sys; scans=json.load(sys.stdin); active=[s for s in scans if s.get('status') in ('running','starting')]; print(f'{len(active)} active scan(s)'); [print(f'  - {s[\"id\"]}: {s[\"status\"]}') for s in active]"`
-2. If ANY scan is running: **STOP. Do NOT deploy.** Inform the user and wait for the scan to complete or for the user to explicitly stop it.
-3. Only proceed with deployment when zero scans are active.
+1. Upload `scripts/check_scan_active.py` to the server and run it inside the container:
+   ```
+   scp scripts/check_scan_active.py ubuntu@<IP>:/tmp/
+   ssh ubuntu@<IP> "docker cp /tmp/check_scan_active.py dast-scanner:/tmp/ && docker exec dast-scanner python3 /tmp/check_scan_active.py"
+   ```
+2. The script exits with code 0 if safe to deploy, code 1 if a scan is active.
+3. If ANY scan is running: **STOP. Do NOT deploy.** Inform the user and wait.
+4. Only proceed with deployment when the script reports "SAFE TO DEPLOY".
+
+**IMPORTANT**: The `/api/scans` endpoint returns a **paginated response** `{"items": [...], "total": N}`, NOT a flat list. Always access `data["items"]` to get the scan list. Never iterate the top-level response directly.
 
 ## Git Branching Protocol
 
