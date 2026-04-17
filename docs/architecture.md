@@ -179,7 +179,9 @@ The core scanning logic follows an **Observe-Think-Act-Analyze-Plan** cycle:
 | Mechanism | File | Purpose |
 |-----------|------|---------|
 | **Evidence Buffer** | `agent.py` | Preserves compact test records that survive context trimming |
-| **Phase Retry** | `agent.py` `_RETRY_PHASES` | Re-attempts critical phases if 0 findings found (12 phases) |
+| **Hybrid Smart Retry** | `agent.py` `_ACTIVE_RETRY_PHASES`, `_PHASE_CORE_KEYWORDS`, `_RETRY_PROMPTS` | Tool-enabled second pass with phase-tailored prompts for 15 high-impact phases, fired when the phase has 0 findings **or** when findings exist but the phase's core vulnerability class (e.g. credential crack for auth, IDOR for BAC) is missing. Other phases use a cheap evidence-summary pass |
+| **Finding Deduplication** | `web/app.py` `_finding_key`, `_dedupe_findings` | Dedups findings by `(title, url, parameter)` when seeding continue/retry scans and when appending live findings — avoids double-counting passive recon across pre-auth/post-auth passes |
+| **Model ID Resolution** | `web/app.py` `_resolve_model_id` | Normalises display names / aliases / raw litellm ids at every scan-start endpoint — prevents "LLM Provider NOT provided" errors from the UI |
 | **Min Security Calls** | `agent.py` `_MIN_SECURITY_CALLS` | Forces LLM to make enough tool calls before concluding (22 phases) |
 | **Finding Grounding** | `agent.py` `extract_findings` | Rejects findings without payload/evidence from actual tool output |
 | **Vuln Signal Extraction** | `tools.py` | Auto-detects SQL/XSS/CMDi/SSTI patterns and flags them prominently |

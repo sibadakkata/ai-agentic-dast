@@ -2,7 +2,7 @@
 
 [← Back to README](../README.md)
 
-Deep dive into the scan engine: tool execution, evidence tracking, evidence summary, context management, and finding extraction.
+Deep dive into the scan engine: tool execution, evidence tracking, hybrid smart retry, evidence summary, context management, and finding extraction.
 
 ---
 
@@ -48,7 +48,10 @@ User clicks "Start Scan" (UI or API)
 │       e. Enforce minimum security calls                 │
 │       f. Extract findings when LLM stops                │
 │       g. Evidence grounding check                       │
-│       h. Evidence summary if 0 findings but evidence    │
+│       h. Hybrid smart retry (tool-enabled, tailored     │
+│          prompt) for 15 active-retry phases when the    │
+│          core vuln class is missing; otherwise cheap    │
+│          evidence-summary pass                          │
 │       i. Trim context if needed                         │
 ├─────────────────────────────────────────────────────────┤
 │  7b. ATTACK CHAIN ANALYSIS                               │
@@ -190,9 +193,12 @@ Security tool call executed
               │
               ▼
   Used by:
-  1. _format_evidence_buffer() → evidence summary prompt
+  1. _format_evidence_buffer() → retry prompt (active retry) or
+     evidence summary prompt (fallback tool-less pass)
   2. _match_evidence_to_finding() → attach request/response to findings
   3. Evidence grounding check → reject unproven findings
+  4. Core-class scan (_phase_has_core_finding) → decide whether active
+     retry should fire for this phase
 ```
 
 ### Evidence Record Structure
@@ -214,47 +220,123 @@ When the LLM reports findings, each finding's `payload` and `evidence` fields ar
 
 ---
 
-## Evidence Summary (Zero-Finding Recovery)
+## Hybrid Smart Retry (Zero-Finding / Missing-Core-Class Recovery)
 
-When a phase completes with 0 reported findings but the evidence buffer shows security tools were called, a single follow-up LLM call reviews the collected evidence to recover any missed vulnerabilities.
+End-of-phase recovery now takes one of two forms depending on the phase. The
+agent does **not** choose between the two dynamically — the branch is decided
+by whether the phase belongs to `_ACTIVE_RETRY_PHASES`.
 
-This replaces the earlier retry mechanism, which re-ran the entire phase loop with full tool access — effectively doubling cost and sometimes re-testing the same payloads.
+### Branch A — Active retry with tool calls (15 high-impact phases)
 
-### How It Works
+For these phases the first pass is often not enough to surface the core
+vulnerability class (e.g. the auth phase discovered a password-reset issue but
+never actually brute-forced credentials). A second, tool-enabled pass is run
+with a phase-tailored retry prompt that tells the LLM exactly what to try,
+seeded with the evidence collected so far.
+
+Active-retry phases (defined in `_ACTIVE_RETRY_PHASES`):
 
 ```
-Phase completes with 0 findings
+web_a01              api_authz
+web_a07              api_auth
+web_a10              web_bfla
+web_a03_sqli         api_bfla
+web_a03_xss          api_injection
+web_a03_cmdi         api_ssrf
+web_a03_ssti
+web_a03_path_traversal
+web_a03_xxe
+```
+
+### Branch B — Evidence summary (all other phases)
+
+For the remaining phases, when 0 findings are reported but evidence exists, a
+single tool-less LLM call reviews the evidence buffer and may emit findings.
+This is cheap (~$0.001–$0.01) and avoids re-running the full loop.
+
+### Smart retry trigger — `_PHASE_CORE_KEYWORDS`
+
+The old retry only fired when a phase produced **zero** findings. That was
+insufficient: the auth phase often reports peripheral issues (weak password
+policy, password-reset leaks) while still never cracking a single credential,
+and the old gate would see "findings > 0" and skip retry.
+
+Each active-retry phase now has a list of **core-class keywords** that describe
+the signal we actually care about. After the first pass, the agent scans every
+new finding's `title`, `description`, `vulnerability_type`, and `category` for
+any of those keywords. The retry fires when:
+
+```
+phase in _ACTIVE_RETRY_PHASES
+AND (phase_new_findings == 0  OR  no finding matches _PHASE_CORE_KEYWORDS[phase.id])
+AND evidence buffer is non-empty
+AND retry has not already run for this phase
+```
+
+Example keyword sets:
+
+```python
+"web_a07":        ("default credential", "weak password", "credential stuffing",
+                   "brute force successful", "admin:admin", "login bypass",
+                   "authentication bypass", "sql injection authentication", ...)
+"web_a01":        ("broken access", "idor", "authorization bypass",
+                   "privilege escalation", "forced browsing", ...)
+"web_a03_sqli":   ("sql injection", "sqli", "blind sql", "union-based", ...)
+"api_ssrf":       ("ssrf", "server-side request forgery", "cloud metadata",
+                   "169.254.169.254", ...)
+```
+
+### How Branch A works
+
+```
+Phase completes
          │
          ▼
-┌─────────────────────────────────┐
-│  Evidence buffer non-empty?      │
-│  (security tools were called)    │
-├─────────┬───────────────────────┘
-│  No     │  Yes
-│  ▼      │  ▼
-│ Done    │ Build summary prompt with
-│         │ full evidence buffer
-│         │         │
-│         │         ▼
-│         │ Single LLM call (no tools)
-│         │ "Review evidence, output any
-│         │  confirmed vulnerabilities as
-│         │  JSON findings"
-│         │         │
-│         │         ▼
-│         │ extract_findings() on response
-│         │ Merge recovered findings
-└─────────┴───────────────────────┘
+Is phase in _ACTIVE_RETRY_PHASES?
+         │
+         ├── No ──▶ Branch B (evidence summary, only if 0 findings)
+         │
+         └── Yes
+                │
+                ▼
+    phase_new_findings == 0  OR  core-class missing?
+                │
+                ├── No (core-class found) ──▶ done
+                │
+                └── Yes, and evidence buffer non-empty
+                        │
+                        ▼
+         Look up phase-tailored prompt in _RETRY_PROMPTS
+         via _PHASE_TO_PROMPT_KEY[phase.id] → one of:
+           access_control, auth, sqli, xss, cmdi, ssti,
+           path_traversal, xxe, ssrf, injection, bfla
+                        │
+                        ▼
+         Emit phase_start for "<name> (retry)" with id
+         "<phase.id>_retry" so the UI shows a retry pass
+                        │
+                        ▼
+         Append retry prompt + evidence excerpt as a user
+         message; run a fresh max_steps tool-enabled loop
+                        │
+                        ▼
+         extract_findings() on the final assistant turn;
+         findings are merged into the same phase results
 ```
 
-### Why This Is Better
+Retry prompts are opinionated — they name specific endpoints, specific payload
+sets (e.g. `admin:admin`, `admin@<host>:admin123`, `admin' --`, `' OR 1=1 --`),
+and forbid giving up after 1–2 attempts. See `_RETRY_PROMPTS` in `agent.py`.
 
-| | Old Retry | Evidence Summary |
-|---|---|---|
-| **LLM calls** | Full `max_steps` loop (up to 25 tool calls) | Single completion call |
-| **Tool access** | Full tools — may re-test same payloads | No tools — analysis only |
-| **Cost** | ~2x the phase cost | ~$0.001–$0.01 |
-| **UI confusion** | Showed as "Retry Phase" with separate numbering | Invisible — findings appear under the original phase |
+### Why hybrid
+
+| | Always-active retry (old) | Evidence summary only | **Hybrid (current)** |
+|---|---|---|---|
+| **When retry fires** | Any phase with 0 findings | Any phase with 0 findings | 15 high-impact phases, on 0 findings **or** missing core class |
+| **Tool access** | Full tools | None | Full tools (Branch A) / none (Branch B) |
+| **Cost on low-value phases** | ~2x phase cost | ~$0.001 | ~$0.001 (Branch B) |
+| **Recovers missed credentials / IDOR / SQLi?** | Sometimes | No (tool-less analysis can't brute-force) | Yes — tool-enabled second pass with tailored payloads |
+| **UI** | Separate "Retry Phase" tile | Invisible | Tile labelled `<name> (retry)`, findings merged into the original phase |
 
 ### Minimum Security Calls (`_MIN_SECURITY_CALLS`)
 

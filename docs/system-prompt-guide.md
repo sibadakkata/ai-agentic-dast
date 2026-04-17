@@ -300,5 +300,7 @@ Step 5: On different response lengths — investigate blind injection
 | `scanners/ai_agent/prompts.py` | `WEB_PHASES` / `API_PHASES` | Adding/modifying scan phases |
 | `scanners/ai_agent/prompts.py` | `_FOCUS_PHASE_MAP` | Adding new focus area keywords |
 | `scanners/ai_agent/prompts.py` | `get_phases()` | Changing phase selection logic |
-| `scanners/ai_agent/agent.py` | `_RETRY_PHASES` | Adding phases that should retry on 0 findings |
+| `scanners/ai_agent/agent.py` | `_ACTIVE_RETRY_PHASES` | Phases that get a tool-enabled second pass on 0 findings or missing core class |
+| `scanners/ai_agent/agent.py` | `_PHASE_CORE_KEYWORDS` | Core vuln-class keywords per phase — retry fires if none of these match the first-pass findings |
+| `scanners/ai_agent/agent.py` | `_RETRY_PROMPTS` / `_PHASE_TO_PROMPT_KEY` | Phase-tailored retry prompts (access_control, auth, sqli, xss, cmdi, ssti, path_traversal, xxe, ssrf, injection, bfla) |
 | `scanners/ai_agent/agent.py` | `_MIN_SECURITY_CALLS` | Setting minimum tool calls per phase |
