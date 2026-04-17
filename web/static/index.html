@@ -3078,7 +3078,7 @@ let _allLiveFindings = [];
 var _liveCatGroups = {};
 
 function _getLiveCatKey(f) {
-  return _inferFindingType(f);
+  return _getGroupKey(f);
 }
 
 function _ensureLiveCatGroup(container, cat) {
@@ -3092,7 +3092,7 @@ function _ensureLiveCatGroup(container, cat) {
   header.className = 'cat-header';
   header.onclick = function() { toggleCatGroup(this); };
   header.innerHTML =
-    '<span class="cat-label">' + esc(cat) + '</span>' +
+    '<span class="cat-label">' + _getGroupLabel(cat) + '</span>' +
     '<span class="cat-counts">' +
       '<span class="lv-cat-count" style="font-weight:700;">0 findings</span>' +
       '<span class="lv-cat-sevs"></span>' +
@@ -3105,11 +3105,12 @@ function _ensureLiveCatGroup(container, cat) {
   group.appendChild(header);
   group.appendChild(body);
 
+  var sorter = _getGroupSorter();
   var inserted = false;
   var existing = container.querySelectorAll('.cat-group');
   for (var i = 0; i < existing.length; i++) {
     var eCat = existing[i].getAttribute('data-cat');
-    if (_catSort(cat, eCat) < 0) {
+    if (sorter(cat, eCat) < 0) {
       container.insertBefore(group, existing[i]);
       inserted = true;
       break;
@@ -3119,6 +3120,43 @@ function _ensureLiveCatGroup(container, cat) {
 
   _liveCatGroups[cat] = { group: group, header: header, body: body, items: [] };
   return _liveCatGroups[cat];
+}
+
+function _rebuildLiveFindings() {
+  var container = document.getElementById('lv-findings-body');
+  if (!container || !_allLiveFindings.length) return;
+  _liveCatGroups = {};
+  var toolbar = container.querySelector('.lv-grp-toolbar');
+  container.innerHTML = '';
+  if (toolbar) container.appendChild(toolbar);
+  else _addLiveGrpToolbar(container);
+
+  _allLiveFindings.forEach(function(f, idx) {
+    var cat = _getLiveCatKey(f);
+    var catData = _ensureLiveCatGroup(container, cat);
+    catData.items.push(f);
+
+    var row = document.createElement('div');
+    row.className = 'live-finding-row';
+    row.onclick = (function(i) { return function() { showFindingDetail(i); }; })(idx);
+    var sevClass = 'sev-' + (f.severity || 'info').toLowerCase();
+    row.innerHTML =
+      '<div class="live-finding-sev"><span class="severity ' + sevClass + '">' + esc(f.severity) + '</span></div>' +
+      '<div class="live-finding-title">' + esc(f.title) + '</div>' +
+      '<div class="live-finding-url" title="' + esc(f.url) + '">' + esc(f.url) + '</div>' +
+      '<div class="live-finding-phase">' + esc(f.phase || '') + '</div>' +
+      '<div class="live-finding-chevron">&#9656;</div>';
+    catData.body.appendChild(row);
+    _updateLiveCatHeader(catData);
+  });
+}
+
+function _addLiveGrpToolbar(container) {
+  var toolbar = document.createElement('div');
+  toolbar.className = 'lv-grp-toolbar';
+  toolbar.style.cssText = 'display:flex;align-items:center;justify-content:flex-end;padding:8px 12px;';
+  toolbar.innerHTML = _grpButtonsHtml();
+  container.insertBefore(toolbar, container.firstChild);
 }
 
 function _updateLiveCatHeader(catData) {
@@ -3358,6 +3396,7 @@ function renderLiveView(live) {
 
   const findingsBody = document.getElementById('lv-findings-body');
   if (live.findings && live.findings.length) {
+    if (!findingsBody.querySelector('.lv-grp-toolbar')) _addLiveGrpToolbar(findingsBody);
     live.findings.forEach(f => {
       const idx = _allLiveFindings.length;
       _allLiveFindings.push(f);
@@ -4115,8 +4154,12 @@ function renderComparison(data) {
 
   const toolbarHtml = `<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;">
     <span style="font-size:12px;color:var(--text2);">${filtered.length} finding${filtered.length!==1?'s':''}</span>
-    ${colPickerHtml}
+    <div style="display:flex;align-items:center;gap:4px;">
+      ${_grpButtonsHtml()}
+      ${colPickerHtml}
+    </div>
   </div>`;
+  window._lastCompData = data;
 
   const c = cols;
   const thRow = [
@@ -4168,12 +4211,13 @@ function renderComparison(data) {
     ].filter(Boolean).join('');
   }
 
-  var groups = _groupByCategory(filtered);
-  var catKeys = Object.keys(groups).sort(_catSort);
+  var groups = _groupFindings(filtered);
+  var sorter = _getGroupSorter();
+  var catKeys = Object.keys(groups).sort(sorter);
   var rowNum = 0;
   var groupsHtml = catKeys.map(function(cat) {
     var items = groups[cat];
-    var catLabel = esc(cat);
+    var catLabel = _getGroupLabel(cat);
     var rows = items.map(function(item) {
       rowNum++;
       var realIdx = data.triaged_findings.indexOf(item.f);
@@ -4279,6 +4323,7 @@ function renderAIRaw(findings) {
   if (!el) return;
   if (!findings || !findings.length) { el.innerHTML = '<div class="empty">No findings</div>'; return; }
   window._aiRawFindings = findings;
+  window._lastAIRawFindings = findings;
 
   var thRow = '<th style="width:30px;"></th><th>#</th><th>Finding</th><th>Severity</th><th>CWE</th><th>URL</th><th>Parameter</th><th style="max-width:160px;">Evidence</th>';
 
@@ -4296,12 +4341,15 @@ function renderAIRaw(findings) {
     '</tr>';
   }
 
-  var groups = _groupByCategory(findings);
-  var catKeys = Object.keys(groups).sort(_catSort);
+  var grpToolbar = '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;"><span style="font-size:12px;color:var(--text2);">' + findings.length + ' finding' + (findings.length!==1?'s':'') + '</span>' + _grpButtonsHtml() + '</div>';
+
+  var groups = _groupFindings(findings);
+  var sorter = _getGroupSorter();
+  var catKeys = Object.keys(groups).sort(sorter);
   var rowNum = 0;
   var groupsHtml = catKeys.map(function(cat) {
     var items = groups[cat];
-    var catLabel = esc(cat);
+    var catLabel = _getGroupLabel(cat);
     var rows = items.map(function(item) {
       rowNum++;
       return _rawRow(item.f, rowNum, item.origIdx);
@@ -4321,7 +4369,7 @@ function renderAIRaw(findings) {
     '</div>';
   }).join('');
 
-  el.innerHTML = groupsHtml;
+  el.innerHTML = grpToolbar + groupsHtml;
 }
 
 function renderPhaseLog(phases) {
@@ -4435,18 +4483,101 @@ function _inferFindingType(f) {
   return 'Other';
 }
 
+var _OWASP_TITLES = {
+  'A01': 'Broken Access Control',
+  'A02': 'Cryptographic Failures',
+  'A03': 'Injection',
+  'A04': 'Insecure Design',
+  'A05': 'Security Misconfiguration',
+  'A06': 'Vulnerable Components',
+  'A07': 'Authentication Failures',
+  'A08': 'Software & Data Integrity',
+  'A09': 'Logging & Monitoring',
+  'A10': 'Server-Side Request Forgery',
+};
+
+var _groupByMode = 'category';
+try { var _saved = localStorage.getItem('dast_group_by'); if (_saved) _groupByMode = _saved; } catch(e) {}
+
+function setGroupBy(mode) {
+  _groupByMode = mode;
+  try { localStorage.setItem('dast_group_by', mode); } catch(e) {}
+  document.querySelectorAll('.grp-btn').forEach(function(b) {
+    b.classList.toggle('active', b.getAttribute('data-grp') === mode);
+  });
+  if (window._lastCompData) renderComparison(window._lastCompData);
+  if (window._lastAIRawFindings) renderAIRaw(window._lastAIRawFindings);
+  _rebuildLiveFindings();
+}
+
+function _grpButtonsHtml() {
+  var modes = [['category','Category'],['owasp','OWASP'],['severity','Severity']];
+  var html = '<div style="display:inline-flex;gap:2px;border:1px solid var(--border);border-radius:6px;overflow:hidden;margin-left:8px;">';
+  modes.forEach(function(m) {
+    var active = _groupByMode === m[0];
+    html += '<button class="grp-btn" data-grp="' + m[0] + '" onclick="setGroupBy(\'' + m[0] + '\')" style="padding:4px 10px;font-size:11px;font-weight:600;font-family:inherit;border:none;cursor:pointer;transition:all 0.15s;' +
+      (active ? 'background:var(--accent);color:#fff;' : 'background:var(--surface2);color:var(--text2);') +
+    '">' + m[1] + '</button>';
+  });
+  html += '</div>';
+  return html;
+}
+
 function _catSort(a, b) {
   if (a === 'Other') return 1;
   if (b === 'Other') return -1;
   return a.localeCompare(b);
 }
 
-function _groupByCategory(findings) {
+function _owaspSort(a, b) {
+  var order = ['A01','A02','A03','A04','A05','A06','A07','A08','A09','A10','Other'];
+  var ai = order.indexOf(a); if (ai === -1) ai = 99;
+  var bi = order.indexOf(b); if (bi === -1) bi = 99;
+  return ai - bi;
+}
+
+var _SEV_ORDER = ['Critical','High','Medium','Low','Info','Other'];
+function _sevSort(a, b) {
+  var ai = _SEV_ORDER.indexOf(a); if (ai === -1) ai = 99;
+  var bi = _SEV_ORDER.indexOf(b); if (bi === -1) bi = 99;
+  return ai - bi;
+}
+
+function _getGroupKey(f) {
+  if (_groupByMode === 'owasp') {
+    var raw = f.owasp_category || f.owasp || '';
+    var code = (typeof raw === 'string' ? raw : String(raw)).substring(0, 3).toUpperCase();
+    if (!/^A\d{2}$/.test(code)) return 'Other';
+    return code;
+  }
+  if (_groupByMode === 'severity') {
+    var s = (f.final_severity || f.severity || 'Info');
+    s = s.charAt(0).toUpperCase() + s.slice(1).toLowerCase();
+    if (_SEV_ORDER.indexOf(s) === -1) s = 'Other';
+    return s;
+  }
+  return _inferFindingType(f);
+}
+
+function _getGroupLabel(key) {
+  if (_groupByMode === 'owasp' && key !== 'Other') {
+    return '<span class="cat-id">' + key + '</span> ' + esc(_OWASP_TITLES[key] || key);
+  }
+  return esc(key);
+}
+
+function _getGroupSorter() {
+  if (_groupByMode === 'owasp') return _owaspSort;
+  if (_groupByMode === 'severity') return _sevSort;
+  return _catSort;
+}
+
+function _groupFindings(findings) {
   var groups = {};
   findings.forEach(function(f, origIdx) {
-    var cat = _inferFindingType(f);
-    if (!groups[cat]) groups[cat] = [];
-    groups[cat].push({f: f, origIdx: origIdx});
+    var key = _getGroupKey(f);
+    if (!groups[key]) groups[key] = [];
+    groups[key].push({f: f, origIdx: origIdx});
   });
   return groups;
 }
