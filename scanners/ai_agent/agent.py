@@ -1767,122 +1767,40 @@ async def run_scan(
 
             phase_new_findings = len(findings) - phase_findings_before
 
-            # ── Phase Retry: if key injection phase found 0, retry with analysis ──
-            _RETRY_PHASES = {"web_a03_sqli", "web_a03_xss", "web_a03_cmdi",
-                            "web_a03_ssti", "web_a03_path_traversal", "web_a03_xxe",
-                            "web_a01", "web_a07", "web_a10",
-                            "api_injection", "api_ssrf", "api_authz"}
-            if (phase.id in _RETRY_PHASES
-                    and phase_new_findings == 0
-                    and phase_evidence
-                    and not getattr(phase, "_retried", False)):
-                phase._retried = True
-                evidence_text = _format_evidence_buffer(phase_evidence)
-                retry_prompt = (
-                    f"RETRY — Phase '{phase.name}' found 0 vulnerabilities. "
-                    "Review your test results below and try a DIFFERENT approach:\n\n"
-                    f"{evidence_text}\n\n"
-                    "ANALYSIS REQUIRED:\n"
-                    "1. Look at which endpoints you tested and their responses\n"
-                    "2. Did you get any status 500, error messages, or anomalies? Those indicate injection worked.\n"
-                    "3. Did you use baseline_value with fuzz_parameter? Without it, payloads like ' won't "
-                    "trigger errors in SQL LIKE '%input%' clauses. Set baseline_value='test' so "
-                    "the actual value sent is 'test' + payload (e.g. q=test').\n"
-                    "4. Try DIFFERENT endpoints you haven't tested yet\n"
-                    "5. Try api_request with the full URL and payload manually constructed\n"
-                    "6. Try inject_payload on any form fields (login username, search box)\n\n"
-                    "DO NOT give up. Try at least 3 more approaches before concluding."
+            # ── Evidence summary: if 0 findings but evidence exists, one LLM call ──
+            if phase_new_findings == 0 and phase_evidence:
+                summary_prompt = (
+                    f"Phase '{phase.name}' completed with 0 vulnerabilities reported, "
+                    "but you performed security tests. Review the evidence below and "
+                    "output ANY confirmed vulnerabilities as JSON findings.\n\n"
+                    + _format_evidence_buffer(phase_evidence)
                 )
-                logger.info("Phase %s: 0 findings with %d evidence records, running retry pass",
-                            phase.name, len(phase_evidence))
-                print(f" [RETRY] {phase.name}: 0 findings, retrying with evidence analysis...")
-                _cb("phase_start", {"phase": phase_num, "total": total_phases,
-                                    "name": f"{phase.name} (retry)", "id": f"{phase.id}_retry"})
-                messages.append({"role": "user", "content": retry_prompt})
-                phase_evidence_retry: list[dict] = []
-                retry_findings_before = len(findings)
-                retry_tool_calls = 0
-                for retry_step in range(phase.max_steps):
+                messages.append({"role": "user", "content": summary_prompt})
+                try:
                     _check_cancel()
-                    try:
-                        _sanitize_all_messages(messages)
-                        messages = _repair_tool_pairs(messages)
-                        response = router.complete(model=model, messages=messages,
-                                                   tools=TOOL_DEFINITIONS, cancel_flag=cancel_flag)
-                    except (ContentFiltered, ContextWindowExceeded, MalformedMessages):
-                        break
-                    except ScanCancelled:
-                        raise
-                    _check_cancel()
-                    if not response or not getattr(response, "choices", None):
-                        break
-                    msg = response.choices[0].message
-                    msg_dict = msg.model_dump() if hasattr(msg, "model_dump") else dict(msg)
-                    msg_dict = _sanitize_message(msg_dict)
-                    messages.append(msg_dict)
-                    tool_calls = msg_dict.get("tool_calls") or getattr(msg, "tool_calls", None) or []
-                    if tool_calls:
-                        for tc in tool_calls:
-                            _check_cancel()
-                            tc_id = tc.get("id") if isinstance(tc, dict) else getattr(tc, "id", "")
-                            fn = tc.get("function") if isinstance(tc, dict) else getattr(tc, "function", {})
-                            fn_name = fn.get("name") if isinstance(fn, dict) else getattr(fn, "name", "")
-                            fn_name = _sanitize_tool_name(fn_name)
-                            fn_args = fn.get("arguments") if isinstance(fn, dict) else getattr(fn, "arguments", "{}")
-                            result = await tools.execute(fn_name, fn_args)
-                            retry_tool_calls += 1
-                            metrics["total_tool_calls"] += 1
-                            messages.append({"role": "tool", "tool_call_id": tc_id,
-                                             "content": _cap_result(result)})
-                            try:
-                                args_parsed = json.loads(fn_args) if isinstance(fn_args, str) else fn_args
-                            except Exception:
-                                args_parsed = {"raw": fn_args}
-                            resp_summary = {
-                                k: v for k, v in result.items()
-                                if k in ("status", "url", "error", "reflected", "anomaly", "body_snippet", "results", "title")
-                            } if isinstance(result, dict) else str(result)[:200]
-                            _cb("tool_call", {
-                                "phase": f"{phase.name} (retry)",
-                                "tool": fn_name,
-                                "request": {k: str(v)[:300] for k, v in args_parsed.items()} if isinstance(args_parsed, dict) else str(args_parsed)[:400],
-                                "response": {k: str(v)[:200] for k, v in resp_summary.items()} if isinstance(resp_summary, dict) else str(resp_summary)[:400],
-                            })
-                            is_sec = fn_name in SECURITY_TEST_TOOLS
-                            if not is_sec and fn_name == "navigate":
-                                nav_url = (args_parsed.get("url") or "") if isinstance(args_parsed, dict) else ""
-                                if any(m in nav_url for m in _INJECTION_MARKERS):
-                                    is_sec = True
-                            if is_sec:
-                                metrics["test_log"].append({"phase": phase.id, "tool": fn_name,
-                                                            "request": args_parsed, "response_summary": resp_summary})
-                                _capture_evidence(phase_evidence_retry, fn_name, args_parsed, resp_summary, result)
-                        if retry_tool_calls % 5 == 0 and _estimate_tokens(messages) > TRIM_TARGET_TOKENS:
-                            messages = trim_context(messages, max_tokens=TRIM_TARGET_TOKENS)
-                    else:
-                        content = msg_dict.get("content") or ""
-                        retry_f = extract_findings(str(content))
-                        if not retry_f and phase_evidence_retry:
-                            ev_text = _format_evidence_buffer(phase_evidence_retry)
-                            messages.append({"role": "user", "content": ev_text})
-                            try:
-                                ev_resp = router.complete(model=model, messages=messages, tools=[], cancel_flag=cancel_flag)
-                                if ev_resp and getattr(ev_resp, "choices", None):
-                                    retry_f = extract_findings(str(ev_resp.choices[0].message.content or ""))
-                            except Exception:
-                                pass
-                        findings.extend(retry_f)
-                        for f in retry_f:
-                            f["phase"] = f"{phase.name} (retry)"
-                            _match_evidence_to_finding(f, phase_evidence_retry or phase_evidence)
-                            _cb("finding", f)
-                        break
-                retry_new = len(findings) - retry_findings_before
-                phase_new_findings += retry_new
-                phase_tool_calls += retry_tool_calls
-                print(f" [RETRY] {retry_tool_calls} tool calls, {retry_new} findings")
-                _cb("phase_end", {"phase": phase_num, "name": f"{phase.name} (retry)",
-                                  "tool_calls": retry_tool_calls, "findings": retry_new})
+                    summary_resp = router.complete(
+                        model=model, messages=messages, tools=[],
+                        cancel_flag=cancel_flag,
+                    )
+                    if summary_resp and getattr(summary_resp, "choices", None):
+                        summary_f = extract_findings(
+                            str(summary_resp.choices[0].message.content or "")
+                        )
+                        if summary_f:
+                            findings.extend(summary_f)
+                            for f in summary_f:
+                                f["phase"] = phase.name
+                                _match_evidence_to_finding(f, phase_evidence)
+                                _cb("finding", f)
+                            phase_new_findings += len(summary_f)
+                            logger.info(
+                                "Phase %s: evidence summary recovered %d findings",
+                                phase.name, len(summary_f),
+                            )
+                except ScanCancelled:
+                    raise
+                except Exception as e:
+                    logger.warning("Evidence summary failed for %s: %s", phase.name, e)
 
             metrics["phases_completed"] += 1
             metrics["phase_log"].append({
