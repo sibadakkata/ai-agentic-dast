@@ -4589,7 +4589,7 @@ function setGroupBy(mode) {
 
 function _grpButtonsHtml() {
   var modes = [['category','Issue Category'],['owasp','OWASP'],['severity','Severity'],['pci_dss','PCI DSS'],['sans25','SANS 25']];
-  var html = '<div style="display:inline-flex;gap:2px;border:1px solid var(--border);border-radius:6px;overflow:hidden;margin-left:8px;">';
+  var html = '<span style="font-size:11px;font-weight:600;color:var(--text2);margin-right:6px;">Group by</span><div style="display:inline-flex;gap:2px;border:1px solid var(--border);border-radius:6px;overflow:hidden;">';
   modes.forEach(function(m) {
     var active = _groupByMode === m[0];
     html += '<button class="grp-btn' + (active ? ' active' : '') + '" data-grp="' + m[0] + '" onclick="setGroupBy(\'' + m[0] + '\')">' + m[1] + '</button>';
