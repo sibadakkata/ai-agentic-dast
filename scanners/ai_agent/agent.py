@@ -1151,7 +1151,7 @@ async def run_scan(
             # Fast path: autodiscover OpenAPI spec live from the target
             # (no spec file was uploaded but the API may expose /v3/api-docs
             # or /openapi.json — Spring Boot, FastAPI, ASP.NET Core defaults).
-            if _use_fast_path and not openapi_path and not registry.endpoints:
+            if _use_fast_path and not openapi_path and not registry.get_all():
                 print(f"  [FAST PATH] No spec provided — autodiscovering OpenAPI at {target.url}")
                 try:
                     discovered = await autodiscover_openapi(http_client, target.url)
