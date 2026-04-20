@@ -17,6 +17,7 @@ ContentFiltered: Model bedrock/... refuses security-testing prompts
 | Amazon Nova Micro/Lite/Pro | Always blocked |
 | Amazon Titan | Always blocked |
 | Claude Haiku 4.5 | Works |
+| Claude Sonnet 4.5 | Works |
 | Claude Sonnet 4.6 | Works |
 | Ministral 8B / 14B | Works |
 | Mistral Small | Works but poor quality |
@@ -104,6 +105,26 @@ Empty response from model at phase X step Y
 **Cause**: Model returned nothing. Can happen when confused by conversation state.
 
 **Auto-recovery**: Breaks out of step loop, moves to next phase. No findings lost.
+
+## Errored / Stopped / Paused Scans — Metrics Still Available
+
+When a scan ends in any non-success state you can still see what it cost and what it found.
+
+**What the DB retains for errored/stopped/paused scans:**
+- `cost`, `total_tokens`, `llm_calls`, `total_tool_calls` (column-level and in the `data` blob)
+- `findings_count`, `phases_completed`
+- Full list of completed phases with per-phase tool call / finding counts
+- Per-phase tool usage breakdown
+- Last 500 crawled URLs
+- Out-of-scope URLs
+- Partial findings (checkpointed every 5 findings and at every phase boundary)
+
+**What is not retained after a hard-kill (OOM, SIGKILL, container restart):**
+- Detailed per-tool-call request/response log (the Live Activity tab). This is ≤ 20 MB per scan and is kept in memory for performance. On graceful error or stop it is flushed into `scan_results.payload.summary.test_log`. Only a `kill -9`-equivalent loses it.
+
+**Typical drift on hard-kill:** cost ±$0.10–$0.80 on a $35 scan, tokens ±0.5 %, findings ±0–4, phases_completed ±0–1.
+
+If your UI shows `cost=NULL` or empty Phases/Crawled tabs on an errored scan, the container is running an **older build** (pre-persistence-snapshot). Redeploy.
 
 ## Authentication Failure (Target App)
 

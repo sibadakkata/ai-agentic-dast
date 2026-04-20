@@ -138,6 +138,7 @@ uvicorn web.app:app --host 0.0.0.0 --port 8080
 | **Ministral 8B** | $0.15 / $0.15 | Good | Cheapest — good for dev/testing |
 | **Ministral 14B** | $0.20 / $0.20 | **Strong** | **Best value** — designed for agentic use |
 | **Claude Haiku 4.5** | $0.80 / $4 | **Excellent** | **Production scans** — reliable, best cost/quality |
+| **Claude Sonnet 4.5** | $3 / $15 | **Excellent** | Deep analysis — strong reasoning at Sonnet-tier cost |
 | **Claude Sonnet 4.6** | $3 / $15 | **Excellent** | Deep analysis — most findings, highest quality |
 
 > Ministral 14B or Claude Haiku 4.5 is the minimum for meaningful results. See [Deployment Guide](docs/deployment.md) for Bedrock setup and model details.
@@ -190,6 +191,7 @@ uvicorn web.app:app --host 0.0.0.0 --port 8080
 ### Data storage (SQLite, not browser disk)
 
 - **`results/scanner.db`** — source of truth: `scans` (metadata), `scan_results` (full findings + summary JSON), `app_kv` (UI prefs), `cost_ledger`. On startup, any scan with `result_file` on disk but no `scan_results` row is **back-filled** and `findings_count` is reconciled.
+- **Crash / error / pause resilience** — on every save, the transient `live_*` counters (cost, tokens, LLM calls, tool calls, findings_count, phases_completed) and structured summaries (per-phase breakdown, per-phase tool usage, last-500 crawled URLs, out-of-scope URLs) are promoted into the persisted `scans` row. Errored, stopped, paused, or container-killed scans therefore keep their last-known-good metrics and breakdowns in the DB — the UI's Phases / Crawled Pages / Out of Scope tabs stay populated. The only field not persisted is the detailed per-tool-call request/response log (`live_tests`), which can reach ~20 MB per scan and is still kept in-memory only; on graceful error it's written into `scan_results.payload.summary.test_log`.
 - **`results/raw/*.json`** — written when a scan finishes as **backup/export** only; API reads **DB first**, then legacy file once to populate DB.
 - **Scan list** (`GET /api/scans`) — DB-backed only (no file-only orphan rows).
 - **Payloads export** (`GET /api/results/{id}/payloads`) — generated in memory (no `payloads_*.json` cache file).

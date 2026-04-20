@@ -523,6 +523,48 @@ Costs are displayed in real-time in the UI and stored with scan results.
 
 ---
 
+## Persistence / Crash Resilience
+
+Scans accumulate live state in memory — counters (cost, tokens, LLM calls, tool calls), the phase log, the crawl list, the out-of-scope list, per-phase tool usage, and the rolling request/response log. Without care, a Python-level error, user `stop`, process kill, or container restart would lose all of this.
+
+**Model: snapshot-on-every-save.** `_snapshot_live_metrics` (in `web/app.py`) promotes each transient `live_*` field into a persisted counterpart before `_clean_scan_for_db` strips the `live_*` keys. Numeric counters use `max()` so a clean finalization (which writes permanent fields directly) never regresses from a stale live value. Runs on every `_save_scan` — there is no status-specific branch, so errored / stopped / paused / crashed scans all benefit equally.
+
+| Live field | → Persisted field | Bound |
+|------------|-------------------|-------|
+| `live_cost` | `cost` column | — |
+| `live_tokens` | `total_tokens` | — |
+| `live_llm_calls` | `llm_calls` | — |
+| `live_tool_calls` | `total_tool_calls` | — |
+| `len(live_findings)` | `findings_count` column | — |
+| `len(live_phases)` | `phases_completed` | — |
+| `live_phases` | `phases` | full list |
+| `live_phase_tools` | `phase_tools` | full dict |
+| `live_crawled` | `crawled_urls` | **last 500** |
+| `live_out_of_scope` | `out_of_scope_urls` | full list |
+| `live_tests` | **not persisted** in `scans.data` | flushed to `scan_results.payload.summary.test_log` only on graceful exit (≤ 20 MB blob would bloat the `scans` table) |
+
+**Save cadence:**
+
+- Every 10 tool calls (hot path)
+- Every 5 new findings (intra-phase checkpoint)
+- On every `phase_end`
+- On every 30 s autosave tick
+- On `pause`, `resume`, `auth_challenge`, `progress_msg`, `scan_start`
+
+**Findings checkpoint.** `_persist_partial_findings` writes the current `live_findings` list to the `scan_results` table. In addition to `phase_end`, it runs every 5 new findings and on the 30 s autosave tick so a mid-phase crash loses at most 4 findings.
+
+**Drift budget on hard-kill (OOM / SIGKILL / container restart — no graceful handler):**
+
+| Field | Drift |
+|-------|-------|
+| `cost`, `total_tokens` | ≤ 30 s or ≤ 10 tool calls of activity |
+| `findings_count` | ≤ 4 findings |
+| `phases_completed` | 0 or 1 |
+
+Graceful error, user-stop, pause, and completion paths have zero drift.
+
+---
+
 ## File Map
 
 | File | Role | Key Classes/Functions |
