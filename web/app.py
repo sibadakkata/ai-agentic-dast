@@ -3707,6 +3707,110 @@ async def generate_excel(scan_id: str):
         return JSONResponse({"error": f"Excel export failed: {str(e)}"}, status_code=500)
 
 
+@app.get("/api/results/{scan_id}/raw/ai", tags=["Results"])
+async def download_raw_ai(scan_id: str):
+    """Download the raw AI findings (pre-triage) as a standalone JSON file.
+
+    Mirrors what the UI "AI Raw Findings" tab shows — AI agent output before
+    triage, verification, or CVSS overrides are applied.
+    """
+    try:
+        data = await _get_results_inner(scan_id)
+    except Exception as e:
+        return JSONResponse({"error": f"Failed to load results: {e}"}, status_code=500)
+    if isinstance(data, JSONResponse):
+        return data
+    meta = data.get("metadata", {}) or {}
+    ai_findings = data.get("ai_findings", []) or []
+    output = {
+        "scan_id": scan_id,
+        "target": meta.get("target", ""),
+        "model": meta.get("model", ""),
+        "scan_mode": meta.get("scan_mode", ""),
+        "count": len(ai_findings),
+        "ai_findings": ai_findings,
+    }
+    blob = json.dumps(output, indent=2, default=str).encode("utf-8")
+    return StreamingResponse(
+        BytesIO(blob),
+        media_type="application/json",
+        headers={"Content-Disposition": f'attachment; filename="ai_raw_findings_{scan_id}.json"'},
+    )
+
+
+@app.get("/api/results/{scan_id}/raw/triage", tags=["Results"])
+async def download_ai_vs_triage(scan_id: str):
+    """Download AI vs Triage comparison as a JSON file.
+
+    For every finding, includes AI-reported severity alongside the triage
+    verdict, verification status, CWE/CVSS, and triage reasoning — the same
+    data shown in the "AI vs Triage" tab of the results view.
+    """
+    try:
+        data = await _get_results_inner(scan_id)
+    except Exception as e:
+        return JSONResponse({"error": f"Failed to load results: {e}"}, status_code=500)
+    if isinstance(data, JSONResponse):
+        return data
+
+    meta = data.get("metadata", {}) or {}
+    coverage = data.get("coverage", {}) or {}
+    triaged = data.get("triaged_findings", []) or []
+
+    comparison = []
+    for f in triaged:
+        ai_sev = (f.get("ai_severity") or "").strip()
+        triage_sev = (f.get("final_severity") or f.get("severity") or "").strip()
+        comparison.append({
+            "title": f.get("title", ""),
+            "url": f.get("url", ""),
+            "parameter": f.get("parameter", ""),
+            "owasp_category": f.get("owasp_category", ""),
+            "cwe": f.get("cwe", ""),
+            "ai_severity": ai_sev,
+            "triage_severity": triage_sev,
+            "severity_changed": ai_sev.lower() != triage_sev.lower(),
+            "verdict": f.get("verdict", ""),
+            "confidence": f.get("confidence", ""),
+            "confidence_score": f.get("confidence_score"),
+            "verified": bool(f.get("verified", False)),
+            "verification_method": f.get("verification_method", "none"),
+            "verification_evidence": f.get("verification_evidence", ""),
+            "triage_reason": f.get("reason", ""),
+            "cvss": f.get("cvss"),
+            "cvss_rationale": f.get("cvss_rationale", ""),
+            "cvss_override": f.get("cvss_override"),
+            "cvss_override_note": f.get("cvss_override_note", ""),
+        })
+
+    verdict_counts: dict[str, int] = {}
+    for c in comparison:
+        v = (c.get("verdict") or "UNKNOWN").upper()
+        verdict_counts[v] = verdict_counts.get(v, 0) + 1
+
+    output = {
+        "scan_id": scan_id,
+        "target": meta.get("target", ""),
+        "model": meta.get("model", ""),
+        "scan_mode": meta.get("scan_mode", ""),
+        "count": len(comparison),
+        "summary": {
+            "total": len(comparison),
+            "severity_changed": sum(1 for c in comparison if c.get("severity_changed")),
+            "verified": sum(1 for c in comparison if c.get("verified")),
+            "verdicts": verdict_counts,
+            "verification": coverage.get("verification", {}),
+        },
+        "comparison": comparison,
+    }
+    blob = json.dumps(output, indent=2, default=str).encode("utf-8")
+    return StreamingResponse(
+        BytesIO(blob),
+        media_type="application/json",
+        headers={"Content-Disposition": f'attachment; filename="ai_vs_triage_{scan_id}.json"'},
+    )
+
+
 @app.get("/api/results/{scan_id}/payloads", tags=["Results"])
 async def download_payloads(scan_id: str):
     """Download all payloads tested per phase as a JSON file."""
