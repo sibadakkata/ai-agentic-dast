@@ -2694,6 +2694,33 @@ async def cvss_override(scan_id: str, request: Request):
     return {"status": "ok", "key": key, "cvss": cvss_value, "note": note}
 
 
+def _apply_cvss_overrides_to_classified(classified: list, scan_id: str) -> list:
+    """Merge any per-finding CVSS overrides into a classified/triaged list.
+
+    Ensures PDF, Excel, and compliance exports reflect the same CVSS values
+    that the UI shows, rather than the auto-computed scores. Sets:
+
+    - ``cvss_override`` / ``cvss_override_note``: supplementary fields
+    - ``cvss``: replaced with the override value so downstream renderers
+      that read ``f['cvss']`` directly (e.g. report_generator.py) pick up
+      the override automatically.
+    """
+    overrides = SCANS.get(scan_id, {}).get("cvss_overrides", {}) if scan_id in SCANS else {}
+    if not overrides:
+        return classified
+    for f in classified:
+        if not isinstance(f, dict):
+            continue
+        key = f"{f.get('title', '')}||{f.get('url', '')}"
+        ov = overrides.get(key)
+        if ov is None:
+            continue
+        f["cvss_override"] = ov["cvss"]
+        f["cvss_override_note"] = ov.get("note", "")
+        f["cvss"] = ov["cvss"]
+    return classified
+
+
 @app.post("/api/results/{scan_id}/report", tags=["Results"])
 async def generate_report(scan_id: str):
     data = _load_raw_result_dict(scan_id)
@@ -2706,6 +2733,7 @@ async def generate_report(scan_id: str):
 
         import scripts.report_generator as rg
         classified = [triage_classify(f, test_log) for f in findings if isinstance(f, dict)]
+        _apply_cvss_overrides_to_classified(classified, scan_id)
         model_key = data.get("model", "") or data.get("metadata", {}).get("model", "unknown")
 
         orig_out = rg.OUT_DIR
@@ -3125,6 +3153,7 @@ async def generate_compliance_report(scan_id: str, framework: str):
         findings = data.get("findings") or []
         test_log = data.get("summary", {}).get("test_log") or []
         classified = [triage_classify(f, test_log) for f in findings if isinstance(f, dict)]
+        _apply_cvss_overrides_to_classified(classified, scan_id)
         _tgt = data.get("target", "")
         target_url = (_tgt if isinstance(_tgt, str) else _tgt.get("url", "") if isinstance(_tgt, dict) else str(_tgt)) or data.get("metadata", {}).get("target_url", "")
         model_key = data.get("model", "") or data.get("metadata", {}).get("model", "unknown")
@@ -3682,19 +3711,23 @@ async def delete_reports_for_target(target: str = ""):
 
 @app.get("/api/results/{scan_id}/excel", tags=["Results"])
 async def generate_excel(scan_id: str):
-    """Generate and download an Excel report for a scan."""
+    """Generate and download an Excel report for a scan.
+
+    Uses the same ``_get_results_inner`` pipeline as the UI so that the
+    Summary, All Findings, AI vs Triage, and AI Raw sheets always reflect
+    the same triage verdicts and CVSS overrides the user sees on-screen.
+    """
     try:
-        data = _load_raw_result_dict(scan_id)
+        result = await _get_results_inner(scan_id)
     except Exception as e:
         return JSONResponse({"error": f"Failed to load scan data: {e}"}, status_code=500)
-    if not data:
-        return JSONResponse({"error": "Results not found"}, status_code=404)
+    if isinstance(result, JSONResponse):
+        return result
     try:
         from scripts.excel_exporter import generate_excel
-        scan_info = SCANS.get(scan_id, {})
-        triaged = scan_info.get("triaged_findings") or data.get("findings", [])
-        raw = data.get("findings", [])
-        meta = data.get("metadata", {})
+        triaged = result.get("triaged_findings", []) or []
+        raw = result.get("ai_findings", []) or []
+        meta = result.get("metadata", {}) or {}
         xlsx_path = generate_excel(scan_id, meta, triaged, raw, str(REPORTS_DIR))
         return FileResponse(
             str(xlsx_path),
