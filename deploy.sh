@@ -34,6 +34,18 @@ if [ ! -f .env ]; then
     cp .env.example .env
 fi
 
+# ─── Check for active scans before deploying ─────────────────────────
+if docker ps --format '{{.Names}}' 2>/dev/null | grep -q "$CONTAINER_NAME"; then
+    echo "==> Checking for active scans..."
+    docker cp "$SCRIPT_DIR/scripts/check_scan_active.py" "$CONTAINER_NAME:/tmp/check_scan_active.py" 2>/dev/null
+    if ! docker exec "$CONTAINER_NAME" python3 /tmp/check_scan_active.py; then
+        echo ""
+        echo "ERROR: Active scan detected. Deployment aborted."
+        echo "       Wait for the scan to finish or stop it manually, then re-run deploy.sh"
+        exit 1
+    fi
+fi
+
 # Load .env
 set -a; source .env; set +a
 

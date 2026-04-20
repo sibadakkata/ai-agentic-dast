@@ -82,10 +82,26 @@ Report each finding with exact payload, response evidence, and affected URL.
 In `agent.py`, optionally add:
 
 ```python
-# Enable retry for the new phase (if 0 findings should trigger re-attempt)
-_RETRY_PHASES = {
+# Enable the tool-enabled smart retry for the new phase.
+# Retry fires when the first pass has 0 findings OR when findings exist
+# but none of them match the phase's core-vuln-class keywords.
+_ACTIVE_RETRY_PHASES = {
     ...,
     "web_a03_nosqli",
+}
+
+# Core-vuln-class keywords — retry also fires if none of these match.
+_PHASE_CORE_KEYWORDS = {
+    ...,
+    "web_a03_nosqli": (
+        "nosql injection", "mongodb injection", "$where", "$ne", "$gt",
+    ),
+}
+
+# Pick which tailored retry prompt this phase should use.
+_PHASE_TO_PROMPT_KEY = {
+    ...,
+    "web_a03_nosqli": "injection",   # or add a new key in _RETRY_PROMPTS
 }
 
 # Set minimum security test calls
@@ -323,23 +339,45 @@ Users can then type "my keyword" in the Focus Areas field in the UI.
 
 ---
 
-## Enabling Retry for a Phase
+## Enabling Hybrid Smart Retry for a Phase
 
-In `agent.py`, add the phase ID to `_RETRY_PHASES`:
+Active-retry phases run a second, tool-enabled pass with a phase-tailored
+prompt whenever the first pass finds 0 vulnerabilities **or** produces
+findings but none of them match the phase's core vulnerability class.
+
+In `agent.py`, wire up three structures:
 
 ```python
-_RETRY_PHASES = {
-    "web_a03_sqli",
-    "web_a03_xss",
-    ...,
+_ACTIVE_RETRY_PHASES = {
+    "web_a01", "web_a07", "web_a10",
+    "web_a03_sqli", "web_a03_xss", "web_a03_cmdi",
+    "web_a03_ssti", "web_a03_path_traversal", "web_a03_xxe",
+    "api_injection", "api_ssrf", "api_authz",
+    "api_auth", "web_bfla", "api_bfla",
     "web_a03_nosqli",   # ← add here
+}
+
+_PHASE_CORE_KEYWORDS = {
+    ...,
+    "web_a03_nosqli": (
+        "nosql injection", "mongodb injection", "$where", "$ne", "$gt",
+    ),
+}
+
+_PHASE_TO_PROMPT_KEY = {
+    ...,
+    "web_a03_nosqli": "injection",
 }
 ```
 
-When this phase finds 0 vulnerabilities but the evidence buffer shows tools were called, the agent automatically:
-1. Builds a retry prompt with the evidence
-2. Asks the LLM to analyze what failed and try different approaches
-3. Runs another round of `max_steps`
+On retry, the agent:
+
+1. Picks the tailored prompt from `_RETRY_PROMPTS` using `_PHASE_TO_PROMPT_KEY[phase.id]` (e.g. `access_control`, `auth`, `sqli`, `xss`, `cmdi`, `ssti`, `path_traversal`, `xxe`, `ssrf`, `injection`, `bfla`).
+2. Injects the prompt + a compact excerpt of the phase's evidence buffer as a user message.
+3. Runs a full tool-enabled loop (up to `phase.max_steps`) so the LLM can actually re-test — not just analyse.
+4. Emits the retry as its own `phase_start` tile (`<name> (retry)`) in the UI; extracted findings merge back into the original phase.
+
+Non-active-retry phases fall back to the cheap **evidence summary** pass (tool-less LLM review of the evidence buffer) only when the phase produced 0 findings.
 
 ---
 

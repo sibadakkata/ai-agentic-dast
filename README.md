@@ -62,7 +62,11 @@ This loop runs up to 25 steps per phase. Every finding is then **triaged offline
 | **Reports** | Three-stage evidence: AI Agent → Runtime Verification → Triage verdict | PDF, Excel, JSON export |
 | **Cost Control** | Pause/resume scans, stop early, per-scan cost tracking | Real-time cost display in UI |
 | **Multi-Step Exploit Chaining** | Combines individual findings into attack chains (e.g. XSS + cookie theft → session hijack, SSRF → internal API → data exfiltration) | Cross-phase context, `chain_exploit` tool |
-| **Category-Grouped Results** | Findings displayed by category (Injection, Access Control, etc.) with collapsible sections and severity breakdown | Comparison and AI Raw Findings tabs |
+| **Findings Grouping** | Group findings by Issue Category, OWASP Top 10 code, Severity, PCI DSS requirement, or SANS/CWE Top 25 — with a "Group by" selector, collapsible sections, and per-group severity breakdown | All tabs: Live, Comparison, AI Raw Findings |
+| **Hybrid Smart Retry** | For 20 high-impact phases (A01, A07, A10, all A03 injection, file upload, password reset, session management, API auth/authz/BFLA/SSRF/injection, API mass-assignment, API data-exposure) the agent runs a second, tool-enabled pass with a phase-tailored retry prompt whenever the phase either finds 0 vulnerabilities **or** produces findings but misses its core vulnerability class (e.g. auth phase reported password-reset issues but no credential crack; upload phase accepted a file but never proved execution). Other phases fall back to a cheap evidence-summary pass | `_ACTIVE_RETRY_PHASES`, `_PHASE_CORE_KEYWORDS`, `_RETRY_PROMPTS` in `agent.py` |
+| **Finding Deduplication** | Findings are deduped by `(title, url, parameter)` both when seeding prior findings into continue/retry scans and when appending new findings during the run — prevents the UI from double-counting passive-recon results across pre-auth / post-auth passes | `_finding_key`, `_dedupe_findings` in `web/app.py` |
+| **Model ID Resolution** | UI/API callers can pass a display name ("Claude Haiku 4.5 (recommended)"), a short alias ("haiku", "sonnet"), or the full litellm id — the backend normalises all three to a valid litellm model id, preventing "LLM Provider NOT provided" errors | `_resolve_model_id` in `web/app.py`, applied at `/api/scan`, `/api/scan/{id}/retry`, `/api/scan/{id}/rescan` |
+| **Deploy Safety** | Pre-deployment check detects active/paused scans and aborts `deploy.sh` before overwriting a running scanner | `scripts/check_scan_active.py`, integrated in `deploy.sh` |
 
 ## Quick Start
 
@@ -170,7 +174,8 @@ uvicorn web.app:app --host 0.0.0.0 --port 8080
 │   ├── triage_engine.py         #   3-layer triage engine
 │   ├── cve_lookup.py            #   NVD + OSV.dev CVE lookup
 │   ├── report_generator.py      #   PDF report generator
-│   └── excel_exporter.py        #   Excel report exporter
+│   ├── excel_exporter.py        #   Excel report exporter
+│   └── check_scan_active.py     #   Pre-deploy scan-active safety check
 ├── web/
 │   ├── app.py                   #   FastAPI backend
 │   ├── db.py                    #   SQLite persistence
@@ -210,7 +215,7 @@ python scripts/run_regression_ec2.py --pytest # same, plus pytest tests/
 |----------|-------------|
 | [Architecture](docs/architecture.md) | AI agent design, LLM loop, tool system, phase orchestration |
 | [System Prompt Guide](docs/system-prompt-guide.md) | **How the LLM is instructed** — system prompt structure, phase prompts, payload methodology, finding format |
-| [Scanner Internals](docs/scanner-internals.md) | **E2E scan flow** — tool execution, evidence buffer, retry logic, context trimming, finding extraction |
+| [Scanner Internals](docs/scanner-internals.md) | **E2E scan flow** — tool execution, evidence buffer, evidence summary, context trimming, finding extraction |
 | [Contributing & Extending](docs/contributing.md) | **How to add new phases, tools, and optimize detection** — step-by-step guide for team members |
 | [Security Checks](docs/security-checks.md) | Complete reference of all 65 check categories — passive recon, web phases, API phases, CWE/OWASP coverage |
 | [Triage Engine](docs/triage-engine.md) | How TP/FP classification works, confidence scoring, CVSS adjustment |
