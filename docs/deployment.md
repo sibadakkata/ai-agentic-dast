@@ -129,6 +129,7 @@ The router auto-selects: `bedrock/` models go direct to Bedrock; others go throu
 | **Ministral 14B** | `bedrock/mistral.ministral-3-14b-instruct` | $0.20 / $0.20 | **Strong** | **Best value** — designed for agentic use |
 | Mistral Small | `bedrock/mistral.mistral-small-2402-v1:0` | $0.10 / $0.30 | Weak | Legacy — doesn't use tools reliably |
 | **Claude Haiku 4.5** | `bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0` | $0.80 / $4 | **Excellent** | **Production scans** — best cost/quality |
+| **Claude Sonnet 4.5** | `bedrock/us.anthropic.claude-sonnet-4-5-20250929-v1:0` | $3 / $15 | **Excellent** | Deep analysis — strong reasoning at Sonnet-tier cost |
 | **Claude Sonnet 4.6** | `bedrock/us.anthropic.claude-sonnet-4-6` | $3 / $15 | **Excellent** | Deep analysis — highest quality |
 
 > **Why not other models?**
@@ -149,6 +150,15 @@ All scan data is stored in Docker named volumes:
 | PDF reports | `dast-data/results/reports/*.pdf` | Yes |
 | Uploaded API specs | `dast-data/imports/` | Yes |
 | CVE/NVD cache | `dast-data/results/cache/` | Yes |
-| Live activity stream | In-memory only | No (progress log saved) |
+| Scan counters (cost, tokens, LLM calls, tool calls, findings_count, phases_completed) | SQLite `scans` row | **Yes** — snapshot promoted on every save |
+| Phase breakdown, per-phase tool usage, last-500 crawled URLs, out-of-scope URLs | SQLite `scans.data` JSON blob | **Yes** — snapshot promoted on every save |
+| Partial findings mid-scan | SQLite `scan_results` | **Yes** — checkpointed every 5 findings, on every phase boundary, and on the 30 s autosave tick |
+| Detailed per-tool-call request/response log (`live_tests`, up to ~20 MB) | In-memory; flushed into `scan_results.payload.summary.test_log` on graceful completion/error/stop | No for hard-kill (OOM, SIGKILL, container restart). Yes for every other exit path. |
 
-Scans interrupted by a restart are marked as "error" with the full progress log preserved.
+**Crash, error, stop, and pause resilience.** On every save, the in-memory `live_*` counters and structured summaries are promoted into the persisted `scans` row before the transient keys are stripped. This means:
+
+- **Graceful error / stop / completion** — all numbers and breakdowns are accurate in the DB.
+- **`kill -9` / OOM / container restart** — the DB reflects the last save (≤ 30 s or ≤ 10 tool calls before the kill). Cost typically drifts by well under 2 %; findings by 0–4; phases_completed by 0–1. Pre-fix behaviour was `cost=NULL`, `tokens=0`, empty breakdowns.
+- **Paused** — state is flushed on pause; resume reads from the in-memory dict.
+
+The only field that is still in-memory-only is the detailed per-tool-call log used by the Live Activity tab (it can reach 20 MB per scan and would bloat the DB). It survives graceful errors via `save_results()` but is lost on hard-kill.
