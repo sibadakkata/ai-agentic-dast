@@ -3,7 +3,8 @@
 Generates a multi-sheet .xlsx file with:
   Sheet 1: Summary — scan metadata, scanner sources, severity counts
   Sheet 2: All Findings — every triaged finding with all fields
-  Sheet 3: AI Raw — AI scanner raw findings
+  Sheet 3: AI vs Triage — side-by-side AI severity vs triage verdict
+  Sheet 4: AI Raw — AI scanner raw findings
 
 Color-coded severity cells, auto-width columns, filters enabled.
 """
@@ -196,7 +197,98 @@ def generate_excel(
     ws_all.auto_filter.ref = ws_all.dimensions
     _auto_width(ws_all)
 
-    # --- Sheet 3: AI Raw ---
+    # --- Sheet 3: AI vs Triage ---
+    # Side-by-side comparison: what the AI said vs what triage decided.
+    # Rows where severity differs between AI and triage are highlighted yellow
+    # and sorted to the top so divergences jump out.
+    ws_cmp = wb.create_sheet("AI vs Triage")
+    cmp_headers = [
+        "#", "Title", "URL", "Parameter",
+        "AI Severity", "Triage Severity", "Changed?",
+        "Verdict", "Verified", "Verification Method",
+        "CWE", "CVSS", "Triage Reason",
+    ]
+    _write_header(ws_cmp, cmp_headers)
+
+    changed_fill = PatternFill(start_color="FEF3C7", end_color="FEF3C7", fill_type="solid")
+    yes_fill = PatternFill(start_color="DC2626", end_color="DC2626", fill_type="solid")
+    no_fill = PatternFill(start_color="22C55E", end_color="22C55E", fill_type="solid")
+
+    def _cmp_key(f):
+        ai = (f.get("ai_severity") or "").strip().lower()
+        tr = (f.get("final_severity") or f.get("severity") or "").strip().lower()
+        return (0 if ai != tr else 1, f.get("title", ""))
+
+    sorted_cmp = sorted(triaged_findings, key=_cmp_key)
+    changed_count = 0
+    for i, f in enumerate(sorted_cmp, 1):
+        row = i + 1
+        ai_sev = (f.get("ai_severity") or "").strip()
+        triage_sev = (f.get("final_severity") or f.get("severity") or "").strip()
+        changed = ai_sev.lower() != triage_sev.lower()
+        if changed:
+            changed_count += 1
+
+        ws_cmp.cell(row=row, column=1, value=i)
+        ws_cmp.cell(row=row, column=2, value=f.get("title", ""))
+        ws_cmp.cell(row=row, column=3, value=f.get("url", ""))
+        ws_cmp.cell(row=row, column=4, value=f.get("parameter", ""))
+
+        ai_cell = ws_cmp.cell(row=row, column=5, value=ai_sev or "-")
+        if ai_sev:
+            ai_cell.fill = _sev_fill(ai_sev)
+            ai_cell.font = Font(color="FFFFFF", bold=True)
+
+        tr_cell = ws_cmp.cell(row=row, column=6, value=triage_sev or "-")
+        if triage_sev:
+            tr_cell.fill = _sev_fill(triage_sev)
+            tr_cell.font = Font(color="FFFFFF", bold=True)
+
+        chg_cell = ws_cmp.cell(row=row, column=7, value="YES" if changed else "no")
+        chg_cell.fill = yes_fill if changed else no_fill
+        chg_cell.font = Font(color="FFFFFF", bold=True)
+        chg_cell.alignment = Alignment(horizontal="center")
+
+        verdict_cell = ws_cmp.cell(
+            row=row, column=8,
+            value=(f.get("verdict") or "").replace("_", " ").title(),
+        )
+        vc = VERDICT_COLORS.get(f.get("verdict", ""), "6B7280")
+        verdict_cell.fill = PatternFill(start_color=vc, end_color=vc, fill_type="solid")
+        verdict_cell.font = Font(color="FFFFFF", bold=True)
+
+        ws_cmp.cell(row=row, column=9, value="Yes" if f.get("verified") else "No")
+        ws_cmp.cell(row=row, column=10, value=f.get("verification_method", ""))
+        ws_cmp.cell(row=row, column=11, value=f.get("cwe", ""))
+        cvss_val = f.get("cvss_override") if f.get("cvss_override") is not None else f.get("cvss")
+        ws_cmp.cell(row=row, column=12, value=round(cvss_val, 1) if cvss_val else 0)
+        ws_cmp.cell(row=row, column=13, value=(f.get("reason") or "")[:500])
+
+        if changed:
+            # Soft-highlight the whole row to make divergences visible.
+            for col in range(1, len(cmp_headers) + 1):
+                cell = ws_cmp.cell(row=row, column=col)
+                if cell.fill.start_color.rgb in (None, "00000000", "FFFFFFFF"):
+                    cell.fill = changed_fill
+
+        for col in range(1, len(cmp_headers) + 1):
+            ws_cmp.cell(row=row, column=col).border = THIN_BORDER
+
+    # Header note above the table explaining the sheet
+    ws_cmp.insert_rows(1)
+    note_cell = ws_cmp.cell(
+        row=1, column=1,
+        value=f"AI vs Triage — {changed_count} of {len(sorted_cmp)} finding(s) had severity changed by triage. "
+              f"Rows where AI and triage disagreed are highlighted and sorted to the top.",
+    )
+    note_cell.font = Font(italic=True, color="6B7280")
+    ws_cmp.merge_cells(start_row=1, start_column=1, end_row=1, end_column=len(cmp_headers))
+
+    ws_cmp.auto_filter.ref = f"A2:{get_column_letter(len(cmp_headers))}{ws_cmp.max_row}"
+    ws_cmp.freeze_panes = "A3"
+    _auto_width(ws_cmp)
+
+    # --- Sheet 4: AI Raw ---
     ws_ai = wb.create_sheet("AI Raw")
     ai_headers = ["#", "Title", "Severity", "URL", "Parameter", "Payload", "Evidence", "Confidence"]
     _write_header(ws_ai, ai_headers)
