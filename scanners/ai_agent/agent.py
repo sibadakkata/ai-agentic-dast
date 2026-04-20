@@ -14,12 +14,19 @@ from playwright.async_api import async_playwright
 
 from .api_import import (
     EndpointRegistry,
+    autodiscover_openapi,
     parse_openapi_spec,
     parse_postman_collection,
 )
-from .auth import ScanTarget, authenticate, detect_app_type
+from .auth import (
+    ScanTarget,
+    authenticate,
+    authenticate_http_only,
+    can_use_http_only_auth,
+    detect_app_type,
+)
 from .llm_config import ContentFiltered, ContextWindowExceeded, MalformedMessages, LLMRouter
-from .passive_recon import run_passive_recon
+from .passive_recon import run_http_only_passive_recon, run_passive_recon
 from .prompts import build_system_prompt, get_phases
 from .tools import TOOL_DEFINITIONS, ScanTools
 
@@ -977,16 +984,47 @@ async def run_scan(
         "api_data_exposure": 4,
     }
 
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(
-            headless=True,
-            args=["--disable-blink-features=AutomationControlled"],
-        )
+    # ── API-only fast path ─────────────────────────────────────────
+    # When the target is a pure API scan AND the auth type is browserless
+    # (none / bearer / api_key / basic), we skip Playwright entirely.
+    # Reasons: (1) the LLM only needs http-level tools for API phases;
+    # (2) many API targets sit behind WAFs that block headless Chromium,
+    # which used to hang the scan at the navigation/auth step.
+    _use_fast_path = (target.scan_mode == "api" and can_use_http_only_auth(target))
+    auth_type_cfg = ((target.auth_config or {}).get("type") or "auto").lower()
+
+    if _use_fast_path:
+        # Build a dummy async context manager so the rest of the function can
+        # continue to live inside a single `async with` block without spawning
+        # a browser driver.
+        from contextlib import asynccontextmanager
+
+        @asynccontextmanager
+        async def _noop_playwright():
+            class _NullP: chromium = None  # unused in fast path
+            yield _NullP()
+
+        _pw_ctx = _noop_playwright()
+    else:
+        _pw_ctx = async_playwright()
+
+    async with _pw_ctx as p:
+        if _use_fast_path:
+            browser = None
+            print(f"  [FAST PATH] API-only scan with {auth_type_cfg!r} auth — bypassing Playwright")
+            _cb("fast_path", {"mode": "api_only", "auth_type": auth_type_cfg, "reason": "browserless_auth"})
+        else:
+            browser = await p.chromium.launch(
+                headless=True,
+                args=["--disable-blink-features=AutomationControlled"],
+            )
         has_creds = bool((target.credentials or {}).get("username") or
                          (target.credentials or {}).get("password"))
 
-        auth_type_cfg = ((target.auth_config or {}).get("type") or "auto").lower()
-        if auth_type_cfg == "interactive_login":
+        if _use_fast_path:
+            print(f"  [SCAN] Connecting to {target.url} via HTTP (no browser)...")
+            _cb("auth", {"status": "http_only", "url": target.url, "auth_type": auth_type_cfg})
+        elif auth_type_cfg == "interactive_login":
             print(f"  [AUTH] Interactive login mode — opening browser for {target.url}")
             _cb("auth", {"status": "interactive_login", "url": target.url})
         elif has_creds:
@@ -996,61 +1034,65 @@ async def run_scan(
             print(f"  [SCAN] Opening {target.url} (unauthenticated)...")
             _cb("auth", {"status": "unauthenticated", "url": target.url})
         _max_auth_attempts = 3
-        for _auth_attempt in range(1, _max_auth_attempts + 1):
-            _check_cancel()
-            auth_session = await authenticate(
-                browser, target, router, model,
-                interactive_session=interactive_session,
-                on_progress=_cb,
-                cancel_flag=cancel_flag,
-            )
-            auth_success = auth_session.success if hasattr(auth_session, "success") else True
-            if auth_success:
-                break
+        if _use_fast_path:
+            # Browserless auth — no retries needed, static tokens or none.
+            auth_session = await authenticate_http_only(target)
+        else:
+            for _auth_attempt in range(1, _max_auth_attempts + 1):
+                _check_cancel()
+                auth_session = await authenticate(
+                    browser, target, router, model,
+                    interactive_session=interactive_session,
+                    on_progress=_cb,
+                    cancel_flag=cancel_flag,
+                )
+                auth_success = auth_session.success if hasattr(auth_session, "success") else True
+                if auth_success:
+                    break
 
-            # Small grace period for the pause signal to arrive
-            # (frontend sends /done + /pause in quick succession)
-            if pause_flag and not pause_flag.is_set():
-                await asyncio.sleep(1.5)
+                # Small grace period for the pause signal to arrive
+                # (frontend sends /done + /pause in quick succession)
+                if pause_flag and not pause_flag.is_set():
+                    await asyncio.sleep(1.5)
 
-            # Auth failed — if scan was paused (user hit Pause during CAPTCHA/MFA),
-            # wait for resume and retry authentication
-            if pause_flag and pause_flag.is_set():
-                print(f"  [AUTH] Auth challenge caused pause — waiting for resume (attempt {_auth_attempt}/{_max_auth_attempts})")
-                _cb("paused", {})
-                _cb("progress_msg", {
-                    "message": f"Scan paused — authentication challenge (CAPTCHA/MFA/SSO). "
-                               f"Resume to retry login (attempt {_auth_attempt}/{_max_auth_attempts})."
-                })
-                while pause_flag.is_set():
-                    if cancel_flag and cancel_flag.is_set():
-                        raise ScanCancelled("Scan stopped by user")
-                    await asyncio.sleep(1)
-                _cb("resumed", {})
+                # Auth failed — if scan was paused (user hit Pause during CAPTCHA/MFA),
+                # wait for resume and retry authentication
+                if pause_flag and pause_flag.is_set():
+                    print(f"  [AUTH] Auth challenge caused pause — waiting for resume (attempt {_auth_attempt}/{_max_auth_attempts})")
+                    _cb("paused", {})
+                    _cb("progress_msg", {
+                        "message": f"Scan paused — authentication challenge (CAPTCHA/MFA/SSO). "
+                                   f"Resume to retry login (attempt {_auth_attempt}/{_max_auth_attempts})."
+                    })
+                    while pause_flag.is_set():
+                        if cancel_flag and cancel_flag.is_set():
+                            raise ScanCancelled("Scan stopped by user")
+                        await asyncio.sleep(1)
+                    _cb("resumed", {})
+                    if _auth_attempt >= _max_auth_attempts:
+                        print(f"  [AUTH] Scan resumed — final attempt ({_auth_attempt}/{_max_auth_attempts})...")
+                        _cb("progress_msg", {"message": f"Scan resumed — FINAL login attempt ({_auth_attempt}/{_max_auth_attempts}). If this fails, scan continues unauthenticated."})
+                    else:
+                        print(f"  [AUTH] Scan resumed — retrying authentication (attempt {_auth_attempt + 1}/{_max_auth_attempts})...")
+                        _cb("progress_msg", {"message": f"Scan resumed — retrying authentication (attempt {_auth_attempt + 1}/{_max_auth_attempts})..."})
+                    # Re-create interactive session for the retry
+                    if interactive_session:
+                        interactive_session["done"].clear()
+                        interactive_session["active"].clear()
+                        interactive_session["screenshot_b64"] = ""
+                    continue
+
+                # Auth failed but not paused — continue unauthenticated
                 if _auth_attempt >= _max_auth_attempts:
-                    print(f"  [AUTH] Scan resumed — final attempt ({_auth_attempt}/{_max_auth_attempts})...")
-                    _cb("progress_msg", {"message": f"Scan resumed — FINAL login attempt ({_auth_attempt}/{_max_auth_attempts}). If this fails, scan continues unauthenticated."})
+                    print(f"  [AUTH] All {_max_auth_attempts} login attempts exhausted — continuing unauthenticated")
+                    _cb("progress_msg", {
+                        "message": f"All {_max_auth_attempts} login attempts failed — continuing scan WITHOUT authentication. "
+                                   f"Findings will be limited to unauthenticated checks only."
+                    })
                 else:
-                    print(f"  [AUTH] Scan resumed — retrying authentication (attempt {_auth_attempt + 1}/{_max_auth_attempts})...")
-                    _cb("progress_msg", {"message": f"Scan resumed — retrying authentication (attempt {_auth_attempt + 1}/{_max_auth_attempts})..."})
-                # Re-create interactive session for the retry
-                if interactive_session:
-                    interactive_session["done"].clear()
-                    interactive_session["active"].clear()
-                    interactive_session["screenshot_b64"] = ""
-                continue
-
-            # Auth failed but not paused — continue unauthenticated
-            if _auth_attempt >= _max_auth_attempts:
-                print(f"  [AUTH] All {_max_auth_attempts} login attempts exhausted — continuing unauthenticated")
-                _cb("progress_msg", {
-                    "message": f"All {_max_auth_attempts} login attempts failed — continuing scan WITHOUT authentication. "
-                               f"Findings will be limited to unauthenticated checks only."
-                })
-            else:
-                print(f"  [AUTH] Auth failed (attempt {_auth_attempt}/{_max_auth_attempts}) — continuing unauthenticated")
-                _cb("progress_msg", {"message": "Authentication failed — continuing scan unauthenticated."})
-            break
+                    print(f"  [AUTH] Auth failed (attempt {_auth_attempt}/{_max_auth_attempts}) — continuing unauthenticated")
+                    _cb("progress_msg", {"message": "Authentication failed — continuing scan unauthenticated."})
+                break
 
         page = auth_session.page
 
@@ -1058,18 +1100,29 @@ async def run_scan(
         # creation, so it has captured every .js since the very first navigation.
         network_js_urls = getattr(auth_session, "network_js_urls", set())
 
-        auth_final_host = urlparse(page.url or "").hostname or ""
-        auth_success = auth_session.success if hasattr(auth_session, "success") else True
-        print(f"  [AUTH] Auth type: {auth_session._auth_type}, success: {auth_success}, URL after login: {page.url}")
-        print(f"  [AUTH] Current host: {auth_final_host}, target host: {urlparse(target.url).hostname}")
-        _cb("auth", {"status": "done", "type": auth_session._auth_type, "url": page.url,
-                      "success": auth_success, "current_host": auth_final_host})
+        if page is not None:
+            auth_final_host = urlparse(page.url or "").hostname or ""
+            auth_success = auth_session.success if hasattr(auth_session, "success") else True
+            print(f"  [AUTH] Auth type: {auth_session._auth_type}, success: {auth_success}, URL after login: {page.url}")
+            print(f"  [AUTH] Current host: {auth_final_host}, target host: {urlparse(target.url).hostname}")
+            _cb("auth", {"status": "done", "type": auth_session._auth_type, "url": page.url,
+                          "success": auth_success, "current_host": auth_final_host})
+        else:
+            auth_final_host = urlparse(target.url).hostname or ""
+            auth_success = True
+            print(f"  [AUTH] Auth type: {auth_session._auth_type} (HTTP-only), target: {target.url}")
+            _cb("auth", {"status": "done", "type": auth_session._auth_type, "url": target.url,
+                          "success": True, "current_host": auth_final_host})
         if auth_session._auth_type not in ("bearer", "none"):
             metrics["auth_pages_detected"] += 1
 
-        cookies = await page.context.cookies()
-        cookie_dict = {c["name"]: c["value"] for c in cookies}
-        cookie_dict.setdefault("language", "en")
+        if page is not None:
+            cookies = await page.context.cookies()
+            cookie_dict = {c["name"]: c["value"] for c in cookies}
+            cookie_dict.setdefault("language", "en")
+        else:
+            cookies = []
+            cookie_dict = {}
         headers = auth_session.get_auth_header()
         http_client = httpx.AsyncClient(
             headers=headers,
@@ -1095,6 +1148,23 @@ async def run_scan(
                 except Exception as e:
                     print(f"  [IMPORT] Could not parse Burp file {burp_path}: {e}")
 
+            # Fast path: autodiscover OpenAPI spec live from the target
+            # (no spec file was uploaded but the API may expose /v3/api-docs
+            # or /openapi.json — Spring Boot, FastAPI, ASP.NET Core defaults).
+            if _use_fast_path and not openapi_path and not registry.endpoints:
+                print(f"  [FAST PATH] No spec provided — autodiscovering OpenAPI at {target.url}")
+                try:
+                    discovered = await autodiscover_openapi(http_client, target.url)
+                    if discovered:
+                        registry.add(discovered)
+                        print(f"  [FAST PATH] Autodiscovered {len(discovered)} endpoints from live spec")
+                        _cb("import", {"source": "openapi_autodiscover", "endpoints": len(discovered)})
+                    else:
+                        print(f"  [FAST PATH] No OpenAPI spec discovered at target")
+                        _cb("import", {"source": "openapi_autodiscover", "endpoints": 0})
+                except Exception as e:
+                    logger.warning("OpenAPI autodiscovery failed: %s", e)
+
         extra_set = set(d.strip().lower() for d in extra_domains if d.strip()) if extra_domains else None
         allowed_domains = _build_allowed_domains(target.url, extra_set)
         logger.info("Scope restricted to domain(s): %s", allowed_domains)
@@ -1116,6 +1186,15 @@ async def run_scan(
         user_b_cookie_str: str = ""
         has_user_b = bool(target.credentials_b and
                           (target.credentials_b.get("username") or target.credentials_b.get("password")))
+        if has_user_b and _use_fast_path:
+            # In fast path we have no browser to drive a login form.  If User B
+            # has a static bearer/api-key we could in principle support BOLA here,
+            # but the current credentials_b schema only carries username/password
+            # — which implies form auth.  Skip with a clear warning.
+            print(f"  [AUTH-B] Skipped — fast path can't drive a login form. "
+                  f"BOLA testing will fall back to single-user mode.")
+            _cb("auth", {"status": "user_b_skipped", "reason": "fast_path_no_browser"})
+            has_user_b = False
         if has_user_b:
             print(f"  [AUTH-B] Authenticating User B for BOLA testing...")
             _cb("auth", {"status": "authenticating_user_b", "url": target.url})
@@ -1145,9 +1224,18 @@ async def run_scan(
         # find SPA resources (iframes, CDN scripts, dynamic chunks).
         target_host = urlparse(target.url).hostname or ""
         landed_on_target = False
+        if _use_fast_path:
+            # No browser to navigate; treat as landed so downstream passive
+            # recon runs (in its HTTP-only variant below).
+            landed_on_target = True
         try:
-            landed_on_target = await _ensure_on_target(page, target.url, target_host)
-            if not landed_on_target and getattr(auth_session, "captcha_detected", False):
+            if _use_fast_path:
+                pass  # browser navigation not applicable
+            else:
+                landed_on_target = await _ensure_on_target(page, target.url, target_host)
+            if _use_fast_path:
+                pass
+            elif not landed_on_target and getattr(auth_session, "captcha_detected", False):
                 print(f"  [AUTH] CAPTCHA was detected — skipping retry loop")
                 landed_on_target = await _ensure_on_target(page, target.url, target_host)
             elif not landed_on_target:
@@ -1178,7 +1266,9 @@ async def run_scan(
                         break
                     await asyncio.sleep(3)
 
-            if landed_on_target:
+            if _use_fast_path:
+                pass  # no browser — nothing to wait on
+            elif landed_on_target:
                 await _wait_for_spa_ready(page)
                 print(f"  [PASSIVE] Page ready on {urlparse(page.url or '').hostname}, "
                       f"network JS captured: {len(network_js_urls)}")
@@ -1208,7 +1298,11 @@ async def run_scan(
             logger.warning("Pre-recon navigation failed (non-fatal): %s", e)
 
         # Detect app type AFTER navigation (not on the login page)
-        app_info = await detect_app_type(page)
+        if _use_fast_path:
+            # Pure API scan — no SPA/framework detection needed.
+            app_info = {"is_spa": False, "framework": "api_only", "has_websockets": False}
+        else:
+            app_info = await detect_app_type(page)
         print(f"  [DETECT] SPA: {app_info.get('is_spa')}, Framework: {app_info.get('framework')}, WebSockets: {app_info.get('has_websockets')}")
         _cb("detect", {"is_spa": app_info.get("is_spa"), "framework": app_info.get("framework")})
 
@@ -1232,29 +1326,16 @@ async def run_scan(
 
         p = _next_phase()
         _cb("phase_start", {"phase": p, "total": 0, "name": "Passive Reconnaissance", "id": "passive_recon"})
-        current_host = urlparse(page.url or "").hostname or ""
         tech_fingerprint = {}
-        if current_host != target_host and target_host:
-            print(f"  [PASSIVE] SKIPPING — browser on {current_host}, not target {target_host}")
-            print(f"  [PASSIVE] Will retry after LLM navigates to target")
-            passive_findings = []
-            _cb("phase_end", {"phase": p, "name": "Passive Reconnaissance (skipped — not on target)",
-                              "tool_calls": 0, "findings": 0})
-        else:
-            print("  [PASSIVE] Running passive reconnaissance...")
+        if _use_fast_path:
+            print("  [PASSIVE] Running HTTP-only passive reconnaissance...")
             try:
-                passive_result = await run_passive_recon(
-                    page=page,
+                passive_findings, tech_fingerprint = await run_http_only_passive_recon(
                     http_client=http_client,
                     target_url=target.url,
                     on_finding=lambda f: _cb("finding", {**f, "phase": "Passive Reconnaissance"}),
                     on_progress=_passive_progress,
-                    network_js_urls=network_js_urls,
                 )
-                if isinstance(passive_result, tuple):
-                    passive_findings, tech_fingerprint = passive_result
-                else:
-                    passive_findings = passive_result
                 findings.extend(passive_findings)
                 if tech_fingerprint.get("technologies"):
                     tech_names = ", ".join(tech_fingerprint["technologies"].keys())
@@ -1264,7 +1345,40 @@ async def run_scan(
             except Exception as e:
                 passive_findings = []
                 print(f"  [PASSIVE] Failed (non-fatal): {e}")
-                logger.warning("Passive recon failed: %s", e, exc_info=True)
+                logger.warning("HTTP-only passive recon failed: %s", e, exc_info=True)
+        else:
+            current_host = urlparse(page.url or "").hostname or ""
+            if current_host != target_host and target_host:
+                print(f"  [PASSIVE] SKIPPING — browser on {current_host}, not target {target_host}")
+                print(f"  [PASSIVE] Will retry after LLM navigates to target")
+                passive_findings = []
+                _cb("phase_end", {"phase": p, "name": "Passive Reconnaissance (skipped — not on target)",
+                                  "tool_calls": 0, "findings": 0})
+            else:
+                print("  [PASSIVE] Running passive reconnaissance...")
+                try:
+                    passive_result = await run_passive_recon(
+                        page=page,
+                        http_client=http_client,
+                        target_url=target.url,
+                        on_finding=lambda f: _cb("finding", {**f, "phase": "Passive Reconnaissance"}),
+                        on_progress=_passive_progress,
+                        network_js_urls=network_js_urls,
+                    )
+                    if isinstance(passive_result, tuple):
+                        passive_findings, tech_fingerprint = passive_result
+                    else:
+                        passive_findings = passive_result
+                    findings.extend(passive_findings)
+                    if tech_fingerprint.get("technologies"):
+                        tech_names = ", ".join(tech_fingerprint["technologies"].keys())
+                        print(f"  [PASSIVE] Done: {len(passive_findings)} findings | Detected: {tech_names}")
+                    else:
+                        print(f"  [PASSIVE] Done: {len(passive_findings)} findings")
+                except Exception as e:
+                    passive_findings = []
+                    print(f"  [PASSIVE] Failed (non-fatal): {e}")
+                    logger.warning("Passive recon failed: %s", e, exc_info=True)
 
         _cb("phase_end", {"phase": p, "name": "Passive Reconnaissance",
                           "tool_calls": 0, "findings": len(passive_findings)})
@@ -2381,7 +2495,7 @@ async def run_scan(
             # present that weren't visible during the initial pass.
             # CRITICAL: If initial passive recon was skipped (not on target),
             # this is our second chance to run it on the actual target page.
-            if phase_idx == 0:
+            if phase_idx == 0 and not _use_fast_path:
                 try:
                     print("  [PASSIVE-2] Re-running passive recon on authenticated page...")
                     p2_num = _next_phase()

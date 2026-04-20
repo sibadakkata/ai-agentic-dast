@@ -158,7 +158,7 @@ def _jwt_expired(token: str) -> bool:
 class AuthSession:
     def __init__(
         self,
-        page: Page,
+        page: Page | None,
         auth_type: str,
         tokens: dict[str, str],
         cookies: list[dict],
@@ -178,11 +178,20 @@ class AuthSession:
         self._monitor_task: asyncio.Task[None] | None = None
 
     @property
-    def page(self) -> Page:
+    def page(self) -> Page | None:
+        """Return the Playwright page, or None when running in HTTP-only mode."""
         return self._page
+
+    @property
+    def browserless(self) -> bool:
+        """True when this session was created without a browser (API-only fast path)."""
+        return self._page is None
 
     def start_monitor(self) -> None:
         if self._monitor_task is not None:
+            return
+        if self._page is None and not self._tokens.get("access_token"):
+            # No browser and no JWT — nothing to monitor.
             return
 
         async def _loop() -> None:
@@ -211,6 +220,10 @@ class AuthSession:
         if access_token and _jwt_expired(access_token):
             logger.debug("JWT access token expired")
             return True
+
+        if self._page is None:
+            # Browserless session — only the JWT check above is available.
+            return False
 
         try:
             current = await self._page.context.cookies()
@@ -1224,3 +1237,87 @@ def load_targets_from_dict(t: dict) -> ScanTarget:
         workflow_id=t.get("workflow_id") or None,
         business_flow=t.get("business_flow") or None,
     )
+
+
+# ---------------------------------------------------------------------------
+# HTTP-only (browserless) authentication — for pure API scans
+# ---------------------------------------------------------------------------
+
+
+def can_use_http_only_auth(target: ScanTarget) -> bool:
+    """Return True when this target's auth needs no browser (pure HTTP auth).
+
+    Eligible auth types:
+      - "none"         — unauthenticated scan
+      - "bearer"       — bearer token supplied in auth_config
+      - "api_key"      — API key supplied in auth_config
+      - "basic"        — HTTP Basic with username/password
+
+    Ineligible auth types (still need Playwright):
+      - "form", "sso", "oauth", "interactive_login" — need to drive a login form
+      - "auto"         — we don't know yet; fall back to the browser path so the
+                         auth agent can discover it
+    """
+    auth_config = target.auth_config or {}
+    auth_type = (auth_config.get("type") or "auto").lower()
+    if auth_type == "none":
+        return True
+    if auth_type == "bearer":
+        return bool(auth_config.get("bearer_token"))
+    if auth_type == "api_key":
+        return bool(auth_config.get("api_key"))
+    if auth_type == "basic":
+        creds = target.credentials or {}
+        return bool(creds.get("username") or creds.get("password"))
+    return False
+
+
+async def authenticate_http_only(target: ScanTarget) -> AuthSession:
+    """Create an AuthSession for pure-API scans without launching a browser.
+
+    Returns an :class:`AuthSession` whose ``page`` attribute is ``None``.  The
+    session carries whatever auth header is appropriate for the supplied
+    credentials (bearer / api-key / basic) or an empty header dict for
+    unauthenticated scans.
+
+    Raises ``ValueError`` if the target's auth type is not browserless-eligible
+    — callers should gate with :func:`can_use_http_only_auth` first.
+    """
+    if not can_use_http_only_auth(target):
+        raise ValueError(
+            f"authenticate_http_only() cannot handle auth_type="
+            f"{(target.auth_config or {}).get('type')!r} — needs Playwright path"
+        )
+
+    auth_config = target.auth_config or {}
+    auth_type = (auth_config.get("type") or "none").lower()
+    credentials = target.credentials or {}
+
+    tokens: dict[str, str] = {}
+    if auth_type == "bearer":
+        tokens["access_token"] = auth_config.get("bearer_token", "")
+    elif auth_type == "api_key":
+        tokens["api_key"] = auth_config.get("api_key", "")
+
+    async def _noop_refresh() -> AuthResult:
+        # Browserless sessions can't renew via a login form.  Static tokens
+        # either keep working or the caller surfaces a 401 and restarts the
+        # scan with fresh creds.
+        return AuthResult(auth_type=auth_type, tokens=tokens, cookies=[], success=True)
+
+    session = AuthSession(
+        page=None,
+        auth_type=auth_type,
+        tokens=tokens,
+        cookies=[],
+        credentials=credentials,
+        refresh_fn=_noop_refresh,
+        target_url=target.url,
+    )
+    # Expose flags the rest of the agent expects to see on a completed auth.
+    session.success = True
+    session.need_mfa = False
+    session.need_captcha = False
+    session.failed = False
+    session.network_js_urls = set()
+    return session

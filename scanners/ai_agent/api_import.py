@@ -649,6 +649,16 @@ def parse_openapi_spec(filepath: str) -> list[APIEndpoint]:
         logger.error("Cannot read OpenAPI file: %s - %s", filepath, e)
         return []
 
+    return _parse_openapi_spec_fallback(spec)
+
+
+def _parse_openapi_spec_fallback(spec: dict) -> list[APIEndpoint]:
+    """Full OpenAPI parser retained for the file-based entry point.
+
+    Kept as a standalone helper because it handles a few extra body content
+    types (xml, graphql) and a richer ``security`` resolver that the lightweight
+    :func:`_parse_openapi_dict` (used by autodiscovery) does not yet cover.
+    """
     if not isinstance(spec, dict):
         return []
 
@@ -773,3 +783,177 @@ def parse_openapi_spec(filepath: str) -> list[APIEndpoint]:
             endpoints.append(ep)
 
     return endpoints
+
+
+# ---------------------------------------------------------------------------
+# OpenAPI autodiscovery — fetches a spec straight from the target
+# ---------------------------------------------------------------------------
+
+
+def _parse_openapi_dict(spec: dict, source_label: str = "") -> list[APIEndpoint]:
+    """Parse an already-loaded OpenAPI spec dict and return endpoints.
+
+    Factored out of :func:`parse_openapi_spec` so autodiscovery can feed a
+    live-fetched spec without writing it to disk.
+    """
+    if not isinstance(spec, dict):
+        return []
+
+    base_url = _openapi_servers(spec)
+    paths = spec.get("paths") or {}
+    if not isinstance(paths, dict):
+        return []
+
+    endpoints: list[APIEndpoint] = []
+    for path_str, path_item in paths.items():
+        if not isinstance(path_item, dict):
+            continue
+        path_str = path_str.strip()
+        if not path_str.startswith("/"):
+            path_str = "/" + path_str
+        for method in ("get", "post", "put", "delete", "patch", "head", "options"):
+            op = path_item.get(method)
+            if not isinstance(op, dict):
+                continue
+            op_id = op.get("operationId") or f"{method}_{path_str.replace('/', '_')}"
+            tags = list(op.get("tags") or [])
+            params = list(op.get("parameters") or []) + list(path_item.get("parameters") or [])
+
+            query_params: dict[str, str] = {}
+            headers: dict[str, str] = {}
+            path_params: dict[str, str] = {}
+
+            for p in params:
+                if not isinstance(p, dict):
+                    continue
+                name = p.get("name")
+                if not name:
+                    continue
+                loc = (p.get("in") or "query").lower()
+                ex = p.get("example") or _example_from_schema(p.get("schema"))
+                val = str(ex) if ex is not None else ""
+                if loc == "query":
+                    query_params[name] = val
+                elif loc == "path":
+                    path_params[name] = val
+                elif loc == "header":
+                    headers[name] = val
+                elif loc == "cookie":
+                    headers["Cookie"] = headers.get("Cookie", "") + f"{name}={val}; "
+
+            resolved_path = path_str
+            for k, v in path_params.items():
+                resolved_path = resolved_path.replace("{" + k + "}", str(v))
+            if query_params:
+                resolved_path = resolved_path + "?" + urlencode(query_params)
+
+            full_url = base_url + resolved_path if base_url else resolved_path
+            parsed = urlparse(full_url)
+            path_only = parsed.path or "/"
+            qp = _query_params_to_dict(full_url)
+
+            body = None
+            body_type = "raw"
+            req_body = op.get("requestBody")
+            if isinstance(req_body, dict):
+                content = req_body.get("content") or {}
+                if "application/json" in content:
+                    body_type = "json"
+                    schema = content["application/json"].get("schema")
+                    example = _example_from_schema(schema)
+                    body = json.dumps(example) if example is not None else "{}"
+                elif "application/x-www-form-urlencoded" in content:
+                    body_type = "form"
+                    schema = content["application/x-www-form-urlencoded"].get("schema")
+                    if schema and schema.get("properties"):
+                        props = schema.get("properties", {})
+                        pairs = [(k, str(_example_from_schema(v) or "")) for k, v in props.items()]
+                        body = urlencode(pairs)
+
+            tags_out = tags or ["openapi_autodiscovered"]
+            if source_label:
+                tags_out = list(tags_out) + [source_label]
+
+            ep = APIEndpoint(
+                method=method.upper(),
+                url=full_url,
+                path=path_only,
+                headers=headers,
+                query_params=qp,
+                body=body,
+                body_type=body_type,
+                auth_type="none",
+                auth_value=None,
+                tags=tags_out,
+                variables={},
+                original_name=op_id,
+            )
+            endpoints.append(ep)
+
+    return endpoints
+
+
+async def autodiscover_openapi(http_client, target_url: str) -> list[APIEndpoint]:
+    """Probe well-known OpenAPI/Swagger paths at the target host and parse any
+    spec we find into :class:`APIEndpoint` records.
+
+    Paths probed (in order of likelihood on Java/Spring, Node/Express, Python/FastAPI):
+
+    - ``/v3/api-docs``            (Spring Boot 2.x+ with springdoc)
+    - ``/v2/api-docs``            (Springfox / older Spring Boot)
+    - ``/openapi.json``           (FastAPI, ASP.NET)
+    - ``/swagger.json``           (Swashbuckle, node-swagger)
+    - ``/swagger/v1/swagger.json`` (ASP.NET Core default)
+    - ``/api-docs``               (generic)
+    - ``/api/swagger.json``
+    - ``/api/openapi.json``
+
+    Returns a list of endpoints (possibly empty).  Never raises.
+    """
+    try:
+        parsed = urlparse(target_url)
+        base = f"{parsed.scheme}://{parsed.netloc}"
+    except Exception:
+        return []
+
+    candidates = [
+        "/v3/api-docs",
+        "/v2/api-docs",
+        "/openapi.json",
+        "/swagger.json",
+        "/swagger/v1/swagger.json",
+        "/api-docs",
+        "/api/swagger.json",
+        "/api/openapi.json",
+        "/openapi",
+        "/api/v3/api-docs",
+        "/api/v2/api-docs",
+    ]
+
+    for path in candidates:
+        url = base + path
+        try:
+            resp = await http_client.get(url, timeout=10.0, follow_redirects=True)
+        except Exception:
+            continue
+        if resp.status_code != 200:
+            continue
+        ctype = (resp.headers.get("content-type") or "").lower()
+        if "json" not in ctype and "yaml" not in ctype and not path.endswith(".json"):
+            continue
+        try:
+            if "yaml" in ctype:
+                spec = yaml.safe_load(resp.text)
+            else:
+                spec = json.loads(resp.text)
+        except (ValueError, yaml.YAMLError):
+            continue
+        if not isinstance(spec, dict) or "paths" not in spec:
+            continue
+        endpoints = _parse_openapi_dict(spec, source_label=f"autodiscovered:{path}")
+        if endpoints:
+            logger.info("OpenAPI autodiscovery hit %s — %d endpoints", url, len(endpoints))
+            return endpoints
+
+    logger.debug("OpenAPI autodiscovery: no spec found at %s", base)
+    return []

@@ -2367,6 +2367,8 @@ async def _fingerprint_technologies(page, http_client, target_url: str, js_urls:
 
         # ── HTML meta / generator tags ───────────────────────────────
         try:
+            if page is None:
+                raise RuntimeError("browserless mode")
             generator = await page.evaluate("() => { const m = document.querySelector('meta[name=generator]'); return m ? m.content : ''; }")
             if generator:
                 signals.append(f"Generator meta: {generator}")
@@ -2568,3 +2570,147 @@ def _make_finding(title, severity, cwe, cvss, url, evidence, payload="",
             "http_exchange": http_exchange,
         }]
     return finding
+
+
+# ---------------------------------------------------------------------------
+# HTTP-only passive recon — for pure API scans without a browser
+# ---------------------------------------------------------------------------
+
+
+async def _fingerprint_technologies_http_only(http_client, target_url: str) -> dict:
+    """Best-effort HTTP-only tech fingerprint — reuses the header/body portion
+    of :func:`_fingerprint_technologies` without relying on a Playwright page.
+    """
+    try:
+        return await _fingerprint_technologies(None, http_client, target_url, [])
+    except Exception as e:
+        logger.debug("HTTP-only fingerprint failed: %s", e)
+        return {"technologies": {}, "signals": []}
+
+
+async def _check_actuator_exposure(http_client, target_url: str) -> list[dict]:
+    """Probe Spring Boot Actuator endpoints for unauthenticated exposure."""
+    findings: list[dict] = []
+    try:
+        parsed = urlparse(target_url)
+        base = f"{parsed.scheme}://{parsed.netloc}"
+    except Exception:
+        return findings
+
+    paths = [
+        "/actuator",
+        "/actuator/health",
+        "/actuator/info",
+        "/actuator/env",
+        "/actuator/beans",
+        "/actuator/mappings",
+        "/actuator/configprops",
+        "/actuator/heapdump",
+        "/actuator/threaddump",
+        "/actuator/loggers",
+        "/actuator/metrics",
+    ]
+    exposed: list[tuple[str, int, str]] = []
+    for p in paths:
+        url = base + p
+        try:
+            resp = await http_client.get(url, timeout=8.0, follow_redirects=False)
+        except Exception:
+            continue
+        if resp.status_code == 200 and "application/json" in (resp.headers.get("content-type", "").lower()):
+            snippet = ""
+            try:
+                snippet = (resp.text or "")[:500]
+            except Exception:
+                pass
+            exposed.append((url, resp.status_code, snippet))
+
+    if not exposed:
+        return findings
+
+    for url, status, snippet in exposed:
+        is_sensitive = any(url.endswith(x) for x in ("/env", "/heapdump", "/beans", "/configprops", "/threaddump"))
+        severity = "high" if is_sensitive else "medium"
+        title = f"Exposed Spring Boot Actuator endpoint: {urlparse(url).path}"
+        evidence = (
+            f"{urlparse(url).path} returns HTTP {status} with JSON body unauthenticated. "
+            f"Snippet: {snippet[:200]}"
+        )
+        findings.append(_make_finding(
+            title=title,
+            severity=severity,
+            cwe="CWE-200",
+            cvss="7.5" if is_sensitive else "5.3",
+            url=url,
+            evidence=evidence,
+        ))
+    return findings
+
+
+async def run_http_only_passive_recon(
+    http_client,
+    target_url: str,
+    on_finding: callable | None = None,
+    on_progress: callable | None = None,
+) -> tuple[list[dict], dict]:
+    """HTTP-only passive reconnaissance — no Playwright required.
+
+    Mirrors :func:`run_passive_recon` but runs only the checks that depend
+    purely on an ``httpx.AsyncClient``.  Intended for the API-only fast path
+    where a headless browser would be blocked (e.g. by WAF/TLS fingerprint) or
+    is simply unnecessary because the target is a REST API.
+    """
+    findings: list[dict] = []
+    _cb = on_finding or (lambda f: None)
+    _progress = on_progress or (lambda event, data: None)
+
+    _progress("passive_start", {
+        "checks": "sensitive_files, security_headers, actuator, cors, cache_control, "
+                  "csp, referrer_policy, permissions_policy, https_redirect, hsts_preload, "
+                  "error_pages, clickjacking, api_version_downgrade, tech_fingerprint",
+        "mode": "http_only",
+    })
+
+    async def _run(step_name: str, coro):
+        try:
+            result = await coro
+        except Exception as e:
+            logger.debug("HTTP-only passive step %s failed: %s", step_name, e)
+            result = []
+        result = result or []
+        for f in result:
+            findings.append(f)
+            _cb(f)
+        _progress("passive_step", {"step": step_name, "found": len(result)})
+
+    await _run("Sensitive files", _check_sensitive_files(http_client, _base(target_url)))
+    await _run("Security headers", _check_security_headers(http_client, target_url))
+    await _run("Actuator exposure", _check_actuator_exposure(http_client, target_url))
+    await _run("CORS misconfiguration", _check_cors_misconfiguration(http_client, target_url))
+    await _run("Cache-Control", _check_cache_control(http_client, target_url))
+    await _run("CSP analysis", _check_csp_weaknesses(http_client, target_url))
+    await _run("Referrer-Policy", _check_referrer_policy(http_client, target_url))
+    await _run("Permissions-Policy", _check_permissions_policy(http_client, target_url))
+    await _run("HTTPS redirect", _check_https_redirect(http_client, target_url))
+    await _run("HSTS preload", _check_hsts_preload(http_client, target_url))
+    await _run("Error pages", _check_error_pages(http_client, target_url))
+    await _run("Clickjacking", _check_clickjacking(http_client, target_url))
+    await _run("API version downgrade", _check_api_version_downgrade(http_client, target_url, []))
+
+    tech_fingerprint = await _fingerprint_technologies_http_only(http_client, target_url)
+    _progress("passive_step", {
+        "step": "Tech fingerprint",
+        "technologies": list(tech_fingerprint.get("technologies", {}).keys()),
+    })
+
+    _progress("passive_end", {"total_findings": len(findings), "mode": "http_only"})
+    logger.info("HTTP-only passive recon complete: %d findings", len(findings))
+    return findings, tech_fingerprint
+
+
+def _base(target_url: str) -> str:
+    try:
+        p = urlparse(target_url)
+        return f"{p.scheme}://{p.netloc}"
+    except Exception:
+        return target_url
