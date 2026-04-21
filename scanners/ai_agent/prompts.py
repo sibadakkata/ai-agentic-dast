@@ -165,6 +165,23 @@ WEB_PHASES: list[ScanPhase] = [
             "  - Check Server, X-Powered-By, X-AspNet-Version response headers\n"
             "  - Note error page format (reveals framework: Express, Django, Spring, Rails, etc.)\n"
             "  - Check for meta generators, framework-specific cookies, JS framework versions\n\n"
+            "STEP 7 — SUB-DOMAIN / SIBLING-HOST DISCOVERY (CRITICAL for SPAs):\n"
+            "  - After the first few navigations, call get_network_log and "
+            "scan the 'url' field of each entry. Any IN-SCOPE host (same "
+            "registrable domain as the target) that you have NOT yet "
+            "navigated to is a sibling sub-domain and MUST be covered.\n"
+            "  - Typical SPA: app.example.com serves the UI but XHRs go to "
+            "api.example.com, auth.example.com, cdn-int.example.com, "
+            "media.example.com. All of these are in-scope and likely have "
+            "their own endpoints / forms / vulnerabilities.\n"
+            "  - For each new in-scope sibling host: navigate('https://<host>/'), "
+            "then repeat STEPs 2–5 (SPA route discovery, API discovery, "
+            "hidden resources, input mapping) on that host.\n"
+            "  - Cap yourself at 10 sibling hosts — log any further ones in "
+            "output but don't recurse.\n"
+            "  - Subsequent scan phases (injection testing, auth testing, "
+            "BOLA, etc.) will ALSO apply their methodology to these hosts — "
+            "finding them here makes later phases much more effective.\n\n"
             "MINIMUM REQUIREMENTS: You MUST discover at least 8 unique endpoints/routes before "
             "finishing this phase. If you have fewer, navigate more pages and check more API paths. "
             "Every input you miss is a vulnerability you won't find."
@@ -1318,11 +1335,141 @@ def _resolve_focus_phases(focus_areas: list[str]) -> set[str] | None:
     return matched
 
 
+# ---------------------------------------------------------------------------
+# Crawl-only phase (Acunetix-style "Crawl Only" scan type)
+#
+# When scan_profile == "crawl_only" the agent runs this phase INSTEAD of the
+# full OWASP test suite. The goal is pure discovery: exercise the app
+# (including SPA routes + dynamic XHRs) broadly enough that the user can
+# verify from the existing "Crawled Endpoints", "Out of Scope", and
+# "AI AGENT COVERAGE" UI whether the scanner can reach everything before
+# committing to a full vulnerability scan.
+#
+# EXPLICITLY PROHIBITED: any form of payload injection (XSS, SQLi, command
+# injection, SSRF, path traversal, template injection, prototype pollution,
+# XXE, etc.), auth-bypass attempts, token tampering, BOLA/BFLA enumeration,
+# rate-limit probes, destructive HTTP verbs against state-changing endpoints.
+#
+# PASSIVE checks (TLS, security headers, JS library CVE lookup, CSP/CORS/
+# HSTS/clickjacking) still run — those happen automatically in the
+# passive_recon pipeline and don't send attack payloads. Per-phase host-
+# delta passive audit also still runs at the end of this phase.
+# ---------------------------------------------------------------------------
+CRAWL_ONLY_PHASE = ScanPhase(
+    id="crawl_only",
+    name="Crawl (Discovery Only — No Vulnerability Testing)",
+    prompt=(
+        "You are running in CRAWL-ONLY mode. Your ONLY job is to discover "
+        "URLs, SPA routes, forms, API endpoints, hosts, and technologies. "
+        "DO NOT test for vulnerabilities of any kind.\n\n"
+        "ABSOLUTE RULES (violating these is a scan failure):\n"
+        "1. DO NOT inject any payloads — no XSS strings, SQL strings, "
+        "command-injection strings, template strings, path-traversal "
+        "strings, SSRF targets, XXE entities, prototype-pollution keys, "
+        "or any deliberately malformed values.\n"
+        "2. DO NOT attempt auth bypass, JWT tampering, session fixation, "
+        "privilege escalation, BOLA/BFLA enumeration, or rate-limit probes.\n"
+        "3. DO NOT call fuzz_parameter, replay_with_modification with "
+        "malicious values, test_auth_bypass, test_method_override, "
+        "test_token_security, or chain_exploit.\n"
+        "4. For forms, you MAY submit with REALISTIC benign dummy values "
+        "(e.g. 'john.doe@example.com' in an email field, 'test-query' in "
+        "a search box) ONLY when it's needed to discover downstream pages "
+        "or API calls. Never submit anything that looks like an attack.\n"
+        "5. DO NOT DELETE, UPDATE, or perform any destructive action. "
+        "Prefer GET over POST. If a form is clearly destructive "
+        "(delete-account, transfer-funds, admin actions), SKIP it.\n\n"
+        "WHAT YOU SHOULD DO:\n\n"
+        "STEP 1 — FRAMEWORK DETECTION: Use execute_js to check for SPA "
+        "framework globals (window.ng, window.__NEXT_DATA__, "
+        "window.__NUXT__, window.React). Note which framework the app uses.\n\n"
+        "STEP 2 — START NETWORK CAPTURE: Call intercept_requests('*') "
+        "FIRST so every XHR/fetch the app makes is captured.\n\n"
+        "STEP 3 — BROAD NAVIGATION:\n"
+        "  - Call get_links to enumerate <a href> targets\n"
+        "  - For SPAs: execute_js to extract routes from Angular "
+        "(document.querySelectorAll('[routerLink]')), React Router, Vue "
+        "Router. Also search main JS bundles for 'path:' patterns and "
+        "/api/, /rest/, /v1/, /v2/ URL literals.\n"
+        "  - NAVIGATE to every distinct route/link/navbar item/sidebar "
+        "entry/footer link you find. After each navigation call "
+        "wait_for_spa_route and get_network_log to capture triggered "
+        "XHRs.\n"
+        "  - Click benign UI elements (menus, tabs, dropdowns, 'show "
+        "more', pagination, filter toggles) to surface lazy-loaded "
+        "content. Do NOT click clearly destructive buttons.\n\n"
+        "STEP 4 — FORM ENUMERATION: Call get_forms on every page you "
+        "land on. Record the action URL, method, and field names. Submit "
+        "a form ONLY when benign dummy values will reveal additional "
+        "routes/APIs (e.g. a search form → results page).\n\n"
+        "STEP 5 — API SURFACE: Use api_request GET on common API base "
+        "paths (/api, /api/, /rest, /rest/, /graphql, /swagger-ui/, "
+        "/api-docs, /v1, /v2, /.well-known/openapi.json). For each base "
+        "that returns 200, attempt one GET to list-style children. "
+        "Extract additional endpoints from the JS bundle via execute_js "
+        "(fetch( / $.ajax / axios. / http.get literals).\n\n"
+        "STEP 6 — HIDDEN RESOURCES (GET only): /robots.txt, /sitemap.xml, "
+        "/.well-known/security.txt, /humans.txt, /crossdomain.xml, "
+        "/clientaccesspolicy.xml. Note what's there — don't attempt any "
+        "sensitive-file reads (no /.env, /.git/, /backup.sql etc — those "
+        "are tested by passive recon when appropriate).\n\n"
+        "STEP 7 — TECHNOLOGY FINGERPRINT: Note Server, X-Powered-By, and "
+        "framework-specific cookies / response shapes. Call get_cookies "
+        "once to record cookies set (names only — do NOT try to manipulate "
+        "them).\n\n"
+        "STEP 8 — SUB-DOMAIN / SIBLING-HOST COVERAGE (CRITICAL):\n"
+        "  - After every few navigations, call get_network_log and look "
+        "at the host part of each logged URL.\n"
+        "  - Any hostname you see that is IN-SCOPE (same registrable "
+        "domain as the target) but that you haven't yet visited is a "
+        "sibling host you MUST also crawl. Call navigate('https://<host>/') "
+        "on it, then repeat STEPs 3–6 (links, forms, API surface, hidden "
+        "resources) on that host.\n"
+        "  - Typical SPA pattern: the landing page is served from "
+        "app.example.com but XHRs go to api.example.com, auth.example.com, "
+        "static.example.com. All of those must be crawled.\n"
+        "  - Cap: crawl up to 10 sibling hosts; if more appear, log them "
+        "but don't recurse further.\n\n"
+        "OUTPUT: You do NOT need to produce vulnerability findings. The "
+        "scan's value in this mode comes entirely from the network log, "
+        "crawled endpoint list, and coverage counters that the platform "
+        "collects automatically from your tool calls. Keep crawling "
+        "broadly until you've explored every navigation surface you can "
+        "find, then stop.\n\n"
+        "MINIMUM REQUIREMENT: before finishing you MUST have visited at "
+        "least 15 distinct URLs/routes or called intercept_requests plus "
+        "get_network_log to verify no more XHRs are being triggered. If "
+        "you finish with fewer than 15 distinct URLs, the coverage check "
+        "will flag the scan as insufficient."
+    ),
+    max_steps=80,
+    applies_to="both",
+)
+
+
 def get_phases(scan_mode: str, app_info: dict | None = None,
                scan_scope: str = "directory",
-               focus_areas: list[str] | None = None) -> list[ScanPhase]:
-    phases: list[ScanPhase] = []
+               focus_areas: list[str] | None = None,
+               scan_profile: str = "vulnerability_scan") -> list[ScanPhase]:
+    """Return the list of scan phases for this run.
+
+    When ``scan_profile == "crawl_only"`` the only phase returned is
+    ``CRAWL_ONLY_PHASE`` — all OWASP vulnerability-test phases and the
+    attack-chain phase are skipped. Passive recon + per-phase host-delta
+    passive audit still run around the phase loop (they live outside
+    ``get_phases``) so the user still gets TLS / security-header / JS-CVE
+    findings in crawl-only mode.
+
+    ``focus_areas`` is ignored in crawl-only mode (mixing focus_areas with
+    crawl-only makes no sense — focus_areas selects vuln categories to
+    test, and crawl-only tests nothing).
+    """
     app_info = app_info or {}
+
+    if scan_profile == "crawl_only":
+        return [CRAWL_ONLY_PHASE]
+
+    phases: list[ScanPhase] = []
     has_websockets = app_info.get("has_websockets", True)
 
     skip_recon = scan_scope == "url_only"
