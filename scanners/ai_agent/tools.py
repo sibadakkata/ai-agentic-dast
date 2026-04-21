@@ -4,6 +4,7 @@ import asyncio
 import base64
 import json
 import logging
+import re
 import time
 import uuid
 from typing import TYPE_CHECKING, Any
@@ -524,6 +525,60 @@ class ScanTools:
         """
         return set(self._discovered_hosts)
 
+    _HOST_LITERAL_RE = re.compile(
+        r"https?://([a-zA-Z0-9][a-zA-Z0-9\-]*(?:\.[a-zA-Z0-9\-]+)+)",
+        re.IGNORECASE,
+    )
+    # Content types whose bodies we mine for hostname string literals. SPA
+    # bundles (JS), server-rendered pages (HTML), inline config (JSON/XML),
+    # stylesheets with url() refs (CSS) and plain text responses are all
+    # cheap to scan with a pre-compiled regex. Binary types (images, fonts,
+    # wasm, pdf, video) are skipped.
+    _BODY_HARVEST_CT_KEYWORDS = (
+        "javascript", "ecmascript", "json", "html", "xml", "css", "text/plain",
+    )
+    _BODY_HARVEST_MAX_BYTES = 512 * 1024  # cap per response to stay cheap
+
+    def _harvest_hosts_from_response_body(
+        self, url: str, content_type: str, body: str,
+    ) -> None:
+        """Scan a response body for ``https?://<host>`` literals and feed
+        each match into the in-scope host discovery set. This catches
+        sibling sub-domains that are referenced inside SPA bundles or
+        lazy-loaded JSON configs but that the browser hasn't yet actually
+        fetched — e.g. a backup/licensing micro-frontend whose base URL
+        (``web-int.backup.example.com``) is baked into the main bundle as
+        a string constant but only used once the user clicks into that
+        feature.
+
+        Scope is enforced by :meth:`_record_discovered_host`, so third-party
+        hosts (CDNs, analytics) are naturally filtered out.
+        """
+        if not body:
+            return
+        ct = (content_type or "").lower()
+        if not any(kw in ct for kw in self._BODY_HARVEST_CT_KEYWORDS):
+            # Also accept known JS/CSS/JSON extensions when the server
+            # returned no or a misleading content-type (common on CDNs).
+            lower_url = (url or "").lower().split("?", 1)[0]
+            if not lower_url.endswith((".js", ".mjs", ".cjs", ".css", ".json", ".html", ".htm")):
+                return
+        snippet = body if len(body) <= self._BODY_HARVEST_MAX_BYTES else body[: self._BODY_HARVEST_MAX_BYTES]
+        seen_in_body: set[str] = set()
+        try:
+            for m in self._HOST_LITERAL_RE.finditer(snippet):
+                host = (m.group(1) or "").lower().rstrip(".")
+                if not host or host in seen_in_body:
+                    continue
+                seen_in_body.add(host)
+                if host in self._discovered_hosts:
+                    continue
+                self._record_discovered_host(f"https://{host}")
+        except Exception:
+            # Pattern-matching on a huge minified bundle should never
+            # bring the scanner down — harvest is best-effort.
+            pass
+
     async def _log_request(self, request: Any) -> None:
         try:
             url = request.url
@@ -549,6 +604,21 @@ class ScanTools:
                 req_headers = await request.all_headers()
             except Exception:
                 pass
+            # Deterministic sibling-host discovery from response body content:
+            # SPA bundles / JSON configs / HTML often reference in-scope
+            # sibling sub-domains as string literals well before the browser
+            # actually fetches them (e.g. lazy-loaded micro-frontends).
+            # Grepping the body feeds those into the discovery queue so
+            # Stage-A passive audits and Stage-B LLM directives can cover
+            # them without waiting for the user to click into that feature.
+            if resp_body:
+                try:
+                    ct = ""
+                    if isinstance(resp_headers, dict):
+                        ct = resp_headers.get("content-type") or resp_headers.get("Content-Type") or ""
+                    self._harvest_hosts_from_response_body(url, ct, resp_body)
+                except Exception:
+                    pass
             self._network_log.append({
                 "url": url,
                 "method": method,
