@@ -29,12 +29,29 @@ from cve_lookup import enrich_library_finding, extract_libraries
 #   Info     = best practice, no security impact
 # ══════════════════════════════════════════════════════════════════════
 
+def _coerce_cvss(s) -> float:
+    """Coerce a CVSS value (str/int/float/None) to float. Returns 0.0 if invalid.
+
+    Passive-recon findings store cvss as strings (e.g. "5.9"); triage callers
+    may pass raw hints, so normalize defensively here.
+    """
+    if s is None or s == "":
+        return 0.0
+    if isinstance(s, (int, float)):
+        return float(s)
+    try:
+        return float(str(s).strip())
+    except (ValueError, TypeError):
+        return 0.0
+
 SEV_FROM_CVSS = lambda s: (
-    "Critical" if s >= 9.0 else
-    "High" if s >= 7.0 else
-    "Medium" if s >= 4.0 else
-    "Low" if s > 0 else "Info"
-)
+    lambda v: (
+        "Critical" if v >= 9.0 else
+        "High" if v >= 7.0 else
+        "Medium" if v >= 4.0 else
+        "Low" if v > 0 else "Info"
+    )
+)(_coerce_cvss(s))
 
 # CWE database for generic weakness types (no CVE, just category)
 CWE_PROFILES = {
@@ -872,7 +889,7 @@ def _classify_inner(finding, test_log, _index=None):
         if finding.get("cwe_hint"):
             r["cwe"] = finding["cwe_hint"]
         if cvss_h:
-            r["cvss"] = cvss_h
+            r["cvss"] = _coerce_cvss(cvss_h)
         return r
 
     # ==================================================================
