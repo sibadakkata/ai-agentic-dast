@@ -47,8 +47,10 @@ This loop runs up to 25 steps per phase. Every finding is then **triaged offline
 
 | Feature | Description | Details |
 |---------|-------------|---------|
-| **Passive Reconnaissance** | 24 deterministic checks: source maps, DOM sinks, secrets, headers, CSP analysis, CORS, JWT, cookies, telemetry leakage, mixed content, clickjacking, and more | Runs before LLM phases, $0 cost |
+| **Passive Reconnaissance** | 26 deterministic checks: source maps, DOM sinks, secrets, headers, CSP analysis, CORS, JWT, cookies, telemetry leakage, mixed content, clickjacking, **TLS protocol/cipher audit** (deprecated TLS 1.0/1.1, Sweet32/3DES, RC4, EXPORT, NULL, anonymous DH — via `sslyze` fallback), **vulnerable JS library detection** (regex catalog + live NVD/OSV.dev CVE enrichment), and more | Runs before LLM phases, $0 cost |
 | **Active Scanning** | 25 web phases + 15 API phases: full OWASP Top 10 + context-aware checks (path traversal, XXE, race conditions, file upload, host header, session mgmt, HTTP smuggling) | [Web Scanning](docs/web-scanning.md) · [API Scanning](docs/api-scanning.md) |
+| **Crawl-Only Profile** | Acunetix-style crawl-only scan mode: discovers URLs, SPA routes, forms, APIs, and in-scope sub-domains **without** sending attack payloads. Still runs passive recon (TLS, headers, JS CVEs) and API baseline. Use to verify coverage before a full scan | Dashboard "Scan Profile" dropdown, `scan_profile: "crawl_only"` via API |
+| **SPA Sibling-Host Coverage** | Passively harvests in-scope HTTPS sub-domains from browser XHR/fetch/navigation traffic and `robots.txt`/`sitemap.xml`. After every phase, newly discovered hosts get a **passive re-audit** (TLS + security headers — Stage A). At the start of each OWASP phase, new hosts are **surfaced to the LLM** with directives to apply that phase's methodology against them (Stage B) | Works for React/Angular/Vue SPAs where sibling hosts only appear post-auth via network traffic |
 | **Triage Engine** | 3-layer evidence-based classification (TP/FP/Manual Review) with CWE/CVSS | [Triage Engine](docs/triage-engine.md) |
 | **Authentication** | Auto-detect form, SSO/OIDC, OAuth, API key, bearer — with session refresh | Multi-step OIDC, self-healing sessions |
 | **Two-User BOLA/BFLA** | Supply a second user (User B) to test horizontal privilege escalation and broken function-level auth | Automated IDOR testing across user contexts |
@@ -105,8 +107,10 @@ uvicorn web.app:app --host 0.0.0.0 --port 8080
 │  1. AUTHENTICATION                                                  │
 │     Auto-detect auth type → login → capture session → auto-refresh  │
 ├─────────────────────────────────────────────────────────────────────┤
-│  2. PASSIVE RECONNAISSANCE ($0) — 24 checks                         │
-│     Source maps, sinks, secrets, headers, CSP, CORS, JWT, cookies  │
+│  2. PASSIVE RECONNAISSANCE ($0) — 26 checks                         │
+│     Source maps, sinks, secrets, headers, CSP, CORS, JWT, cookies,  │
+│     TLS audit (sslyze), vulnerable JS libraries (NVD/OSV.dev CVE)  │
+│     Runs on seed host AND passively-discovered in-scope sub-domains │
 ├─────────────────────────────────────────────────────────────────────┤
 │  3. API BASELINE (if Postman/OpenAPI imported)                      │
 │     Execute every endpoint → capture "known good" responses         │
@@ -116,6 +120,8 @@ uvicorn web.app:app --host 0.0.0.0 --port 8080
 ├─────────────────────────────────────────────────────────────────────┤
 │  5. LLM DEEP SCAN (25 web + 15 API phases)                         │
 │     OWASP Top 10 + context-aware: race, upload, host header, etc.  │
+│     After each phase: host-delta passive audit on new sub-domains   │
+│     Before each phase: new in-scope sub-domains injected into prompt│
 ├─────────────────────────────────────────────────────────────────────┤
 │  5b. ATTACK CHAIN ANALYSIS                                          │
 │     Combine findings into multi-step exploit chains                 │

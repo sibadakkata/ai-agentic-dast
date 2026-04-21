@@ -8,11 +8,13 @@ Complete reference of every security check the scanner performs. Organized by sc
 
 | Category | Count | LLM Cost | FP Risk |
 |----------|-------|----------|---------|
-| Passive Reconnaissance | 24 checks | $0 (deterministic) | Zero/Very Low |
+| Passive Reconnaissance | 26 checks | $0 (deterministic) | Zero/Very Low |
 | Active Web Phases | 25 phases | LLM-driven | Low (context-aware) |
 | Active API Phases | 15 phases | LLM-driven | Low (context-aware) |
 | Attack Chain Analysis | 1 phase (12 chain patterns) | LLM-driven | Low (must prove with evidence) |
-| **Total** | **65 check categories** | | |
+| **Total** | **67 check categories** | | |
+
+> Passive checks run on the seed host **and** every passively-discovered in-scope HTTPS sub-domain (from page DOM, `robots.txt`, `sitemap.xml`, and live browser network traffic). After every active phase, any newly observed sub-domain gets a passive re-audit for TLS and security headers (Stage A host-delta, capped at 10 new hosts per phase). See [Web Scanning](web-scanning.md#sibling-sub-domain-coverage) for the full flow.
 
 ---
 
@@ -42,6 +44,7 @@ These checks run before any LLM calls. They analyze the page, HTTP responses, co
 | 11 | Mixed Content | CWE-319 | Medium–Low | HTTP resources (scripts, styles, iframes) loaded on HTTPS pages — MitM can inject malicious code |
 | 12 | Password Autocomplete | CWE-522 | Low | `<input type="password">` without `autocomplete="off"` — browser caches credentials on disk |
 | 13 | Form Actions to External Domains | CWE-200 | High–Medium | Forms submitting data to third-party domains, especially forms with password or sensitive fields |
+| 13a | **Vulnerable JavaScript Library** | CWE-1104 / CWE-937 | Critical–Medium | Fingerprints client-side libraries (jQuery, AngularJS, Angular, React, Vue, Bootstrap, Lodash, Moment, Handlebars, etc.) from URL patterns, `<script src>` / `<link href>` in DOM, and file content via a version-extracting regex catalog. Enriches each detected `(library, version)` with live CVE/CVSS data from **NVD + OSV.dev** (severity derived from CVSS, capped by confidence in version extraction) |
 
 ### Transport & Header Security
 
@@ -56,6 +59,7 @@ These checks run before any LLM calls. They analyze the page, HTTP responses, co
 | 20 | HSTS Preload Readiness | CWE-319 | Low | HSTS present but `max-age` too short, missing `includeSubDomains` |
 | 21 | Clickjacking Protection | CWE-1021 | Medium | Both X-Frame-Options and CSP `frame-ancestors` missing on HTML pages — page is frameable |
 | 22 | Cache-Control on Auth Pages | CWE-525 | Medium–Low | Authenticated pages missing `Cache-Control: no-store` — sensitive content cached by browsers/proxies |
+| 22a | **TLS Protocol/Cipher Audit** | CWE-326 / CWE-327 | High–Medium | Deprecated protocols (TLS 1.0, TLS 1.1) accepted; weak cipher suites enumerated via `sslyze` (primary, bypasses OpenSSL 3.x legacy-provider gap) with raw-socket fallback: 3DES/Sweet32 (CVE-2016-2183), RC4, EXPORT, NULL, anonymous DH/ECDH. Runs per host (seed + every in-scope HTTPS sub-domain discovered during the scan). Pins `maximum_version=TLSv1_2` when probing weak ciphers to eliminate TLS 1.3 false positives |
 
 ### Session & Token Security
 
@@ -240,7 +244,11 @@ The LLM **attempts to execute** each applicable chain using the `chain_exploit` 
 | CWE-798 | Hardcoded Credentials | Passive (secrets in JS) |
 | CWE-918 | SSRF | Active (Web/API) |
 | CWE-942 | Overly Permissive CORS | Passive (CORS check) |
+| CWE-326 | Inadequate Encryption Strength | Passive (TLS weak ciphers: 3DES/Sweet32, RC4, EXPORT) |
+| CWE-327 | Broken/Risky Cryptographic Algorithm | Passive (deprecated TLS 1.0/1.1, anonymous DH/ECDH, NULL ciphers) |
+| CWE-937 | Using Components with Known Vulnerabilities | Passive (vulnerable JS library detection + NVD/OSV.dev CVE lookup) |
 | CWE-1021 | Improper Restriction of Frames | Passive (clickjacking) |
+| CWE-1104 | Unmaintained Third-Party Component | Passive (vulnerable JS library detection) |
 | CWE-1321 | Prototype Pollution | Active (Beyond OWASP) |
 
 ---
@@ -250,11 +258,11 @@ The LLM **attempts to execute** each applicable chain using the `chain_exploit` 
 | OWASP Category | Passive Checks | Active Web Phases | Active API Phases |
 |---------------|----------------|-------------------|-------------------|
 | **A01** Broken Access Control | — | Broken Access Control, BFLA | Authorization/BOLA, BFLA, Method Override |
-| **A02** Cryptographic Failures | Cookie audit, HSTS, HTTPS redirect, mixed content | Cryptographic Failures | — |
+| **A02** Cryptographic Failures | Cookie audit, HSTS, HTTPS redirect, mixed content, **TLS protocol/cipher audit (per host)** | Cryptographic Failures | — |
 | **A03** Injection | DOM sinks, source maps | SQLi, XSS, CMDi, SSTI | Injection Testing |
 | **A04** Insecure Design | — | Insecure Design, Race Conditions, File Upload | Race Conditions, Business Logic |
 | **A05** Security Misconfiguration | CSP weakness, headers, CORS, clickjacking, error pages, Permissions-Policy | Security Misconfiguration, Host Header | Host Header, Content-Type Confusion |
-| **A06** Vulnerable Components | — | Vulnerable Components | — |
+| **A06** Vulnerable Components | **Vulnerable JS library detection + NVD/OSV.dev CVE enrichment** | Vulnerable Components | — |
 | **A07** Auth Failures | JWT analysis, password autocomplete | Auth Failures, Timing Enum, Password Reset, Session Mgmt | Authentication Testing |
 | **A08** Integrity Failures | SRI missing | Integrity Failures | Mass Assignment |
 | **A09** Logging Failures | Telemetry token leakage (12 checks) | Logging Failures | — |

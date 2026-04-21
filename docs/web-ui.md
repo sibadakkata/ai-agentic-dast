@@ -10,8 +10,9 @@ The scanner includes a single-page web UI for managing scans, viewing results, a
 |---------|-------------|
 | **New Scan** | Enter target URL, optional credentials, pick model and scan mode |
 | **AI Scan Planner** | Type natural-language instruction → LLM generates structured scan plan → review and confirm |
-| **Vulnerability Focus** | Select specific vuln types (XSS, SQLi, CMDI, etc.) or "Full Scan" for all |
-| **Scan Intensity** | Light (3-5 payloads), Standard (8-15), or Deep (20-40+) per input |
+| **Scan Profile** | `Vulnerability Scan` (default, full OWASP testing) or `Crawl Only` (discovery + passive checks, no attack payloads). A `CRAWL` badge appears next to crawl-only scans in the scan list and a "Profile: Crawl Only" stat in the scan detail header |
+| **Vulnerability Focus** | Select specific vuln types (XSS, SQLi, CMDI, etc.) or "Full Scan" for all. Disabled in `Crawl Only` mode |
+| **Scan Intensity** | Light (3-5 payloads), Standard (8-15), or Deep (20-40+) per input. Disabled in `Crawl Only` mode |
 | **Scan Scope** | "This URL Only", "URL + Sub-paths" (default), or "Full Site Crawl" |
 | **API Imports** | Upload Postman Collection or OpenAPI/Swagger spec |
 | **Live Progress** | Real-time tool calls, payloads, responses, and findings as the scan runs |
@@ -40,16 +41,38 @@ The scanner includes a single-page web UI for managing scans, viewing results, a
 | Setting | Options | Default | Notes |
 |---------|---------|---------|-------|
 | **Scan Mode** | `website`, `api`, `both` | `both` | What to test |
+| **Scan Profile** | `vulnerability_scan`, `crawl_only` | `vulnerability_scan` | `crawl_only` skips every OWASP attack phase and the attack-chain stage. Still runs passive recon (TLS, headers, JS CVEs), API baseline, and a broad crawl of URLs/SPA routes/forms/APIs/sibling sub-domains. Selecting it disables Vulnerability Focus and Scan Intensity. Results appear in the normal Crawled Endpoints / Out of Scope / AI Agent Coverage tabs |
 | **Scan Scope** | `url_only`, `directory`, `full_site` | `directory` | How far to crawl |
-| **Vulnerability Focus** | `Full Scan`, or specific types | Full Scan | Limits phases to selected types |
-| **Scan Intensity** | `light`, `standard`, `deep` | `deep` | Payloads per input |
+| **Vulnerability Focus** | `Full Scan`, or specific types | Full Scan | Limits phases to selected types. Ignored in Crawl Only mode |
+| **Scan Intensity** | `light`, `standard`, `deep` | `deep` | Payloads per input. Ignored in Crawl Only mode |
 | **Focus URLs** | List of URLs | (empty) | Specific pages to prioritize |
 | **Exclude URLs** | List of URLs/paths | (empty) | URLs the scanner must skip entirely |
+| **Additional Domains** | List of domains | (empty) | Extra domains (beyond the target's registrable domain) treated as in-scope for crawl, sibling-host passive checks, and LLM recursion |
 | **Second User (User B)** | Username + password | (empty) | Enables two-user BOLA/BFLA testing |
 
 ### Auto-Deep Rule
 
 When you select specific vulnerability types (e.g. XSS + SQLi), the scanner automatically forces **Deep** intensity for maximum coverage.
+
+### Crawl-Only Profile
+
+Use **Crawl Only** to verify the scanner can actually reach every part of your app before committing budget to a full vulnerability scan. In this mode:
+
+- A single `crawl_only` phase replaces all 25 web / 15 API OWASP phases
+- No attack payloads are sent (no injection, no auth-bypass, no BOLA/BFLA, no SSRF probes)
+- Passive recon (TLS audit, security headers, JS library CVEs) still runs — on the seed host **and** every passively-discovered in-scope HTTPS sub-domain
+- API baseline requests still execute against imported Postman/OpenAPI specs (informational, not fuzzed)
+- The LLM is instructed to enumerate broadly: click links/buttons, fill forms with dummy data, walk SPA routes, inspect the network log for new in-scope hostnames and recurse into them (capped)
+- Coverage lands in the normal **Crawled Endpoints**, **Out of Scope**, and **AI Agent Coverage** tabs; the scan list shows a `CRAWL` badge
+
+### Sibling Sub-Domain Coverage
+
+The scanner automatically extends both passive and active coverage to in-scope sub-domains that appear during the scan (typical for SPAs where hosts like `api.example.com` or `cdn-int.example.com` only surface after authentication via XHR/fetch):
+
+- **Passive harvest** — hostnames are collected from the landing page DOM, `robots.txt`, `sitemap.xml`, and live browser network traffic
+- **Stage A (post-phase)** — after every phase, any newly discovered in-scope HTTPS host gets a passive re-audit (TLS protocol/cipher + security headers), capped at 10 new hosts per phase
+- **Stage B (pre-phase)** — before the next phase prompt, new in-scope hosts (capped at 8 per phase) are surfaced to the LLM with an explicit directive to navigate to them and apply the current phase's testing methodology
+- Scope is computed from the target's registrable domain (eTLD+1 via `tldextract`) plus any **Additional Domains** you configure
 
 ### Manual vs AI Planner
 
