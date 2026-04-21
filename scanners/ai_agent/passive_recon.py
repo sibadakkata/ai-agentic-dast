@@ -3328,6 +3328,88 @@ async def _check_tls_configuration_multi_host(
     return findings
 
 
+# Stage-A per-phase host-delta re-check: after each OWASP phase, the agent
+# drains ScanTools._discovered_hosts (hosts the browser observed in XHR /
+# fetch / navigation traffic during that phase) and calls
+# run_host_delta_passive_check to TLS-audit and security-header-audit any
+# hosts that weren't previously audited. Max new hosts per phase is bounded
+# to keep wall-clock predictable; the caller-managed audited_hosts set
+# persists across phases and across this function's calls.
+_MAX_DELTA_HOSTS_PER_PHASE = 10
+
+
+async def run_host_delta_passive_check(
+    http_client,
+    candidate_hosts: set,
+    target_url: str,
+    audited_hosts: set,
+    extra_domains: set | None = None,
+    max_new: int = _MAX_DELTA_HOSTS_PER_PHASE,
+) -> list[dict]:
+    """Run passive checks (TLS + security headers) on any in-scope https
+    hosts in ``candidate_hosts`` that are not yet in ``audited_hosts``.
+
+    Mutates ``audited_hosts`` in place, adding each host as it is probed
+    (even if no findings were generated) so subsequent calls don't re-probe.
+
+    Returns the aggregated finding list for the newly probed hosts. Per-host
+    cost is roughly 1 TLS probe round-trip (~2-3s with sslyze fallback) plus
+    1 HTTP GET for security headers, so worst-case ``max_new`` hosts ~= 30s.
+
+    Typical use: call at the end of every OWASP phase; most phases will
+    discover 0–2 new in-scope sibling hosts, so most calls are near-free.
+    """
+    findings: list[dict] = []
+    if not candidate_hosts:
+        return findings
+
+    # Normalize + filter candidates → new in-scope hosts not yet audited.
+    new_hosts: list[str] = []
+    seen_here: set[str] = set()
+    for raw in candidate_hosts:
+        if not raw:
+            continue
+        host = str(raw).strip().lower()
+        # Strip any port suffix defensively (hostnames from urlparse.hostname
+        # shouldn't carry one, but be safe).
+        if ":" in host:
+            host = host.split(":", 1)[0]
+        if not host or host in seen_here:
+            continue
+        if host in audited_hosts:
+            continue
+        if not _host_in_scope(host, target_url, extra_domains):
+            continue
+        seen_here.add(host)
+        new_hosts.append(host)
+        if len(new_hosts) >= max_new:
+            break
+
+    if not new_hosts:
+        return findings
+
+    logger.info(
+        "Host-delta passive check: %d new in-scope host(s) to audit: %s",
+        len(new_hosts), ", ".join(new_hosts),
+    )
+
+    for host in new_hosts:
+        host_url = f"https://{host}"
+        try:
+            tls_findings = await _check_tls_configuration(host_url)
+            findings.extend(tls_findings)
+        except Exception as e:
+            logger.debug("Host-delta TLS audit failed for %s: %s", host_url, e)
+        try:
+            hdr_findings = await _check_security_headers(http_client, host_url)
+            findings.extend(hdr_findings)
+        except Exception as e:
+            logger.debug("Host-delta header audit failed for %s: %s", host_url, e)
+        audited_hosts.add(host)
+
+    return findings
+
+
 # ---------------------------------------------------------------------------
 # Vulnerable JS library detection (regex catalog + OSV.dev/NVD enrichment)
 # ---------------------------------------------------------------------------

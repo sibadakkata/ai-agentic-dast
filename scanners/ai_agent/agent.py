@@ -26,7 +26,11 @@ from .auth import (
     detect_app_type,
 )
 from .llm_config import ContentFiltered, ContextWindowExceeded, MalformedMessages, LLMRouter
-from .passive_recon import run_http_only_passive_recon, run_passive_recon
+from .passive_recon import (
+    run_host_delta_passive_check,
+    run_http_only_passive_recon,
+    run_passive_recon,
+)
 from .prompts import build_system_prompt, get_phases
 from .tools import TOOL_DEFINITIONS, ScanTools
 
@@ -1180,6 +1184,17 @@ async def run_scan(
             exclude_urls=getattr(target, "exclude_urls", None) or [],
         )
         tools.set_findings_ref(findings)
+
+        # Stage-A per-phase host-delta audit state. Seeded with the target's
+        # seed host so the first delta pass doesn't re-probe it (initial
+        # passive recon already audited seed + siblings discovered from the
+        # landing-page DOM + robots/sitemap). Any host added via a browser
+        # XHR/fetch/navigation in later phases is new → audited once.
+        try:
+            _seed_host = (urlparse(target.url).hostname or "").lower()
+        except Exception:
+            _seed_host = ""
+        audited_hosts: set[str] = {_seed_host} if _seed_host else set()
 
         # ── Authenticate User B for BOLA/BFLA two-user testing ──────
         user_b_auth_header: dict = {}
@@ -2488,6 +2503,46 @@ async def run_scan(
             print(f" {phase_tool_calls} tool calls, {phase_new_findings} findings")
             _cb("phase_end", {"phase": phase_num, "name": phase.name, "tool_calls": phase_tool_calls, "findings": phase_new_findings})
             messages = trim_context(messages, max_tokens=TRIM_TARGET_TOKENS)
+
+            # ── Stage-A per-phase host-delta passive check ──────────────
+            # Drain browser-observed in-scope https hostnames (populated
+            # continuously by tools._log_request). Any host that wasn't
+            # previously audited gets a one-shot TLS + security-header pass.
+            # This is how SPAs that reveal sibling hosts post-auth (via XHR
+            # to /api/v2 on a sibling subdomain) still get TLS-audited even
+            # when the landing-page DOM / robots / sitemap didn't mention
+            # them. Cheap: typical phase yields 0–2 new hosts.
+            try:
+                candidate_hosts = tools.get_discovered_hosts()
+                if candidate_hosts - audited_hosts:
+                    delta_findings = await run_host_delta_passive_check(
+                        http_client=http_client,
+                        candidate_hosts=candidate_hosts,
+                        target_url=target.url,
+                        audited_hosts=audited_hosts,
+                        extra_domains=extra_set,
+                    )
+                    if delta_findings:
+                        existing_titles = {
+                            (f.get("title", "") + f.get("url", ""))
+                            for f in findings
+                        }
+                        new_delta = [
+                            f for f in delta_findings
+                            if (f.get("title", "") + f.get("url", "")) not in existing_titles
+                        ]
+                        for f in new_delta:
+                            f.setdefault("phase", f"Host-Delta Passive ({phase.name})")
+                            _cb("finding", f)
+                        findings.extend(new_delta)
+                        if new_delta:
+                            print(f"  [HOST-DELTA] +{len(new_delta)} findings on new sibling host(s)")
+                            logger.info(
+                                "Host-delta passive check after phase '%s': %d new findings",
+                                phase.name, len(new_delta),
+                            )
+            except Exception as e:
+                logger.warning("Host-delta passive check failed (non-fatal): %s", e)
 
             # ── Re-run passive recon after first LLM phase ──────────────
             # After the first phase the LLM has navigated/interacted with

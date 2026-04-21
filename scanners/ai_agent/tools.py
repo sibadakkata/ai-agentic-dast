@@ -198,6 +198,13 @@ class ScanTools:
         self._ws_connections: dict[str, Any] = {}
         self._findings_ref: list[dict] = []
         self._chain_results: list[dict] = []
+        # Stage-A host harvest: every in-scope https host observed in the
+        # browser's network traffic (XHR, fetch, navigations, redirects) is
+        # added here by _log_request. The agent drains this set after each
+        # OWASP phase to run TLS + security-header audits on newly appearing
+        # sibling hosts (e.g., SPA XHRs to *.example.com that only surface
+        # post-authentication). Hostnames only; no scheme/port.
+        self._discovered_hosts: set[str] = set()
 
     def set_findings_ref(self, findings: list[dict]) -> None:
         """Bind the shared findings list so tools can read it."""
@@ -483,10 +490,45 @@ class ScanTools:
     def _require_page(self) -> bool:
         return self._page is not None
 
+    def _record_discovered_host(self, url: str) -> None:
+        """Record an https hostname seen in browser traffic for Stage-A
+        per-phase host-delta passive re-check. Only https is tracked because
+        the delta pass runs TLS audits. Scope is enforced against
+        ``self._allowed_domains`` so third-party CDNs / analytics hosts
+        don't pollute the queue.
+        """
+        if not url:
+            return
+        try:
+            p = urlparse(url)
+        except Exception:
+            return
+        if (p.scheme or "").lower() != "https":
+            return
+        host = (p.hostname or "").lower()
+        if not host:
+            return
+        if self._allowed_domains:
+            in_scope = False
+            for d in self._allowed_domains:
+                if host == d or host.endswith("." + d):
+                    in_scope = True
+                    break
+            if not in_scope:
+                return
+        self._discovered_hosts.add(host)
+
+    def get_discovered_hosts(self) -> set[str]:
+        """Return a snapshot of in-scope https hostnames seen in browser
+        network traffic since scan start. Caller-owned copy; safe to mutate.
+        """
+        return set(self._discovered_hosts)
+
     async def _log_request(self, request: Any) -> None:
         try:
             url = request.url
             method = request.method
+            self._record_discovered_host(url)
             response = await request.response()
             status = response.status if response else None
             req_body = ""
