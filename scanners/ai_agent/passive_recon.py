@@ -18,6 +18,10 @@ Runs before the LLM scan phases. Checks for:
   - API version downgrade discovery
   - Form action targets on external domains
   - TLS protocol + cipher audit (TLS 1.0/1.1, 3DES/Sweet32, RC4, NULL, EXPORT, anon DH)
+    — runs per-host across every in-scope https hostname harvested from
+      the landing-page DOM, robots.txt, and sitemap.xml
+    — uses sslyze (if installed) for authoritative cipher enumeration,
+      falling back to native OpenSSL per-cipher probes
   - Vulnerable JavaScript library detection (OSV.dev + NVD enrichment)
 """
 from __future__ import annotations
@@ -483,9 +487,15 @@ async def run_passive_recon(
         _cb(f)
     _progress("passive_step", {"step": "Clickjacking", "found": len(cj_findings)})
 
-    # ── 25. TLS protocol & cipher audit ────────────────────────────────
+    # ── 25. TLS protocol & cipher audit (multi-host) ───────────────────
+    # Discovers sibling https hosts from the landing-page DOM + robots.txt
+    # + sitemap.xml (passive — no agent navigation) and runs the TLS audit
+    # against every in-scope host. Closes the gap where the LLM agent
+    # doesn't visit every subdomain that Acunetix's BFS crawler reaches.
     try:
-        tls_findings = await _check_tls_configuration(target_url)
+        tls_findings = await _check_tls_configuration_multi_host(
+            page, http_client, target_url
+        )
     except Exception as e:
         logger.debug("TLS audit failed: %s", e)
         tls_findings = []
@@ -2789,6 +2799,136 @@ def _tls_probe_cipher_sync(host: str, port: int, cipher_string: str) -> tuple[bo
         return False, f"probe error: {e}"
 
 
+# Cipher-name substrings that count as "weak" when sslyze enumerates a
+# server's accepted cipher suites. Matches are case-insensitive against
+# the IANA cipher name (e.g. TLS_RSA_WITH_3DES_EDE_CBC_SHA).
+_SSLYZE_WEAK_CIPHER_PATTERNS: list[tuple[str, str, str, str, str, str]] = [
+    # (substring, label,                    cwe,        cvss,  severity, description)
+    ("3DES",      "3DES (Sweet32)",          "CWE-327", "5.9", "Medium",
+     "3DES/DES-CBC3 block size is 64 bits — vulnerable to Sweet32 birthday attacks (CVE-2016-2183)."),
+    ("DES_CBC3",  "3DES (Sweet32)",          "CWE-327", "5.9", "Medium",
+     "3DES/DES-CBC3 block size is 64 bits — vulnerable to Sweet32 birthday attacks (CVE-2016-2183)."),
+    ("RC4",       "RC4",                     "CWE-327", "5.9", "Medium",
+     "RC4 stream cipher is cryptographically broken (RFC 7465). Allows biased-keystream recovery of session tokens."),
+    ("NULL",      "NULL cipher (no encryption)", "CWE-326", "7.5", "High",
+     "NULL cipher accepted — server will negotiate a session with no encryption at all."),
+    ("EXPORT",    "EXPORT-grade cipher",     "CWE-326", "7.5", "High",
+     "EXPORT-grade ciphers (40/56-bit) accepted — trivially broken and enable FREAK/Logjam-class attacks."),
+    ("_anon_",    "Anonymous DH/ECDH",       "CWE-287", "7.4", "High",
+     "Anonymous DH/ECDH cipher accepted — no server authentication, trivial MITM."),
+    ("ADH",       "Anonymous DH/ECDH",       "CWE-287", "7.4", "High",
+     "Anonymous DH/ECDH cipher accepted — no server authentication, trivial MITM."),
+]
+
+
+def _tls_sslyze_weak_ciphers_sync(host: str, port: int) -> tuple[bool, list[dict]]:
+    """Use sslyze to enumerate accepted cipher suites across TLS 1.0/1.1/1.2
+    and return entries matching the weak-cipher patterns.
+
+    Returns (sslyze_ran, [weak_cipher_info...]). ``sslyze_ran`` is False if
+    the sslyze library is unavailable in the current environment, in which
+    case the caller should fall back to the OpenSSL per-cipher probes.
+
+    This runs synchronously (sslyze is blocking) — the async caller invokes
+    it via ``loop.run_in_executor``.
+
+    Why we need this fallback: OpenSSL 3.x in modern Linux distros often
+    ships without the legacy provider, so ``ctx.set_ciphers("3DES")`` /
+    ``"RC4"`` / ``"EXPORT"`` raises before the ClientHello is sent. Our
+    native probe then silently reports "no 3DES" even when the server
+    supports it. sslyze ships its own TLS client (nassl) that does not
+    depend on the local OpenSSL cipher configuration, so it can still
+    enumerate Sweet32/RC4/EXPORT on the server side.
+    """
+    try:
+        from sslyze import (  # type: ignore
+            Scanner,
+            ScanCommand,
+            ServerNetworkLocation,
+            ServerScanRequest,
+        )
+        # ScanCommandAttemptStatusEnum moved between sslyze releases; try a
+        # couple of known locations so we don't crash on minor-version drift.
+        try:
+            from sslyze.scanner.scan_command_attempt import (  # type: ignore
+                ScanCommandAttemptStatusEnum,
+            )
+        except ImportError:
+            try:
+                from sslyze.scanner.models import (  # type: ignore
+                    ScanCommandAttemptStatusEnum,
+                )
+            except ImportError:
+                from sslyze import ScanCommandAttemptStatusEnum  # type: ignore
+    except Exception as e:
+        logger.debug("sslyze unavailable (%s) — falling back to OpenSSL probes", e)
+        return False, []
+
+    try:
+        server_location = ServerNetworkLocation(hostname=host, port=port)
+    except Exception as e:
+        logger.debug("sslyze: invalid server location %s:%s: %s", host, port, e)
+        return True, []
+
+    scan_commands = {
+        ScanCommand.TLS_1_0_CIPHER_SUITES,
+        ScanCommand.TLS_1_1_CIPHER_SUITES,
+        ScanCommand.TLS_1_2_CIPHER_SUITES,
+    }
+    try:
+        scanner = Scanner()
+        scanner.queue_scans([ServerScanRequest(
+            server_location=server_location,
+            scan_commands=scan_commands,
+        )])
+    except Exception as e:
+        logger.debug("sslyze: queue_scans failed for %s:%s: %s", host, port, e)
+        return True, []
+
+    weak: list[dict] = []
+    try:
+        for server_result in scanner.get_results():
+            attempts = [
+                ("TLSv1.0", getattr(server_result.scan_result, "tls_1_0_cipher_suites", None)),
+                ("TLSv1.1", getattr(server_result.scan_result, "tls_1_1_cipher_suites", None)),
+                ("TLSv1.2", getattr(server_result.scan_result, "tls_1_2_cipher_suites", None)),
+            ]
+            for version_label, attempt in attempts:
+                if attempt is None:
+                    continue
+                status = getattr(attempt, "status", None)
+                # sslyze >=5 puts the result on .result when status == COMPLETED
+                if status != ScanCommandAttemptStatusEnum.COMPLETED:
+                    continue
+                result = getattr(attempt, "result", None)
+                if result is None:
+                    continue
+                accepted = getattr(result, "accepted_cipher_suites", []) or []
+                for acc in accepted:
+                    suite = getattr(acc, "cipher_suite", None)
+                    if suite is None:
+                        continue
+                    name = getattr(suite, "name", "") or ""
+                    upper = name.upper()
+                    for substr, label, cwe, cvss, sev, desc in _SSLYZE_WEAK_CIPHER_PATTERNS:
+                        if substr.upper() in upper:
+                            weak.append({
+                                "version": version_label,
+                                "cipher": name,
+                                "label": label,
+                                "cwe": cwe,
+                                "cvss": cvss,
+                                "severity": sev,
+                                "description": desc,
+                            })
+                            break
+    except Exception as e:
+        logger.debug("sslyze: result iteration failed for %s:%s: %s", host, port, e)
+        return True, weak
+
+    return True, weak
+
+
 async def _check_tls_configuration(target_url: str) -> list[dict]:
     """Audit the target's TLS configuration for deprecated protocols and
     weak cipher suites.
@@ -2848,28 +2988,343 @@ async def _check_tls_configuration(target_url: str) -> list[dict]:
             evidence=f"{desc} {evidence}".strip(),
         ))
 
-    # ── Weak ciphers ──────────────────────────────────────────────────
-    for cipher_string, label, cwe, cvss, severity, desc in _WEAK_CIPHER_PROBES:
-        try:
-            accepted, evidence = await loop.run_in_executor(
-                None, _tls_probe_cipher_sync, host, port, cipher_string
-            )
-        except Exception as e:
-            logger.debug("TLS cipher %s probe failed: %s", label, e)
-            continue
-        if not accepted:
-            continue
-        findings.append(_make_finding(
-            title=f"Weak TLS cipher accepted: {label}",
-            severity=severity,
-            cwe=cwe,
-            cvss=cvss,
-            url=base_url,
-            evidence=f"{desc} {evidence}".strip(),
-        ))
+    # ── Weak ciphers (sslyze authoritative enumeration, OpenSSL fallback) ──
+    # sslyze uses its own TLS stack (nassl) so it can detect 3DES / RC4 /
+    # EXPORT even when the container's OpenSSL drops the legacy provider.
+    # If sslyze isn't installed or returns nothing, we fall back to the
+    # per-cipher OpenSSL probes below.
+    sslyze_ran = False
+    sslyze_weak: list[dict] = []
+    try:
+        sslyze_ran, sslyze_weak = await loop.run_in_executor(
+            None, _tls_sslyze_weak_ciphers_sync, host, port
+        )
+    except Exception as e:
+        logger.debug("TLS sslyze audit failed for %s: %s", base_url, e)
+
+    if sslyze_ran and sslyze_weak:
+        # Dedupe: emit one finding per (label) — the worst version observed
+        seen_labels: set[str] = set()
+        # Sort so oldest/most-broken protocol version is reported first
+        sslyze_weak_sorted = sorted(sslyze_weak, key=lambda w: w["version"])
+        for entry in sslyze_weak_sorted:
+            if entry["label"] in seen_labels:
+                continue
+            seen_labels.add(entry["label"])
+            findings.append(_make_finding(
+                title=f"Weak TLS cipher accepted: {entry['label']}",
+                severity=entry["severity"],
+                cwe=entry["cwe"],
+                cvss=entry["cvss"],
+                url=base_url,
+                evidence=(
+                    f"{entry['description']} Accepted suite {entry['cipher']} "
+                    f"on {entry['version']} (sslyze)"
+                ).strip(),
+            ))
+    elif not sslyze_ran:
+        # sslyze not available — fall back to OpenSSL per-cipher probes.
+        # Caveat: these silently miss 3DES/RC4/EXPORT when OpenSSL 3.x's
+        # legacy provider isn't loaded. NULL/aNULL still work.
+        for cipher_string, label, cwe, cvss, severity, desc in _WEAK_CIPHER_PROBES:
+            try:
+                accepted, evidence = await loop.run_in_executor(
+                    None, _tls_probe_cipher_sync, host, port, cipher_string
+                )
+            except Exception as e:
+                logger.debug("TLS cipher %s probe failed: %s", label, e)
+                continue
+            if not accepted:
+                continue
+            findings.append(_make_finding(
+                title=f"Weak TLS cipher accepted: {label}",
+                severity=severity,
+                cwe=cwe,
+                cvss=cvss,
+                url=base_url,
+                evidence=f"{desc} {evidence}".strip(),
+            ))
 
     if findings:
-        logger.info("TLS audit on %s: %d weaknesses found", base_url, len(findings))
+        logger.info(
+            "TLS audit on %s: %d weaknesses found (sslyze=%s)",
+            base_url, len(findings), "yes" if sslyze_ran else "no",
+        )
+    return findings
+
+
+# ---------------------------------------------------------------------------
+# Multi-host TLS discovery + audit
+#
+# Rationale: Acunetix crawls every sibling host it can discover and TLS-
+# audits each one independently. Our LLM-driven crawler doesn't exhaustively
+# visit every subdomain, and the single-URL TLS probe above only looks at
+# the seed host. That combination caused us to miss Acunetix's Legacy-TLS
+# findings on hosts like web-int.backup.norton.com and lldsp-int.norton.com
+# even though the probe itself works correctly for those hosts.
+#
+# This section adds a light, passive "lite (2)" host-discovery pass: extract
+# hostnames from the landing page DOM (anchors, scripts, iframes, forms,
+# stylesheets), plus robots.txt and sitemap.xml of the seed host, filter to
+# the scope the agent already honors, dedupe, and run the TLS audit against
+# every unique https host. No active crawling/navigation is performed here.
+# ---------------------------------------------------------------------------
+
+_MAX_DISCOVERED_HOSTS = 25  # cap per scan to bound probe cost
+_SITEMAP_MAX_BYTES = 512 * 1024  # don't download huge sitemaps
+_ROBOTS_MAX_BYTES = 64 * 1024
+
+
+def _registrable_domain(host: str) -> str:
+    """Return the registrable (eTLD+1) domain for ``host``.
+
+    Uses tldextract when available so we correctly handle multi-label
+    public suffixes (e.g. co.uk). Falls back to the last two labels.
+    """
+    if not host:
+        return ""
+    try:
+        import tldextract  # type: ignore
+        ext = tldextract.extract(host)
+        if ext.domain and ext.suffix:
+            return f"{ext.domain}.{ext.suffix}".lower()
+    except Exception:
+        pass
+    parts = host.lower().split(".")
+    return ".".join(parts[-2:]) if len(parts) >= 2 else host.lower()
+
+
+def _host_in_scope(host: str, target_url: str, extra_domains: set | None = None) -> bool:
+    """Return True if ``host`` shares the target's registrable domain or
+    matches one of ``extra_domains``.
+
+    Mirrors ``agent._is_in_scope`` but lives here so passive_recon doesn't
+    need to import from the agent package (which would create a cycle).
+    """
+    if not host:
+        return False
+    host = host.lower().strip(".")
+    try:
+        target_host = (urlparse(target_url).hostname or "").lower()
+    except Exception:
+        target_host = ""
+    target_reg = _registrable_domain(target_host)
+    host_reg = _registrable_domain(host)
+    if target_reg and host_reg and host_reg == target_reg:
+        return True
+    if extra_domains:
+        for d in extra_domains:
+            d = (d or "").lower().strip(".")
+            if not d:
+                continue
+            if host == d or host.endswith("." + d):
+                return True
+    return False
+
+
+async def _harvest_hosts_from_page(page) -> set[str]:
+    """Extract all https hostnames referenced by the landing-page DOM.
+
+    Looks at anchors, scripts, stylesheets, iframes, images, and form
+    actions — across the main frame and every accessible child frame.
+    Runs a single page.evaluate so it's cheap. Returns a set of lowercase
+    hostnames (ports stripped; scheme filtered to https only).
+    """
+    hosts: set[str] = set()
+    if page is None:
+        return hosts
+
+    async def _gather(frame) -> list[str]:
+        try:
+            return await frame.evaluate("""() => {
+                const urls = new Set();
+                const push = (u) => { if (u && typeof u === 'string') urls.add(u); };
+                document.querySelectorAll('a[href]').forEach(e => push(e.href));
+                document.querySelectorAll('script[src]').forEach(e => push(e.src));
+                document.querySelectorAll('link[href]').forEach(e => push(e.href));
+                document.querySelectorAll('iframe[src]').forEach(e => push(e.src));
+                document.querySelectorAll('img[src]').forEach(e => push(e.src));
+                document.querySelectorAll('form[action]').forEach(e => push(e.action));
+                try {
+                    for (const entry of performance.getEntriesByType('resource')) {
+                        push(entry.name);
+                    }
+                } catch (e) {}
+                return [...urls];
+            }""") or []
+        except Exception:
+            return []
+
+    candidates: list[str] = []
+    candidates.extend(await _gather(page))
+    for frame in getattr(page, "frames", []) or []:
+        if frame == page.main_frame:
+            continue
+        candidates.extend(await _gather(frame))
+
+    for url in candidates:
+        try:
+            p = urlparse(url)
+        except Exception:
+            continue
+        if p.scheme.lower() != "https":
+            continue
+        host = (p.hostname or "").lower()
+        if host:
+            hosts.add(host)
+    return hosts
+
+
+_SITEMAP_LOC_RE = re.compile(r"<loc>\s*(https?://[^<\s]+)\s*</loc>", re.IGNORECASE)
+_ROBOTS_SITEMAP_RE = re.compile(r"(?im)^\s*sitemap\s*:\s*(\S+)\s*$")
+_ROBOTS_LIKE_URL_RE = re.compile(r"https?://[\w.-]+", re.IGNORECASE)
+
+
+async def _harvest_hosts_from_robots_sitemap(http_client, target_url: str) -> set[str]:
+    """Fetch robots.txt and sitemap.xml of the seed host and extract any
+    https hostnames referenced. Best-effort — network errors are ignored.
+    """
+    hosts: set[str] = set()
+    try:
+        p = urlparse(target_url)
+        base = f"{p.scheme}://{p.netloc}"
+    except Exception:
+        return hosts
+
+    sitemap_urls: list[str] = [f"{base}/sitemap.xml"]
+
+    # robots.txt — also pick up Sitemap: directives
+    try:
+        resp = await http_client.get(f"{base}/robots.txt", timeout=8.0)
+        if resp.status_code == 200 and resp.text:
+            text = resp.text[:_ROBOTS_MAX_BYTES]
+            for m in _ROBOTS_SITEMAP_RE.finditer(text):
+                sitemap_urls.append(m.group(1).strip())
+            for m in _ROBOTS_LIKE_URL_RE.finditer(text):
+                try:
+                    h = urlparse(m.group(0)).hostname
+                except Exception:
+                    h = None
+                if h:
+                    hosts.add(h.lower())
+    except Exception as e:
+        logger.debug("robots.txt fetch failed for %s: %s", base, e)
+
+    # sitemaps
+    seen_sitemaps: set[str] = set()
+    for sm_url in sitemap_urls[:5]:  # hard cap to avoid sitemap bombs
+        if sm_url in seen_sitemaps:
+            continue
+        seen_sitemaps.add(sm_url)
+        try:
+            resp = await http_client.get(sm_url, timeout=8.0)
+            if resp.status_code != 200:
+                continue
+            body = (resp.text or "")[:_SITEMAP_MAX_BYTES]
+            for m in _SITEMAP_LOC_RE.finditer(body):
+                try:
+                    h = urlparse(m.group(1)).hostname
+                except Exception:
+                    h = None
+                if h:
+                    hosts.add(h.lower())
+        except Exception as e:
+            logger.debug("sitemap fetch failed for %s: %s", sm_url, e)
+
+    return hosts
+
+
+async def _discover_in_scope_https_hosts(
+    page,
+    http_client,
+    target_url: str,
+    extra_domains: set | None = None,
+) -> list[str]:
+    """Build the list of https hosts to TLS-audit for this scan.
+
+    Passive "lite (2)" discovery: combines the seed host, hostnames pulled
+    from the landing page DOM, and hostnames referenced by robots.txt /
+    sitemap.xml — all filtered to the agent's scope. No active crawling.
+
+    Returns a list of ``host`` strings (no scheme/port) — seed first,
+    deduped and capped at ``_MAX_DISCOVERED_HOSTS``.
+    """
+    hosts: list[str] = []
+    seen: set[str] = set()
+
+    try:
+        seed_host = (urlparse(target_url).hostname or "").lower()
+    except Exception:
+        seed_host = ""
+    if seed_host:
+        hosts.append(seed_host)
+        seen.add(seed_host)
+
+    discovered: set[str] = set()
+    try:
+        discovered |= await _harvest_hosts_from_page(page)
+    except Exception as e:
+        logger.debug("page host harvest failed: %s", e)
+    try:
+        discovered |= await _harvest_hosts_from_robots_sitemap(http_client, target_url)
+    except Exception as e:
+        logger.debug("robots/sitemap host harvest failed: %s", e)
+
+    for h in sorted(discovered):
+        if h in seen:
+            continue
+        if not _host_in_scope(h, target_url, extra_domains):
+            continue
+        hosts.append(h)
+        seen.add(h)
+        if len(hosts) >= _MAX_DISCOVERED_HOSTS:
+            logger.info(
+                "Host discovery capped at %d — additional in-scope hosts skipped",
+                _MAX_DISCOVERED_HOSTS,
+            )
+            break
+    return hosts
+
+
+async def _check_tls_configuration_multi_host(
+    page,
+    http_client,
+    target_url: str,
+    extra_domains: set | None = None,
+) -> list[dict]:
+    """Run ``_check_tls_configuration`` against every in-scope https host
+    discovered passively (landing-page DOM + robots.txt + sitemap.xml).
+
+    Aggregates findings across all hosts. Probes are run sequentially to
+    keep network load predictable; per-host TLS audit is already cheap
+    (<~3s) so total wall-clock scales linearly with the discovered set.
+    """
+    findings: list[dict] = []
+    try:
+        hosts = await _discover_in_scope_https_hosts(
+            page, http_client, target_url, extra_domains
+        )
+    except Exception as e:
+        logger.debug("TLS multi-host discovery failed: %s", e)
+        # Fall back to seed-only
+        return await _check_tls_configuration(target_url)
+
+    if not hosts:
+        return findings
+
+    logger.info(
+        "TLS audit: %d in-scope https host(s) discovered for %s (seed + %d sibling)",
+        len(hosts), target_url, max(0, len(hosts) - 1),
+    )
+
+    for host in hosts:
+        host_url = f"https://{host}"
+        try:
+            host_findings = await _check_tls_configuration(host_url)
+        except Exception as e:
+            logger.debug("TLS audit failed for %s: %s", host_url, e)
+            continue
+        findings.extend(host_findings)
     return findings
 
 
@@ -3287,7 +3742,12 @@ async def run_http_only_passive_recon(
     await _run("Error pages", _check_error_pages(http_client, target_url))
     await _run("Clickjacking", _check_clickjacking(http_client, target_url))
     await _run("API version downgrade", _check_api_version_downgrade(http_client, target_url, []))
-    await _run("TLS audit", _check_tls_configuration(target_url))
+    # No Playwright page in HTTP-only mode, so DOM-based host harvesting is
+    # unavailable. We still pull sibling hosts from robots.txt + sitemap.xml.
+    await _run(
+        "TLS audit",
+        _check_tls_configuration_multi_host(None, http_client, target_url),
+    )
 
     tech_fingerprint = await _fingerprint_technologies_http_only(http_client, target_url)
     _progress("passive_step", {
