@@ -45,6 +45,7 @@ curl -s -u "$DAST_USER:$DAST_PASS" \
 | `target_url` | Yes | — | URL to scan |
 | `model` | No | Haiku 4.5 | Model ID from `/api/models` |
 | `scan_mode` | No | `both` | `website`, `api`, or `both` |
+| `scan_profile` | No | `vulnerability_scan` | `vulnerability_scan` (full OWASP testing) or `crawl_only` (discovery + passive checks only — no attack payloads). `crawl_only` forces-clears `focus_areas` and ignores `scan_intensity` |
 | `username` | No | — | Login credentials (User A) |
 | `password` | No | — | Login credentials (User A) |
 | `username_b` | No | — | Second user credentials for BOLA/BFLA testing |
@@ -102,6 +103,24 @@ curl -s -u "$DAST_USER:$DAST_PASS" \
 curl -s -u "$DAST_USER:$DAST_PASS" \
   -X POST "$DAST_URL/api/scan/{scan_id}/resume" | jq .
 ```
+
+### 7b. Start a Crawl-Only Scan
+
+Use this to verify the scanner can reach every part of your app before committing budget to a full vulnerability scan. No attack payloads are sent.
+
+```bash
+curl -s -u "$DAST_USER:$DAST_PASS" \
+  -X POST "$DAST_URL/api/scan" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "target_url": "https://example.com",
+    "scan_profile": "crawl_only",
+    "scan_mode": "both",
+    "scan_scope": "directory"
+  }' | jq .
+```
+
+Results land in the normal `/api/results/{scan_id}` payload — inspect `crawled_endpoints`, `out_of_scope_urls`, and `coverage` (AI Agent Coverage). Scan metadata includes `scan_profile: "crawl_only"`.
 
 ### 8. Retry a Failed/Cancelled Scan
 

@@ -26,7 +26,11 @@ from .auth import (
     detect_app_type,
 )
 from .llm_config import ContentFiltered, ContextWindowExceeded, MalformedMessages, LLMRouter
-from .passive_recon import run_http_only_passive_recon, run_passive_recon
+from .passive_recon import (
+    run_host_delta_passive_check,
+    run_http_only_passive_recon,
+    run_passive_recon,
+)
 from .prompts import build_system_prompt, get_phases
 from .tools import TOOL_DEFINITIONS, ScanTools
 
@@ -1181,6 +1185,27 @@ async def run_scan(
         )
         tools.set_findings_ref(findings)
 
+        # Stage-A per-phase host-delta audit state. Seeded with the target's
+        # seed host so the first delta pass doesn't re-probe it (initial
+        # passive recon already audited seed + siblings discovered from the
+        # landing-page DOM + robots/sitemap). Any host added via a browser
+        # XHR/fetch/navigation in later phases is new → audited once.
+        try:
+            _seed_host = (urlparse(target.url).hostname or "").lower()
+        except Exception:
+            _seed_host = ""
+        audited_hosts: set[str] = {_seed_host} if _seed_host else set()
+
+        # Stage-B sibling-host coverage state. Tracks which in-scope sub-
+        # domains the LLM has been explicitly instructed to test. Seeded
+        # with the seed host so we don't re-announce the primary target.
+        # When a new in-scope host appears in browser traffic (Stage A
+        # host harvest), the next phase's prompt gets a "MUST ALSO COVER
+        # THESE HOSTS" injection listing the new hosts — this ensures the
+        # LLM's OWASP test methodology actually reaches sibling sub-
+        # domains instead of only the passive TLS/header audit.
+        hosts_surfaced_to_llm: set[str] = {_seed_host} if _seed_host else set()
+
         # ── Authenticate User B for BOLA/BFLA two-user testing ──────
         user_b_auth_header: dict = {}
         user_b_cookie_str: str = ""
@@ -1502,7 +1527,13 @@ async def run_scan(
                 })
                 metrics["total_tool_calls"] += len(all_fuzz_results)
 
-        phases = get_phases(target.scan_mode, app_info, scan_scope=getattr(target, "scan_scope", "directory"), focus_areas=getattr(target, "focus_areas", None))
+        phases = get_phases(
+            target.scan_mode,
+            app_info,
+            scan_scope=getattr(target, "scan_scope", "directory"),
+            focus_areas=getattr(target, "focus_areas", None),
+            scan_profile=getattr(target, "scan_profile", "vulnerability_scan"),
+        )
         system_prompt = build_system_prompt(target, registry, app_info, extra_domains=extra_domains)
         if passive_findings:
             passive_summary = _format_passive_for_llm(passive_findings)
@@ -1623,6 +1654,60 @@ async def run_scan(
             else:
                 phase_prompt = phase_prompt.replace(bola_web_placeholder, "")
                 phase_prompt = phase_prompt.replace(bola_api_placeholder, "")
+
+            # Stage-B sibling-host coverage: announce any newly-discovered
+            # in-scope sub-domains to the LLM and require it to extend
+            # THIS phase's methodology to each of them. Without this
+            # injection, the LLM typically only drives against the seed
+            # host — so any finding class (XSS, SQLi, IDOR, auth-bypass,
+            # …) that lives on a sibling sub-domain gets missed, even
+            # though passive recon already TLS-audits those hosts.
+            try:
+                new_hosts = tools.get_discovered_hosts() - hosts_surfaced_to_llm
+                # Cap per-phase announcement to keep context size bounded.
+                # Newly discovered hosts that don't fit this round naturally
+                # surface at the next phase's injection.
+                MAX_NEW_HOSTS_PER_PHASE = 8
+                if new_hosts:
+                    picked = sorted(new_hosts)[:MAX_NEW_HOSTS_PER_PHASE]
+                    host_lines = "\n".join(f"  - https://{h}/" for h in picked)
+                    coverage_block = (
+                        "\n\n--- ADDITIONAL IN-SCOPE SUB-DOMAINS (MUST COVER) ---\n"
+                        "During scan reconnaissance and earlier phases the "
+                        "following in-scope sub-domains were discovered via "
+                        "browser network traffic (XHR / fetch / navigation):\n\n"
+                        f"{host_lines}\n\n"
+                        "These are part of the same application as the seed "
+                        "target and may expose DISTINCT endpoints, forms, "
+                        "APIs, and vulnerabilities that do not exist on the "
+                        "seed host.\n\n"
+                        "For the current phase "
+                        f"('{phase.name}') you MUST:\n"
+                        "  1. Call navigate(<host-url>) for each sub-domain "
+                        "above before finishing this phase.\n"
+                        "  2. Call get_links, get_forms, and intercept_requests "
+                        "to enumerate each host's endpoints.\n"
+                        "  3. Apply this phase's testing methodology (as "
+                        "described in the instructions above) to each host — "
+                        "do NOT limit testing to the seed target.\n"
+                        "  4. Record every finding with the FULL host URL "
+                        "so per-host coverage is auditable in the report.\n"
+                        "--- END ADDITIONAL SUB-DOMAINS ---"
+                    )
+                    phase_prompt += coverage_block
+                    hosts_surfaced_to_llm |= set(picked)
+                    logger.info(
+                        "Sibling-host coverage: announced %d new sub-domain(s) "
+                        "to LLM for phase '%s': %s",
+                        len(picked), phase.name, ", ".join(picked),
+                    )
+            except Exception as e:
+                # Non-fatal: if host-delta plumbing fails, the phase still
+                # runs against the seed target as before.
+                logger.debug(
+                    "Sibling-host coverage injection failed for phase %s: %s",
+                    phase.id, e,
+                )
 
             messages.append({"role": "user", "content": phase_prompt})
 
@@ -2489,6 +2574,46 @@ async def run_scan(
             _cb("phase_end", {"phase": phase_num, "name": phase.name, "tool_calls": phase_tool_calls, "findings": phase_new_findings})
             messages = trim_context(messages, max_tokens=TRIM_TARGET_TOKENS)
 
+            # ── Stage-A per-phase host-delta passive check ──────────────
+            # Drain browser-observed in-scope https hostnames (populated
+            # continuously by tools._log_request). Any host that wasn't
+            # previously audited gets a one-shot TLS + security-header pass.
+            # This is how SPAs that reveal sibling hosts post-auth (via XHR
+            # to /api/v2 on a sibling subdomain) still get TLS-audited even
+            # when the landing-page DOM / robots / sitemap didn't mention
+            # them. Cheap: typical phase yields 0–2 new hosts.
+            try:
+                candidate_hosts = tools.get_discovered_hosts()
+                if candidate_hosts - audited_hosts:
+                    delta_findings = await run_host_delta_passive_check(
+                        http_client=http_client,
+                        candidate_hosts=candidate_hosts,
+                        target_url=target.url,
+                        audited_hosts=audited_hosts,
+                        extra_domains=extra_set,
+                    )
+                    if delta_findings:
+                        existing_titles = {
+                            (f.get("title", "") + f.get("url", ""))
+                            for f in findings
+                        }
+                        new_delta = [
+                            f for f in delta_findings
+                            if (f.get("title", "") + f.get("url", "")) not in existing_titles
+                        ]
+                        for f in new_delta:
+                            f.setdefault("phase", f"Host-Delta Passive ({phase.name})")
+                            _cb("finding", f)
+                        findings.extend(new_delta)
+                        if new_delta:
+                            print(f"  [HOST-DELTA] +{len(new_delta)} findings on new sibling host(s)")
+                            logger.info(
+                                "Host-delta passive check after phase '%s': %d new findings",
+                                phase.name, len(new_delta),
+                            )
+            except Exception as e:
+                logger.warning("Host-delta passive check failed (non-fatal): %s", e)
+
             # ── Re-run passive recon after first LLM phase ──────────────
             # After the first phase the LLM has navigated/interacted with
             # the SPA. Dynamic iframes and lazy-loaded scripts may now be
@@ -2897,7 +3022,13 @@ async def run_dry_scan(
         )
 
         app_info = await detect_app_type(page)
-        phases = get_phases(target.scan_mode, app_info, scan_scope=getattr(target, "scan_scope", "directory"), focus_areas=getattr(target, "focus_areas", None))
+        phases = get_phases(
+            target.scan_mode,
+            app_info,
+            scan_scope=getattr(target, "scan_scope", "directory"),
+            focus_areas=getattr(target, "focus_areas", None),
+            scan_profile=getattr(target, "scan_profile", "vulnerability_scan"),
+        )
         recon_phases = [ph for ph in phases if "recon" in ph.id.lower()]
         if not recon_phases:
             recon_phases = phases[:1]

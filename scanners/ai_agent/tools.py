@@ -4,6 +4,7 @@ import asyncio
 import base64
 import json
 import logging
+import re
 import time
 import uuid
 from typing import TYPE_CHECKING, Any
@@ -198,6 +199,13 @@ class ScanTools:
         self._ws_connections: dict[str, Any] = {}
         self._findings_ref: list[dict] = []
         self._chain_results: list[dict] = []
+        # Stage-A host harvest: every in-scope https host observed in the
+        # browser's network traffic (XHR, fetch, navigations, redirects) is
+        # added here by _log_request. The agent drains this set after each
+        # OWASP phase to run TLS + security-header audits on newly appearing
+        # sibling hosts (e.g., SPA XHRs to *.example.com that only surface
+        # post-authentication). Hostnames only; no scheme/port.
+        self._discovered_hosts: set[str] = set()
 
     def set_findings_ref(self, findings: list[dict]) -> None:
         """Bind the shared findings list so tools can read it."""
@@ -483,10 +491,99 @@ class ScanTools:
     def _require_page(self) -> bool:
         return self._page is not None
 
+    def _record_discovered_host(self, url: str) -> None:
+        """Record an https hostname seen in browser traffic for Stage-A
+        per-phase host-delta passive re-check. Only https is tracked because
+        the delta pass runs TLS audits. Scope is enforced against
+        ``self._allowed_domains`` so third-party CDNs / analytics hosts
+        don't pollute the queue.
+        """
+        if not url:
+            return
+        try:
+            p = urlparse(url)
+        except Exception:
+            return
+        if (p.scheme or "").lower() != "https":
+            return
+        host = (p.hostname or "").lower()
+        if not host:
+            return
+        if self._allowed_domains:
+            in_scope = False
+            for d in self._allowed_domains:
+                if host == d or host.endswith("." + d):
+                    in_scope = True
+                    break
+            if not in_scope:
+                return
+        self._discovered_hosts.add(host)
+
+    def get_discovered_hosts(self) -> set[str]:
+        """Return a snapshot of in-scope https hostnames seen in browser
+        network traffic since scan start. Caller-owned copy; safe to mutate.
+        """
+        return set(self._discovered_hosts)
+
+    _HOST_LITERAL_RE = re.compile(
+        r"https?://([a-zA-Z0-9][a-zA-Z0-9\-]*(?:\.[a-zA-Z0-9\-]+)+)",
+        re.IGNORECASE,
+    )
+    # Content types whose bodies we mine for hostname string literals. SPA
+    # bundles (JS), server-rendered pages (HTML), inline config (JSON/XML),
+    # stylesheets with url() refs (CSS) and plain text responses are all
+    # cheap to scan with a pre-compiled regex. Binary types (images, fonts,
+    # wasm, pdf, video) are skipped.
+    _BODY_HARVEST_CT_KEYWORDS = (
+        "javascript", "ecmascript", "json", "html", "xml", "css", "text/plain",
+    )
+    _BODY_HARVEST_MAX_BYTES = 512 * 1024  # cap per response to stay cheap
+
+    def _harvest_hosts_from_response_body(
+        self, url: str, content_type: str, body: str,
+    ) -> None:
+        """Scan a response body for ``https?://<host>`` literals and feed
+        each match into the in-scope host discovery set. This catches
+        sibling sub-domains that are referenced inside SPA bundles or
+        lazy-loaded JSON configs but that the browser hasn't yet actually
+        fetched — e.g. a backup/licensing micro-frontend whose base URL
+        (``web-int.backup.example.com``) is baked into the main bundle as
+        a string constant but only used once the user clicks into that
+        feature.
+
+        Scope is enforced by :meth:`_record_discovered_host`, so third-party
+        hosts (CDNs, analytics) are naturally filtered out.
+        """
+        if not body:
+            return
+        ct = (content_type or "").lower()
+        if not any(kw in ct for kw in self._BODY_HARVEST_CT_KEYWORDS):
+            # Also accept known JS/CSS/JSON extensions when the server
+            # returned no or a misleading content-type (common on CDNs).
+            lower_url = (url or "").lower().split("?", 1)[0]
+            if not lower_url.endswith((".js", ".mjs", ".cjs", ".css", ".json", ".html", ".htm")):
+                return
+        snippet = body if len(body) <= self._BODY_HARVEST_MAX_BYTES else body[: self._BODY_HARVEST_MAX_BYTES]
+        seen_in_body: set[str] = set()
+        try:
+            for m in self._HOST_LITERAL_RE.finditer(snippet):
+                host = (m.group(1) or "").lower().rstrip(".")
+                if not host or host in seen_in_body:
+                    continue
+                seen_in_body.add(host)
+                if host in self._discovered_hosts:
+                    continue
+                self._record_discovered_host(f"https://{host}")
+        except Exception:
+            # Pattern-matching on a huge minified bundle should never
+            # bring the scanner down — harvest is best-effort.
+            pass
+
     async def _log_request(self, request: Any) -> None:
         try:
             url = request.url
             method = request.method
+            self._record_discovered_host(url)
             response = await request.response()
             status = response.status if response else None
             req_body = ""
@@ -507,6 +604,21 @@ class ScanTools:
                 req_headers = await request.all_headers()
             except Exception:
                 pass
+            # Deterministic sibling-host discovery from response body content:
+            # SPA bundles / JSON configs / HTML often reference in-scope
+            # sibling sub-domains as string literals well before the browser
+            # actually fetches them (e.g. lazy-loaded micro-frontends).
+            # Grepping the body feeds those into the discovery queue so
+            # Stage-A passive audits and Stage-B LLM directives can cover
+            # them without waiting for the user to click into that feature.
+            if resp_body:
+                try:
+                    ct = ""
+                    if isinstance(resp_headers, dict):
+                        ct = resp_headers.get("content-type") or resp_headers.get("Content-Type") or ""
+                    self._harvest_hosts_from_response_body(url, ct, resp_body)
+                except Exception:
+                    pass
             self._network_log.append({
                 "url": url,
                 "method": method,

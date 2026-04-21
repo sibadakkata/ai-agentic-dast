@@ -17,6 +17,12 @@ Runs before the LLM scan phases. Checks for:
   - Subresource Integrity (SRI) missing on external scripts
   - API version downgrade discovery
   - Form action targets on external domains
+  - TLS protocol + cipher audit (TLS 1.0/1.1, 3DES/Sweet32, RC4, NULL, EXPORT, anon DH)
+    — runs per-host across every in-scope https hostname harvested from
+      the landing-page DOM, robots.txt, and sitemap.xml
+    — uses sslyze (if installed) for authoritative cipher enumeration,
+      falling back to native OpenSSL per-cipher probes
+  - Vulnerable JavaScript library detection (OSV.dev + NVD enrichment)
 """
 from __future__ import annotations
 
@@ -288,7 +294,7 @@ async def run_passive_recon(
     target_parsed = urlparse(target_url)
     base_url = f"{target_parsed.scheme}://{target_parsed.netloc}"
 
-    _progress("passive_start", {"checks": "source_maps, js_sinks, secrets, sensitive_files, headers, html_comments, telemetry_token_leakage, cookie_security, jwt_analysis, cors, cache_control, sri, form_actions, api_versioning, csp_analysis, referrer_policy, permissions_policy, mixed_content, password_autocomplete, sensitive_url_params, https_redirect, hsts_preload, error_pages, clickjacking"})
+    _progress("passive_start", {"checks": "source_maps, js_sinks, secrets, sensitive_files, headers, html_comments, telemetry_token_leakage, cookie_security, jwt_analysis, cors, cache_control, sri, form_actions, api_versioning, csp_analysis, referrer_policy, permissions_policy, mixed_content, password_autocomplete, sensitive_url_params, https_redirect, hsts_preload, error_pages, clickjacking, tls_audit, js_library_cves"})
 
     # ── 1. Collect all JS files loaded by the page ────────────────────
     all_js_urls = await _collect_js_urls(page, target_url)
@@ -481,9 +487,40 @@ async def run_passive_recon(
         _cb(f)
     _progress("passive_step", {"step": "Clickjacking", "found": len(cj_findings)})
 
-    # ── 25. Technology fingerprinting (context for LLM) ───────────────
+    # ── 25. TLS protocol & cipher audit (multi-host) ───────────────────
+    # Discovers sibling https hosts from the landing-page DOM + robots.txt
+    # + sitemap.xml (passive — no agent navigation) and runs the TLS audit
+    # against every in-scope host. Closes the gap where the LLM agent
+    # doesn't visit every subdomain that Acunetix's BFS crawler reaches.
+    try:
+        tls_findings = await _check_tls_configuration_multi_host(
+            page, http_client, target_url
+        )
+    except Exception as e:
+        logger.debug("TLS audit failed: %s", e)
+        tls_findings = []
+    for f in tls_findings:
+        findings.append(f)
+        _cb(f)
+    _progress("passive_step", {"step": "TLS audit", "found": len(tls_findings)})
+
+    # ── 26. Technology fingerprinting (context for LLM) ───────────────
     tech_fingerprint = await _fingerprint_technologies(page, http_client, target_url, js_urls)
     _progress("passive_step", {"step": "Tech fingerprint", "technologies": list(tech_fingerprint.get("technologies", {}).keys())})
+
+    # ── 27. Vulnerable JavaScript library detection (OSV.dev + NVD) ───
+    try:
+        js_lib_findings = await _check_js_library_vulnerabilities(
+            http_client, js_urls, page=page, target_url=target_url,
+            tech_fingerprint=tech_fingerprint,
+        )
+    except Exception as e:
+        logger.debug("JS library audit failed: %s", e)
+        js_lib_findings = []
+    for f in js_lib_findings:
+        findings.append(f)
+        _cb(f)
+    _progress("passive_step", {"step": "JS library CVE audit", "found": len(js_lib_findings)})
 
     _progress("passive_end", {"total_findings": len(findings)})
     logger.info("Passive recon complete: %d findings", len(findings))
@@ -2433,6 +2470,9 @@ _CWE_REMEDIATION: dict[str, str] = {
     "CWE-942": "Remove or restrict cross-domain policy files (crossdomain.xml, clientaccesspolicy.xml). Set allow-access-from to specific trusted domains.",
     "CWE-1021": "Set X-Frame-Options: DENY (or SAMEORIGIN) and use Content-Security-Policy frame-ancestors directive to prevent clickjacking.",
     "CWE-1275": "Ensure cookies use the SameSite attribute (Strict or Lax) to prevent CSRF via cross-site requests.",
+    "CWE-326": "Disable weak/null/anonymous/export cipher suites. Require AEAD ciphers (AES-GCM, ChaCha20-Poly1305) with PFS key exchange.",
+    "CWE-327": "Disable deprecated protocols (TLS 1.0/1.1) and weak ciphers (RC4, 3DES/DES-CBC3, DES). Only enable TLS 1.2+ with modern cipher suites.",
+    "CWE-1104": "Upgrade the vulnerable third-party JavaScript library to a patched version. Subscribe to security advisories and automate dependency auditing (npm audit, Snyk, Dependabot).",
 }
 
 
@@ -2497,6 +2537,9 @@ _IMPACT_MAP = {
     "form action": "Forms submitting to external domains may leak credentials or sensitive data to third parties.",
     "api version": "Older API versions may lack security fixes, exposing known vulnerabilities.",
     "sensitive": "Exposed sensitive files or data can be used for unauthorized access or further attacks.",
+    "tls": "Deprecated TLS protocols or weak ciphers allow network attackers to downgrade the connection, decrypt traffic, or impersonate the server.",
+    "cipher": "Weak cipher suites allow network attackers to decrypt or forge TLS sessions (e.g. Sweet32 on 3DES, keystream recovery on RC4).",
+    "javascript library": "Outdated JS libraries ship known CVEs (XSS, prototype pollution, ReDoS). Any client input reaching library sinks can be exploited.",
 }
 
 
@@ -2647,6 +2690,1090 @@ async def _check_actuator_exposure(http_client, target_url: str) -> list[dict]:
     return findings
 
 
+# ---------------------------------------------------------------------------
+# TLS protocol & cipher audit (deterministic stdlib probes)
+# ---------------------------------------------------------------------------
+
+# Weak cipher families we explicitly probe for. Each entry is (OpenSSL cipher
+# string, short label, CWE, CVSS, severity, description).
+_WEAK_CIPHER_PROBES = [
+    ("RC4",                     "RC4",                        "CWE-327", "5.9", "Medium",
+     "RC4 stream cipher is cryptographically broken (RFC 7465). Allows biased-keystream recovery of session tokens."),
+    ("3DES:DES-CBC3-SHA",       "3DES (Sweet32)",             "CWE-327", "5.9", "Medium",
+     "3DES/DES-CBC3 block size is 64 bits — vulnerable to Sweet32 birthday attacks (CVE-2016-2183)."),
+    ("NULL",                    "NULL cipher (no encryption)","CWE-326", "7.5", "High",
+     "NULL cipher accepted — server will negotiate a session with no encryption at all."),
+    ("EXPORT",                  "EXPORT-grade cipher",        "CWE-326", "7.5", "High",
+     "EXPORT-grade ciphers (40/56-bit) accepted — trivially broken and enable FREAK/Logjam-class attacks."),
+    ("aNULL",                   "Anonymous DH/ECDH",          "CWE-287", "7.4", "High",
+     "Anonymous DH/ECDH cipher accepted — no server authentication, trivial MITM."),
+]
+
+# Deprecated TLS protocol versions we try to negotiate directly.
+# ssl.TLSVersion is always present on Python 3.7+; we still guard imports.
+_TLS_VERSION_PROBES = [
+    ("TLSv1",   "TLS 1.0", "CWE-327", "6.5", "Medium",
+     "TLS 1.0 is deprecated (RFC 8996) and no longer PCI-DSS compliant. Vulnerable to BEAST, POODLE, and Lucky13."),
+    ("TLSv1_1", "TLS 1.1", "CWE-327", "5.3", "Medium",
+     "TLS 1.1 is deprecated (RFC 8996). No modern AEAD ciphers; weaker than TLS 1.2/1.3."),
+]
+
+
+def _tls_probe_version_sync(host: str, port: int, version_attr: str) -> tuple[bool, str]:
+    """Synchronous TLS version probe. Returns (supported, evidence_string).
+
+    Runs in an executor because the ssl module is blocking.
+    """
+    import socket
+    import ssl
+    try:
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        # Some distro builds of OpenSSL drop old protocols at SECLEVEL>=1.
+        try:
+            ctx.set_ciphers("ALL:@SECLEVEL=0")
+        except ssl.SSLError:
+            ctx.set_ciphers("DEFAULT:@SECLEVEL=0")
+        try:
+            v = getattr(ssl.TLSVersion, version_attr)
+            ctx.minimum_version = v
+            ctx.maximum_version = v
+        except (AttributeError, ValueError):
+            return False, f"{version_attr} not exposed by local OpenSSL"
+    except Exception as e:
+        return False, f"Unable to build SSLContext for {version_attr}: {e}"
+
+    try:
+        with socket.create_connection((host, port), timeout=5) as sock:
+            with ctx.wrap_socket(sock, server_hostname=host) as ssock:
+                negotiated = ssock.version() or ""
+                cipher = ssock.cipher() or ("", "", 0)
+                return True, f"Negotiated {negotiated} with cipher {cipher[0]}"
+    except (ssl.SSLError, OSError, ConnectionError):
+        return False, ""
+    except Exception as e:
+        return False, f"probe error: {e}"
+
+
+def _tls_probe_cipher_sync(host: str, port: int, cipher_string: str) -> tuple[bool, str]:
+    """Try to negotiate using ``cipher_string``. Returns (accepted, evidence).
+
+    IMPORTANT: SSLContext.set_ciphers() only affects TLS ≤ 1.2. TLS 1.3 uses
+    a fixed set of AEAD cipher suites that OpenSSL picks automatically and
+    ignores the legacy cipher list. If we let the handshake float up to 1.3
+    the server will happily complete with a modern AEAD suite and we would
+    mis-report "weak cipher accepted". Pin max_version to TLS 1.2 so the
+    legacy cipher string is actually honoured.
+    """
+    import socket
+    import ssl
+    try:
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        try:
+            ctx.maximum_version = ssl.TLSVersion.TLSv1_2
+        except (AttributeError, ValueError):
+            pass
+        try:
+            ctx.set_ciphers(f"{cipher_string}:@SECLEVEL=0")
+        except ssl.SSLError:
+            return False, f"Local OpenSSL refuses cipher string {cipher_string!r}"
+    except Exception as e:
+        return False, f"SSLContext build failed for {cipher_string}: {e}"
+
+    try:
+        with socket.create_connection((host, port), timeout=5) as sock:
+            with ctx.wrap_socket(sock, server_hostname=host) as ssock:
+                negotiated = ssock.version() or ""
+                cipher = ssock.cipher() or ("", "", 0)
+                # Paranoid double-check: if we still somehow landed on TLS 1.3,
+                # the server didn't honour the weak cipher — discard result.
+                if negotiated and negotiated.upper().startswith("TLSV1.3"):
+                    return False, ""
+                return True, f"Server accepted cipher {cipher[0]} on {negotiated}"
+    except (ssl.SSLError, OSError, ConnectionError):
+        return False, ""
+    except Exception as e:
+        return False, f"probe error: {e}"
+
+
+# Cipher-name substrings that count as "weak" when sslyze enumerates a
+# server's accepted cipher suites. Matches are case-insensitive against
+# the IANA cipher name (e.g. TLS_RSA_WITH_3DES_EDE_CBC_SHA).
+_SSLYZE_WEAK_CIPHER_PATTERNS: list[tuple[str, str, str, str, str, str]] = [
+    # (substring, label,                    cwe,        cvss,  severity, description)
+    ("3DES",      "3DES (Sweet32)",          "CWE-327", "5.9", "Medium",
+     "3DES/DES-CBC3 block size is 64 bits — vulnerable to Sweet32 birthday attacks (CVE-2016-2183)."),
+    ("DES_CBC3",  "3DES (Sweet32)",          "CWE-327", "5.9", "Medium",
+     "3DES/DES-CBC3 block size is 64 bits — vulnerable to Sweet32 birthday attacks (CVE-2016-2183)."),
+    ("RC4",       "RC4",                     "CWE-327", "5.9", "Medium",
+     "RC4 stream cipher is cryptographically broken (RFC 7465). Allows biased-keystream recovery of session tokens."),
+    ("NULL",      "NULL cipher (no encryption)", "CWE-326", "7.5", "High",
+     "NULL cipher accepted — server will negotiate a session with no encryption at all."),
+    ("EXPORT",    "EXPORT-grade cipher",     "CWE-326", "7.5", "High",
+     "EXPORT-grade ciphers (40/56-bit) accepted — trivially broken and enable FREAK/Logjam-class attacks."),
+    ("_anon_",    "Anonymous DH/ECDH",       "CWE-287", "7.4", "High",
+     "Anonymous DH/ECDH cipher accepted — no server authentication, trivial MITM."),
+    ("ADH",       "Anonymous DH/ECDH",       "CWE-287", "7.4", "High",
+     "Anonymous DH/ECDH cipher accepted — no server authentication, trivial MITM."),
+]
+
+
+def _tls_sslyze_weak_ciphers_sync(host: str, port: int) -> tuple[bool, list[dict]]:
+    """Use sslyze to enumerate accepted cipher suites across TLS 1.0/1.1/1.2
+    and return entries matching the weak-cipher patterns.
+
+    Returns (sslyze_ran, [weak_cipher_info...]). ``sslyze_ran`` is False if
+    the sslyze library is unavailable in the current environment, in which
+    case the caller should fall back to the OpenSSL per-cipher probes.
+
+    This runs synchronously (sslyze is blocking) — the async caller invokes
+    it via ``loop.run_in_executor``.
+
+    Why we need this fallback: OpenSSL 3.x in modern Linux distros often
+    ships without the legacy provider, so ``ctx.set_ciphers("3DES")`` /
+    ``"RC4"`` / ``"EXPORT"`` raises before the ClientHello is sent. Our
+    native probe then silently reports "no 3DES" even when the server
+    supports it. sslyze ships its own TLS client (nassl) that does not
+    depend on the local OpenSSL cipher configuration, so it can still
+    enumerate Sweet32/RC4/EXPORT on the server side.
+    """
+    try:
+        from sslyze import (  # type: ignore
+            Scanner,
+            ScanCommand,
+            ServerNetworkLocation,
+            ServerScanRequest,
+        )
+        # ScanCommandAttemptStatusEnum moved between sslyze releases; try a
+        # couple of known locations so we don't crash on minor-version drift.
+        try:
+            from sslyze.scanner.scan_command_attempt import (  # type: ignore
+                ScanCommandAttemptStatusEnum,
+            )
+        except ImportError:
+            try:
+                from sslyze.scanner.models import (  # type: ignore
+                    ScanCommandAttemptStatusEnum,
+                )
+            except ImportError:
+                from sslyze import ScanCommandAttemptStatusEnum  # type: ignore
+    except Exception as e:
+        logger.debug("sslyze unavailable (%s) — falling back to OpenSSL probes", e)
+        return False, []
+
+    try:
+        server_location = ServerNetworkLocation(hostname=host, port=port)
+    except Exception as e:
+        logger.debug("sslyze: invalid server location %s:%s: %s", host, port, e)
+        return True, []
+
+    scan_commands = {
+        ScanCommand.TLS_1_0_CIPHER_SUITES,
+        ScanCommand.TLS_1_1_CIPHER_SUITES,
+        ScanCommand.TLS_1_2_CIPHER_SUITES,
+    }
+    try:
+        scanner = Scanner()
+        scanner.queue_scans([ServerScanRequest(
+            server_location=server_location,
+            scan_commands=scan_commands,
+        )])
+    except Exception as e:
+        logger.debug("sslyze: queue_scans failed for %s:%s: %s", host, port, e)
+        return True, []
+
+    weak: list[dict] = []
+    try:
+        for server_result in scanner.get_results():
+            attempts = [
+                ("TLSv1.0", getattr(server_result.scan_result, "tls_1_0_cipher_suites", None)),
+                ("TLSv1.1", getattr(server_result.scan_result, "tls_1_1_cipher_suites", None)),
+                ("TLSv1.2", getattr(server_result.scan_result, "tls_1_2_cipher_suites", None)),
+            ]
+            for version_label, attempt in attempts:
+                if attempt is None:
+                    continue
+                status = getattr(attempt, "status", None)
+                # sslyze >=5 puts the result on .result when status == COMPLETED
+                if status != ScanCommandAttemptStatusEnum.COMPLETED:
+                    continue
+                result = getattr(attempt, "result", None)
+                if result is None:
+                    continue
+                accepted = getattr(result, "accepted_cipher_suites", []) or []
+                for acc in accepted:
+                    suite = getattr(acc, "cipher_suite", None)
+                    if suite is None:
+                        continue
+                    name = getattr(suite, "name", "") or ""
+                    upper = name.upper()
+                    for substr, label, cwe, cvss, sev, desc in _SSLYZE_WEAK_CIPHER_PATTERNS:
+                        if substr.upper() in upper:
+                            weak.append({
+                                "version": version_label,
+                                "cipher": name,
+                                "label": label,
+                                "cwe": cwe,
+                                "cvss": cvss,
+                                "severity": sev,
+                                "description": desc,
+                            })
+                            break
+    except Exception as e:
+        logger.debug("sslyze: result iteration failed for %s:%s: %s", host, port, e)
+        return True, weak
+
+    return True, weak
+
+
+async def _check_tls_configuration(target_url: str) -> list[dict]:
+    """Audit the target's TLS configuration for deprecated protocols and
+    weak cipher suites.
+
+    - Deprecated protocols probed: TLS 1.0, TLS 1.1
+    - Weak ciphers probed: RC4, 3DES (Sweet32), NULL, EXPORT, anonymous DH/ECDH
+
+    Returns one finding per observed weakness. Only runs when the target is
+    HTTPS; HTTP targets return an empty list.
+    """
+    findings: list[dict] = []
+    try:
+        parsed = urlparse(target_url)
+    except Exception:
+        return findings
+    if parsed.scheme.lower() != "https":
+        return findings
+
+    host = parsed.hostname
+    port = parsed.port or 443
+    if not host:
+        return findings
+
+    base_url = f"https://{host}:{port}"
+    loop = asyncio.get_event_loop()
+
+    # ── Connectivity sanity check ─────────────────────────────────────
+    reachable, _ = await loop.run_in_executor(
+        None, _tls_probe_version_sync, host, port, "TLSv1_2"
+    )
+    if not reachable:
+        # Try 1.3 — some hosts are TLS1.3-only now.
+        reachable13, _ = await loop.run_in_executor(
+            None, _tls_probe_version_sync, host, port, "TLSv1_3"
+        )
+        if not reachable13:
+            logger.debug("TLS audit skipped: %s:%s not reachable via TLS", host, port)
+            return findings
+
+    # ── Deprecated protocol versions ──────────────────────────────────
+    for version_attr, label, cwe, cvss, severity, desc in _TLS_VERSION_PROBES:
+        try:
+            supported, evidence = await loop.run_in_executor(
+                None, _tls_probe_version_sync, host, port, version_attr
+            )
+        except Exception as e:
+            logger.debug("TLS %s probe failed: %s", label, e)
+            continue
+        if not supported:
+            continue
+        findings.append(_make_finding(
+            title=f"Deprecated TLS protocol enabled: {label}",
+            severity=severity,
+            cwe=cwe,
+            cvss=cvss,
+            url=base_url,
+            evidence=f"{desc} {evidence}".strip(),
+        ))
+
+    # ── Weak ciphers (sslyze authoritative enumeration, OpenSSL fallback) ──
+    # sslyze uses its own TLS stack (nassl) so it can detect 3DES / RC4 /
+    # EXPORT even when the container's OpenSSL drops the legacy provider.
+    # If sslyze isn't installed or returns nothing, we fall back to the
+    # per-cipher OpenSSL probes below.
+    sslyze_ran = False
+    sslyze_weak: list[dict] = []
+    try:
+        sslyze_ran, sslyze_weak = await loop.run_in_executor(
+            None, _tls_sslyze_weak_ciphers_sync, host, port
+        )
+    except Exception as e:
+        logger.debug("TLS sslyze audit failed for %s: %s", base_url, e)
+
+    if sslyze_ran and sslyze_weak:
+        # Dedupe: emit one finding per (label) — the worst version observed
+        seen_labels: set[str] = set()
+        # Sort so oldest/most-broken protocol version is reported first
+        sslyze_weak_sorted = sorted(sslyze_weak, key=lambda w: w["version"])
+        for entry in sslyze_weak_sorted:
+            if entry["label"] in seen_labels:
+                continue
+            seen_labels.add(entry["label"])
+            findings.append(_make_finding(
+                title=f"Weak TLS cipher accepted: {entry['label']}",
+                severity=entry["severity"],
+                cwe=entry["cwe"],
+                cvss=entry["cvss"],
+                url=base_url,
+                evidence=(
+                    f"{entry['description']} Accepted suite {entry['cipher']} "
+                    f"on {entry['version']} (sslyze)"
+                ).strip(),
+            ))
+    elif not sslyze_ran:
+        # sslyze not available — fall back to OpenSSL per-cipher probes.
+        # Caveat: these silently miss 3DES/RC4/EXPORT when OpenSSL 3.x's
+        # legacy provider isn't loaded. NULL/aNULL still work.
+        for cipher_string, label, cwe, cvss, severity, desc in _WEAK_CIPHER_PROBES:
+            try:
+                accepted, evidence = await loop.run_in_executor(
+                    None, _tls_probe_cipher_sync, host, port, cipher_string
+                )
+            except Exception as e:
+                logger.debug("TLS cipher %s probe failed: %s", label, e)
+                continue
+            if not accepted:
+                continue
+            findings.append(_make_finding(
+                title=f"Weak TLS cipher accepted: {label}",
+                severity=severity,
+                cwe=cwe,
+                cvss=cvss,
+                url=base_url,
+                evidence=f"{desc} {evidence}".strip(),
+            ))
+
+    if findings:
+        logger.info(
+            "TLS audit on %s: %d weaknesses found (sslyze=%s)",
+            base_url, len(findings), "yes" if sslyze_ran else "no",
+        )
+    return findings
+
+
+# ---------------------------------------------------------------------------
+# Multi-host TLS discovery + audit
+#
+# Rationale: Acunetix crawls every sibling host it can discover and TLS-
+# audits each one independently. Our LLM-driven crawler doesn't exhaustively
+# visit every subdomain, and the single-URL TLS probe above only looks at
+# the seed host. That combination caused us to miss Acunetix's Legacy-TLS
+# findings on hosts like web-int.backup.norton.com and lldsp-int.norton.com
+# even though the probe itself works correctly for those hosts.
+#
+# This section adds a light, passive "lite (2)" host-discovery pass: extract
+# hostnames from the landing page DOM (anchors, scripts, iframes, forms,
+# stylesheets), plus robots.txt and sitemap.xml of the seed host, filter to
+# the scope the agent already honors, dedupe, and run the TLS audit against
+# every unique https host. No active crawling/navigation is performed here.
+# ---------------------------------------------------------------------------
+
+_MAX_DISCOVERED_HOSTS = 25  # cap per scan to bound probe cost
+_SITEMAP_MAX_BYTES = 512 * 1024  # don't download huge sitemaps
+_ROBOTS_MAX_BYTES = 64 * 1024
+
+
+def _registrable_domain(host: str) -> str:
+    """Return the registrable (eTLD+1) domain for ``host``.
+
+    Uses tldextract when available so we correctly handle multi-label
+    public suffixes (e.g. co.uk). Falls back to the last two labels.
+    """
+    if not host:
+        return ""
+    try:
+        import tldextract  # type: ignore
+        ext = tldextract.extract(host)
+        if ext.domain and ext.suffix:
+            return f"{ext.domain}.{ext.suffix}".lower()
+    except Exception:
+        pass
+    parts = host.lower().split(".")
+    return ".".join(parts[-2:]) if len(parts) >= 2 else host.lower()
+
+
+def _host_in_scope(host: str, target_url: str, extra_domains: set | None = None) -> bool:
+    """Return True if ``host`` shares the target's registrable domain or
+    matches one of ``extra_domains``.
+
+    Mirrors ``agent._is_in_scope`` but lives here so passive_recon doesn't
+    need to import from the agent package (which would create a cycle).
+    """
+    if not host:
+        return False
+    host = host.lower().strip(".")
+    try:
+        target_host = (urlparse(target_url).hostname or "").lower()
+    except Exception:
+        target_host = ""
+    target_reg = _registrable_domain(target_host)
+    host_reg = _registrable_domain(host)
+    if target_reg and host_reg and host_reg == target_reg:
+        return True
+    if extra_domains:
+        for d in extra_domains:
+            d = (d or "").lower().strip(".")
+            if not d:
+                continue
+            if host == d or host.endswith("." + d):
+                return True
+    return False
+
+
+async def _harvest_hosts_from_page(page) -> set[str]:
+    """Extract all https hostnames referenced by the landing-page DOM.
+
+    Looks at anchors, scripts, stylesheets, iframes, images, and form
+    actions — across the main frame and every accessible child frame.
+    Runs a single page.evaluate so it's cheap. Returns a set of lowercase
+    hostnames (ports stripped; scheme filtered to https only).
+    """
+    hosts: set[str] = set()
+    if page is None:
+        return hosts
+
+    async def _gather(frame) -> list[str]:
+        try:
+            return await frame.evaluate("""() => {
+                const urls = new Set();
+                const push = (u) => { if (u && typeof u === 'string') urls.add(u); };
+                document.querySelectorAll('a[href]').forEach(e => push(e.href));
+                document.querySelectorAll('script[src]').forEach(e => push(e.src));
+                document.querySelectorAll('link[href]').forEach(e => push(e.href));
+                document.querySelectorAll('iframe[src]').forEach(e => push(e.src));
+                document.querySelectorAll('img[src]').forEach(e => push(e.src));
+                document.querySelectorAll('form[action]').forEach(e => push(e.action));
+                try {
+                    for (const entry of performance.getEntriesByType('resource')) {
+                        push(entry.name);
+                    }
+                } catch (e) {}
+                return [...urls];
+            }""") or []
+        except Exception:
+            return []
+
+    candidates: list[str] = []
+    candidates.extend(await _gather(page))
+    for frame in getattr(page, "frames", []) or []:
+        if frame == page.main_frame:
+            continue
+        candidates.extend(await _gather(frame))
+
+    for url in candidates:
+        try:
+            p = urlparse(url)
+        except Exception:
+            continue
+        if p.scheme.lower() != "https":
+            continue
+        host = (p.hostname or "").lower()
+        if host:
+            hosts.add(host)
+    return hosts
+
+
+_SITEMAP_LOC_RE = re.compile(r"<loc>\s*(https?://[^<\s]+)\s*</loc>", re.IGNORECASE)
+_ROBOTS_SITEMAP_RE = re.compile(r"(?im)^\s*sitemap\s*:\s*(\S+)\s*$")
+_ROBOTS_LIKE_URL_RE = re.compile(r"https?://[\w.-]+", re.IGNORECASE)
+
+
+async def _harvest_hosts_from_robots_sitemap(http_client, target_url: str) -> set[str]:
+    """Fetch robots.txt and sitemap.xml of the seed host and extract any
+    https hostnames referenced. Best-effort — network errors are ignored.
+    """
+    hosts: set[str] = set()
+    try:
+        p = urlparse(target_url)
+        base = f"{p.scheme}://{p.netloc}"
+    except Exception:
+        return hosts
+
+    sitemap_urls: list[str] = [f"{base}/sitemap.xml"]
+
+    # robots.txt — also pick up Sitemap: directives
+    try:
+        resp = await http_client.get(f"{base}/robots.txt", timeout=8.0)
+        if resp.status_code == 200 and resp.text:
+            text = resp.text[:_ROBOTS_MAX_BYTES]
+            for m in _ROBOTS_SITEMAP_RE.finditer(text):
+                sitemap_urls.append(m.group(1).strip())
+            for m in _ROBOTS_LIKE_URL_RE.finditer(text):
+                try:
+                    h = urlparse(m.group(0)).hostname
+                except Exception:
+                    h = None
+                if h:
+                    hosts.add(h.lower())
+    except Exception as e:
+        logger.debug("robots.txt fetch failed for %s: %s", base, e)
+
+    # sitemaps
+    seen_sitemaps: set[str] = set()
+    for sm_url in sitemap_urls[:5]:  # hard cap to avoid sitemap bombs
+        if sm_url in seen_sitemaps:
+            continue
+        seen_sitemaps.add(sm_url)
+        try:
+            resp = await http_client.get(sm_url, timeout=8.0)
+            if resp.status_code != 200:
+                continue
+            body = (resp.text or "")[:_SITEMAP_MAX_BYTES]
+            for m in _SITEMAP_LOC_RE.finditer(body):
+                try:
+                    h = urlparse(m.group(1)).hostname
+                except Exception:
+                    h = None
+                if h:
+                    hosts.add(h.lower())
+        except Exception as e:
+            logger.debug("sitemap fetch failed for %s: %s", sm_url, e)
+
+    return hosts
+
+
+async def _discover_in_scope_https_hosts(
+    page,
+    http_client,
+    target_url: str,
+    extra_domains: set | None = None,
+) -> list[str]:
+    """Build the list of https hosts to TLS-audit for this scan.
+
+    Passive "lite (2)" discovery: combines the seed host, hostnames pulled
+    from the landing page DOM, and hostnames referenced by robots.txt /
+    sitemap.xml — all filtered to the agent's scope. No active crawling.
+
+    Returns a list of ``host`` strings (no scheme/port) — seed first,
+    deduped and capped at ``_MAX_DISCOVERED_HOSTS``.
+    """
+    hosts: list[str] = []
+    seen: set[str] = set()
+
+    try:
+        seed_host = (urlparse(target_url).hostname or "").lower()
+    except Exception:
+        seed_host = ""
+    if seed_host:
+        hosts.append(seed_host)
+        seen.add(seed_host)
+
+    discovered: set[str] = set()
+    try:
+        discovered |= await _harvest_hosts_from_page(page)
+    except Exception as e:
+        logger.debug("page host harvest failed: %s", e)
+    try:
+        discovered |= await _harvest_hosts_from_robots_sitemap(http_client, target_url)
+    except Exception as e:
+        logger.debug("robots/sitemap host harvest failed: %s", e)
+
+    for h in sorted(discovered):
+        if h in seen:
+            continue
+        if not _host_in_scope(h, target_url, extra_domains):
+            continue
+        hosts.append(h)
+        seen.add(h)
+        if len(hosts) >= _MAX_DISCOVERED_HOSTS:
+            logger.info(
+                "Host discovery capped at %d — additional in-scope hosts skipped",
+                _MAX_DISCOVERED_HOSTS,
+            )
+            break
+    return hosts
+
+
+async def _check_tls_configuration_multi_host(
+    page,
+    http_client,
+    target_url: str,
+    extra_domains: set | None = None,
+) -> list[dict]:
+    """Run ``_check_tls_configuration`` against every in-scope https host
+    discovered passively (landing-page DOM + robots.txt + sitemap.xml).
+
+    Aggregates findings across all hosts. Probes are run sequentially to
+    keep network load predictable; per-host TLS audit is already cheap
+    (<~3s) so total wall-clock scales linearly with the discovered set.
+    """
+    findings: list[dict] = []
+    try:
+        hosts = await _discover_in_scope_https_hosts(
+            page, http_client, target_url, extra_domains
+        )
+    except Exception as e:
+        logger.debug("TLS multi-host discovery failed: %s", e)
+        # Fall back to seed-only
+        return await _check_tls_configuration(target_url)
+
+    if not hosts:
+        return findings
+
+    logger.info(
+        "TLS audit: %d in-scope https host(s) discovered for %s (seed + %d sibling)",
+        len(hosts), target_url, max(0, len(hosts) - 1),
+    )
+
+    for host in hosts:
+        host_url = f"https://{host}"
+        try:
+            host_findings = await _check_tls_configuration(host_url)
+        except Exception as e:
+            logger.debug("TLS audit failed for %s: %s", host_url, e)
+            continue
+        findings.extend(host_findings)
+    return findings
+
+
+# Stage-A per-phase host-delta re-check: after each OWASP phase, the agent
+# drains ScanTools._discovered_hosts (hosts the browser observed in XHR /
+# fetch / navigation traffic during that phase) and calls
+# run_host_delta_passive_check to TLS-audit and security-header-audit any
+# hosts that weren't previously audited. Max new hosts per phase is bounded
+# to keep wall-clock predictable; the caller-managed audited_hosts set
+# persists across phases and across this function's calls.
+_MAX_DELTA_HOSTS_PER_PHASE = 10
+
+
+async def run_host_delta_passive_check(
+    http_client,
+    candidate_hosts: set,
+    target_url: str,
+    audited_hosts: set,
+    extra_domains: set | None = None,
+    max_new: int = _MAX_DELTA_HOSTS_PER_PHASE,
+) -> list[dict]:
+    """Run passive checks (TLS + security headers) on any in-scope https
+    hosts in ``candidate_hosts`` that are not yet in ``audited_hosts``.
+
+    Mutates ``audited_hosts`` in place, adding each host as it is probed
+    (even if no findings were generated) so subsequent calls don't re-probe.
+
+    Returns the aggregated finding list for the newly probed hosts. Per-host
+    cost is roughly 1 TLS probe round-trip (~2-3s with sslyze fallback) plus
+    1 HTTP GET for security headers, so worst-case ``max_new`` hosts ~= 30s.
+
+    Typical use: call at the end of every OWASP phase; most phases will
+    discover 0–2 new in-scope sibling hosts, so most calls are near-free.
+    """
+    findings: list[dict] = []
+    if not candidate_hosts:
+        return findings
+
+    # Normalize + filter candidates → new in-scope hosts not yet audited.
+    new_hosts: list[str] = []
+    seen_here: set[str] = set()
+    for raw in candidate_hosts:
+        if not raw:
+            continue
+        host = str(raw).strip().lower()
+        # Strip any port suffix defensively (hostnames from urlparse.hostname
+        # shouldn't carry one, but be safe).
+        if ":" in host:
+            host = host.split(":", 1)[0]
+        if not host or host in seen_here:
+            continue
+        if host in audited_hosts:
+            continue
+        if not _host_in_scope(host, target_url, extra_domains):
+            continue
+        seen_here.add(host)
+        new_hosts.append(host)
+        if len(new_hosts) >= max_new:
+            break
+
+    if not new_hosts:
+        return findings
+
+    logger.info(
+        "Host-delta passive check: %d new in-scope host(s) to audit: %s",
+        len(new_hosts), ", ".join(new_hosts),
+    )
+
+    for host in new_hosts:
+        host_url = f"https://{host}"
+        try:
+            tls_findings = await _check_tls_configuration(host_url)
+            findings.extend(tls_findings)
+        except Exception as e:
+            logger.debug("Host-delta TLS audit failed for %s: %s", host_url, e)
+        try:
+            hdr_findings = await _check_security_headers(http_client, host_url)
+            findings.extend(hdr_findings)
+        except Exception as e:
+            logger.debug("Host-delta header audit failed for %s: %s", host_url, e)
+        audited_hosts.add(host)
+
+    return findings
+
+
+# ---------------------------------------------------------------------------
+# Vulnerable JS library detection (regex catalog + OSV.dev/NVD enrichment)
+# ---------------------------------------------------------------------------
+
+# Map extractor name -> (OSV package name, OSV ecosystem, URL regexes, content regexes)
+# URL regexes run against the JS URL (path + query); content regexes run against
+# the first ~8 KB of each first-party JS file.
+_JS_LIB_CATALOG: list[dict] = [
+    {
+        "name": "jquery",
+        "osv_name": "jquery",
+        "ecosystem": "npm",
+        "url": [
+            # /jquery/3.5.1/jquery.min.js  (cdnjs, bootstrapcdn layout)
+            re.compile(r"/jquery/(\d+\.\d+\.\d+)/", re.I),
+            # jquery-3.5.1.js / jquery-3.5.1.min.js
+            re.compile(r"jquery-(\d+\.\d+\.\d+)(?:\.min)?\.js", re.I),
+            # bootstrap.bundle.min.js?v=4.5.0 style query-string versioning
+            re.compile(r"jquery(?:\.\w+)*\.min\.js\?v=(\d+\.\d+\.\d+)", re.I),
+        ],
+        "content": [
+            re.compile(r"jQuery\s+v?(\d+\.\d+\.\d+)", re.I),
+            re.compile(r"/\*!\s*jQuery\s+JavaScript\s+Library\s+v?(\d+\.\d+\.\d+)", re.I),
+        ],
+    },
+    {
+        "name": "jquery-ui",
+        "osv_name": "jquery-ui",
+        "ecosystem": "npm",
+        "url": [
+            re.compile(r"/jquery(?:ui|-ui)/(\d+\.\d+\.\d+)/", re.I),
+            re.compile(r"jquery[.-]ui[-.](\d+\.\d+\.\d+)", re.I),
+        ],
+        "content": [re.compile(r"jQuery\s+UI\s+-\s+v?(\d+\.\d+\.\d+)", re.I)],
+    },
+    {
+        "name": "jquery-migrate",
+        "osv_name": "jquery-migrate",
+        "ecosystem": "npm",
+        "url": [
+            re.compile(r"/jquery-migrate/(\d+\.\d+\.\d+)/", re.I),
+            re.compile(r"jquery-migrate[-.](\d+\.\d+\.\d+)", re.I),
+        ],
+        "content": [re.compile(r"jQuery\s+Migrate\s+-\s+v?(\d+\.\d+\.\d+)", re.I)],
+    },
+    {
+        "name": "bootstrap",
+        "osv_name": "bootstrap",
+        "ecosystem": "npm",
+        "url": [
+            re.compile(r"/(?:twitter-)?bootstrap/(\d+\.\d+\.\d+)/", re.I),
+            re.compile(r"bootstrap-(\d+\.\d+\.\d+)(?:\.min)?\.(?:js|css)", re.I),
+            re.compile(r"bootstrap(?:\.bundle)?(?:\.min)?\.(?:js|css)\?v?=?(\d+\.\d+\.\d+)", re.I),
+        ],
+        "content": [re.compile(r"Bootstrap\s+v?(\d+\.\d+\.\d+)", re.I)],
+    },
+    {
+        "name": "angular",  # AngularJS 1.x
+        "osv_name": "angular",
+        "ecosystem": "npm",
+        "url": [
+            re.compile(r"/angular(?:js)?/(\d+\.\d+\.\d+)/", re.I),
+            re.compile(r"angular-(\d+\.\d+\.\d+)(?:\.min)?\.js", re.I),
+        ],
+        "content": [re.compile(r"AngularJS\s+v?(\d+\.\d+\.\d+)", re.I)],
+    },
+    {
+        "name": "react",
+        "osv_name": "react",
+        "ecosystem": "npm",
+        "url": [
+            re.compile(r"/react/(\d+\.\d+\.\d+)/", re.I),
+            re.compile(r"react[-.](\d+\.\d+\.\d+)(?:\.min|\.development|\.production)?\.js", re.I),
+        ],
+        "content": [re.compile(r"\*\s*React\s+v?(\d+\.\d+\.\d+)", re.I)],
+    },
+    {
+        "name": "vue",
+        "osv_name": "vue",
+        "ecosystem": "npm",
+        "url": [
+            re.compile(r"/vue(?:\.js)?/(\d+\.\d+\.\d+)/", re.I),
+            re.compile(r"vue[-.](\d+\.\d+\.\d+)(?:\.min)?\.js", re.I),
+        ],
+        "content": [re.compile(r"Vue\.js\s+v?(\d+\.\d+\.\d+)", re.I)],
+    },
+    {
+        "name": "lodash",
+        "osv_name": "lodash",
+        "ecosystem": "npm",
+        "url": [
+            re.compile(r"/lodash(?:\.js)?/(\d+\.\d+\.\d+)/", re.I),
+            re.compile(r"lodash-(\d+\.\d+\.\d+)(?:\.min)?\.js", re.I),
+        ],
+        "content": [re.compile(r"lodash[^\d]{0,20}(\d+\.\d+\.\d+)", re.I)],
+    },
+    {
+        "name": "moment",
+        "osv_name": "moment",
+        "ecosystem": "npm",
+        "url": [
+            re.compile(r"/moment(?:\.js)?/(\d+\.\d+\.\d+)/", re.I),
+            re.compile(r"moment-(\d+\.\d+\.\d+)(?:\.min)?\.js", re.I),
+        ],
+        "content": [re.compile(r"//!\s*moment\.js\s+version\s+:\s+(\d+\.\d+\.\d+)", re.I)],
+    },
+    {
+        "name": "handlebars",
+        "osv_name": "handlebars",
+        "ecosystem": "npm",
+        "url": [
+            re.compile(r"/handlebars\.js/(\d+\.\d+\.\d+)/", re.I),
+            re.compile(r"handlebars-(\d+\.\d+\.\d+)(?:\.min)?\.js", re.I),
+        ],
+        "content": [re.compile(r"Handlebars\.VERSION\s*=\s*[\"'](\d+\.\d+\.\d+)", re.I)],
+    },
+    {
+        "name": "underscore",
+        "osv_name": "underscore",
+        "ecosystem": "npm",
+        "url": [
+            re.compile(r"/underscore\.js/(\d+\.\d+\.\d+)/", re.I),
+            re.compile(r"underscore-(\d+\.\d+\.\d+)(?:\.min)?\.js", re.I),
+        ],
+        "content": [re.compile(r"Underscore\.js\s+(\d+\.\d+\.\d+)", re.I)],
+    },
+    {
+        "name": "backbone",
+        "osv_name": "backbone",
+        "ecosystem": "npm",
+        "url": [
+            re.compile(r"/backbone\.js/(\d+\.\d+\.\d+)/", re.I),
+            re.compile(r"backbone-(\d+\.\d+\.\d+)(?:\.min)?\.js", re.I),
+        ],
+        "content": [re.compile(r"Backbone\.js\s+(\d+\.\d+\.\d+)", re.I)],
+    },
+    {
+        "name": "axios",
+        "osv_name": "axios",
+        "ecosystem": "npm",
+        "url": [
+            re.compile(r"/axios/(\d+\.\d+\.\d+)/", re.I),
+            re.compile(r"axios-(\d+\.\d+\.\d+)(?:\.min)?\.js", re.I),
+        ],
+        "content": [re.compile(r"axios[^\d]{0,20}(\d+\.\d+\.\d+)", re.I)],
+    },
+    {
+        "name": "dompurify",
+        "osv_name": "dompurify",
+        "ecosystem": "npm",
+        "url": [
+            re.compile(r"/dompurify/(\d+\.\d+\.\d+)/", re.I),
+            re.compile(r"dompurify-(\d+\.\d+\.\d+)(?:\.min)?\.js", re.I),
+        ],
+        "content": [re.compile(r"DOMPurify\s+(\d+\.\d+\.\d+)", re.I)],
+    },
+    {
+        "name": "ckeditor",
+        "osv_name": "ckeditor4",
+        "ecosystem": "npm",
+        "url": [
+            re.compile(r"/ckeditor(?:4)?/(\d+\.\d+\.\d+)/", re.I),
+            re.compile(r"ckeditor-(\d+\.\d+\.\d+)(?:\.min)?\.js", re.I),
+        ],
+        "content": [re.compile(r"CKEDITOR\.version\s*=\s*[\"'](\d+\.\d+\.\d+)", re.I)],
+    },
+    {
+        "name": "tinymce",
+        "osv_name": "tinymce",
+        "ecosystem": "npm",
+        "url": [
+            re.compile(r"/tinymce/(\d+\.\d+\.\d+)/", re.I),
+            re.compile(r"tinymce-(\d+\.\d+\.\d+)(?:\.min)?\.js", re.I),
+        ],
+        "content": [re.compile(r"tinymce[^\d]{0,20}majorVersion:\s*[\"'](\d+)", re.I)],
+    },
+]
+
+
+def _extract_js_library(url: str, content: str = "") -> list[tuple[str, str, str, str]]:
+    """Identify JS libraries in a URL and optional file content.
+
+    Returns a list of (friendly_name, osv_name, ecosystem, version) tuples.
+    Duplicates are left in; dedupe at the call site.
+    """
+    found: list[tuple[str, str, str, str]] = []
+    for lib in _JS_LIB_CATALOG:
+        for rx in lib["url"]:
+            m = rx.search(url or "")
+            if m:
+                found.append((lib["name"], lib["osv_name"], lib["ecosystem"], m.group(1)))
+                break  # one hit per lib per URL is enough
+        if content:
+            for rx in lib["content"]:
+                m = rx.search(content)
+                if m:
+                    found.append((lib["name"], lib["osv_name"], lib["ecosystem"], m.group(1)))
+                    break
+    return found
+
+
+async def _collect_html_script_refs(page, target_url: str) -> list[str]:
+    """Pull <script src> URLs from the live DOM so we can regex-match filenames
+    even when network capture missed them (e.g. iframes already closed)."""
+    if page is None:
+        return []
+    try:
+        urls = await page.evaluate("""() => {
+            const out = new Set();
+            document.querySelectorAll('script[src]').forEach(s => out.add(s.src));
+            document.querySelectorAll('link[rel="stylesheet"][href]').forEach(l => out.add(l.href));
+            return [...out];
+        }""")
+        return [u for u in urls if isinstance(u, str) and u.startswith("http")]
+    except Exception:
+        return []
+
+
+async def _check_js_library_vulnerabilities(
+    http_client,
+    js_urls: list[str],
+    page=None,
+    target_url: str = "",
+    tech_fingerprint: dict | None = None,
+) -> list[dict]:
+    """Detect vulnerable JavaScript libraries by name+version and enrich with
+    real CVE data from OSV.dev + NVD (via scripts.cve_lookup).
+
+    Hybrid approach:
+      • Deterministic regex catalog extracts (lib, version) from URLs, inline
+        <script src> on the page, and the first 8 KB of each first-party JS
+        file.
+      • Dynamic CVE lookup (OSV.dev) pulls the authoritative CVE list and CVSS
+        for that exact version — no hand-maintained CVE dictionary.
+      • Detected libs are written back into ``tech_fingerprint["technologies"]``
+        so downstream LLM phases see them as attack-surface context.
+    """
+    findings: list[dict] = []
+
+    candidates: dict[tuple[str, str], tuple[str, str, str]] = {}
+    # key = (osv_name, version)  →  (friendly_name, ecosystem, source_url)
+
+    def _add(name: str, osv_name: str, ecosystem: str, version: str, source_url: str):
+        key = (osv_name, version)
+        if key not in candidates:
+            candidates[key] = (name, ecosystem, source_url)
+
+    # ── 1. Filename-based extraction on every known JS URL ────────────
+    for u in js_urls or []:
+        for name, osv_name, ecosystem, version in _extract_js_library(u):
+            _add(name, osv_name, ecosystem, version, u)
+
+    # ── 2. DOM-reported <script src>/<link href> (picks up CSS versions too)
+    try:
+        dom_urls = await _collect_html_script_refs(page, target_url)
+        for u in dom_urls:
+            for name, osv_name, ecosystem, version in _extract_js_library(u):
+                _add(name, osv_name, ecosystem, version, u)
+    except Exception as e:
+        logger.debug("DOM script-ref collection failed: %s", e)
+
+    # ── 3. Content-banner extraction — only for URLs with no URL hit and
+    #      only on first-party JS (third-party already filtered upstream). ─
+    hit_urls = {v[2] for v in candidates.values()}
+    remaining = [u for u in (js_urls or []) if u not in hit_urls]
+    for u in remaining[:40]:  # cap to keep runtime bounded
+        try:
+            resp = await http_client.get(u, timeout=8.0)
+            if resp.status_code != 200:
+                continue
+            snippet = (resp.text or "")[:8000]
+        except Exception:
+            continue
+        for name, osv_name, ecosystem, version in _extract_js_library(u, snippet):
+            _add(name, osv_name, ecosystem, version, u)
+
+    if not candidates:
+        return findings
+
+    logger.info("JS library audit: %d unique (lib, version) pairs detected", len(candidates))
+
+    # ── 4. Dynamic CVE enrichment via OSV.dev + NVD ───────────────────
+    try:
+        from scripts.cve_lookup import enrich_library_finding
+    except Exception as e:
+        logger.warning("cve_lookup unavailable (%s) — emitting bare library findings", e)
+        enrich_library_finding = None  # type: ignore
+
+    for (osv_name, version), (friendly, ecosystem, source_url) in candidates.items():
+        enriched = {}
+        if enrich_library_finding:
+            try:
+                # enrich_library_finding() is synchronous + network-bound;
+                # offload so we never block the event loop.
+                loop = asyncio.get_event_loop()
+                enriched = await loop.run_in_executor(
+                    None, enrich_library_finding, osv_name, version, ecosystem
+                )
+            except Exception as e:
+                logger.debug("CVE enrichment failed for %s@%s: %s", osv_name, version, e)
+                enriched = {}
+
+        # Record into tech fingerprint regardless of CVE outcome (LLM context).
+        if tech_fingerprint is not None:
+            try:
+                techs = tech_fingerprint.setdefault("technologies", {})
+                label = f"{friendly} {version}"
+                suffix = ""
+                if enriched.get("has_cves"):
+                    suffix = f" (vulnerable — {enriched.get('cve_count', 0)} CVEs, max CVSS {enriched.get('max_cvss', 0):.1f})"
+                techs[label] = {
+                    "confidence": "high",
+                    "evidence": f"Detected via {source_url}{suffix}",
+                    "category": "js_library",
+                }
+            except Exception:
+                pass
+
+        if not enriched.get("has_cves"):
+            continue
+
+        cvss = float(enriched.get("max_cvss", 0.0) or 0.0)
+        severity = (enriched.get("max_severity") or "").capitalize()
+        if not severity:
+            if cvss >= 9.0: severity = "Critical"
+            elif cvss >= 7.0: severity = "High"
+            elif cvss >= 4.0: severity = "Medium"
+            elif cvss > 0: severity = "Low"
+            else: severity = "Info"
+
+        top_cves = enriched.get("cves", [])[:5]
+        cwe_set: list[str] = []
+        for c in top_cves:
+            for cw in c.get("cwes", []) or []:
+                if cw and cw not in cwe_set:
+                    cwe_set.append(cw)
+        cwe = cwe_set[0] if cwe_set else "CWE-1104"
+
+        evidence_lines = [
+            f"Detected {friendly}@{version} via {source_url}.",
+            f"{enriched.get('cve_count', 0)} known CVE(s) per OSV.dev. "
+            f"Highest CVSS {cvss:.1f} ({severity}).",
+        ]
+        for c in top_cves:
+            evidence_lines.append(
+                f"  • {c.get('cve')} (CVSS {c.get('cvss', 0.0):.1f}) — "
+                f"{(c.get('description') or c.get('osv_summary') or '')[:140]}"
+            )
+        evidence = "\n".join(evidence_lines)
+
+        findings.append(_make_finding(
+            title=f"Vulnerable JavaScript library: {friendly} {version}",
+            severity=severity,
+            cwe=cwe,
+            cvss=f"{cvss:.1f}",
+            url=source_url,
+            evidence=evidence,
+        ))
+
+    if findings:
+        logger.info("JS library audit: %d vulnerable library findings", len(findings))
+    return findings
+
+
 async def run_http_only_passive_recon(
     http_client,
     target_url: str,
@@ -2667,7 +3794,8 @@ async def run_http_only_passive_recon(
     _progress("passive_start", {
         "checks": "sensitive_files, security_headers, actuator, cors, cache_control, "
                   "csp, referrer_policy, permissions_policy, https_redirect, hsts_preload, "
-                  "error_pages, clickjacking, api_version_downgrade, tech_fingerprint",
+                  "error_pages, clickjacking, api_version_downgrade, tls_audit, "
+                  "js_library_cves, tech_fingerprint",
         "mode": "http_only",
     })
 
@@ -2696,12 +3824,30 @@ async def run_http_only_passive_recon(
     await _run("Error pages", _check_error_pages(http_client, target_url))
     await _run("Clickjacking", _check_clickjacking(http_client, target_url))
     await _run("API version downgrade", _check_api_version_downgrade(http_client, target_url, []))
+    # No Playwright page in HTTP-only mode, so DOM-based host harvesting is
+    # unavailable. We still pull sibling hosts from robots.txt + sitemap.xml.
+    await _run(
+        "TLS audit",
+        _check_tls_configuration_multi_host(None, http_client, target_url),
+    )
 
     tech_fingerprint = await _fingerprint_technologies_http_only(http_client, target_url)
     _progress("passive_step", {
         "step": "Tech fingerprint",
         "technologies": list(tech_fingerprint.get("technologies", {}).keys()),
     })
+
+    # JS library audit — HTTP-only mode has no browser, so the detector falls
+    # back to URL-pattern matching against any .js links surfaced by earlier
+    # fingerprinting (e.g. in HTML body regexes). For a pure API target this
+    # is usually a no-op, which is the correct behaviour.
+    await _run(
+        "JS library CVE audit",
+        _check_js_library_vulnerabilities(
+            http_client, js_urls=[], page=None,
+            target_url=target_url, tech_fingerprint=tech_fingerprint,
+        ),
+    )
 
     _progress("passive_end", {"total_findings": len(findings), "mode": "http_only"})
     logger.info("HTTP-only passive recon complete: %d findings", len(findings))

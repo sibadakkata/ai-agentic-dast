@@ -17,3 +17,4 @@ uvicorn[standard]>=0.32.0
 mcp>=1.26.0
 openpyxl>=3.1.0
 tldextract>=5.1.0
+sslyze>=6.0.0

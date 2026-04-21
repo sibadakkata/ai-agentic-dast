@@ -75,6 +75,13 @@ class ScanTarget:
     credentials_b: dict | None = None    # optional User B for BOLA/BFLA two-user testing
     workflow_id: str | None = None       # saved workflow ID to replay before/during scan
     business_flow: str | None = None     # natural-language business flow description
+    # Crawl-only mode: when "crawl_only", the agent skips all OWASP vulnerability
+    # test phases and the attack-chain phase. Passive recon (TLS, headers, JS
+    # CVEs, CSP, CORS, HSTS, clickjacking), API baseline, authentication, and
+    # a single broad CRAWL phase still run so the user can verify that the
+    # scanner can reach and enumerate their app before committing to a full
+    # vulnerability scan. Mirrors Acunetix "Crawl Only" scan type.
+    scan_profile: str = "vulnerability_scan"  # vulnerability_scan | crawl_only
 
 
 def _resolve_env_vars(obj: Any) -> Any:
@@ -1236,6 +1243,7 @@ def load_targets_from_dict(t: dict) -> ScanTarget:
         credentials_b=creds_b,
         workflow_id=t.get("workflow_id") or None,
         business_flow=t.get("business_flow") or None,
+        scan_profile=(t.get("scan_profile") or "vulnerability_scan"),
     )
 
 

@@ -743,6 +743,16 @@ input:focus-visible, select:focus-visible, textarea:focus-visible { outline:none
         </select>
       </div>
       <div class="form-group">
+        <label>Scan Profile</label>
+        <select id="scan-profile" onchange="onScanProfileChange()">
+          <option value="vulnerability_scan" selected>Vulnerability Scan — crawl + OWASP tests (default)</option>
+          <option value="crawl_only">Crawl Only — discover URLs/forms/APIs, no attack payloads</option>
+        </select>
+        <div id="scan-profile-hint" style="display:none;margin-top:6px;padding:10px 14px;border-radius:8px;background:rgba(59,130,246,0.08);border:1px solid rgba(59,130,246,0.25);font-size:12px;color:#1d4ed8;line-height:1.5;">
+          <strong>Crawl Only mode:</strong> skips all OWASP vulnerability-test phases (no injection, auth-bypass, BOLA, etc.). Still runs passive recon (TLS, security headers, JS library CVEs) and a broad crawl of URLs, SPA routes, forms, APIs, and in-scope sub-domains. Use this to verify the scanner can reach every part of your app before committing to a full scan. Coverage shows up in the usual <em>Crawled Endpoints</em>, <em>Out of Scope</em>, and <em>AI Agent Coverage</em> tabs.
+        </div>
+      </div>
+      <div class="form-group">
         <label>Scan Scope</label>
         <select id="scan-scope" onchange="onScanScopeChange()">
           <option value="url_only">This URL Only</option>
@@ -2139,6 +2149,7 @@ async function confirmPlan() {
     password: p.password || '',
     model: model,
     scan_mode: p.scan_mode || 'both',
+    scan_profile: p.scan_profile || 'vulnerability_scan',
     scan_scope: p.scan_scope || 'directory',
     focus_urls: (p.focus_urls || []).filter(Boolean),
     focus_areas: (p.focus_areas || []).filter(Boolean),
@@ -2214,6 +2225,26 @@ function onScanScopeChange() {
   var scope = document.getElementById('scan-scope').value;
   var group = document.getElementById('focus-urls-group');
   if (group) group.style.display = (scope === 'full_site') ? 'none' : '';
+}
+
+function onScanProfileChange() {
+  var sel = document.getElementById('scan-profile');
+  if (!sel) return;
+  var isCrawl = sel.value === 'crawl_only';
+  var hint = document.getElementById('scan-profile-hint');
+  if (hint) hint.style.display = isCrawl ? '' : 'none';
+  var intensity = document.getElementById('scan-intensity');
+  if (intensity) {
+    intensity.disabled = isCrawl;
+    intensity.style.opacity = isCrawl ? '0.5' : '';
+    intensity.title = isCrawl ? 'Not applicable in Crawl Only mode' : '';
+  }
+  var focusChips = document.getElementById('focus-chips');
+  if (focusChips) {
+    focusChips.style.pointerEvents = isCrawl ? 'none' : '';
+    focusChips.style.opacity = isCrawl ? '0.4' : '';
+    focusChips.title = isCrawl ? 'Not applicable in Crawl Only mode' : '';
+  }
 }
 
 function toggleFocusChip(el) {
@@ -2337,6 +2368,9 @@ async function loadScans() {
       var mode = s.scan_mode || '';
       var modeLabel = {web:'Web',api:'API',both:'Full',quick:'Quick',standard:'Std',deep:'Deep'}[mode] || mode;
       var modeColor = {web:'#6366f1',api:'#2563eb',both:'#059669',quick:'#d97706',standard:'#6366f1',deep:'#dc2626'}[mode] || '#6b7280';
+      var crawlOnlyBadge = (s.scan_profile === 'crawl_only')
+        ? '<span class="badge" style="background:rgba(59,130,246,0.1);color:#1d4ed8;font-size:10px;margin-left:4px;padding:1px 6px;border-radius:8px;font-weight:600;" title="Crawl-only scan (no vulnerability testing)">CRAWL</span>'
+        : '';
       var started = s.started ? _fmtTime(s.started) : '-';
       var phaseInfo = s.current_phase ? '<div style="font-size:11px;color:var(--text2);margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:200px;" title="' + esc(s.current_phase) + '">' + esc(s.current_phase) + '</div>' : '';
       var fcColor = (typeof fc === 'number' && fc > 0) ? (fc >= 10 ? 'var(--red)' : fc >= 3 ? 'var(--orange)' : 'var(--text)') : 'var(--text2)';
@@ -2358,6 +2392,7 @@ async function loadScans() {
       if (_vis('model'))    cells += '<div class="model" title="' + esc(model) + '">' + esc(_shortModel(model)) + '</div>';
       if (_vis('status'))   cells += '<div><span class="badge badge-' + st + '">' + stLabel + '</span>' +
         (modeLabel ? ' <span class="badge" style="font-size:10px;padding:2px 7px;background:' + modeColor + '18;color:' + modeColor + ';margin-left:3px;">' + modeLabel + '</span>' : '') +
+        crawlOnlyBadge +
         (st === 'running' ? phaseInfo : '') + '</div>';
       if (_vis('started'))  cells += '<div style="font-size:12px;color:var(--text2);">' + started + '</div>';
       if (_vis('duration')) cells += '<div style="font-size:13px;color:var(--text2);">' + dur + '</div>';
@@ -2763,6 +2798,7 @@ async function startScan() {
     password: document.getElementById('password').value,
     model: document.getElementById('model-select').value,
     scan_mode: document.getElementById('scan-mode').value,
+    scan_profile: (document.getElementById('scan-profile') || {}).value || 'vulnerability_scan',
     scan_scope: scanScope,
     focus_urls: focusUrls,
     focus_areas: focusAreas,
@@ -3837,9 +3873,11 @@ function showErrorView(scanId, data) {
   const errShowAi = true;
   const errAiStatus = data.ai_status || '';
 
+  const _profileLabel = (data.scan_profile === 'crawl_only') ? 'Crawl Only' : 'Vuln Scan';
   let errStatsHtml = [
     stat(_shortModel(data.model_name || data.model), 'Model'),
     stat(data.scan_mode || '-', 'Scan Mode'),
+    stat(_profileLabel, 'Profile'),
     stat((data.scan_scope || 'directory').replace('_', ' '), 'Scope'),
     stat((data.focus_areas || []).length ? data.focus_areas.join(', ') : 'Full Scan', 'Vuln Focus'),
     stat((data.scan_intensity || 'deep').charAt(0).toUpperCase() + (data.scan_intensity || 'deep').slice(1), 'Intensity'),
