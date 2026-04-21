@@ -2747,13 +2747,25 @@ def _tls_probe_version_sync(host: str, port: int, version_attr: str) -> tuple[bo
 
 
 def _tls_probe_cipher_sync(host: str, port: int, cipher_string: str) -> tuple[bool, str]:
-    """Try to negotiate using ``cipher_string``. Returns (accepted, evidence)."""
+    """Try to negotiate using ``cipher_string``. Returns (accepted, evidence).
+
+    IMPORTANT: SSLContext.set_ciphers() only affects TLS ≤ 1.2. TLS 1.3 uses
+    a fixed set of AEAD cipher suites that OpenSSL picks automatically and
+    ignores the legacy cipher list. If we let the handshake float up to 1.3
+    the server will happily complete with a modern AEAD suite and we would
+    mis-report "weak cipher accepted". Pin max_version to TLS 1.2 so the
+    legacy cipher string is actually honoured.
+    """
     import socket
     import ssl
     try:
         ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
         ctx.check_hostname = False
         ctx.verify_mode = ssl.CERT_NONE
+        try:
+            ctx.maximum_version = ssl.TLSVersion.TLSv1_2
+        except (AttributeError, ValueError):
+            pass
         try:
             ctx.set_ciphers(f"{cipher_string}:@SECLEVEL=0")
         except ssl.SSLError:
@@ -2766,6 +2778,10 @@ def _tls_probe_cipher_sync(host: str, port: int, cipher_string: str) -> tuple[bo
             with ctx.wrap_socket(sock, server_hostname=host) as ssock:
                 negotiated = ssock.version() or ""
                 cipher = ssock.cipher() or ("", "", 0)
+                # Paranoid double-check: if we still somehow landed on TLS 1.3,
+                # the server didn't honour the weak cipher — discard result.
+                if negotiated and negotiated.upper().startswith("TLSV1.3"):
+                    return False, ""
                 return True, f"Server accepted cipher {cipher[0]} on {negotiated}"
     except (ssl.SSLError, OSError, ConnectionError):
         return False, ""
