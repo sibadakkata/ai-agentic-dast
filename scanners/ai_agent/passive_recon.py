@@ -17,6 +17,8 @@ Runs before the LLM scan phases. Checks for:
   - Subresource Integrity (SRI) missing on external scripts
   - API version downgrade discovery
   - Form action targets on external domains
+  - TLS protocol + cipher audit (TLS 1.0/1.1, 3DES/Sweet32, RC4, NULL, EXPORT, anon DH)
+  - Vulnerable JavaScript library detection (OSV.dev + NVD enrichment)
 """
 from __future__ import annotations
 
@@ -288,7 +290,7 @@ async def run_passive_recon(
     target_parsed = urlparse(target_url)
     base_url = f"{target_parsed.scheme}://{target_parsed.netloc}"
 
-    _progress("passive_start", {"checks": "source_maps, js_sinks, secrets, sensitive_files, headers, html_comments, telemetry_token_leakage, cookie_security, jwt_analysis, cors, cache_control, sri, form_actions, api_versioning, csp_analysis, referrer_policy, permissions_policy, mixed_content, password_autocomplete, sensitive_url_params, https_redirect, hsts_preload, error_pages, clickjacking"})
+    _progress("passive_start", {"checks": "source_maps, js_sinks, secrets, sensitive_files, headers, html_comments, telemetry_token_leakage, cookie_security, jwt_analysis, cors, cache_control, sri, form_actions, api_versioning, csp_analysis, referrer_policy, permissions_policy, mixed_content, password_autocomplete, sensitive_url_params, https_redirect, hsts_preload, error_pages, clickjacking, tls_audit, js_library_cves"})
 
     # ── 1. Collect all JS files loaded by the page ────────────────────
     all_js_urls = await _collect_js_urls(page, target_url)
@@ -481,9 +483,34 @@ async def run_passive_recon(
         _cb(f)
     _progress("passive_step", {"step": "Clickjacking", "found": len(cj_findings)})
 
-    # ── 25. Technology fingerprinting (context for LLM) ───────────────
+    # ── 25. TLS protocol & cipher audit ────────────────────────────────
+    try:
+        tls_findings = await _check_tls_configuration(target_url)
+    except Exception as e:
+        logger.debug("TLS audit failed: %s", e)
+        tls_findings = []
+    for f in tls_findings:
+        findings.append(f)
+        _cb(f)
+    _progress("passive_step", {"step": "TLS audit", "found": len(tls_findings)})
+
+    # ── 26. Technology fingerprinting (context for LLM) ───────────────
     tech_fingerprint = await _fingerprint_technologies(page, http_client, target_url, js_urls)
     _progress("passive_step", {"step": "Tech fingerprint", "technologies": list(tech_fingerprint.get("technologies", {}).keys())})
+
+    # ── 27. Vulnerable JavaScript library detection (OSV.dev + NVD) ───
+    try:
+        js_lib_findings = await _check_js_library_vulnerabilities(
+            http_client, js_urls, page=page, target_url=target_url,
+            tech_fingerprint=tech_fingerprint,
+        )
+    except Exception as e:
+        logger.debug("JS library audit failed: %s", e)
+        js_lib_findings = []
+    for f in js_lib_findings:
+        findings.append(f)
+        _cb(f)
+    _progress("passive_step", {"step": "JS library CVE audit", "found": len(js_lib_findings)})
 
     _progress("passive_end", {"total_findings": len(findings)})
     logger.info("Passive recon complete: %d findings", len(findings))
@@ -2433,6 +2460,9 @@ _CWE_REMEDIATION: dict[str, str] = {
     "CWE-942": "Remove or restrict cross-domain policy files (crossdomain.xml, clientaccesspolicy.xml). Set allow-access-from to specific trusted domains.",
     "CWE-1021": "Set X-Frame-Options: DENY (or SAMEORIGIN) and use Content-Security-Policy frame-ancestors directive to prevent clickjacking.",
     "CWE-1275": "Ensure cookies use the SameSite attribute (Strict or Lax) to prevent CSRF via cross-site requests.",
+    "CWE-326": "Disable weak/null/anonymous/export cipher suites. Require AEAD ciphers (AES-GCM, ChaCha20-Poly1305) with PFS key exchange.",
+    "CWE-327": "Disable deprecated protocols (TLS 1.0/1.1) and weak ciphers (RC4, 3DES/DES-CBC3, DES). Only enable TLS 1.2+ with modern cipher suites.",
+    "CWE-1104": "Upgrade the vulnerable third-party JavaScript library to a patched version. Subscribe to security advisories and automate dependency auditing (npm audit, Snyk, Dependabot).",
 }
 
 
@@ -2497,6 +2527,9 @@ _IMPACT_MAP = {
     "form action": "Forms submitting to external domains may leak credentials or sensitive data to third parties.",
     "api version": "Older API versions may lack security fixes, exposing known vulnerabilities.",
     "sensitive": "Exposed sensitive files or data can be used for unauthorized access or further attacks.",
+    "tls": "Deprecated TLS protocols or weak ciphers allow network attackers to downgrade the connection, decrypt traffic, or impersonate the server.",
+    "cipher": "Weak cipher suites allow network attackers to decrypt or forge TLS sessions (e.g. Sweet32 on 3DES, keystream recovery on RC4).",
+    "javascript library": "Outdated JS libraries ship known CVEs (XSS, prototype pollution, ReDoS). Any client input reaching library sinks can be exploited.",
 }
 
 
@@ -2647,6 +2680,547 @@ async def _check_actuator_exposure(http_client, target_url: str) -> list[dict]:
     return findings
 
 
+# ---------------------------------------------------------------------------
+# TLS protocol & cipher audit (deterministic stdlib probes)
+# ---------------------------------------------------------------------------
+
+# Weak cipher families we explicitly probe for. Each entry is (OpenSSL cipher
+# string, short label, CWE, CVSS, severity, description).
+_WEAK_CIPHER_PROBES = [
+    ("RC4",                     "RC4",                        "CWE-327", "5.9", "Medium",
+     "RC4 stream cipher is cryptographically broken (RFC 7465). Allows biased-keystream recovery of session tokens."),
+    ("3DES:DES-CBC3-SHA",       "3DES (Sweet32)",             "CWE-327", "5.9", "Medium",
+     "3DES/DES-CBC3 block size is 64 bits — vulnerable to Sweet32 birthday attacks (CVE-2016-2183)."),
+    ("NULL",                    "NULL cipher (no encryption)","CWE-326", "7.5", "High",
+     "NULL cipher accepted — server will negotiate a session with no encryption at all."),
+    ("EXPORT",                  "EXPORT-grade cipher",        "CWE-326", "7.5", "High",
+     "EXPORT-grade ciphers (40/56-bit) accepted — trivially broken and enable FREAK/Logjam-class attacks."),
+    ("aNULL",                   "Anonymous DH/ECDH",          "CWE-287", "7.4", "High",
+     "Anonymous DH/ECDH cipher accepted — no server authentication, trivial MITM."),
+]
+
+# Deprecated TLS protocol versions we try to negotiate directly.
+# ssl.TLSVersion is always present on Python 3.7+; we still guard imports.
+_TLS_VERSION_PROBES = [
+    ("TLSv1",   "TLS 1.0", "CWE-327", "6.5", "Medium",
+     "TLS 1.0 is deprecated (RFC 8996) and no longer PCI-DSS compliant. Vulnerable to BEAST, POODLE, and Lucky13."),
+    ("TLSv1_1", "TLS 1.1", "CWE-327", "5.3", "Medium",
+     "TLS 1.1 is deprecated (RFC 8996). No modern AEAD ciphers; weaker than TLS 1.2/1.3."),
+]
+
+
+def _tls_probe_version_sync(host: str, port: int, version_attr: str) -> tuple[bool, str]:
+    """Synchronous TLS version probe. Returns (supported, evidence_string).
+
+    Runs in an executor because the ssl module is blocking.
+    """
+    import socket
+    import ssl
+    try:
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        # Some distro builds of OpenSSL drop old protocols at SECLEVEL>=1.
+        try:
+            ctx.set_ciphers("ALL:@SECLEVEL=0")
+        except ssl.SSLError:
+            ctx.set_ciphers("DEFAULT:@SECLEVEL=0")
+        try:
+            v = getattr(ssl.TLSVersion, version_attr)
+            ctx.minimum_version = v
+            ctx.maximum_version = v
+        except (AttributeError, ValueError):
+            return False, f"{version_attr} not exposed by local OpenSSL"
+    except Exception as e:
+        return False, f"Unable to build SSLContext for {version_attr}: {e}"
+
+    try:
+        with socket.create_connection((host, port), timeout=5) as sock:
+            with ctx.wrap_socket(sock, server_hostname=host) as ssock:
+                negotiated = ssock.version() or ""
+                cipher = ssock.cipher() or ("", "", 0)
+                return True, f"Negotiated {negotiated} with cipher {cipher[0]}"
+    except (ssl.SSLError, OSError, ConnectionError):
+        return False, ""
+    except Exception as e:
+        return False, f"probe error: {e}"
+
+
+def _tls_probe_cipher_sync(host: str, port: int, cipher_string: str) -> tuple[bool, str]:
+    """Try to negotiate using ``cipher_string``. Returns (accepted, evidence)."""
+    import socket
+    import ssl
+    try:
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        try:
+            ctx.set_ciphers(f"{cipher_string}:@SECLEVEL=0")
+        except ssl.SSLError:
+            return False, f"Local OpenSSL refuses cipher string {cipher_string!r}"
+    except Exception as e:
+        return False, f"SSLContext build failed for {cipher_string}: {e}"
+
+    try:
+        with socket.create_connection((host, port), timeout=5) as sock:
+            with ctx.wrap_socket(sock, server_hostname=host) as ssock:
+                negotiated = ssock.version() or ""
+                cipher = ssock.cipher() or ("", "", 0)
+                return True, f"Server accepted cipher {cipher[0]} on {negotiated}"
+    except (ssl.SSLError, OSError, ConnectionError):
+        return False, ""
+    except Exception as e:
+        return False, f"probe error: {e}"
+
+
+async def _check_tls_configuration(target_url: str) -> list[dict]:
+    """Audit the target's TLS configuration for deprecated protocols and
+    weak cipher suites.
+
+    - Deprecated protocols probed: TLS 1.0, TLS 1.1
+    - Weak ciphers probed: RC4, 3DES (Sweet32), NULL, EXPORT, anonymous DH/ECDH
+
+    Returns one finding per observed weakness. Only runs when the target is
+    HTTPS; HTTP targets return an empty list.
+    """
+    findings: list[dict] = []
+    try:
+        parsed = urlparse(target_url)
+    except Exception:
+        return findings
+    if parsed.scheme.lower() != "https":
+        return findings
+
+    host = parsed.hostname
+    port = parsed.port or 443
+    if not host:
+        return findings
+
+    base_url = f"https://{host}:{port}"
+    loop = asyncio.get_event_loop()
+
+    # ── Connectivity sanity check ─────────────────────────────────────
+    reachable, _ = await loop.run_in_executor(
+        None, _tls_probe_version_sync, host, port, "TLSv1_2"
+    )
+    if not reachable:
+        # Try 1.3 — some hosts are TLS1.3-only now.
+        reachable13, _ = await loop.run_in_executor(
+            None, _tls_probe_version_sync, host, port, "TLSv1_3"
+        )
+        if not reachable13:
+            logger.debug("TLS audit skipped: %s:%s not reachable via TLS", host, port)
+            return findings
+
+    # ── Deprecated protocol versions ──────────────────────────────────
+    for version_attr, label, cwe, cvss, severity, desc in _TLS_VERSION_PROBES:
+        try:
+            supported, evidence = await loop.run_in_executor(
+                None, _tls_probe_version_sync, host, port, version_attr
+            )
+        except Exception as e:
+            logger.debug("TLS %s probe failed: %s", label, e)
+            continue
+        if not supported:
+            continue
+        findings.append(_make_finding(
+            title=f"Deprecated TLS protocol enabled: {label}",
+            severity=severity,
+            cwe=cwe,
+            cvss=cvss,
+            url=base_url,
+            evidence=f"{desc} {evidence}".strip(),
+        ))
+
+    # ── Weak ciphers ──────────────────────────────────────────────────
+    for cipher_string, label, cwe, cvss, severity, desc in _WEAK_CIPHER_PROBES:
+        try:
+            accepted, evidence = await loop.run_in_executor(
+                None, _tls_probe_cipher_sync, host, port, cipher_string
+            )
+        except Exception as e:
+            logger.debug("TLS cipher %s probe failed: %s", label, e)
+            continue
+        if not accepted:
+            continue
+        findings.append(_make_finding(
+            title=f"Weak TLS cipher accepted: {label}",
+            severity=severity,
+            cwe=cwe,
+            cvss=cvss,
+            url=base_url,
+            evidence=f"{desc} {evidence}".strip(),
+        ))
+
+    if findings:
+        logger.info("TLS audit on %s: %d weaknesses found", base_url, len(findings))
+    return findings
+
+
+# ---------------------------------------------------------------------------
+# Vulnerable JS library detection (regex catalog + OSV.dev/NVD enrichment)
+# ---------------------------------------------------------------------------
+
+# Map extractor name -> (OSV package name, OSV ecosystem, URL regexes, content regexes)
+# URL regexes run against the JS URL (path + query); content regexes run against
+# the first ~8 KB of each first-party JS file.
+_JS_LIB_CATALOG: list[dict] = [
+    {
+        "name": "jquery",
+        "osv_name": "jquery",
+        "ecosystem": "npm",
+        "url": [
+            # /jquery/3.5.1/jquery.min.js  (cdnjs, bootstrapcdn layout)
+            re.compile(r"/jquery/(\d+\.\d+\.\d+)/", re.I),
+            # jquery-3.5.1.js / jquery-3.5.1.min.js
+            re.compile(r"jquery-(\d+\.\d+\.\d+)(?:\.min)?\.js", re.I),
+            # bootstrap.bundle.min.js?v=4.5.0 style query-string versioning
+            re.compile(r"jquery(?:\.\w+)*\.min\.js\?v=(\d+\.\d+\.\d+)", re.I),
+        ],
+        "content": [
+            re.compile(r"jQuery\s+v?(\d+\.\d+\.\d+)", re.I),
+            re.compile(r"/\*!\s*jQuery\s+JavaScript\s+Library\s+v?(\d+\.\d+\.\d+)", re.I),
+        ],
+    },
+    {
+        "name": "jquery-ui",
+        "osv_name": "jquery-ui",
+        "ecosystem": "npm",
+        "url": [
+            re.compile(r"/jquery(?:ui|-ui)/(\d+\.\d+\.\d+)/", re.I),
+            re.compile(r"jquery[.-]ui[-.](\d+\.\d+\.\d+)", re.I),
+        ],
+        "content": [re.compile(r"jQuery\s+UI\s+-\s+v?(\d+\.\d+\.\d+)", re.I)],
+    },
+    {
+        "name": "jquery-migrate",
+        "osv_name": "jquery-migrate",
+        "ecosystem": "npm",
+        "url": [
+            re.compile(r"/jquery-migrate/(\d+\.\d+\.\d+)/", re.I),
+            re.compile(r"jquery-migrate[-.](\d+\.\d+\.\d+)", re.I),
+        ],
+        "content": [re.compile(r"jQuery\s+Migrate\s+-\s+v?(\d+\.\d+\.\d+)", re.I)],
+    },
+    {
+        "name": "bootstrap",
+        "osv_name": "bootstrap",
+        "ecosystem": "npm",
+        "url": [
+            re.compile(r"/(?:twitter-)?bootstrap/(\d+\.\d+\.\d+)/", re.I),
+            re.compile(r"bootstrap-(\d+\.\d+\.\d+)(?:\.min)?\.(?:js|css)", re.I),
+            re.compile(r"bootstrap(?:\.bundle)?(?:\.min)?\.(?:js|css)\?v?=?(\d+\.\d+\.\d+)", re.I),
+        ],
+        "content": [re.compile(r"Bootstrap\s+v?(\d+\.\d+\.\d+)", re.I)],
+    },
+    {
+        "name": "angular",  # AngularJS 1.x
+        "osv_name": "angular",
+        "ecosystem": "npm",
+        "url": [
+            re.compile(r"/angular(?:js)?/(\d+\.\d+\.\d+)/", re.I),
+            re.compile(r"angular-(\d+\.\d+\.\d+)(?:\.min)?\.js", re.I),
+        ],
+        "content": [re.compile(r"AngularJS\s+v?(\d+\.\d+\.\d+)", re.I)],
+    },
+    {
+        "name": "react",
+        "osv_name": "react",
+        "ecosystem": "npm",
+        "url": [
+            re.compile(r"/react/(\d+\.\d+\.\d+)/", re.I),
+            re.compile(r"react[-.](\d+\.\d+\.\d+)(?:\.min|\.development|\.production)?\.js", re.I),
+        ],
+        "content": [re.compile(r"\*\s*React\s+v?(\d+\.\d+\.\d+)", re.I)],
+    },
+    {
+        "name": "vue",
+        "osv_name": "vue",
+        "ecosystem": "npm",
+        "url": [
+            re.compile(r"/vue(?:\.js)?/(\d+\.\d+\.\d+)/", re.I),
+            re.compile(r"vue[-.](\d+\.\d+\.\d+)(?:\.min)?\.js", re.I),
+        ],
+        "content": [re.compile(r"Vue\.js\s+v?(\d+\.\d+\.\d+)", re.I)],
+    },
+    {
+        "name": "lodash",
+        "osv_name": "lodash",
+        "ecosystem": "npm",
+        "url": [
+            re.compile(r"/lodash(?:\.js)?/(\d+\.\d+\.\d+)/", re.I),
+            re.compile(r"lodash-(\d+\.\d+\.\d+)(?:\.min)?\.js", re.I),
+        ],
+        "content": [re.compile(r"lodash[^\d]{0,20}(\d+\.\d+\.\d+)", re.I)],
+    },
+    {
+        "name": "moment",
+        "osv_name": "moment",
+        "ecosystem": "npm",
+        "url": [
+            re.compile(r"/moment(?:\.js)?/(\d+\.\d+\.\d+)/", re.I),
+            re.compile(r"moment-(\d+\.\d+\.\d+)(?:\.min)?\.js", re.I),
+        ],
+        "content": [re.compile(r"//!\s*moment\.js\s+version\s+:\s+(\d+\.\d+\.\d+)", re.I)],
+    },
+    {
+        "name": "handlebars",
+        "osv_name": "handlebars",
+        "ecosystem": "npm",
+        "url": [
+            re.compile(r"/handlebars\.js/(\d+\.\d+\.\d+)/", re.I),
+            re.compile(r"handlebars-(\d+\.\d+\.\d+)(?:\.min)?\.js", re.I),
+        ],
+        "content": [re.compile(r"Handlebars\.VERSION\s*=\s*[\"'](\d+\.\d+\.\d+)", re.I)],
+    },
+    {
+        "name": "underscore",
+        "osv_name": "underscore",
+        "ecosystem": "npm",
+        "url": [
+            re.compile(r"/underscore\.js/(\d+\.\d+\.\d+)/", re.I),
+            re.compile(r"underscore-(\d+\.\d+\.\d+)(?:\.min)?\.js", re.I),
+        ],
+        "content": [re.compile(r"Underscore\.js\s+(\d+\.\d+\.\d+)", re.I)],
+    },
+    {
+        "name": "backbone",
+        "osv_name": "backbone",
+        "ecosystem": "npm",
+        "url": [
+            re.compile(r"/backbone\.js/(\d+\.\d+\.\d+)/", re.I),
+            re.compile(r"backbone-(\d+\.\d+\.\d+)(?:\.min)?\.js", re.I),
+        ],
+        "content": [re.compile(r"Backbone\.js\s+(\d+\.\d+\.\d+)", re.I)],
+    },
+    {
+        "name": "axios",
+        "osv_name": "axios",
+        "ecosystem": "npm",
+        "url": [
+            re.compile(r"/axios/(\d+\.\d+\.\d+)/", re.I),
+            re.compile(r"axios-(\d+\.\d+\.\d+)(?:\.min)?\.js", re.I),
+        ],
+        "content": [re.compile(r"axios[^\d]{0,20}(\d+\.\d+\.\d+)", re.I)],
+    },
+    {
+        "name": "dompurify",
+        "osv_name": "dompurify",
+        "ecosystem": "npm",
+        "url": [
+            re.compile(r"/dompurify/(\d+\.\d+\.\d+)/", re.I),
+            re.compile(r"dompurify-(\d+\.\d+\.\d+)(?:\.min)?\.js", re.I),
+        ],
+        "content": [re.compile(r"DOMPurify\s+(\d+\.\d+\.\d+)", re.I)],
+    },
+    {
+        "name": "ckeditor",
+        "osv_name": "ckeditor4",
+        "ecosystem": "npm",
+        "url": [
+            re.compile(r"/ckeditor(?:4)?/(\d+\.\d+\.\d+)/", re.I),
+            re.compile(r"ckeditor-(\d+\.\d+\.\d+)(?:\.min)?\.js", re.I),
+        ],
+        "content": [re.compile(r"CKEDITOR\.version\s*=\s*[\"'](\d+\.\d+\.\d+)", re.I)],
+    },
+    {
+        "name": "tinymce",
+        "osv_name": "tinymce",
+        "ecosystem": "npm",
+        "url": [
+            re.compile(r"/tinymce/(\d+\.\d+\.\d+)/", re.I),
+            re.compile(r"tinymce-(\d+\.\d+\.\d+)(?:\.min)?\.js", re.I),
+        ],
+        "content": [re.compile(r"tinymce[^\d]{0,20}majorVersion:\s*[\"'](\d+)", re.I)],
+    },
+]
+
+
+def _extract_js_library(url: str, content: str = "") -> list[tuple[str, str, str, str]]:
+    """Identify JS libraries in a URL and optional file content.
+
+    Returns a list of (friendly_name, osv_name, ecosystem, version) tuples.
+    Duplicates are left in; dedupe at the call site.
+    """
+    found: list[tuple[str, str, str, str]] = []
+    for lib in _JS_LIB_CATALOG:
+        for rx in lib["url"]:
+            m = rx.search(url or "")
+            if m:
+                found.append((lib["name"], lib["osv_name"], lib["ecosystem"], m.group(1)))
+                break  # one hit per lib per URL is enough
+        if content:
+            for rx in lib["content"]:
+                m = rx.search(content)
+                if m:
+                    found.append((lib["name"], lib["osv_name"], lib["ecosystem"], m.group(1)))
+                    break
+    return found
+
+
+async def _collect_html_script_refs(page, target_url: str) -> list[str]:
+    """Pull <script src> URLs from the live DOM so we can regex-match filenames
+    even when network capture missed them (e.g. iframes already closed)."""
+    if page is None:
+        return []
+    try:
+        urls = await page.evaluate("""() => {
+            const out = new Set();
+            document.querySelectorAll('script[src]').forEach(s => out.add(s.src));
+            document.querySelectorAll('link[rel="stylesheet"][href]').forEach(l => out.add(l.href));
+            return [...out];
+        }""")
+        return [u for u in urls if isinstance(u, str) and u.startswith("http")]
+    except Exception:
+        return []
+
+
+async def _check_js_library_vulnerabilities(
+    http_client,
+    js_urls: list[str],
+    page=None,
+    target_url: str = "",
+    tech_fingerprint: dict | None = None,
+) -> list[dict]:
+    """Detect vulnerable JavaScript libraries by name+version and enrich with
+    real CVE data from OSV.dev + NVD (via scripts.cve_lookup).
+
+    Hybrid approach:
+      • Deterministic regex catalog extracts (lib, version) from URLs, inline
+        <script src> on the page, and the first 8 KB of each first-party JS
+        file.
+      • Dynamic CVE lookup (OSV.dev) pulls the authoritative CVE list and CVSS
+        for that exact version — no hand-maintained CVE dictionary.
+      • Detected libs are written back into ``tech_fingerprint["technologies"]``
+        so downstream LLM phases see them as attack-surface context.
+    """
+    findings: list[dict] = []
+
+    candidates: dict[tuple[str, str], tuple[str, str, str]] = {}
+    # key = (osv_name, version)  →  (friendly_name, ecosystem, source_url)
+
+    def _add(name: str, osv_name: str, ecosystem: str, version: str, source_url: str):
+        key = (osv_name, version)
+        if key not in candidates:
+            candidates[key] = (name, ecosystem, source_url)
+
+    # ── 1. Filename-based extraction on every known JS URL ────────────
+    for u in js_urls or []:
+        for name, osv_name, ecosystem, version in _extract_js_library(u):
+            _add(name, osv_name, ecosystem, version, u)
+
+    # ── 2. DOM-reported <script src>/<link href> (picks up CSS versions too)
+    try:
+        dom_urls = await _collect_html_script_refs(page, target_url)
+        for u in dom_urls:
+            for name, osv_name, ecosystem, version in _extract_js_library(u):
+                _add(name, osv_name, ecosystem, version, u)
+    except Exception as e:
+        logger.debug("DOM script-ref collection failed: %s", e)
+
+    # ── 3. Content-banner extraction — only for URLs with no URL hit and
+    #      only on first-party JS (third-party already filtered upstream). ─
+    hit_urls = {v[2] for v in candidates.values()}
+    remaining = [u for u in (js_urls or []) if u not in hit_urls]
+    for u in remaining[:40]:  # cap to keep runtime bounded
+        try:
+            resp = await http_client.get(u, timeout=8.0)
+            if resp.status_code != 200:
+                continue
+            snippet = (resp.text or "")[:8000]
+        except Exception:
+            continue
+        for name, osv_name, ecosystem, version in _extract_js_library(u, snippet):
+            _add(name, osv_name, ecosystem, version, u)
+
+    if not candidates:
+        return findings
+
+    logger.info("JS library audit: %d unique (lib, version) pairs detected", len(candidates))
+
+    # ── 4. Dynamic CVE enrichment via OSV.dev + NVD ───────────────────
+    try:
+        from scripts.cve_lookup import enrich_library_finding
+    except Exception as e:
+        logger.warning("cve_lookup unavailable (%s) — emitting bare library findings", e)
+        enrich_library_finding = None  # type: ignore
+
+    for (osv_name, version), (friendly, ecosystem, source_url) in candidates.items():
+        enriched = {}
+        if enrich_library_finding:
+            try:
+                # enrich_library_finding() is synchronous + network-bound;
+                # offload so we never block the event loop.
+                loop = asyncio.get_event_loop()
+                enriched = await loop.run_in_executor(
+                    None, enrich_library_finding, osv_name, version, ecosystem
+                )
+            except Exception as e:
+                logger.debug("CVE enrichment failed for %s@%s: %s", osv_name, version, e)
+                enriched = {}
+
+        # Record into tech fingerprint regardless of CVE outcome (LLM context).
+        if tech_fingerprint is not None:
+            try:
+                techs = tech_fingerprint.setdefault("technologies", {})
+                label = f"{friendly} {version}"
+                suffix = ""
+                if enriched.get("has_cves"):
+                    suffix = f" (vulnerable — {enriched.get('cve_count', 0)} CVEs, max CVSS {enriched.get('max_cvss', 0):.1f})"
+                techs[label] = {
+                    "confidence": "high",
+                    "evidence": f"Detected via {source_url}{suffix}",
+                    "category": "js_library",
+                }
+            except Exception:
+                pass
+
+        if not enriched.get("has_cves"):
+            continue
+
+        cvss = float(enriched.get("max_cvss", 0.0) or 0.0)
+        severity = (enriched.get("max_severity") or "").capitalize()
+        if not severity:
+            if cvss >= 9.0: severity = "Critical"
+            elif cvss >= 7.0: severity = "High"
+            elif cvss >= 4.0: severity = "Medium"
+            elif cvss > 0: severity = "Low"
+            else: severity = "Info"
+
+        top_cves = enriched.get("cves", [])[:5]
+        cwe_set: list[str] = []
+        for c in top_cves:
+            for cw in c.get("cwes", []) or []:
+                if cw and cw not in cwe_set:
+                    cwe_set.append(cw)
+        cwe = cwe_set[0] if cwe_set else "CWE-1104"
+
+        evidence_lines = [
+            f"Detected {friendly}@{version} via {source_url}.",
+            f"{enriched.get('cve_count', 0)} known CVE(s) per OSV.dev. "
+            f"Highest CVSS {cvss:.1f} ({severity}).",
+        ]
+        for c in top_cves:
+            evidence_lines.append(
+                f"  • {c.get('cve')} (CVSS {c.get('cvss', 0.0):.1f}) — "
+                f"{(c.get('description') or c.get('osv_summary') or '')[:140]}"
+            )
+        evidence = "\n".join(evidence_lines)
+
+        findings.append(_make_finding(
+            title=f"Vulnerable JavaScript library: {friendly} {version}",
+            severity=severity,
+            cwe=cwe,
+            cvss=f"{cvss:.1f}",
+            url=source_url,
+            evidence=evidence,
+        ))
+
+    if findings:
+        logger.info("JS library audit: %d vulnerable library findings", len(findings))
+    return findings
+
+
 async def run_http_only_passive_recon(
     http_client,
     target_url: str,
@@ -2667,7 +3241,8 @@ async def run_http_only_passive_recon(
     _progress("passive_start", {
         "checks": "sensitive_files, security_headers, actuator, cors, cache_control, "
                   "csp, referrer_policy, permissions_policy, https_redirect, hsts_preload, "
-                  "error_pages, clickjacking, api_version_downgrade, tech_fingerprint",
+                  "error_pages, clickjacking, api_version_downgrade, tls_audit, "
+                  "js_library_cves, tech_fingerprint",
         "mode": "http_only",
     })
 
@@ -2696,12 +3271,25 @@ async def run_http_only_passive_recon(
     await _run("Error pages", _check_error_pages(http_client, target_url))
     await _run("Clickjacking", _check_clickjacking(http_client, target_url))
     await _run("API version downgrade", _check_api_version_downgrade(http_client, target_url, []))
+    await _run("TLS audit", _check_tls_configuration(target_url))
 
     tech_fingerprint = await _fingerprint_technologies_http_only(http_client, target_url)
     _progress("passive_step", {
         "step": "Tech fingerprint",
         "technologies": list(tech_fingerprint.get("technologies", {}).keys()),
     })
+
+    # JS library audit — HTTP-only mode has no browser, so the detector falls
+    # back to URL-pattern matching against any .js links surfaced by earlier
+    # fingerprinting (e.g. in HTML body regexes). For a pure API target this
+    # is usually a no-op, which is the correct behaviour.
+    await _run(
+        "JS library CVE audit",
+        _check_js_library_vulnerabilities(
+            http_client, js_urls=[], page=None,
+            target_url=target_url, tech_fingerprint=tech_fingerprint,
+        ),
+    )
 
     _progress("passive_end", {"total_findings": len(findings), "mode": "http_only"})
     logger.info("HTTP-only passive recon complete: %d findings", len(findings))
