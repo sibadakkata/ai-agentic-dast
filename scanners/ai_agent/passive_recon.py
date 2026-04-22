@@ -2957,7 +2957,7 @@ async def _check_tls_configuration(target_url: str) -> list[dict]:
         return findings
 
     base_url = f"https://{host}:{port}"
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
 
     # ── Connectivity sanity check ─────────────────────────────────────
     reachable, _ = await loop.run_in_executor(
@@ -3708,7 +3708,7 @@ async def _check_js_library_vulnerabilities(
             try:
                 # enrich_library_finding() is synchronous + network-bound;
                 # offload so we never block the event loop.
-                loop = asyncio.get_event_loop()
+                loop = asyncio.get_running_loop()
                 enriched = await loop.run_in_executor(
                     None, enrich_library_finding, osv_name, version, ecosystem
                 )
