@@ -82,6 +82,11 @@ class ScanTarget:
     # scanner can reach and enumerate their app before committing to a full
     # vulnerability scan. Mirrors Acunetix "Crawl Only" scan type.
     scan_profile: str = "vulnerability_scan"  # vulnerability_scan | crawl_only
+    # When True, initial passive TLS audit probes only the seed URL's host —
+    # not siblings from landing DOM / robots.txt / sitemap. Sibling hosts
+    # still get TLS when observed in browser traffic (host-delta after each
+    # phase). Use for "TLS on sibling only after crawl" workflows.
+    skip_passive_sibling_tls: bool = False
 
 
 def _resolve_env_vars(obj: Any) -> Any:
@@ -1244,6 +1249,7 @@ def load_targets_from_dict(t: dict) -> ScanTarget:
         workflow_id=t.get("workflow_id") or None,
         business_flow=t.get("business_flow") or None,
         scan_profile=(t.get("scan_profile") or "vulnerability_scan"),
+        skip_passive_sibling_tls=bool(t.get("skip_passive_sibling_tls")),
     )
 
 

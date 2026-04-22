@@ -1352,6 +1352,7 @@ async def run_scan(
         p = _next_phase()
         _cb("phase_start", {"phase": p, "total": 0, "name": "Passive Reconnaissance", "id": "passive_recon"})
         tech_fingerprint = {}
+        _skip_tls_siblings = getattr(target, "skip_passive_sibling_tls", False)
         if _use_fast_path:
             print("  [PASSIVE] Running HTTP-only passive reconnaissance...")
             try:
@@ -1360,6 +1361,7 @@ async def run_scan(
                     target_url=target.url,
                     on_finding=lambda f: _cb("finding", {**f, "phase": "Passive Reconnaissance"}),
                     on_progress=_passive_progress,
+                    skip_tls_sibling_discovery=_skip_tls_siblings,
                 )
                 findings.extend(passive_findings)
                 if tech_fingerprint.get("technologies"):
@@ -1389,6 +1391,7 @@ async def run_scan(
                         on_finding=lambda f: _cb("finding", {**f, "phase": "Passive Reconnaissance"}),
                         on_progress=_passive_progress,
                         network_js_urls=network_js_urls,
+                        skip_tls_sibling_discovery=_skip_tls_siblings,
                     )
                     if isinstance(passive_result, tuple):
                         passive_findings, tech_fingerprint = passive_result
@@ -1407,6 +1410,49 @@ async def run_scan(
 
         _cb("phase_end", {"phase": p, "name": "Passive Reconnaissance",
                           "tool_calls": 0, "findings": len(passive_findings)})
+
+        # ── SPA Crawl (browser-only; harvests XHR/fetch endpoints) ──
+        if page is not None and target.scan_mode in ("website", "both"):
+            try:
+                from .spa_crawler import run_spa_crawl
+                p = _next_phase()
+                _cb("phase_start", {"phase": p, "total": 0,
+                                    "name": "SPA Crawl", "id": "spa_crawl"})
+
+                def _spa_progress(event, data):
+                    _cb("progress_msg", {"message": f"[SPA] {event}: {data}"})
+
+                def _spa_oos(rec):
+                    _cb("out_of_scope", {**rec, "phase": "SPA Crawl"})
+
+                spa_endpoints, spa_oos = await run_spa_crawl(
+                    page=page,
+                    target_url=target.url,
+                    target_host=urlparse(target.url).hostname or "",
+                    extra_domains=extra_domains or [],
+                    on_progress=_spa_progress,
+                    on_out_of_scope=_spa_oos,
+                )
+                if spa_endpoints:
+                    registry.add(spa_endpoints)
+                    for ep in spa_endpoints:
+                        if ep.url and ep.url not in metrics["pages_list"]:
+                            metrics["pages_list"].append(ep.url)
+                            metrics["pages_crawled"] += 1
+                            _cb("crawl", {"url": ep.url, "type": "api",
+                                          "tool": "spa_crawl",
+                                          "count": metrics["pages_crawled"]})
+                print(f"  [SPA] Added {len(spa_endpoints)} new endpoints to registry "
+                      f"({len(spa_oos)} out-of-scope)")
+                _cb("phase_end", {"phase": p, "name": "SPA Crawl",
+                                  "tool_calls": 0, "findings": 0,
+                                  "details": {
+                                      "endpoints_discovered": len(spa_endpoints),
+                                      "out_of_scope_hosts": len(spa_oos),
+                                  }})
+            except Exception as e:
+                print(f"  [SPA] Failed (non-fatal): {e}")
+                logger.warning("SPA crawl failed: %s", e, exc_info=True)
 
         # ── Baseline Execution (happy path, no LLM) ──
         baseline_context = ""
@@ -2632,6 +2678,7 @@ async def run_scan(
                         on_finding=lambda f: _cb("finding", {**f, "phase": "Passive Recon (post-auth)"}),
                         on_progress=_passive_progress,
                         network_js_urls=network_js_urls,
+                        skip_tls_sibling_discovery=_skip_tls_siblings,
                     )
                     if isinstance(p2_result, tuple):
                         p2_findings, p2_tech = p2_result

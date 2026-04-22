@@ -751,6 +751,12 @@ input:focus-visible, select:focus-visible, textarea:focus-visible { outline:none
         <div id="scan-profile-hint" style="display:none;margin-top:6px;padding:10px 14px;border-radius:8px;background:rgba(59,130,246,0.08);border:1px solid rgba(59,130,246,0.25);font-size:12px;color:#1d4ed8;line-height:1.5;">
           <strong>Crawl Only mode:</strong> skips all OWASP vulnerability-test phases (no injection, auth-bypass, BOLA, etc.). Still runs passive recon (TLS, security headers, JS library CVEs) and a broad crawl of URLs, SPA routes, forms, APIs, and in-scope sub-domains. Use this to verify the scanner can reach every part of your app before committing to a full scan. Coverage shows up in the usual <em>Crawled Endpoints</em>, <em>Out of Scope</em>, and <em>AI Agent Coverage</em> tabs.
         </div>
+        <div id="skip-sibling-tls-group" class="form-group full" style="display:none;margin-top:10px;">
+          <label style="display:flex;align-items:flex-start;gap:10px;cursor:pointer;font-weight:500;font-size:13px;">
+            <input type="checkbox" id="skip-passive-sibling-tls" style="margin-top:3px;flex-shrink:0;">
+            <span style="line-height:1.45;color:var(--text2);">TLS-audit sibling subdomains <strong>only</strong> when the browser observes them (XHR / navigation). Skips TLS discovery from robots.txt, sitemap, and the first-page DOM during passive recon. Leave <em>Additional Domains</em> empty so hosts are not pre-seeded.</span>
+          </label>
+        </div>
       </div>
       <div class="form-group">
         <label>Scan Scope</label>
@@ -2150,6 +2156,7 @@ async function confirmPlan() {
     model: model,
     scan_mode: p.scan_mode || 'both',
     scan_profile: p.scan_profile || 'vulnerability_scan',
+    skip_passive_sibling_tls: !!(document.getElementById('skip-passive-sibling-tls') && document.getElementById('skip-passive-sibling-tls').checked),
     scan_scope: p.scan_scope || 'directory',
     focus_urls: (p.focus_urls || []).filter(Boolean),
     focus_areas: (p.focus_areas || []).filter(Boolean),
@@ -2209,6 +2216,10 @@ function editPlan() {
   }
   setFocusAreasFromList(p.focus_areas || []);
   if (p.scan_intensity) document.getElementById('scan-intensity').value = p.scan_intensity;
+  if (p.scan_profile) document.getElementById('scan-profile').value = p.scan_profile;
+  var stls = document.getElementById('skip-passive-sibling-tls');
+  if (stls) stls.checked = !!p.skip_passive_sibling_tls;
+  onScanProfileChange();
   onScanScopeChange();
   setScanMode('form');
   _currentPlan = null;
@@ -2233,6 +2244,12 @@ function onScanProfileChange() {
   var isCrawl = sel.value === 'crawl_only';
   var hint = document.getElementById('scan-profile-hint');
   if (hint) hint.style.display = isCrawl ? '' : 'none';
+  var tlsGrp = document.getElementById('skip-sibling-tls-group');
+  if (tlsGrp) tlsGrp.style.display = isCrawl ? '' : 'none';
+  if (!isCrawl) {
+    var cb = document.getElementById('skip-passive-sibling-tls');
+    if (cb) cb.checked = false;
+  }
   var intensity = document.getElementById('scan-intensity');
   if (intensity) {
     intensity.disabled = isCrawl;
@@ -2799,6 +2816,7 @@ async function startScan() {
     model: document.getElementById('model-select').value,
     scan_mode: document.getElementById('scan-mode').value,
     scan_profile: (document.getElementById('scan-profile') || {}).value || 'vulnerability_scan',
+    skip_passive_sibling_tls: !!(document.getElementById('skip-passive-sibling-tls') && document.getElementById('skip-passive-sibling-tls').checked),
     scan_scope: scanScope,
     focus_urls: focusUrls,
     focus_areas: focusAreas,

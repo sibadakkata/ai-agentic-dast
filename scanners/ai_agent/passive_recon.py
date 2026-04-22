@@ -279,6 +279,7 @@ async def run_passive_recon(
     on_finding: callable | None = None,
     on_progress: callable | None = None,
     network_js_urls: set | None = None,
+    skip_tls_sibling_discovery: bool = False,
 ) -> list[dict]:
     """Run all passive recon checks. Returns list of findings.
 
@@ -493,9 +494,12 @@ async def run_passive_recon(
     # against every in-scope host. Closes the gap where the LLM agent
     # doesn't visit every subdomain that Acunetix's BFS crawler reaches.
     try:
-        tls_findings = await _check_tls_configuration_multi_host(
-            page, http_client, target_url
-        )
+        if skip_tls_sibling_discovery:
+            tls_findings = await _check_tls_configuration(target_url)
+        else:
+            tls_findings = await _check_tls_configuration_multi_host(
+                page, http_client, target_url
+            )
     except Exception as e:
         logger.debug("TLS audit failed: %s", e)
         tls_findings = []
@@ -3779,6 +3783,7 @@ async def run_http_only_passive_recon(
     target_url: str,
     on_finding: callable | None = None,
     on_progress: callable | None = None,
+    skip_tls_sibling_discovery: bool = False,
 ) -> tuple[list[dict], dict]:
     """HTTP-only passive reconnaissance — no Playwright required.
 
@@ -3825,11 +3830,15 @@ async def run_http_only_passive_recon(
     await _run("Clickjacking", _check_clickjacking(http_client, target_url))
     await _run("API version downgrade", _check_api_version_downgrade(http_client, target_url, []))
     # No Playwright page in HTTP-only mode, so DOM-based host harvesting is
-    # unavailable. We still pull sibling hosts from robots.txt + sitemap.xml.
-    await _run(
-        "TLS audit",
-        _check_tls_configuration_multi_host(None, http_client, target_url),
-    )
+    # unavailable. We still pull sibling hosts from robots.txt + sitemap.xml
+    # unless skip_tls_sibling_discovery (seed host only).
+    if skip_tls_sibling_discovery:
+        await _run("TLS audit", _check_tls_configuration(target_url))
+    else:
+        await _run(
+            "TLS audit",
+            _check_tls_configuration_multi_host(None, http_client, target_url),
+        )
 
     tech_fingerprint = await _fingerprint_technologies_http_only(http_client, target_url)
     _progress("passive_step", {
