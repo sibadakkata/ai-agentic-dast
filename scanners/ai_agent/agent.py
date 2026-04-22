@@ -31,7 +31,13 @@ from .passive_recon import (
     run_http_only_passive_recon,
     run_passive_recon,
 )
-from .prompts import build_system_prompt, get_phases
+from .prompts import (
+    build_system_prompt,
+    get_phases,
+    CHAIN_SUB_PHASES,
+    REACTIVE_CHAIN_TRIGGERS,
+    ScanPhase,
+)
 from .tools import TOOL_DEFINITIONS, ScanTools
 
 logger = logging.getLogger(__name__)
@@ -918,6 +924,306 @@ def _resolve_import_path(base_dir: str, path: str | None) -> str | None:
     return resolved if os.path.exists(resolved) else path
 
 
+# ── Multi-Agent Parallel Execution ────────────────────────────────────────
+# Maximum number of concurrent LLM agent workers during parallel phase
+# execution.  Each worker gets its own browser context and LLM conversation.
+# Set to 1 to disable parallelism (sequential fallback).
+MAX_PARALLEL_WORKERS = 5
+
+
+async def _clone_browser_context(browser, auth_cookies: list[dict], target_url: str):
+    """Create an isolated browser context with cloned auth cookies.
+
+    Each parallel worker gets its own context so navigations and DOM state
+    don't interfere with each other.
+    """
+    context = await browser.new_context(
+        ignore_https_errors=True,
+        java_script_enabled=True,
+    )
+    if auth_cookies:
+        await context.add_cookies(auth_cookies)
+    page = await context.new_page()
+    try:
+        await page.goto(target_url, wait_until="domcontentloaded", timeout=15000)
+    except Exception:
+        pass
+    return context, page
+
+
+async def _run_phase_worker(
+    *,
+    phase: ScanPhase,
+    system_prompt: str,
+    model: str,
+    router: LLMRouter,
+    browser,
+    auth_cookies: list[dict],
+    http_client: httpx.AsyncClient,
+    registry: EndpointRegistry,
+    allowed_domains: set,
+    target_url: str,
+    cancel_flag,
+    pause_flag,
+    exclude_urls: list[str],
+    prior_findings: list[dict],
+    worker_id: int,
+    on_progress: callable | None = None,
+    auth_headers: dict | None = None,
+) -> tuple[list[dict], dict]:
+    """Run a single scan phase in an isolated browser context.
+
+    Returns (findings, phase_metrics).  This is the unit of work for
+    parallel fan-out.
+    """
+    _cb = on_progress or (lambda *a, **k: None)
+    findings: list[dict] = []
+
+    context = None
+    page = None
+    worker_http = None
+    try:
+        if browser:
+            context, page = await _clone_browser_context(
+                browser, auth_cookies, target_url,
+            )
+        worker_http = httpx.AsyncClient(
+            timeout=30.0, verify=False, follow_redirects=True,
+            headers=auth_headers or {},
+        )
+
+        tools = ScanTools(
+            page=page,
+            http_client=worker_http,
+            registry=registry,
+            allowed_domains=allowed_domains,
+            cancel_flag=cancel_flag,
+            exclude_urls=exclude_urls,
+        )
+        tools.set_findings_ref(findings)
+
+        phase_prompt = phase.prompt
+        if phase.id.startswith("chain_") and prior_findings:
+            summary_lines = []
+            for i, f in enumerate(prior_findings, 1):
+                line = f"{i}. [{_s(f.get('severity','?'))}] {_s(f.get('title','?'))} @ {_s(f.get('url','?'))}"
+                param = _s(f.get("parameter", ""))
+                if param:
+                    line += f" [param: {param}]"
+                summary_lines.append(line)
+            findings_text = "\n".join(summary_lines) or "(no findings yet)"
+            phase_prompt = phase_prompt.replace("{findings_summary}", findings_text)
+        elif prior_findings:
+            ctx = _build_findings_context(prior_findings, phase.id)
+            if ctx:
+                phase_prompt += "\n\n" + ctx
+
+        messages: list[dict] = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": phase_prompt},
+        ]
+
+        phase_tool_calls = 0
+        phase_evidence: list[dict] = []
+
+        tag = f"W{worker_id}:{phase.id}"
+        print(f"  [{tag}] Starting...", end="", flush=True)
+        _cb("phase_start", {
+            "phase": 0, "total": 0,
+            "name": f"{phase.name} (worker {worker_id})",
+            "id": phase.id, "worker": worker_id,
+        })
+
+        for step in range(phase.max_steps):
+            if cancel_flag and cancel_flag.is_set():
+                break
+            if pause_flag and pause_flag.is_set():
+                while pause_flag.is_set():
+                    if cancel_flag and cancel_flag.is_set():
+                        break
+                    await asyncio.sleep(1)
+
+            try:
+                _sanitize_all_messages(messages)
+                messages = _repair_tool_pairs(messages)
+                response = router.complete(
+                    model=model, messages=messages,
+                    tools=TOOL_DEFINITIONS, cancel_flag=cancel_flag,
+                )
+            except (ContentFiltered, ContextWindowExceeded, MalformedMessages):
+                break
+            except ScanCancelled:
+                break
+
+            if not response or not getattr(response, "choices", None):
+                break
+            msg = response.choices[0].message
+            msg_dict = msg.model_dump() if hasattr(msg, "model_dump") else dict(msg)
+            msg_dict = _sanitize_message(msg_dict)
+            messages.append(msg_dict)
+
+            tool_calls = msg_dict.get("tool_calls") or getattr(msg, "tool_calls", None) or []
+            if tool_calls:
+                for tc in tool_calls:
+                    if cancel_flag and cancel_flag.is_set():
+                        break
+                    tc_id = tc.get("id") if isinstance(tc, dict) else getattr(tc, "id", "")
+                    fn = tc.get("function") if isinstance(tc, dict) else getattr(tc, "function", {})
+                    fn_name = fn.get("name") if isinstance(fn, dict) else getattr(fn, "name", "")
+                    fn_name = _sanitize_tool_name(fn_name)
+                    fn_args = fn.get("arguments") if isinstance(fn, dict) else getattr(fn, "arguments", "{}")
+                    result = await tools.execute(fn_name, fn_args)
+                    phase_tool_calls += 1
+                    messages.append({
+                        "role": "tool", "tool_call_id": tc_id,
+                        "content": _cap_result(result),
+                    })
+                    _cb("tool_call", {
+                        "phase": phase.name, "tool": fn_name,
+                        "request": fn_args[:200] if isinstance(fn_args, str) else "",
+                        "worker": worker_id,
+                    })
+
+                    if isinstance(result, dict):
+                        try:
+                            args_parsed = json.loads(fn_args) if isinstance(fn_args, str) else fn_args
+                        except (json.JSONDecodeError, TypeError):
+                            args_parsed = {}
+                        _capture_evidence(phase_evidence, fn_name, args_parsed, result, result)
+            else:
+                content = msg_dict.get("content") or ""
+                new_f = extract_findings(str(content))
+                for f in new_f:
+                    f["phase"] = phase.name
+                    _match_evidence_to_finding(f, phase_evidence)
+                    _cb("finding", f)
+                findings.extend(new_f)
+                break
+
+            if len(messages) > 40:
+                messages = trim_context(messages, max_tokens=TRIM_TARGET_TOKENS)
+
+        if not findings and phase_evidence:
+            summary_prompt = (
+                f"Phase '{phase.name}' completed with 0 vulnerabilities. "
+                "Review the evidence and output confirmed vulnerabilities as JSON.\n\n"
+                + _format_evidence_buffer(phase_evidence)
+            )
+            messages.append({"role": "user", "content": summary_prompt})
+            try:
+                resp = router.complete(model=model, messages=messages, tools=[], cancel_flag=cancel_flag)
+                if resp and getattr(resp, "choices", None):
+                    summary_f = extract_findings(str(resp.choices[0].message.content or ""))
+                    for f in summary_f:
+                        f["phase"] = phase.name
+                        _cb("finding", f)
+                    findings.extend(summary_f)
+            except Exception:
+                pass
+
+        print(f" {phase_tool_calls} calls, {len(findings)} findings")
+        _cb("phase_end", {
+            "phase": 0, "name": phase.name,
+            "tool_calls": phase_tool_calls, "findings": len(findings),
+            "worker": worker_id,
+        })
+
+        phase_metrics = {
+            "phase": phase.id, "name": phase.name,
+            "tool_calls": phase_tool_calls, "findings_count": len(findings),
+        }
+        return findings, phase_metrics
+
+    finally:
+        if worker_http:
+            try:
+                await worker_http.aclose()
+            except Exception:
+                pass
+        if context:
+            try:
+                await context.close()
+            except Exception:
+                pass
+
+
+def _select_reactive_chains(findings: list[dict]) -> list[ScanPhase]:
+    """Pick chain sub-phases to spawn based on actual finding categories."""
+    triggered: set[str] = set()
+    for f in findings:
+        title = (f.get("title") or "").lower()
+        owasp = (f.get("owasp_category") or "").lower()
+        combined = f"{title} {owasp}"
+        for keyword, chain_ids in REACTIVE_CHAIN_TRIGGERS.items():
+            if keyword in combined:
+                triggered.update(chain_ids)
+    if not triggered:
+        return []
+    return [p for p in CHAIN_SUB_PHASES if p.id in triggered]
+
+
+async def run_phases_parallel(
+    *,
+    phases: list[ScanPhase],
+    system_prompt: str,
+    model: str,
+    router: LLMRouter,
+    browser,
+    auth_cookies: list[dict],
+    http_client: httpx.AsyncClient,
+    registry: EndpointRegistry,
+    allowed_domains: set,
+    target_url: str,
+    cancel_flag,
+    pause_flag,
+    exclude_urls: list[str],
+    prior_findings: list[dict],
+    on_progress: callable | None = None,
+    max_workers: int = MAX_PARALLEL_WORKERS,
+    auth_headers: dict | None = None,
+) -> tuple[list[dict], list[dict]]:
+    """Run multiple scan phases concurrently with a semaphore cap.
+
+    Returns (all_findings, phase_logs).
+    """
+    if not phases:
+        return [], []
+
+    sem = asyncio.Semaphore(max_workers)
+    all_findings: list[dict] = []
+    all_logs: list[dict] = []
+    lock = asyncio.Lock()
+
+    async def _guarded(idx: int, phase: ScanPhase):
+        async with sem:
+            f, m = await _run_phase_worker(
+                phase=phase,
+                system_prompt=system_prompt,
+                model=model,
+                router=router,
+                browser=browser,
+                auth_cookies=auth_cookies,
+                http_client=http_client,
+                registry=registry,
+                allowed_domains=allowed_domains,
+                target_url=target_url,
+                cancel_flag=cancel_flag,
+                pause_flag=pause_flag,
+                exclude_urls=exclude_urls,
+                prior_findings=prior_findings,
+                worker_id=idx,
+                on_progress=on_progress,
+                auth_headers=auth_headers,
+            )
+            async with lock:
+                all_findings.extend(f)
+                all_logs.append(m)
+
+    tasks = [_guarded(i, p) for i, p in enumerate(phases)]
+    await asyncio.gather(*tasks, return_exceptions=True)
+    return all_findings, all_logs
+
+
 async def run_scan(
     target: ScanTarget,
     model: str,
@@ -1632,10 +1938,40 @@ async def run_scan(
         has_baseline = bool(baseline_context)
         has_body_fuzz = bool(body_fuzz_context)
         has_workflow = workflow_replayed or bool(getattr(target, "business_flow", None))
-        total_phases = _phase_seq + len(phases) + 2  # pre-LLM + LLM phases + post-auth passive + verification
+
+        # ── Split phases into sequential (recon) vs parallel (vuln testing) ──
+        # Recon phases (parallel_ok=False) MUST run first sequentially.
+        # Vuln testing phases (parallel_ok=True) can run concurrently.
+        # attack_chain_analysis is excluded from both groups when parallel
+        # mode is active — replaced by reactive CHAIN_SUB_PHASES that run
+        # after the parallel vuln-testing fan-out completes.
+        sequential_phases = [
+            p for p in phases
+            if not p.parallel_ok and p.id != "attack_chain_analysis"
+        ]
+        parallel_phases = [
+            p for p in phases
+            if p.parallel_ok and p.id != "attack_chain_analysis"
+        ]
+        use_parallel = (
+            len(parallel_phases) > 1
+            and browser is not None
+            and MAX_PARALLEL_WORKERS > 1
+        )
+        if use_parallel:
+            run_sequentially = sequential_phases
+            run_in_parallel = parallel_phases
+            print(f"  [PARALLEL] {len(run_sequentially)} sequential + "
+                  f"{len(run_in_parallel)} parallel phases "
+                  f"(max {MAX_PARALLEL_WORKERS} workers)")
+        else:
+            run_sequentially = phases
+            run_in_parallel = []
+
+        total_phases = _phase_seq + len(phases) + 2
         print(f"  [SCAN] Starting {len(phases)} scan phases + verification...")
         _cb("scan_start", {"total_phases": total_phases})
-        for phase_idx, phase in enumerate(phases):
+        for phase_idx, phase in enumerate(run_sequentially):
             _check_cancel()
             phase_num = _next_phase()
             if start_from_phase > 0 and phase_idx < start_from_phase:
@@ -2699,6 +3035,92 @@ async def run_scan(
                             "Use these to inform your remaining scan phases."})
                 except Exception as e:
                     logger.warning("Post-auth passive recon failed (non-fatal): %s", e)
+
+        # ── Parallel Vuln-Testing Fan-Out ─────────────────────────────
+        if run_in_parallel:
+            _check_cancel()
+            print(f"  [PARALLEL] Launching {len(run_in_parallel)} vuln phases concurrently...")
+            _cb("parallel_start", {
+                "phases": [p.id for p in run_in_parallel],
+                "workers": min(len(run_in_parallel), MAX_PARALLEL_WORKERS),
+            })
+
+            auth_cookies: list[dict] = []
+            if page:
+                try:
+                    auth_cookies = await page.context.cookies()
+                except Exception:
+                    pass
+            _par_auth_headers = auth_session.get_auth_header() if auth_session else {}
+
+            par_findings, par_logs = await run_phases_parallel(
+                phases=run_in_parallel,
+                system_prompt=system_prompt,
+                model=model,
+                router=router,
+                browser=browser,
+                auth_cookies=auth_cookies,
+                http_client=http_client,
+                registry=registry,
+                allowed_domains=allowed_domains,
+                target_url=target.url,
+                cancel_flag=cancel_flag,
+                pause_flag=pause_flag,
+                exclude_urls=getattr(target, "exclude_urls", None) or [],
+                prior_findings=findings,
+                on_progress=_cb,
+                max_workers=MAX_PARALLEL_WORKERS,
+                auth_headers=_par_auth_headers,
+            )
+            findings.extend(par_findings)
+            for log in par_logs:
+                metrics["phase_log"].append(log)
+                metrics["total_tool_calls"] += log.get("tool_calls", 0)
+            metrics["phases_completed"] += len(run_in_parallel)
+            print(f"  [PARALLEL] Done: {len(par_findings)} new findings from "
+                  f"{len(run_in_parallel)} parallel phases")
+            _cb("parallel_end", {
+                "findings": len(par_findings), "phases": len(run_in_parallel),
+            })
+
+            # ── Reactive Chain Analysis (parallel) ────────────────────
+            chain_phases = _select_reactive_chains(findings)
+            if chain_phases:
+                _check_cancel()
+                print(f"  [CHAINS] {len(chain_phases)} chain categories triggered by findings:")
+                for cp in chain_phases:
+                    print(f"    - {cp.name}")
+                _cb("chains_start", {
+                    "phases": [cp.id for cp in chain_phases],
+                })
+
+                chain_findings, chain_logs = await run_phases_parallel(
+                    phases=chain_phases,
+                    system_prompt=system_prompt,
+                    model=model,
+                    router=router,
+                    browser=browser,
+                    auth_cookies=auth_cookies,
+                    http_client=http_client,
+                    registry=registry,
+                    allowed_domains=allowed_domains,
+                    target_url=target.url,
+                    cancel_flag=cancel_flag,
+                    pause_flag=pause_flag,
+                    exclude_urls=getattr(target, "exclude_urls", None) or [],
+                    prior_findings=findings,
+                    on_progress=_cb,
+                    max_workers=MAX_PARALLEL_WORKERS,
+                    auth_headers=_par_auth_headers,
+                )
+                findings.extend(chain_findings)
+                for log in chain_logs:
+                    metrics["phase_log"].append(log)
+                    metrics["total_tool_calls"] += log.get("tool_calls", 0)
+                print(f"  [CHAINS] Done: {len(chain_findings)} chain findings")
+                _cb("chains_end", {"findings": len(chain_findings)})
+            else:
+                print("  [CHAINS] No chain categories triggered — skipping")
 
         metrics["api_endpoints_found"] = len(registry.get_all())
         print(f"  [DONE] Pages: {metrics['pages_crawled']}, Forms: {metrics['forms_found']}, APIs: {metrics['api_endpoints_found']}, Findings: {len(findings)}")

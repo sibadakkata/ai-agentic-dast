@@ -1812,6 +1812,32 @@ async def _run_scan_task(scan_id, target_url, username, password, model, scan_mo
                 if msg:
                     scan["progress"].append(msg)
                     _save_scan(scan_id)
+            elif event == "parallel_start":
+                count = data.get("workers", 0)
+                phase_ids = data.get("phases", [])
+                scan["progress"].append(
+                    f"Launching {len(phase_ids)} phases in parallel ({count} workers)..."
+                )
+                scan["parallel_active"] = True
+                _save_scan(scan_id)
+            elif event == "parallel_end":
+                scan["progress"].append(
+                    f"Parallel execution done: {data.get('findings', 0)} findings "
+                    f"from {data.get('phases', 0)} phases"
+                )
+                scan["parallel_active"] = False
+                _save_scan(scan_id)
+            elif event == "chains_start":
+                phase_ids = data.get("phases", [])
+                scan["progress"].append(
+                    f"Running {len(phase_ids)} attack chain categories in parallel..."
+                )
+                _save_scan(scan_id)
+            elif event == "chains_end":
+                scan["progress"].append(
+                    f"Chain analysis done: {data.get('findings', 0)} chain findings"
+                )
+                _save_scan(scan_id)
             elif event == "out_of_scope":
                 url = data.get("url", "")
                 if url and url not in [u["url"] for u in scan.get("live_out_of_scope", [])]:

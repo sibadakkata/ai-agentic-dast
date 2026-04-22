@@ -111,6 +111,7 @@ class ScanPhase:
     prompt: str
     max_steps: int = 50
     applies_to: str = "both"
+    parallel_ok: bool = True
 
 
 WEB_PHASES: list[ScanPhase] = [
@@ -187,6 +188,7 @@ WEB_PHASES: list[ScanPhase] = [
             "Every input you miss is a vulnerability you won't find."
         ),
         applies_to="website",
+        parallel_ok=False,
     ),
     ScanPhase(
         id="web_a01",
@@ -885,6 +887,7 @@ API_PHASES: list[ScanPhase] = [
             "Record every endpoint that returns a non-404 response."
         ),
         applies_to="api",
+        parallel_ok=False,
     ),
     ScanPhase(
         id="api_auth",
@@ -1260,7 +1263,135 @@ ATTACK_CHAIN_PHASE = ScanPhase(
     ),
     max_steps=50,
     applies_to="both",
+    parallel_ok=False,
 )
+
+
+# ---------------------------------------------------------------------------
+# Parallel chain sub-phases: each focuses on one chain category so they can
+# run concurrently, each in its own LLM conversation + browser context.
+# ---------------------------------------------------------------------------
+
+_CHAIN_PREAMBLE = (
+    "You have completed all individual scan phases. Your ONLY job now is to "
+    "find and PROVE exploitable attack chains in ONE specific category.\n\n"
+    "Your findings so far:\n{findings_summary}\n\n"
+    "## METHODOLOGY\n"
+    "1. Review ALL findings above. Identify pairs/triples that can combine.\n"
+    "2. Plan the attack path: Step 1 (initial access) -> Step 2 (escalation) -> Step 3 (impact)\n"
+    "3. Execute using `chain_exploit` tool with ordered steps.\n"
+    "4. Verify end-to-end. Report as a SINGLE finding with combined severity.\n\n"
+    "## RULES\n"
+    "- Use `chain_exploit` for every attempt — it records step-by-step evidence\n"
+    "- Only report chains with PROOF from actual requests (not theoretical)\n"
+    "- Reference individual findings by number\n"
+    "- A chain of two Low findings that achieves RCE = Critical\n"
+    "- If no chains are exploitable in your category, say so\n\n"
+)
+
+CHAIN_CREDENTIAL_THEFT = ScanPhase(
+    id="chain_credential_theft",
+    name="Chain: Credential / Session Theft",
+    prompt=(
+        _CHAIN_PREAMBLE +
+        "## YOUR CATEGORY: Credential / Session Theft Chains\n"
+        "Focus ONLY on these patterns:\n"
+        "- XSS + non-HttpOnly session cookie -> steal document.cookie\n"
+        "- XSS + CSRF-vulnerable form -> auto-submit password/email change\n"
+        "- Open Redirect + OAuth/SSO callback -> steal auth token\n"
+        "- Session fixation + XSS -> fix session then hijack\n"
+        "- JWT alg:none + role claim -> forge admin token\n"
+        "- Host header injection + password reset -> poisoned reset link\n"
+    ),
+    max_steps=30,
+    applies_to="both",
+    parallel_ok=True,
+)
+
+CHAIN_DATA_EXFIL = ScanPhase(
+    id="chain_data_exfil",
+    name="Chain: Data Exfiltration",
+    prompt=(
+        _CHAIN_PREAMBLE +
+        "## YOUR CATEGORY: Data Exfiltration Chains\n"
+        "Focus ONLY on these patterns:\n"
+        "- CORS misconfig + sensitive API endpoint -> cross-origin fetch\n"
+        "- IDOR + missing rate limit -> enumerate all user records\n"
+        "- SQLi + UNION SELECT -> extract credentials, use on admin login\n"
+        "- Path traversal + known config path -> read secrets files\n"
+        "- API data exposure + GraphQL introspection -> extract PII\n"
+    ),
+    max_steps=30,
+    applies_to="both",
+    parallel_ok=True,
+)
+
+CHAIN_RCE = ScanPhase(
+    id="chain_rce",
+    name="Chain: Remote Code Execution",
+    prompt=(
+        _CHAIN_PREAMBLE +
+        "## YOUR CATEGORY: Remote Code Execution Chains\n"
+        "Focus ONLY on these patterns:\n"
+        "- File upload + path traversal -> place webshell\n"
+        "- SSRF + cloud metadata (169.254.169.254) -> steal IAM creds\n"
+        "- SSTI + unrestricted context -> execute OS commands\n"
+        "- Command injection + file read -> exfiltrate secrets\n"
+        "- XXE + internal file read -> extract SSH keys\n"
+    ),
+    max_steps=30,
+    applies_to="both",
+    parallel_ok=True,
+)
+
+CHAIN_ACCESS_ESCALATION = ScanPhase(
+    id="chain_access_escalation",
+    name="Chain: Access Control Escalation",
+    prompt=(
+        _CHAIN_PREAMBLE +
+        "## YOUR CATEGORY: Access Control Escalation Chains\n"
+        "Focus ONLY on these patterns:\n"
+        "- BOLA + privilege escalation -> admin account takeover\n"
+        "- API version downgrade + missing auth -> bypass authentication\n"
+        "- Content-type confusion + WAF bypass -> deliver payload\n"
+        "- Timing enumeration + no rate limit -> brute force\n"
+        "- Missing SameSite + CORS misconfig -> cross-site state change\n"
+        "- Mass assignment + admin role field -> self-promote to admin\n"
+    ),
+    max_steps=30,
+    applies_to="both",
+    parallel_ok=True,
+)
+
+CHAIN_SUB_PHASES: list[ScanPhase] = [
+    CHAIN_CREDENTIAL_THEFT,
+    CHAIN_DATA_EXFIL,
+    CHAIN_RCE,
+    CHAIN_ACCESS_ESCALATION,
+]
+
+# Reactive chain triggers: when a finding of a given OWASP category appears,
+# these chain sub-phases become relevant. Used by the orchestrator to decide
+# which chain agents to spawn based on actual findings.
+REACTIVE_CHAIN_TRIGGERS: dict[str, list[str]] = {
+    "xss":       ["chain_credential_theft"],
+    "sqli":      ["chain_data_exfil", "chain_rce"],
+    "ssrf":      ["chain_rce"],
+    "ssti":      ["chain_rce"],
+    "cmdi":      ["chain_rce"],
+    "xxe":       ["chain_rce", "chain_data_exfil"],
+    "idor":      ["chain_data_exfil", "chain_access_escalation"],
+    "bola":      ["chain_access_escalation"],
+    "cors":      ["chain_data_exfil", "chain_credential_theft"],
+    "csrf":      ["chain_credential_theft"],
+    "redirect":  ["chain_credential_theft"],
+    "jwt":       ["chain_credential_theft", "chain_access_escalation"],
+    "upload":    ["chain_rce"],
+    "traversal": ["chain_data_exfil", "chain_rce"],
+    "auth":      ["chain_access_escalation"],
+    "mass_assign": ["chain_access_escalation"],
+    "graphql":   ["chain_data_exfil"],
+}
 
 
 _FOCUS_PHASE_MAP: dict[str, set[str]] = {
