@@ -3407,6 +3407,8 @@ async function pollLiveView(scanId) {
           ${stat((live.phases || []).length, 'Phases')}
           ${stat(live.total_tokens ? live.total_tokens.toLocaleString() : '0', 'Tokens Used')}
           ${stat(live.live_cost != null && live.live_cost > 0 ? '$' + live.live_cost.toFixed(4) : '-', 'Est. Cost')}
+          ${stat(live.cache_read_tokens ? live.cache_read_tokens.toLocaleString() : '0', 'Cache Hits')}
+          ${stat(live.cache_write_tokens ? live.cache_write_tokens.toLocaleString() : '0', 'Cache Writes')}
         </div>
       </div>`;
 

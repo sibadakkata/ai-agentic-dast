@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import logging
 import os
 import time
@@ -28,6 +29,79 @@ MODELS = [
     "bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0",
 ]
 
+_BEDROCK_ANTHROPIC_CACHE_MODELS = (
+    "anthropic.claude-haiku-4-5",
+    "anthropic.claude-sonnet-4",
+    "anthropic.claude-opus-4",
+    "anthropic.claude-3-7-sonnet",
+    "anthropic.claude-3-5-sonnet",
+)
+
+
+def _supports_bedrock_cache(model: str) -> bool:
+    """Check if a bedrock/ model supports prompt caching."""
+    if not model.startswith("bedrock/"):
+        return False
+    model_id = model.split("/", 1)[1]
+    if model_id.startswith("us."):
+        model_id = model_id[3:]
+    return any(model_id.startswith(prefix) for prefix in _BEDROCK_ANTHROPIC_CACHE_MODELS)
+
+
+def _inject_cache_control(messages: list[dict], tools: list[dict] | None, model: str):
+    """Add cache_control breakpoints to the system message and last tool definition.
+
+    Bedrock Anthropic requires the system message content to be in content-block
+    format (list of dicts) for cache_control to apply.  We place one cache
+    checkpoint on the system message (the static prompt that repeats every call)
+    and one on the last tool definition (tool schema is also identical every call).
+
+    Returns (messages, tools) — may be shallow-copied to avoid mutating originals.
+    """
+    if not _supports_bedrock_cache(model):
+        return messages, tools
+
+    has_1h_ttl = any(k in model for k in ("haiku-4-5", "sonnet-4-5", "sonnet-4.5", "opus-4-5", "opus-4.5", "sonnet-4-6", "opus-4-6", "haiku-4.5"))
+    ttl_value = "1h" if has_1h_ttl else None
+
+    cache_marker: dict = {"type": "ephemeral"}
+    if ttl_value:
+        cache_marker["ttl"] = ttl_value
+
+    new_messages = list(messages)
+    for i, msg in enumerate(new_messages):
+        if msg.get("role") != "system":
+            continue
+        content = msg.get("content")
+        if isinstance(content, str):
+            new_messages[i] = {
+                "role": "system",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": content,
+                        "cache_control": cache_marker,
+                    }
+                ],
+            }
+        elif isinstance(content, list):
+            content = [dict(block) for block in content]
+            if content:
+                content[-1] = dict(content[-1])
+                content[-1]["cache_control"] = cache_marker
+            new_messages[i] = {**msg, "content": content}
+        break
+
+    new_tools = tools
+    if tools:
+        new_tools = [t for t in tools]
+        last = copy.deepcopy(new_tools[-1])
+        fn = last.get("function", last)
+        fn["cache_control"] = cache_marker
+        new_tools[-1] = last
+
+    return new_messages, new_tools
+
 
 @dataclass
 class ModelUsage:
@@ -36,6 +110,8 @@ class ModelUsage:
     output_tokens: int = 0
     total_cost_usd: float = 0.0
     calls: int = 0
+    cache_read_tokens: int = 0
+    cache_creation_tokens: int = 0
 
 
 DIRECT_PREFIXES = ("bedrock/", "vertex_ai/", "sagemaker/", "ollama/")
@@ -151,9 +227,10 @@ class LLMRouter:
         return raw
 
     def _direct_complete(self, model, messages, tools, **kwargs):
-        call_kwargs: dict = {"model": model, "messages": messages, **kwargs}
-        if tools is not None:
-            call_kwargs["tools"] = tools
+        cached_messages, cached_tools = _inject_cache_control(messages, tools, model)
+        call_kwargs: dict = {"model": model, "messages": cached_messages, **kwargs}
+        if cached_tools is not None:
+            call_kwargs["tools"] = cached_tools
         return litellm.completion(**call_kwargs)
 
     def _track(self, model: str, response) -> None:
@@ -164,6 +241,12 @@ class LLMRouter:
         mu.input_tokens += u.prompt_tokens or 0
         mu.output_tokens += u.completion_tokens or 0
         mu.calls += 1
+
+        ptd = getattr(u, "prompt_tokens_details", None)
+        if ptd:
+            mu.cache_read_tokens += getattr(ptd, "cached_tokens", 0) or 0
+        mu.cache_creation_tokens += getattr(u, "cache_creation_input_tokens", 0) or 0
+
         try:
             cost = litellm.completion_cost(completion_response=response)
             if cost is not None:
@@ -179,6 +262,8 @@ class LLMRouter:
                 "output_tokens": u.output_tokens,
                 "cost_usd": round(u.total_cost_usd, 4),
                 "calls": u.calls,
+                "cache_read_tokens": u.cache_read_tokens,
+                "cache_creation_tokens": u.cache_creation_tokens,
             }
             for u in self.usage.values()
         ]

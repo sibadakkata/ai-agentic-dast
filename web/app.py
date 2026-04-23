@@ -298,7 +298,7 @@ def _load_scans_from_disk():
         if bootstrap_cost > 0:
             scandb.set_cost_ledger(bootstrap_cost)
 
-_TRANSIENT_KEYS = frozenset({"live_tests", "live_findings", "live_phases", "live_crawled", "live_forms", "live_tool_calls", "live_out_of_scope", "live_tokens", "live_llm_calls", "live_cost", "live_phase_tools", "_router", "_findings_seen"})
+_TRANSIENT_KEYS = frozenset({"live_tests", "live_findings", "live_phases", "live_crawled", "live_forms", "live_tool_calls", "live_out_of_scope", "live_tokens", "live_llm_calls", "live_cost", "live_cache_read", "live_cache_write", "live_phase_tools", "_router", "_findings_seen"})
 _SECRET_KEYS = frozenset({"_password"})
 
 _CRAWLED_PERSIST_CAP = 500
@@ -1743,6 +1743,8 @@ async def _run_scan_task(scan_id, target_url, username, password, model, scan_mo
                     scan["live_tokens"] = sum(c.get("input_tokens", 0) + c.get("output_tokens", 0) for c in _cs)
                     scan["live_llm_calls"] = sum(c.get("calls", 0) for c in _cs)
                     scan["live_cost"] = round(sum(c.get("cost_usd", 0) for c in _cs), 4)
+                    scan["live_cache_read"] = sum(c.get("cache_read_tokens", 0) for c in _cs)
+                    scan["live_cache_write"] = sum(c.get("cache_creation_tokens", 0) for c in _cs)
                 if scan["live_tool_calls"] % 10 == 0:
                     _save_scan(scan_id)
             elif event == "finding":
@@ -2113,6 +2115,8 @@ async def get_scan_live(scan_id: str, since_test: int = 0, since_finding: int = 
         "live_cost": s.get("live_cost", 0),
         "out_of_scope": s.get("live_out_of_scope", []),
         "parallel_active": s.get("parallel_active", False),
+        "cache_read_tokens": s.get("live_cache_read", 0),
+        "cache_write_tokens": s.get("live_cache_write", 0),
     }
 
 
