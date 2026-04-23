@@ -1710,12 +1710,16 @@ async def _run_scan_task(scan_id, target_url, username, password, model, scan_mo
                 scan["progress"].append(scan["current_phase"])
                 _mark_dirty(scan_id)
             elif event == "phase_end":
-                scan["live_phases"].append({
+                phase_entry = {
                     "phase": data["phase"],
                     "name": data["name"],
                     "tool_calls": data["tool_calls"],
                     "findings": data["findings"],
-                })
+                }
+                if "worker" in data:
+                    phase_entry["worker"] = data["worker"]
+                    phase_entry["parallel"] = True
+                scan["live_phases"].append(phase_entry)
                 _save_scan(scan_id)
                 _persist_partial_findings(scan_id, scan)
             elif event == "tool_call":
@@ -2053,6 +2057,26 @@ async def get_scan_status(scan_id: str):
     return JSONResponse({"error": "Scan not found"}, status_code=404)
 
 
+def _slim_finding(f: dict) -> dict:
+    """Return a lightweight copy of a finding for the live poll response.
+
+    Strips large fields (evidence blobs, HTTP exchanges, full remediation
+    text) that can bloat findings to ~15 KB each.  The full data is still
+    available via /api/results/{scan_id}.
+    """
+    return {
+        "title": f.get("title", ""),
+        "severity": f.get("severity", ""),
+        "url": f.get("url", ""),
+        "parameter": f.get("parameter", ""),
+        "phase": f.get("phase", ""),
+        "owasp_category": f.get("owasp_category", ""),
+        "payload": str(f.get("payload", ""))[:200],
+        "evidence": str(f.get("evidence", ""))[:300],
+        "explanation": str(f.get("explanation", ""))[:200],
+    }
+
+
 @app.get("/api/scan/{scan_id}/live", tags=["Scans"])
 async def get_scan_live(scan_id: str, since_test: int = 0, since_finding: int = 0):
     """Return live scan activity: recent tests, findings, and phases since given offsets."""
@@ -2061,14 +2085,25 @@ async def get_scan_live(scan_id: str, since_test: int = 0, since_finding: int = 
     s = SCANS[scan_id]
     tests = s.get("live_tests", [])
     findings = s.get("live_findings", [])
+    # Cap per-poll batch to keep response under ~200 KB
+    _MAX_TESTS_PER_POLL = 150
+    _MAX_FINDINGS_PER_POLL = 50
+    new_tests = tests[since_test:]
+    if len(new_tests) > _MAX_TESTS_PER_POLL:
+        new_tests = new_tests[:_MAX_TESTS_PER_POLL]
+    new_findings = findings[since_finding:]
+    if len(new_findings) > _MAX_FINDINGS_PER_POLL:
+        new_findings = new_findings[:_MAX_FINDINGS_PER_POLL]
+    # Slim down findings to avoid multi-MB responses
+    slim_findings = [_slim_finding(f) for f in new_findings]
     return {
         "status": s.get("status"),
         "current_phase": s.get("current_phase", ""),
         "phases": s.get("live_phases", []),
         "phase_tools": s.get("live_phase_tools", {}),
-        "tests": tests[since_test:],
+        "tests": new_tests,
         "tests_total": len(tests),
-        "findings": findings[since_finding:],
+        "findings": slim_findings,
         "findings_total": len(findings),
         "pages_crawled": len(s.get("live_crawled", [])),
         "crawled_urls": s.get("live_crawled", []),
@@ -2077,6 +2112,7 @@ async def get_scan_live(scan_id: str, since_test: int = 0, since_finding: int = 
         "llm_calls": s.get("live_llm_calls", 0),
         "live_cost": s.get("live_cost", 0),
         "out_of_scope": s.get("live_out_of_scope", []),
+        "parallel_active": s.get("parallel_active", False),
     }
 
 
