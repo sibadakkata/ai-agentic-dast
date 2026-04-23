@@ -218,6 +218,7 @@ tr:hover td { background:rgba(79,70,229,0.03); }
 .crawl-badge-api { background:rgba(5,150,105,0.08); color:var(--green); }
 
 .phase-card { border:1px solid var(--border); border-radius:8px; margin:8px 10px; overflow:hidden; }
+.phase-card.parallel-phase { border-left:3px solid var(--accent); }
 .phase-header { display:flex; justify-content:space-between; align-items:center; padding:12px 16px; background:var(--surface); cursor:pointer; user-select:none; transition:background 0.1s; }
 .phase-header:hover { background:var(--surface2); }
 .phase-header .phase-num { font-weight:700; color:var(--accent2); min-width:28px; }
@@ -225,9 +226,20 @@ tr:hover td { background:rgba(79,70,229,0.03); }
 .phase-header .phase-stats { display:flex; gap:12px; font-size:12px; color:var(--text2); }
 .phase-header .phase-stats .count-badge { background:rgba(79,70,229,0.1); color:var(--accent); padding:2px 10px; border-radius:10px; font-weight:600; }
 .phase-header .phase-stats .findings-badge { background:rgba(5,150,105,0.1); color:var(--green); padding:2px 10px; border-radius:10px; font-weight:600; }
+.phase-header .phase-stats .worker-badge { background:rgba(245,158,11,0.12); color:var(--yellow); padding:2px 8px; border-radius:10px; font-weight:600; font-size:10px; }
 .phase-header .phase-arrow { transition:transform 0.2s; font-size:10px; color:var(--text2); margin-left:8px; }
 .phase-header.expanded .phase-arrow { transform:rotate(90deg); }
 .phase-detail { display:none; border-top:1px solid var(--border); }
+.parallel-group-banner { margin:12px 10px 4px; padding:10px 16px; background:linear-gradient(135deg,rgba(79,70,229,0.08),rgba(99,102,241,0.04)); border:1px solid rgba(79,70,229,0.2); border-radius:8px; display:flex; align-items:center; gap:10px; }
+.parallel-group-banner .par-icon { font-size:16px; }
+.parallel-group-banner .par-label { font-weight:700; font-size:13px; color:var(--accent); }
+.parallel-group-banner .par-detail { font-size:11px; color:var(--text2); }
+.parallel-group-banner.active { animation:parallel-pulse 2s ease-in-out infinite; }
+@keyframes parallel-pulse { 0%,100%{border-color:rgba(79,70,229,0.2)} 50%{border-color:rgba(79,70,229,0.5)} }
+.chain-group-banner { margin:12px 10px 4px; padding:10px 16px; background:linear-gradient(135deg,rgba(245,158,11,0.08),rgba(245,158,11,0.03)); border:1px solid rgba(245,158,11,0.25); border-radius:8px; display:flex; align-items:center; gap:10px; }
+.chain-group-banner .chain-icon { font-size:16px; }
+.chain-group-banner .chain-label { font-weight:700; font-size:13px; color:var(--yellow); }
+.chain-group-banner .chain-detail { font-size:11px; color:var(--text2); }
 
 .cat-group { border:1px solid var(--border); border-radius:8px; margin-bottom:8px; overflow:hidden; }
 .cat-header { display:flex; justify-content:space-between; align-items:center; padding:10px 16px; background:var(--surface); cursor:pointer; user-select:none; transition:background 0.1s; }
@@ -3308,11 +3320,14 @@ async function pollLiveView(scanId) {
       return;
     }
 
-    let live = {tests:[], findings:[], phases:[], tests_total:0, findings_total:0, current_phase:''};
+    let live = {tests:[], findings:[], phases:[], tests_total:0, findings_total:0, current_phase:'', tool_calls:0, total_tokens:0, live_cost:0, llm_calls:0, pages_crawled:0};
     try {
-      const liveResp = await fetch(`/api/scan/${scanId}/live?since_test=${lvTestOffset}&since_finding=${lvFindingOffset}`);
+      const _ac = new AbortController();
+      const _to = setTimeout(() => _ac.abort(), 10000);
+      const liveResp = await fetch(`/api/scan/${scanId}/live?since_test=${lvTestOffset}&since_finding=${lvFindingOffset}`, {signal: _ac.signal});
+      clearTimeout(_to);
       if (liveResp.ok) live = await liveResp.json();
-    } catch(e2) {}
+    } catch(e2) { /* timeout or parse error — stats will show stale data */ }
 
     const targetLine = data.target
       ? `<div style="font-size:14px;font-weight:400;color:var(--accent2);margin-top:4px;">
@@ -3522,9 +3537,10 @@ function renderPhaseBreakdown(container, live) {
   const phases = live.phases || [];
   const allTests = _allLiveTests || [];
   const currentPhase = live.current_phase || '';
+  const parallelActive = live.parallel_active || false;
   if (live.phase_tools) _livePhaseTools = live.phase_tools;
 
-  const key = phases.length + '-' + allTests.length + '-' + JSON.stringify(_livePhaseTools).length;
+  const key = phases.length + '-' + allTests.length + '-' + JSON.stringify(_livePhaseTools).length + '-' + parallelActive;
   if (key === _prevPhaseRender) return;
   _prevPhaseRender = key;
 
@@ -3550,15 +3566,23 @@ function renderPhaseBreakdown(container, live) {
     return;
   }
 
+  // Build a map of phase name -> metadata for parallel detection
+  const phaseMetaByName = {};
+  phases.forEach(ph => { phaseMetaByName[ph.name] = ph; });
+
   let html = '';
   const cpNumMatch = currentPhase.match(/\[(\d+)\//);
   const currentPhaseNum = cpNumMatch ? parseInt(cpNumMatch[1]) : null;
+  let inParallelGroup = false;
+  let inChainGroup = false;
   phaseNames.forEach((phaseName, idx) => {
     const phaseData = phases.find(p => p.name === phaseName);
     const tests = testsByPhase[phaseName] || [];
     const totalCalls = phaseData ? phaseData.tool_calls : tests.length;
     const findingsCount = phaseData ? phaseData.findings : 0;
     const isCurrent = currentPhase.includes(phaseName) && !phaseData;
+    const isParallel = phaseData && phaseData.parallel;
+    const isChain = phaseName.startsWith('Chain:');
     let phaseNum;
     if (phaseData && typeof phaseData.phase === 'number' && phaseData.phase > 0) {
       phaseNum = phaseData.phase;
@@ -3566,6 +3590,33 @@ function renderPhaseBreakdown(container, live) {
       phaseNum = currentPhaseNum;
     } else {
       phaseNum = idx + 1;
+    }
+
+    // Insert parallel group banner before the first parallel phase
+    if (isParallel && !isChain && !inParallelGroup) {
+      inParallelGroup = true;
+      const parPhases = phases.filter(p => p.parallel && !p.name.startsWith('Chain:'));
+      const parTotal = parPhases.reduce((s, p) => s + (p.tool_calls || 0), 0);
+      const parFindings = parPhases.reduce((s, p) => s + (p.findings || 0), 0);
+      const parDone = parPhases.length;
+      const activeClass = parallelActive ? ' active' : '';
+      html += `<div class="parallel-group-banner${activeClass}">
+        <span class="par-icon">&#9881;</span>
+        <span class="par-label">Parallel Execution</span>
+        <span class="par-detail">${parDone} phases &middot; ${parTotal} tests &middot; ${parFindings} findings${parallelActive ? ' &middot; <span style="color:var(--yellow);font-weight:600;">running</span>' : ''}</span>
+      </div>`;
+    }
+    // Insert chain group banner before the first chain phase
+    if (isChain && !inChainGroup) {
+      inChainGroup = true;
+      const chainPhases = phases.filter(p => p.name.startsWith('Chain:'));
+      const chainTotal = chainPhases.reduce((s, p) => s + (p.tool_calls || 0), 0);
+      const chainFindings = chainPhases.reduce((s, p) => s + (p.findings || 0), 0);
+      html += `<div class="chain-group-banner">
+        <span class="chain-icon">&#9876;</span>
+        <span class="chain-label">Attack Chain Analysis</span>
+        <span class="chain-detail">${chainPhases.length} categories &middot; ${chainTotal} tests &middot; ${chainFindings} findings</span>
+      </div>`;
     }
 
     const toolGroups = {};
@@ -3578,22 +3629,28 @@ function renderPhaseBreakdown(container, live) {
     const phaseToolSummary = _livePhaseTools[phaseName] || {};
     const toolTypeCount = Object.keys(toolGroups).length || Object.keys(phaseToolSummary).length;
 
+    const workerBadge = (isParallel && typeof phaseData.worker === 'number')
+      ? `<span class="worker-badge">W${phaseData.worker}</span>`
+      : '';
+
     const statusBadge = isCurrent
-      ? '<span style="color:var(--yellow);font-size:10px;margin-left:6px;">● running</span>'
+      ? '<span style="color:var(--yellow);font-size:10px;margin-left:6px;">&#9679; running</span>'
       : phaseData
-        ? '<span style="color:var(--green);font-size:10px;margin-left:6px;">✓ done</span>'
+        ? '<span style="color:var(--green);font-size:10px;margin-left:6px;">&#10003; done</span>'
         : '';
 
-    html += '<div class="phase-card">';
+    const cardClass = isParallel ? 'phase-card parallel-phase' : 'phase-card';
+    html += `<div class="${cardClass}">`;
     html += `<div class="phase-header" onclick="togglePhaseDetail(this)">
       <span class="phase-num">${phaseNum}</span>
       <span class="phase-name">${esc(phaseName)}${statusBadge}</span>
       <span class="phase-stats">
+        ${workerBadge}
         <span class="count-badge">${totalCalls} tests</span>
         ${findingsCount > 0 ? '<span class="findings-badge">' + findingsCount + ' findings</span>' : ''}
         <span style="color:var(--text2);font-size:10px;">${toolTypeCount} tool types</span>
       </span>
-      <span class="phase-arrow">▶</span>
+      <span class="phase-arrow">&#9654;</span>
     </div>`;
     html += '<div class="phase-detail">';
 
