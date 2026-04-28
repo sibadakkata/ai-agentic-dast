@@ -203,11 +203,34 @@ class LLMRouter:
                     or "429" in err_msg
                     or "too many requests" in err_msg
                 )
-                if attempt < 3 and is_rate_limit:
+                # Transient network/upstream errors. We've observed
+                # "All connection attempts failed" (Bedrock side regional
+                # blip), 503/504 from Bedrock + LiteLLM proxy, and read
+                # timeouts during long generations. These are recoverable
+                # on the next attempt and MUST be retried; otherwise the
+                # exception propagates to ``run_phases_parallel`` and the
+                # whole phase is silently dropped (with all its findings).
+                # See tests/test_parallel_phase_resilience.py.
+                is_transient = (
+                    "all connection attempts failed" in err_msg
+                    or "connection error" in err_msg
+                    or "service unavailable" in err_msg
+                    or "service_unavailable" in err_msg
+                    or "503" in err_msg
+                    or "502" in err_msg
+                    or "504" in err_msg
+                    or "timeout" in err_msg
+                    or "timed out" in err_msg
+                    or "internal server error" in err_msg
+                    or "throttling" in err_msg
+                    or "throttled" in err_msg
+                )
+                if attempt < 3 and (is_rate_limit or is_transient):
                     delay = delays[attempt]
+                    reason = "rate limit" if is_rate_limit else "transient network/upstream error"
                     logger.warning(
-                        "Rate limit hit for %s, retrying in %ds (attempt %d/3)",
-                        model, delay, attempt + 1,
+                        "%s hit for %s, retrying in %ds (attempt %d/3): %s",
+                        reason, model, delay, attempt + 1, str(e)[:200],
                     )
                     for _ in range(delay):
                         if cancel_flag and cancel_flag.is_set():

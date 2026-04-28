@@ -79,7 +79,7 @@ Before ANY deployment:
 
 ## Pre-Merge Test Gate
 
-**Every PR that touches `web/app.py` (especially the `/api/results/` read path or `_extract_*` helpers) MUST pass the regression suite below before being merged to `master`.**
+**Every PR that touches `web/app.py`, `scanners/ai_agent/agent.py`, or `scanners/ai_agent/llm_config.py` MUST pass the regression suite below before being merged to `master`.**
 
 ```
 python -m pytest tests/ -q \
@@ -88,10 +88,23 @@ python -m pytest tests/ -q \
     --ignore=tests/test_tls_skip_flag.py
 ```
 
-Why: the read path (`_get_results_inner`, `_extract_crawled`, `_extract_payloads_by_endpoint`, `_build_test_log_index`) consumes `SCANS[scan_id]["live_tests"]` which is *expected* to be a list of dicts but has produced malformed entries (strings, None, scalars) in production. Any change to these helpers MUST keep `tests/test_results_endpoint_resilience.py` green. That file pins:
+### `tests/test_results_endpoint_resilience.py` — `/api/results/` read path
+
+The read path (`_get_results_inner`, `_extract_crawled`, `_extract_payloads_by_endpoint`, `_build_test_log_index`) consumes `SCANS[scan_id]["live_tests"]` which is *expected* to be a list of dicts but has produced malformed entries (strings, None, scalars) in production. The file pins:
 
 1. Every `_extract_*` helper handles non-list `test_log`, non-dict items, dict items with non-dict `request` / `response_summary`.
 2. `GET /api/results/{scan_id}` returns 200 (not 500) when `SCANS[id]["live_tests"]` contains malformed entries.
 3. The `?enc=b64` envelope round-trips a complete JSON document with all expected top-level keys.
 
 If you add a new function that iterates `test_log`, add a corresponding resilience test in the same file.
+
+### `tests/test_parallel_phase_resilience.py` — parallel-phase / LLM router resilience
+
+`run_phases_parallel` fans out vulnerability-test phases concurrently. Workers can hit transient Bedrock connection errors ("All connection attempts failed"), 5xx upstream errors, browser-context death, or bugs in tool execution. The file pins:
+
+1. **`run_phases_parallel`** ALWAYS appends one `phase_log` entry per phase, even when the worker raises (the entry carries an `error` field). Lost-phase regressions caused 5 phases to disappear from a Sonnet 4.5 scan on 28-Apr-2026 (110 → 74 findings).
+2. **`LLMRouter.complete`** retries transient errors with exponential backoff: "All connection attempts failed", connection error, 502/503/504, timeout, throttling. Terminal errors (`ContentFiltered`, `ContextWindowExceeded`, `MalformedMessages`) are NOT retried.
+3. `ScanCancelled` continues to propagate through the new defensive try/except (user cancellation must not be masked).
+4. The orchestrator-level invariant `len(phase_log) == len(phases)` holds under arbitrary worker failures.
+
+If you change `run_phases_parallel`, `_run_phase_worker`, or `LLMRouter.complete`, you MUST keep these tests green.
