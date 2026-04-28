@@ -2734,16 +2734,26 @@ async def _get_results_inner(scan_id: str):
 
 
 def _build_test_log_index(test_log: list) -> dict:
-    """Pre-index test_log entries by URL base path and pre-serialize request JSON."""
+    """Pre-index test_log entries by URL base path and pre-serialize request JSON.
+
+    Defensive: ``test_log`` may originate from in-memory ``live_tests`` which
+    is *expected* to hold dicts but has been observed to contain strings/None
+    in production (see test_results_endpoint_resilience.py for the
+    regression fixtures). Skip non-dict entries silently rather than 500.
+    """
     from collections import defaultdict
     idx: dict[str, list] = defaultdict(list)
+    if not isinstance(test_log, list):
+        return dict(idx)
     for t in test_log:
+        if not isinstance(t, dict):
+            continue
         req = t.get("request", {})
         if not isinstance(req, dict):
             continue
         t_url = req.get("url", "") or req.get("endpoint", "")
         url_base = str(t_url).split("?")[0]
-        if not hasattr(t, "_req_json_lower"):
+        if "_req_json_lower" not in t:
             t["_req_json_lower"] = json.dumps(req, default=str).lower()
         if url_base:
             idx[url_base].append(t)
@@ -4019,10 +4029,21 @@ async def download_live_payloads(scan_id: str):
 
 
 def _extract_crawled(summary: dict, test_log: list) -> list[dict]:
+    # Defensive: in-memory ``live_tests`` (line 1734) and on-disk ``summary.test_log``
+    # are *expected* to be a list of dicts, but live agent telemetry has occasionally
+    # produced string entries (e.g. raw stringified JSON or error messages). Guard at
+    # both levels - non-dict ``t`` and non-dict ``t['request']`` - so the read path
+    # never raises AttributeError and breaks the results UI.
     urls = set()
     crawled = []
+    if not isinstance(test_log, list):
+        return crawled
     for t in test_log:
+        if not isinstance(t, dict):
+            continue
         req = t.get("request", {})
+        if not isinstance(req, dict):
+            continue
         url = str(req.get("url", "") or req.get("endpoint", ""))
         method = str(req.get("method", "GET"))
         if url and url not in urls:
@@ -4053,7 +4074,11 @@ def _parse_str_value(v):
 def _extract_payloads_by_endpoint(test_log: list) -> list[dict]:
     from collections import defaultdict
     ep_map: dict[str, list] = defaultdict(list)
+    if not isinstance(test_log, list):
+        return []
     for t in test_log:
+        if not isinstance(t, dict):
+            continue
         req = t.get("request", {})
         if not isinstance(req, dict):
             continue

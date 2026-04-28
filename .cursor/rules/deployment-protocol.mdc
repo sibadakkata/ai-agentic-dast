@@ -76,3 +76,22 @@ Before ANY deployment:
 - Never treat prior deploy approval in the same conversation as approval for a new deploy
 - Never say "deploying now" and then deploy — that is announcing, not asking
 - **Never deploy while a scan is running** — always check first, wait or ask user to stop the scan
+
+## Pre-Merge Test Gate
+
+**Every PR that touches `web/app.py` (especially the `/api/results/` read path or `_extract_*` helpers) MUST pass the regression suite below before being merged to `master`.**
+
+```
+python -m pytest tests/ -q \
+    --ignore=tests/test_regression_ui.py \
+    --ignore=tests/test_api_imports.py \
+    --ignore=tests/test_tls_skip_flag.py
+```
+
+Why: the read path (`_get_results_inner`, `_extract_crawled`, `_extract_payloads_by_endpoint`, `_build_test_log_index`) consumes `SCANS[scan_id]["live_tests"]` which is *expected* to be a list of dicts but has produced malformed entries (strings, None, scalars) in production. Any change to these helpers MUST keep `tests/test_results_endpoint_resilience.py` green. That file pins:
+
+1. Every `_extract_*` helper handles non-list `test_log`, non-dict items, dict items with non-dict `request` / `response_summary`.
+2. `GET /api/results/{scan_id}` returns 200 (not 500) when `SCANS[id]["live_tests"]` contains malformed entries.
+3. The `?enc=b64` envelope round-trips a complete JSON document with all expected top-level keys.
+
+If you add a new function that iterates `test_log`, add a corresponding resilience test in the same file.
