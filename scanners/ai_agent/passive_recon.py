@@ -427,8 +427,8 @@ async def run_passive_recon(
     network_js_urls: set | None = None,
     skip_tls_sibling_discovery: bool = False,
     extra_text_snippets: list[tuple[str, str]] | None = None,
-) -> list[dict]:
-    """Run all passive recon checks. Returns list of findings.
+) -> tuple[list[dict], dict]:
+    """Run all passive recon checks. Returns ``(findings, tech_fingerprint)``.
 
     Args:
         network_js_urls: optional pre-collected set of .js URLs captured
