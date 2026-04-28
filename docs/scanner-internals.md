@@ -523,6 +523,66 @@ Costs are displayed in real-time in the UI and stored with scan results.
 
 ---
 
+## Parallel-Phase Failure Surfacing (`run_phases_parallel`)
+
+Phases marked `parallel_ok=True` (most OWASP / API phases) are fanned out concurrently with `asyncio.Semaphore`-bounded `asyncio.gather`. The original implementation used `gather(..., return_exceptions=True)` and ignored the returned exceptions — so a worker that raised any exception (Bedrock 5xx, Playwright timeout, LLM context-window overflow, transient network reset) became an exception object in the result list that was never logged, never surfaced to the UI, and never written into `phase_log`.  Symptom in production: r2 of a Sonnet 4.5 scan completed with **6 phases missing** from `phase_log` vs r1 — the failure was silent end-to-end.
+
+Each worker is now wrapped in a guard that:
+
+1. Catches every non-`ScanCancelled` exception.
+2. Emits a synthetic `phase_log` entry with the phase id/name, an `error` field carrying the truncated exception message, and zero findings.
+3. Adds a `(FAILED)` suffix to the live `on_progress` callback so the UI shows the failed phase explicitly instead of skipping it.
+4. Re-raises `ScanCancelled` so user-stop propagates out of `gather` immediately.
+
+```python
+async def _guarded(idx: int, phase: ScanPhase):
+    async with sem:
+        try:
+            f, m = await _run_phase_worker(...)
+        except ScanCancelled:
+            raise                         # propagate user stop
+        except Exception as exc:           # surface, do not silently drop
+            err = repr(exc)[:300]
+            log_entry = {
+                "phase": phase.id, "name": phase.name,
+                "tool_calls": 0, "findings_count": 0, "error": err,
+            }
+            on_progress("phase_end", {**log_entry, "name": f"{phase.name} (FAILED)"})
+            return [], log_entry
+        return f, m
+```
+
+**Invariant (regression-tested in `tests/test_parallel_phase_resilience.py` and `tests/test_scan_error_resilience.py`):** `len(phase_log) == len(phases)` regardless of how many workers raise. The on-disk record always describes every phase, error or not.
+
+`_run_phase_worker`'s own `finally` block continues to close `worker_http` and the browser context, so resource cleanup happens even when the worker raises before reaching its return statement.
+
+---
+
+## LLM Router Retry Contract (`LLMRouter.complete`)
+
+Originally the router only retried `RateLimitError`. Any other transient signature — `ConnectError`, 502/503/504, `ReadTimeout`, throttling — was terminal on first occurrence. In practice this shows up as 1–6 silently-failed phases per scan whenever Bedrock has a ~30 s blip.
+
+The retry loop now treats all of the following as transient and retries up to **3 times** with exponential back-off `2s → 4s → 8s`:
+
+| Signature | Source |
+|-----------|--------|
+| `RateLimitError` | LiteLLM / Anthropic / OpenAI (existing) |
+| `ConnectError`, `All connection attempts failed` | network |
+| HTTP 502 / 503 / 504 | LiteLLM raises with status code in message |
+| `ReadTimeout`, `TimeoutError`, "timeout" | network / LiteLLM |
+| Provider throttling messages | various |
+
+**Terminal — never retried** (would just burn 4× cost on a deterministic failure):
+
+- `ContextWindowExceeded` — message is too long; bubble so the agent can trim and retry with smaller context
+- `ContentFiltered` — guardrail tripped; bubble so the agent can drop the offending message
+- `MalformedMessages` — orphaned tool_call / tool_result pair; bubble so the agent can repair the message array
+- `ScanCancelled` — user stopped
+
+`cancel_flag` is checked between attempts so a user-stop during the back-off is honoured immediately rather than after the next sleep finishes. Tests live in `tests/test_parallel_phase_resilience.py` and `tests/test_scan_error_resilience.py` (Section F).
+
+---
+
 ## Persistence / Crash Resilience
 
 Scans accumulate live state in memory — counters (cost, tokens, LLM calls, tool calls), the phase log, the crawl list, the out-of-scope list, per-phase tool usage, and the rolling request/response log. Without care, a Python-level error, user `stop`, process kill, or container restart would lose all of this.
@@ -563,6 +623,24 @@ Scans accumulate live state in memory — counters (cost, tokens, LLM calls, too
 
 Graceful error, user-stop, pause, and completion paths have zero drift.
 
+### Partial-checkpoint fallback (`_load_raw_result_dict`)
+
+`_persist_partial_findings` deliberately writes a **partial** `scan_results.payload` blob (`metadata.partial = True`) every 5 new findings so the UI can show in-progress findings after a crash. When the scan finishes cleanly it writes the full result file to disk (`results/raw/<scan_id>.json`) but the partial DB row from the last checkpoint can shadow it if the read path naively prefers DB > disk.
+
+`_load_raw_result_dict` (in `web/app.py`) now resolves the conflict in this order:
+
+1. Read the DB record. If `metadata.partial` is **not** set (full final write), use it.
+2. Otherwise, look for `results/raw/<scan_id>.json`. If present, load it, **back-fill** the DB with the full payload (so subsequent loads serve from DB), and return the disk version.
+3. Otherwise, return the partial DB record (best-effort live view of an in-progress / crashed scan).
+
+This eliminates a class of "scan finished with N findings but UI shows M < N" bugs that were caused by partial-checkpoint shadowing.
+
+### Results-API resilience (`/api/results/{scan_id}`)
+
+The frontend's "Results could not be loaded" error was driven by an `AttributeError: 'str' object has no attribute 'get'` thrown deep inside `_extract_crawled` / `_extract_payloads_by_endpoint` / `_build_test_log_index` whenever `summary.test_log` contained a non-dict entry (a string, `None`, a scalar, a list, or a dict whose `request` field wasn't itself a dict). Older scans had any combination of these.
+
+All three readers now guard with `isinstance(t, dict)` (and analogous checks on nested fields) and silently skip malformed rows, so the API endpoint never returns 500 just because of one corrupted log line. Regression coverage is in `tests/test_results_endpoint_resilience.py` and Section D of `tests/test_scan_error_resilience.py`.
+
 ---
 
 ## File Map
@@ -574,7 +652,8 @@ Graceful error, user-stop, pause, and completion paths have zero drift.
 | `scanners/ai_agent/prompts.py` | LLM instructions | `SYSTEM_PROMPT`, `WEB_PHASES`, `API_PHASES`, `get_phases()` |
 | `scanners/ai_agent/auth.py` | Authentication | `detect_and_login()`, `AuthSession`, `_detect_captcha()` |
 | `scanners/ai_agent/llm_config.py` | LLM routing | `LLMRouter`, `ModelUsage`, cost tracking |
-| `scanners/ai_agent/passive_recon.py` | Passive checks | 24 deterministic security checks |
+| `scanners/ai_agent/passive_recon.py` | Passive checks | 24 deterministic security checks; hybrid JS-library detection (catalog + heuristic + OSV.dev) |
+| `scanners/ai_agent/js_registry.py` | Global JS URL registry | `JSUrlRegistry` — collects every JS URL the scanner encounters across auth, SPA, and the network listener; in-scope filtering happens here. Used by passive recon's CVE audit so library detection isn't scoped to the seed page only |
 | `scanners/ai_agent/api_import.py` | API parsers | Postman, OpenAPI, Burp → `EndpointRegistry` |
 | `scanners/ai_agent/baseline_executor.py` | API baseline | Happy-path execution, variable chaining |
 | `scanners/ai_agent/body_fuzzer.py` | Body fuzzing | LLM-planned, engine-executed fuzzing |

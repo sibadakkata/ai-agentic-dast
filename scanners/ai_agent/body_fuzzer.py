@@ -814,7 +814,7 @@ async def fuzz_body(
     on_progress: Callable | None = None,
     llm_router: Any = None,
     llm_model: str | None = None,
-) -> list[FuzzResult]:
+) -> tuple[list[FuzzResult], list["LLMFinding"]]:
     """Run body fuzzing with three phases:
     1. Field-level fuzzing (LLM-planned or static payloads)
     2. JSON schema validation probes
@@ -824,7 +824,7 @@ async def fuzz_body(
         body_data = json.loads(original_body)
     except (json.JSONDecodeError, TypeError):
         logger.warning("Cannot parse body as JSON for fuzzing")
-        return []
+        return [], []
 
     fields = classify_all_fields(body_data)
     target_fields = [f for f in fields if f.priority <= max_priority]
@@ -867,7 +867,7 @@ async def fuzz_body(
             baseline_keys = set()
     except Exception as e:
         logger.warning("Baseline request failed: %s", e)
-        return []
+        return [], []
 
     results: list[FuzzResult] = []
     req_num = 0

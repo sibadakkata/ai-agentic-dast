@@ -1885,8 +1885,15 @@ async def run_scan(
                     _cb("crawl", {"url": r.url, "type": "api", "tool": "baseline", "count": metrics["pages_crawled"]})
 
         # ── Hybrid Body Fuzzing (LLM plans, engine executes) ──
+        # Skip entirely under the ``crawl_only`` scan profile — body fuzzing
+        # sends attack payloads, which crawl_only is documented as never doing.
         body_fuzz_context = ""
-        if baseline_context and baseline_results:
+        _scan_profile_eff = getattr(target, "scan_profile", "vulnerability_scan")
+        if (
+            baseline_context
+            and baseline_results
+            and _scan_profile_eff != "crawl_only"
+        ):
             from .body_fuzzer import fuzz_body, format_fuzz_results_for_llm as fmt_fuzz
             post_endpoints = [r for r in baseline_results if r.success and r.request_body and r.method in ("POST", "PUT", "PATCH")]
             if post_endpoints:
