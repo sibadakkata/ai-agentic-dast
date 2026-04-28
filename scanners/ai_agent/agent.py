@@ -38,6 +38,7 @@ from .prompts import (
     REACTIVE_CHAIN_TRIGGERS,
     ScanPhase,
 )
+from .severity import classify_severity
 from .tools import TOOL_DEFINITIONS, ScanTools
 
 logger = logging.getLogger(__name__)
@@ -3167,6 +3168,10 @@ async def run_scan(
                     "inconclusive": inconclusive,
                     "unverified": unverified,
                 }
+                # Re-classify now that verdict + verified are populated:
+                # CONFIRMED gets a small CVSS boost, DISPROVED collapses to 0.
+                for f in verified:
+                    f.update(classify_severity(f))
                 findings = verified
             except Exception as e:
                 print(f"  [VERIFY] Verification failed (non-fatal): {e}")
@@ -3211,6 +3216,10 @@ def _process_finding_obj(obj: dict, findings: list[dict], rejected: list[str],
             if require_evidence and not _has_evidence(obj):
                 rejected.append(obj.get("title", "?"))
                 return
+            # Normalise severity / CVSS / CWE deterministically before dedup so that
+            # two identical findings with different LLM-assigned severities still
+            # collapse together.
+            obj.update(classify_severity(obj))
             if dedup and any(f.get("title") == obj.get("title") and f.get("severity") == obj.get("severity") for f in findings):
                 return
             findings.append(obj)

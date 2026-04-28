@@ -29,6 +29,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 logger = logging.getLogger(__name__)
 
 from scanners.ai_agent.agent import run_scan, save_results, ScanCancelled
+from scanners.ai_agent.severity import classify_severity
 from scanners.ai_agent.api_import import (
     parse_postman_collection,
     parse_openapi_spec,
@@ -2623,9 +2624,18 @@ async def _get_results_inner(scan_id: str):
     triaged_findings = []
     overrides = SCANS[scan_id].get("cvss_overrides", {}) if scan_id in SCANS else {}
     for f in findings:
+        # Defensive: legacy result files persisted before deterministic
+        # severity classification only carry the LLM-assigned severity.
+        # Re-classify on read so the AI Raw tab is always normalised.
+        if "cvss" not in f or "cvss_vector" not in f:
+            f.update(classify_severity(f))
         ai_findings.append({
             "title": f.get("title", ""),
             "severity": f.get("severity", ""),
+            "llm_severity": f.get("llm_severity", ""),
+            "cvss": f.get("cvss"),
+            "cvss_vector": f.get("cvss_vector", ""),
+            "cwe": f.get("cwe", ""),
             "owasp": f.get("owasp_category", ""),
             "url": f.get("url", ""),
             "parameter": f.get("parameter", ""),

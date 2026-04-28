@@ -4453,15 +4453,20 @@ function renderAIRaw(findings) {
   window._aiRawFindings = findings;
   window._lastAIRawFindings = findings;
 
-  var thRow = '<th style="width:30px;"></th><th>#</th><th>Finding</th><th>Severity</th><th>CWE</th><th>URL</th><th>Parameter</th><th style="max-width:160px;">Evidence</th>';
+  var thRow = '<th style="width:30px;"></th><th>#</th><th>Finding</th><th>Severity</th><th title="Deterministic CVSS v3.1 score">CVSS</th><th>CWE</th><th>URL</th><th>Parameter</th><th style="max-width:160px;">Evidence</th>';
 
   function _rawRow(f, rowNum, origIdx) {
     const hasDetail = f.payload || f.evidence || (f.request_response && f.request_response.length);
+    var cvss = (typeof f.cvss === 'number') ? f.cvss.toFixed(1) : '-';
+    var vector = f.cvss_vector || '';
+    var llmSev = f.llm_severity || '';
+    var sevTitle = llmSev && llmSev.toLowerCase() !== (f.severity||'').toLowerCase() ? ('LLM said: ' + llmSev + ' \u2192 normalised to ' + (f.severity||'-')) : '';
     return '<tr onclick="showAIRawFindingDetail(' + origIdx + ')" style="cursor:pointer;" title="Click to view evidence">' +
       '<td style="text-align:center;">' + (hasDetail ? '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--accent2)" stroke-width="2" style="vertical-align:-2px;"><path d="M9 18l6-6-6-6"/></svg>' : '') + '</td>' +
       '<td>' + rowNum + '</td>' +
       '<td><strong>' + esc(f.title) + '</strong></td>' +
-      '<td><span class="severity sev-' + (f.severity||'').toLowerCase() + '">' + (f.severity||'-') + '</span></td>' +
+      '<td' + (sevTitle ? ' title="' + esc(sevTitle) + '"' : '') + '><span class="severity sev-' + (f.severity||'').toLowerCase() + '">' + (f.severity||'-') + '</span></td>' +
+      '<td style="font-size:11px;font-family:var(--font-mono);"' + (vector ? ' title="' + esc(vector) + '"' : '') + '>' + cvss + '</td>' +
       '<td style="font-size:11px">' + _cweLink(f.cwe_hint||f.cwe) + '</td>' +
       '<td style="word-break:break-all;font-size:11px;max-width:200px">' + esc(f.url||'') + '</td>' +
       '<td style="font-size:11px">' + esc(f.parameter||'') + '</td>' +
@@ -6131,9 +6136,20 @@ function showAIRawFindingDetail(idx) {
   const modal = document.getElementById('finding-detail-modal');
   const sevClass = `sev-${(f.severity || 'info').toLowerCase()}`;
 
+  const _cvssVal = (typeof f.cvss === 'number') ? f.cvss.toFixed(1) : '-';
+  const _vector = f.cvss_vector || '';
+  const _llmSev = f.llm_severity || '';
+  const _sevHtml = (_llmSev && _llmSev.toLowerCase() !== (f.severity || '').toLowerCase())
+    ? `<span class="severity ${sevClass}">${esc(f.severity || 'Info')}</span> <span style="font-size:10px;color:var(--text2);" title="LLM-assigned severity, replaced by deterministic CVSS bucket">(LLM: ${esc(_llmSev)})</span>`
+    : `<span class="severity ${sevClass}">${esc(f.severity || 'Info')}</span>`;
+  const _cvssHtml = _vector
+    ? `<span style="font-family:var(--font-mono);font-weight:600;">${_cvssVal}</span> <span style="font-size:10px;color:var(--text2);font-family:var(--font-mono);">${esc(_vector)}</span>`
+    : `<span style="font-family:var(--font-mono);font-weight:600;">${_cvssVal}</span>`;
+
   let metaHtml = '';
   [
-    ['Severity', `<span class="severity ${sevClass}">${esc(f.severity || 'Info')}</span>`],
+    ['Severity', _sevHtml],
+    ['CVSS v3.1', _cvssHtml],
     ['URL', `<a href="${esc(f.url || '')}" target="_blank" style="color:var(--accent2);word-break:break-all;">${esc(f.url || '-')}</a>`],
     ['Parameter', esc(f.parameter || '-')],
     ['Category', esc(f.owasp || '-')],
