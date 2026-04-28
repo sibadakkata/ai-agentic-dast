@@ -348,3 +348,121 @@ class TestResultsEndpointWithMalformedLiveTests:
         app_module._RESULTS_CACHE.pop(scan_id, None)
         resp = client.get(f"/api/results/{scan_id}", auth=("test-user", "test-pass"))
         assert resp.status_code == 200
+
+
+@pytest.fixture()
+def client_with_partial_db(tmp_path, monkeypatch):
+    """Simulate the production 'partial DB shadows full disk file' scenario.
+
+    - DB has a payload with metadata.partial=True and a minimal summary.
+    - Disk has the complete result JSON (with phase_log/test_log/pages_list).
+    - API MUST prefer disk and also back-fill DB with the full payload.
+    """
+    from fastapi.testclient import TestClient
+
+    scan_id = "test_scan_partial_db_001"
+
+    raw_dir = tmp_path / "raw"
+    raw_dir.mkdir()
+
+    disk_payload = {
+        "target": "http://example.test/",
+        "scan_mode": "both",
+        "findings": [
+            {
+                "title": "Test finding A",
+                "severity": "Medium",
+                "url": "http://example.test/a",
+                "owasp_category": "A01:2021 - Broken Access Control",
+                "cwe": "CWE-285",
+                "cvss": 5.4,
+                "cvss_vector": "AV:N/AC:L/PR:L/UI:N/S:U/C:L/I:L/A:N",
+            },
+        ],
+        "metadata": {
+            "model": "test-model",
+            "partial": False,
+        },
+        "summary": {
+            "total_findings": 1,
+            "pages_crawled": 1,
+            "pages_list": ["http://example.test/page"],
+            "phase_log": [
+                {"phase": "web_recon", "name": "Application mapping", "tool_calls": 10, "findings_count": 0},
+            ],
+            "test_log": [
+                {
+                    "phase": "web_recon",
+                    "tool": "api_request",
+                    "request": {"url": "http://example.test/page", "method": "GET"},
+                    "response_summary": {"status": 200},
+                }
+            ],
+        },
+    }
+
+    raw_file = raw_dir / f"aiagent_test_{scan_id}.json"
+    raw_file.write_text(json.dumps(disk_payload), encoding="utf-8")
+
+    partial_payload = {
+        "target": "http://example.test/",
+        "findings": disk_payload["findings"],
+        "metadata": {"model": "test-model", "partial": True, "phases_completed": 0},
+        "summary": {"total_findings": 1},
+    }
+
+    # Point the app at our temporary directory.
+    monkeypatch.setattr(app_module, "RAW_DIR", raw_dir)
+
+    # DB returns partial payload; save_scan_result should be called to back-fill full payload.
+    saved_payloads: list[str] = []
+
+    def fake_get_scan_result(sid: str):
+        return json.dumps(partial_payload) if sid == scan_id else None
+
+    def fake_save_scan_result(sid: str, payload_json: str):
+        if sid == scan_id:
+            saved_payloads.append(payload_json)
+
+    monkeypatch.setattr(app_module.scandb, "get_scan_result", fake_get_scan_result)
+    monkeypatch.setattr(app_module.scandb, "save_scan_result", fake_save_scan_result)
+
+    # Provide SCANS record so _find_result_file resolves quickly.
+    app_module.SCANS[scan_id] = {
+        "id": scan_id,
+        "target": "http://example.test/",
+        "status": "completed",
+        "result_file": raw_file.name,
+        "live_tests": [],
+    }
+    app_module._RESULTS_CACHE.clear()
+
+    client = TestClient(app_module.app)
+    yield client, scan_id, saved_payloads
+
+    app_module.SCANS.pop(scan_id, None)
+    app_module._RESULTS_CACHE.pop(scan_id, None)
+
+
+class TestPartialDbFallback:
+    def test_results_endpoint_prefers_disk_when_db_is_partial(self, client_with_partial_db):
+        client, scan_id, saved_payloads = client_with_partial_db
+
+        resp = client.get(f"/api/results/{scan_id}", auth=("test-user", "test-pass"))
+        assert resp.status_code == 200, resp.text[:300]
+        body = resp.json()
+
+        # Disk summary/test_log must be visible through the API response.
+        assert body["coverage"]["total_tests"] == 1
+        assert len(body["phase_log"]) == 1
+        assert body["phase_log"][0]["phase"] == "web_recon"
+        assert len(body["crawled_endpoints"]) == 1
+        assert body["crawled_endpoints"][0]["url"] == "http://example.test/page"
+        assert len(body["payloads_by_endpoint"]) >= 1
+
+        # Back-fill should have persisted a non-partial payload to DB.
+        assert saved_payloads, "Expected save_scan_result to be called to back-fill full payload"
+        persisted = json.loads(saved_payloads[-1])
+        assert not persisted.get("metadata", {}).get("partial", False)
+        assert len(persisted.get("summary", {}).get("phase_log", [])) == 1
+        assert len(persisted.get("summary", {}).get("test_log", [])) == 1

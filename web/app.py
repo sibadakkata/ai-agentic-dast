@@ -550,22 +550,57 @@ def _find_result_file(scan_id: str) -> str | None:
 
 
 def _load_raw_result_dict(scan_id: str) -> dict | None:
-    """Load raw result document: DB first, then legacy file (and back-fill DB)."""
+    """Load raw result document: DB first, then legacy file (and back-fill DB).
+
+    Defensive: ``_persist_partial_findings`` checkpoints a STRIPPED-DOWN
+    document to the same DB table during the scan (no ``test_log``,
+    no ``phase_log``, no ``pages_list``) and flags it
+    ``metadata.partial = True``. If the final ``_persist_scan_result``
+    write at completion fails, gets skipped, or races a container
+    restart, that partial checkpoint is the last DB write - and the
+    canonical full result file on disk is silently shadowed forever.
+
+    Observed in production on ``scan_20260428_081209_b23cf3``: DB had
+    1.6 MB partial (74 findings, phase_log=0, test_log=0); disk had
+    3.4 MB complete (74 findings, phase_log=37, test_log=138). API
+    served the partial version because the original code returned the
+    DB row unconditionally if it parsed.
+
+    The fix: when the DB version is flagged partial, prefer the
+    on-disk file if one exists and re-persist the full version so
+    subsequent reads are fast. See
+    tests/test_results_endpoint_resilience.py::TestPartialDbFallback.
+    """
     raw = scandb.get_scan_result(scan_id)
+    cached: dict | None = None
     if raw:
         try:
-            return json.loads(raw)
+            cached = json.loads(raw)
         except Exception:
-            pass
+            cached = None
+
+    cached_is_partial = bool(
+        isinstance(cached, dict)
+        and cached.get("metadata", {}).get("partial")
+    )
+    if cached and not cached_is_partial:
+        return cached
+
     fname = _find_result_file(scan_id)
     if fname:
         try:
             data = json.loads(Path(fname).read_text(encoding="utf-8"))
-            _persist_scan_result(scan_id, data)
+            disk_is_partial = bool(
+                isinstance(data, dict)
+                and data.get("metadata", {}).get("partial")
+            )
+            if not disk_is_partial:
+                _persist_scan_result(scan_id, data)
             return data
         except Exception:
             pass
-    return None
+
+    return cached
 
 
 def _backfill_scan_results_from_disk():
@@ -1724,6 +1759,10 @@ async def _run_scan_task(scan_id, target_url, username, password, model, scan_mo
                 if "worker" in data:
                     phase_entry["worker"] = data["worker"]
                     phase_entry["parallel"] = True
+                # Preserve transient-error context from run_phases_parallel so
+                # operators can see WHY a phase shows 0 findings in the live UI.
+                if data.get("error"):
+                    phase_entry["error"] = str(data["error"])[:200]
                 scan["live_phases"].append(phase_entry)
                 _save_scan(scan_id)
                 _persist_partial_findings(scan_id, scan)
