@@ -13,26 +13,30 @@ description: Builds and runs an LLM-powered agentic web security scanner using L
 │   └── targets.env               # Credentials (gitignored)
 │   └── targets.env.example       # Template for credentials
 ├── scanners/ai_agent/
-│   ├── agent.py                  # Core agent loop + context management
-│   ├── auth.py                   # Authentication (form/SSO/OAuth/MFA)
+│   ├── agent.py                  # Core agent loop, context mgmt, multi-identity, enriched retry prompts
+│   ├── auth.py                   # Authentication (form/SSO/OAuth/MFA) + multi-identity (User B/Admin/Tenant B)
+│   ├── severity.py               # Deterministic CVSS v3.1 severity classifier (XBOW-style, $0 cost)
+│   ├── passive_recon.py          # Deterministic passive checks + hardcoded secret scanner (17 patterns)
 │   ├── llm_config.py             # LiteLLM routing + cost tracking
-│   ├── prompts.py                # System + phase prompts
-│   ├── tools.py                  # 28 tools (browser, API, WebSocket, token)
+│   ├── prompts.py                # System + phase prompts (multi-identity placeholders for 8 auth-class phases)
+│   ├── tools.py                  # 30 tools (browser, API, WebSocket, token, exploit chaining)
 │   ├── api_import.py             # Postman/Burp/OpenAPI parsers
 │   ├── baseline_executor.py      # API happy-path executor + auto-chaining
 │   └── body_fuzzer.py            # Hybrid body fuzzer (LLM-planned + deterministic)
 ├── scripts/
 │   ├── run_scan.py               # CLI entry point for scanning
-│   ├── report_generator.py        # PDF report generator (auto-discovers results)
+│   ├── report_generator.py       # PDF report generator (auto-discovers results)
 │   ├── triage_engine.py          # 3-layer universal triage engine
-│   └── cve_lookup.py             # NVD + OSV.dev dynamic CVE lookup
+│   ├── cve_lookup.py             # NVD + OSV.dev dynamic CVE lookup
+│   └── check_scan_active.py      # Pre-deploy scan-active safety check
 ├── results/
 │   ├── raw/                      # Raw scan JSON output
 │   ├── reports/                  # Generated PDF reports
 │   └── cache/                    # NVD/OSV API cache
 ├── web/
-│   ├── app.py                    # FastAPI backend (stop, pause, resume, retry, delete-stops-running)
-│   └── static/index.html         # Single-page web UI (stop/pause/resume, scan mode badges, bulk actions)
+│   ├── app.py                    # FastAPI backend (stop, pause, resume, retry, multi-identity, CVSS re-classify)
+│   ├── db.py                     # SQLite persistence
+│   └── static/index.html         # Single-page web UI (CVSS column, multi-identity inputs, grouping)
 ├── mcp_server.py                 # MCP server — 17 tools for AI assistant integration
 ├── imports/                      # API definition files (Postman/Burp/OpenAPI)
 ├── Dockerfile                    # Production container (Playwright + Chromium)
@@ -51,6 +55,9 @@ Build all code first. Present the plan. Wait for explicit user approval before e
 | Payload generation | **Hybrid** — LLM plans payloads (1 call), engine executes, LLM analyzes anomalies (1 call) | Smart (~$0.003/endpoint): LLM plans + identifies IDOR/biz-logic/auth issues from responses |
 | API endpoint import | Postman/Burp/OpenAPI parsed into a unified endpoint registry | Enables testing APIs that aren't discoverable via crawling |
 | Static payload catalog | **Fallback only** — body_fuzzer.py has regex-classified payloads as fallback when LLM planning fails | Primary path is always LLM-planned |
+| Pre-triage severity | **Deterministic CVSS v3.1** via `severity.py` — CWE profile matching + evidence-keyword adjustment | XBOW-style: reproducible severity independent of LLM mood; `llm_severity` preserved for comparison |
+| Secret scanning | **17 TruffleHog-style regex patterns** in `passive_recon.py` — runs on JS bundles + post-auth HTML | Catches hardcoded AWS keys, Stripe, GitHub PATs, Slack, Google, SendGrid, JWT tokens, master secrets |
+| Multi-identity | **3 extra identities** (User B, Admin, Tenant B) authenticated at scan start, injected into 8 auth-class phases | Enables cross-user, cross-role, cross-tenant testing (BOLA/BFLA/IDOR) without manual replay |
 | Triage | **Offline, evidence-based** — no LLM used for triage | Deterministic rules + confidence scoring, zero cost, reproducible |
 | Cost tracking | **Per-call accumulation** via `litellm.completion_cost()` | Accurate token + dollar tracking per model |
 
@@ -76,6 +83,7 @@ This scanner supports complex modern applications. All modes can combine in a si
 | Cookie-based sessions | Maintained automatically by Playwright browser context |
 | MFA / 2FA (TOTP) | Computes TOTP from shared secret in config (if provided), or pauses for manual entry |
 | Session refresh | Background monitor detects expired sessions and re-authenticates mid-scan |
+| **Multi-identity** | Up to 3 extra identities (User B, Admin, Tenant B) via UI or API. Supports username/password, bearer tokens, API keys. All identities authenticated at scan start; injected into 8 authorization-class phases for cross-user, cross-role, and cross-tenant testing |
 
 ### SPA Detection and Handling
 
@@ -135,55 +143,68 @@ python scripts/run_scan.py --dry-run
 AI Agentic Scanner Components:
 - [x] Step 1: LLM connectivity (LiteLLM proxy / Bedrock / direct)
 - [x] Step 2: llm_config.py (hybrid model routing + cost tracking)
-- [x] Step 3: tools.py (28 tools — browser + SPA + WebSocket + API + token security)
+- [x] Step 3: tools.py (30 tools — browser + SPA + WebSocket + API + token + exploit chaining)
 - [x] Step 3b: api_import.py (Postman / Burp / OpenAPI parsers)
 - [x] Step 3c: baseline_executor.py (API happy-path execution + variable auto-chaining)
 - [x] Step 3d: body_fuzzer.py (hybrid body fuzzing: LLM plans → deterministic execution → LLM anomaly analysis)
-- [x] Step 4: prompts.py (system + scan prompts per OWASP category)
-- [x] Step 5: agent.py (agent loop with SPA detection + dynamic endpoint discovery)
-- [x] Step 6: auth.py (SSO / OAuth / SAML / MFA / form / token auth + session monitor)
+- [x] Step 4: prompts.py (system + scan prompts per OWASP category + multi-identity placeholders)
+- [x] Step 5: agent.py (agent loop with SPA detection + dynamic endpoint discovery + enriched retry prompts)
+- [x] Step 6: auth.py (SSO / OAuth / SAML / MFA / form / token auth + session monitor + multi-identity)
 - [x] Step 7: triage_engine.py (3-layer universal evidence-based triage)
 - [x] Step 8: cve_lookup.py (NVD + OSV.dev dynamic CVE/CVSS)
 - [x] Step 9: report_generator.py (PDF with clickable summaries, curl evidence)
 - [x] Step 10: run_scan.py (CLI entry point)
+- [x] Step 11: severity.py (deterministic CVSS v3.1 severity — XBOW-style pre-triage classification)
+- [x] Step 12: passive_recon hardcoded secret scanner (17 TruffleHog-style patterns + post-auth DOM scan)
+- [x] Step 13: Multi-identity testing (User B / Admin / Tenant B — 8 authorization-class phases)
 ```
 
 ## Architecture
 
 ```
-┌──────────────────────────────────────────────────────────────┐
-│                    AI Agentic Scanner                        │
-│                                                              │
-│  ┌─────────────────────────────────────┐                     │
-│  │         Endpoint Discovery          │                     │
-│  │  ┌──────────┐ ┌───────┐ ┌────────┐ │                     │
-│  │  │ Postman  │ │ Burp  │ │OpenAPI │ │                     │
-│  │  │ .json    │ │ .xml  │ │ .yaml  │ │                     │
-│  │  └────┬─────┘ └───┬───┘ └───┬────┘ │                     │
-│  │       └────────┬───┘────────┘       │                     │
-│  │           ┌────▼─────┐              │                     │
-│  │           │ Endpoint │              │                     │
-│  │           │ Registry │              │                     │
-│  │           └────┬─────┘              │                     │
-│  └────────────────┼────────────────────┘                     │
-│                   │                                          │
-│  ┌────────────┐   │   ┌─────────────┐                        │
-│  │ Playwright │   │   │  LLMRouter  │   LLM generates ALL   │
-│  │ (Browser)  │◄──┼──▶│  ┌────────┐ │   payloads based on   │
-│  └────────────┘   │   │  │Bedrock │ │   observed context.   │
-│                   │   │  │Proxy   │ │   No static payload   │
-│  ┌────────────┐   │   │  │Direct  │ │   lists.              │
-│  │ HTTP       │   │   │  └────────┘ │                        │
-│  │ Client     │◄──┘   └──────┬──────┘                        │
-│  │ (API calls)│       ┌──────▼──────┐     ┌────────────┐    │
-│  └────────────┘       │ Agent Loop  │     │ Cost       │    │
-│                       │ 1. Observe  │     │ Tracker    │    │
-│    ┌──────────┐       │ 2. Think    │─────│ (per model)│    │
-│    │  Target  │       │ 3. Act      │     └────────────┘    │
-│    │ Web+API  │       │ 4. Analyze  │                        │
-│    └──────────┘       │ 5. Plan     │                        │
-│                       └─────────────┘                        │
-└──────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────┐
+│                      AI Agentic Scanner                          │
+│                                                                  │
+│  ┌─────────────────────────────────────┐                         │
+│  │         Endpoint Discovery          │                         │
+│  │  ┌──────────┐ ┌───────┐ ┌────────┐ │                         │
+│  │  │ Postman  │ │ Burp  │ │OpenAPI │ │                         │
+│  │  │ .json    │ │ .xml  │ │ .yaml  │ │                         │
+│  │  └────┬─────┘ └───┬───┘ └───┬────┘ │                         │
+│  │       └────────┬───┘────────┘       │                         │
+│  │           ┌────▼─────┐              │                         │
+│  │           │ Endpoint │              │                         │
+│  │           │ Registry │              │                         │
+│  │           └────┬─────┘              │                         │
+│  └────────────────┼────────────────────┘                         │
+│                   │                                              │
+│  ┌────────────┐   │   ┌─────────────┐                            │
+│  │ Playwright │   │   │  LLMRouter  │   LLM generates ALL       │
+│  │ (Browser)  │◄──┼──▶│  ┌────────┐ │   payloads based on       │
+│  └────────────┘   │   │  │Bedrock │ │   observed context.       │
+│                   │   │  │Proxy   │ │   No static payload       │
+│  ┌────────────┐   │   │  │Direct  │ │   lists.                  │
+│  │ HTTP       │   │   │  └────────┘ │                            │
+│  │ Client     │◄──┘   └──────┬──────┘                            │
+│  │ (API calls)│       ┌──────▼──────┐     ┌────────────┐        │
+│  └────────────┘       │ Agent Loop  │     │ Cost       │        │
+│                       │ 1. Observe  │     │ Tracker    │        │
+│    ┌──────────┐       │ 2. Think    │─────│ (per model)│        │
+│    │  Target  │       │ 3. Act      │     └────────────┘        │
+│    │ Web+API  │       │ 4. Analyze  │                            │
+│    │ +Multi-  │       │ 5. Plan     │     ┌──────────────┐      │
+│    │ Identity │       └──────┬──────┘     │ severity.py  │      │
+│    └──────────┘              │            │ CVSS v3.1    │      │
+│                              ▼            │ deterministic│      │
+│    ┌────────────────┐  ┌──────────┐       │ pre-triage   │      │
+│    │ passive_recon  │  │ Runtime  │──────▶│ ($0)         │      │
+│    │ + Secret Scan  │  │ Verify   │       └──────┬───────┘      │
+│    │ (17 patterns)  │  └──────────┘              │              │
+│    └────────────────┘                     ┌──────▼───────┐      │
+│                                           │ Triage Engine│      │
+│                                           │ ($0 LLM)     │      │
+│                                           └──────────────┘      │
+└──────────────────────────────────────────────────────────────────┘
 ```
 
 ## Step 1: Verify LLM Connectivity
@@ -264,7 +285,7 @@ Location: `scanners/ai_agent/tools.py`
 | `test_auth_bypass(endpoint, methods)` | Try endpoint without auth / with tampered tokens | list of {method, status, accessible} |
 | `test_method_override(endpoint)` | Try PUT/DELETE/PATCH on GET-only endpoints | list of {method, status, response_snippet} |
 
-**Total: 28 tools.** All return structured dicts, truncated to stay within token limits. Tool definitions use OpenAI function calling format. The `fuzz_parameter` tool supports query, body (JSON with dot-notation), header, and path fuzzing. The `test_token_security` tool performs comprehensive JWT/bearer token analysis.
+**Total: 30 tools.** All return structured dicts, truncated to stay within token limits. Tool definitions use OpenAI function calling format. The `fuzz_parameter` tool supports query, body (JSON with dot-notation), header, and path fuzzing. The `test_token_security` tool performs comprehensive JWT/bearer token analysis. Additional tools include `chain_exploit` (multi-step exploit chaining across findings) and `report_finding` (structured finding submission).
 
 ## Step 3b: Build api_import.py
 
@@ -519,9 +540,21 @@ targets:
       sso_provider: "${T1_SSO_PROVIDER}"  # optional — hint for SSO flow (okta, azure, ping)
       api_key: "${T1_API_KEY}"             # optional — for API-only auth
       bearer_token: "${T1_BEARER}"         # optional — skip login, use token directly
+    # Multi-identity testing (all optional):
+    credentials_user_b:
+      username: "${T1_USERB_USERNAME}"
+      password: "${T1_USERB_PASSWORD}"     # or bearer / api_key
+    credentials_admin:
+      username: "${T1_ADMIN_USERNAME}"
+      password: "${T1_ADMIN_PASSWORD}"
+    credentials_tenant_b:
+      username: "${T1_TENANTB_USERNAME}"
+      password: "${T1_TENANTB_PASSWORD}"
 ```
 
 When `type: auto`, the LLM detects the auth flow at runtime. Use explicit types to skip detection.
+
+Multi-identity credentials support three formats: username/password, bearer token, or API key. All extra identities are authenticated at scan start and their headers/cookies are injected into all 8 authorization-class phases (web_a01, web_bfla, web_session_mgmt, web_password_reset, api_authz, api_auth, api_bfla, api_data_exposure). The UI provides a collapsible "Multi-Identity Testing" section for these credentials.
 
 For detailed auth flow handling (SSO redirect chains, OAuth state params, SAML assertion parsing), see [complex-targets.md](complex-targets.md).
 
@@ -557,7 +590,11 @@ Each result JSON contains:
 | `target` | The target URL scanned |
 | `findings[]` | Array of detected vulnerabilities |
 | `findings[].title` | Finding name (e.g. "Reflected XSS in search parameter") |
-| `findings[].severity` | Scanner-assigned severity (Critical/High/Medium/Low/Info) |
+| `findings[].severity` | Deterministic CVSS-bucket severity (Critical/High/Medium/Low/Info) via `severity.py` |
+| `findings[].llm_severity` | Original LLM-assigned severity (preserved for comparison) |
+| `findings[].cvss` | CVSS v3.1 base score (0.0–10.0), deterministic |
+| `findings[].cvss_vector` | CVSS v3.1 vector string |
+| `findings[].cwe` | CWE identifier matched from title/evidence |
 | `findings[].owasp_category` | OWASP Top 10 mapping (e.g. "A03:2021") |
 | `findings[].url` | Affected URL |
 | `findings[].parameter` | Affected parameter |

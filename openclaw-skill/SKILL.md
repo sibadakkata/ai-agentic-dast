@@ -37,13 +37,17 @@ Authorization: Basic {base64(SCANNER_USER:SCANNER_PASS)}
   "model": "bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0",
   "username": "",
   "password": "",
-  "auth_type": "none"
+  "auth_type": "none",
+  "credentials_user_b": {"username": "", "password": ""},
+  "credentials_admin": {"username": "", "password": ""},
+  "credentials_tenant_b": {"username": "", "password": ""}
 }
 ```
 
 - `scan_mode`: Use "api" if user says API/endpoint, "website" if they say website/page, "both" if unclear
 - `model`: Default to Claude Haiku unless user specifies otherwise
 - Available models: `bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0`, `bedrock/mistral.ministral-3-8b-instruct`
+- `credentials_user_b/admin/tenant_b`: Optional multi-identity credentials for cross-user, cross-role, cross-tenant testing. Each supports `username`+`password`, `bearer` (token), or `api_key`. Only include when user provides extra identities
 - Returns `{ "scan_id": "...", "status": "running" }`
 
 After starting, tell the user the scan ID and that it typically takes 3-20 minutes.
@@ -92,7 +96,14 @@ Returns `triaged_findings` (post-triage), `ai_findings` (raw AI output), `crawle
 - `verdict`: TRUE_POSITIVE, FALSE_POSITIVE, NEEDS_VERIFICATION
 - `reason`: Triage engine explanation with runtime evidence
 - `verified`: boolean, `verification_method`, `verification_evidence`
-- `cwe`, `cvss`, `cve`
+- `cwe`, `cvss`, `cvss_vector`, `cve`
+
+Each `ai_finding` (raw) now includes deterministic CVSS fields:
+- `severity`: CVSS-bucket severity (deterministic via `severity.py`)
+- `llm_severity`: Original LLM-assigned severity (preserved for comparison)
+- `cvss`: CVSS v3.1 base score (0.0–10.0)
+- `cvss_vector`: Full CVSS v3.1 vector string
+- `cwe`: Matched CWE identifier
 
 ### 7. Generate PDF Report
 

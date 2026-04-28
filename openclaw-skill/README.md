@@ -1,6 +1,6 @@
 # AI Agentic Scanner - OpenClaw Skill
 
-An [OpenClaw](https://github.com/openclaw/openclaw) skill that lets you trigger and manage AI-powered DAST security scans through natural language chat.
+An [OpenClaw](https://github.com/openclaw/openclaw) skill that lets you trigger and manage AI-powered DAST security scans through natural language chat. The scanner features deterministic CVSS v3.1 severity classification, multi-identity testing (User B/Admin/Tenant B), hardcoded secret scanning, and enriched retry prompts for injection and access control phases.
 
 ## Architecture
 

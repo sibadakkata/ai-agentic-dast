@@ -13,7 +13,8 @@ A single LLM agent drives a real Chromium browser and HTTP client through the OW
 │  ┌─────────────┐   ┌──────────────┐   ┌────────────────────────────┐ │
 │  │    Auth      │──▶│   Passive    │──▶│     LLM Deep Scan          │ │
 │  │  (auto-     │   │   Recon      │   │  (25 web + 15 API phases)  │ │
-│  │  detect)    │   │ (24 checks)  │   │                            │ │
+│  │  detect +   │   │ (26 checks + │   │  + enriched retry prompts  │ │
+│  │  multi-id)  │   │  secrets)    │   │                            │ │
 │  └─────────────┘   └──────────────┘   └─────────────┬──────────────┘ │
 │                                                      │                │
 │                                        ┌─────────────▼──────────────┐ │
@@ -21,11 +22,12 @@ A single LLM agent drives a real Chromium browser and HTTP client through the OW
 │                                        │  (multi-step exploit chains)│ │
 │                                        └─────────────┬──────────────┘ │
 │                                                      │                │
-│  ┌─────────────┐   ┌──────────────┐                  ▼                │
-│  │   Report    │◀──│   Triage     │◀──┌──────────────────────────┐   │
-│  │  (PDF/Excel │   │   Engine     │   │  Runtime Verification    │   │
-│  │   /JSON)    │   │  ($0 cost)   │   │  (replay live payloads)  │   │
-│  └─────────────┘   └──────────────┘   └──────────────────────────┘   │
+│  ┌─────────────┐   ┌──────────────┐   ┌──────────────┐     ▼          │
+│  │   Report    │◀──│   Triage     │◀──│  CVSS        │◀──┌────────┐  │
+│  │  (PDF/Excel │   │   Engine     │   │  Severity    │   │Runtime │  │
+│  │   /JSON)    │   │  ($0 cost)   │   │  (severity.  │   │Verify  │  │
+│  └─────────────┘   └──────────────┘   │   py, $0)    │   └────────┘  │
+│                                        └──────────────┘               │
 │                                                                       │
 │  Infrastructure: AWS Bedrock (Claude/Mistral) · Playwright · FastAPI  │
 └───────────────────────────────────────────────────────────────────────┘
@@ -47,13 +49,14 @@ This loop runs up to 25 steps per phase. Every finding is then **triaged offline
 
 | Feature | Description | Details |
 |---------|-------------|---------|
-| **Passive Reconnaissance** | 26 deterministic checks: source maps, DOM sinks, secrets, headers, CSP analysis, CORS, JWT, cookies, telemetry leakage, mixed content, clickjacking, **TLS protocol/cipher audit** (deprecated TLS 1.0/1.1, Sweet32/3DES, RC4, EXPORT, NULL, anonymous DH — via `sslyze` fallback), **vulnerable JS library detection** (regex catalog + live NVD/OSV.dev CVE enrichment), and more | Runs before LLM phases, $0 cost |
+| **Passive Reconnaissance** | 26 deterministic checks: source maps, DOM sinks, **hardcoded secret scanner** (17 TruffleHog-style patterns: AWS keys, Stripe, GitHub PATs, Slack, SendGrid, Google, JWT, master/service tokens, JSON key sweep — with masked evidence), headers, CSP analysis, CORS, JWT, cookies, telemetry leakage, mixed content, clickjacking, **TLS protocol/cipher audit** (deprecated TLS 1.0/1.1, Sweet32/3DES, RC4, EXPORT, NULL, anonymous DH — via `sslyze` fallback), **vulnerable JS library detection** (regex catalog + live NVD/OSV.dev CVE enrichment), and more. Post-auth passive pass also scans authenticated DOM HTML for secrets | Runs before LLM phases, $0 cost |
 | **Active Scanning** | 25 web phases + 15 API phases: full OWASP Top 10 + context-aware checks (path traversal, XXE, race conditions, file upload, host header, session mgmt, HTTP smuggling) | [Web Scanning](docs/web-scanning.md) · [API Scanning](docs/api-scanning.md) |
 | **Crawl-Only Profile** | Acunetix-style crawl-only scan mode: discovers URLs, SPA routes, forms, APIs, and in-scope sub-domains **without** sending attack payloads. Still runs passive recon (TLS, headers, JS CVEs) and API baseline. Use to verify coverage before a full scan | Dashboard "Scan Profile" dropdown, `scan_profile: "crawl_only"` via API |
 | **SPA Sibling-Host Coverage** | Passively harvests in-scope HTTPS sub-domains from browser XHR/fetch/navigation traffic and `robots.txt`/`sitemap.xml`. After every phase, newly discovered hosts get a **passive re-audit** (TLS + security headers — Stage A). At the start of each OWASP phase, new hosts are **surfaced to the LLM** with directives to apply that phase's methodology against them (Stage B) | Works for React/Angular/Vue SPAs where sibling hosts only appear post-auth via network traffic |
 | **Triage Engine** | 3-layer evidence-based classification (TP/FP/Manual Review) with CWE/CVSS | [Triage Engine](docs/triage-engine.md) |
-| **Authentication** | Auto-detect form, SSO/OIDC, OAuth, API key, bearer — with session refresh | Multi-step OIDC, self-healing sessions |
-| **Two-User BOLA/BFLA** | Supply a second user (User B) to test horizontal privilege escalation and broken function-level auth | Automated IDOR testing across user contexts |
+| **Authentication** | Auto-detect form, SSO/OIDC, OAuth, API key, bearer — with session refresh. Multi-identity: User B, Admin, Tenant B (password, bearer, or API key) authenticated at scan start | Multi-step OIDC, self-healing sessions, fast-path static-token auth |
+| **Multi-Identity Testing** | Supply up to 3 extra identities (User B, Admin, Tenant B) via UI or API. All identities are authenticated at scan start; their credentials are injected into **all 8 authorization-class phases** (not just BOLA). Supports username/password, bearer tokens, and API keys — including fast-path static-token auth | Cross-user BOLA, cross-role BFLA, cross-tenant access, session/key revocation, license generation |
+| **Deterministic CVSS Severity** | AI Raw findings get a deterministic CVSS v3.1 score and severity bucket (`severity.py`) based on CWE profile + evidence keywords — independent of LLM mood. LLM's original severity preserved as `llm_severity` for comparison | XBOW-style pre-triage classification, UI shows CVSS column + LLM-vs-deterministic tooltip |
 | **Impact Statements** | LLM-generated business impact for every finding, with passive recon fallback | Contextual risk descriptions in reports |
 | **Scan Targeting** | Exclude URLs, focus on specific pages/areas, control scan intensity (light/standard/deep) | Fine-grained scan scope control |
 | **API Import** | Postman (v2.0/v2.1), OpenAPI/Swagger (2.0, 3.0, 3.1) | Baseline execution + hybrid fuzzing |
@@ -61,11 +64,11 @@ This loop runs up to 25 steps per phase. Every finding is then **triaged offline
 | **Web UI** | Real-time scan progress, AI vs Triage comparison, PDF reports, scan management | [Web UI Guide](docs/web-ui.md) |
 | **REST API** | Full API for CI/CD integration — start, stop, pause, resume, results, reports | [API Reference](docs/rest-api.md) |
 | **MCP Server** | Model Context Protocol integration for Cursor, Claude Desktop | [MCP Guide](docs/mcp-server.md) |
-| **Reports** | Three-stage evidence: AI Agent → Runtime Verification → Triage verdict | PDF, Excel, JSON export |
+| **Reports** | Four-stage evidence: AI Agent → Runtime Verification → CVSS Severity → Triage verdict | PDF, Excel, JSON export |
 | **Cost Control** | Pause/resume scans, stop early, per-scan cost tracking | Real-time cost display in UI |
 | **Multi-Step Exploit Chaining** | Combines individual findings into attack chains (e.g. XSS + cookie theft → session hijack, SSRF → internal API → data exfiltration) | Cross-phase context, `chain_exploit` tool |
 | **Findings Grouping** | Group findings by Issue Category, OWASP Top 10 code, Severity, PCI DSS requirement, or SANS/CWE Top 25 — with a "Group by" selector, collapsible sections, and per-group severity breakdown | All tabs: Live, Comparison, AI Raw Findings |
-| **Hybrid Smart Retry** | For 20 high-impact phases (A01, A07, A10, all A03 injection, file upload, password reset, session management, API auth/authz/BFLA/SSRF/injection, API mass-assignment, API data-exposure) the agent runs a second, tool-enabled pass with a phase-tailored retry prompt whenever the phase either finds 0 vulnerabilities **or** produces findings but misses its core vulnerability class (e.g. auth phase reported password-reset issues but no credential crack; upload phase accepted a file but never proved execution). Other phases fall back to a cheap evidence-summary pass | `_ACTIVE_RETRY_PHASES`, `_PHASE_CORE_KEYWORDS`, `_RETRY_PROMPTS` in `agent.py` |
+| **Hybrid Smart Retry** | For 20 high-impact phases the agent runs a second, tool-enabled pass with a phase-tailored retry prompt whenever the phase either finds 0 vulnerabilities **or** misses its core vulnerability class. Retry prompts include: **SQLi** (ORDER BY/GROUP BY column-injection, date_trunc/period parameter injection, export/report endpoint injection), **Injection** (14-engine SSTI payload sweep, YAML/Pickle/Java/PHP/.NET deserialization content-type sweep, verbose-error/stack-trace harness), **Access Control** (SaaS business-logic surface probing — /api/licenses, /api/sessions, /api/invoices, etc.; state-mutation invariants — cross-user session/key revocation, cross-tenant license generation, role-validation absence, org-switch impersonation), **Auth** (multi-role credential discovery, parameter-name permutation), **XSS/SSRF/File Upload** (existing) | `_ACTIVE_RETRY_PHASES`, `_PHASE_CORE_KEYWORDS`, `_RETRY_PROMPTS` in `agent.py` |
 | **Finding Deduplication** | Findings are deduped by `(title, url, parameter)` both when seeding prior findings into continue/retry scans and when appending new findings during the run — prevents the UI from double-counting passive-recon results across pre-auth / post-auth passes | `_finding_key`, `_dedupe_findings` in `web/app.py` |
 | **Model ID Resolution** | UI/API callers can pass a display name ("Claude Haiku 4.5 (recommended)"), a short alias ("haiku", "sonnet"), or the full litellm id — the backend normalises all three to a valid litellm model id, preventing "LLM Provider NOT provided" errors | `_resolve_model_id` in `web/app.py`, applied at `/api/scan`, `/api/scan/{id}/retry`, `/api/scan/{id}/rescan` |
 | **Deploy Safety** | Pre-deployment check detects active/paused scans and aborts `deploy.sh` before overwriting a running scanner | `scripts/check_scan_active.py`, integrated in `deploy.sh` |
@@ -106,10 +109,14 @@ uvicorn web.app:app --host 0.0.0.0 --port 8080
 ┌─────────────────────────────────────────────────────────────────────┐
 │  1. AUTHENTICATION                                                  │
 │     Auto-detect auth type → login → capture session → auto-refresh  │
+│     Multi-identity: also authenticate User B, Admin, Tenant B       │
 ├─────────────────────────────────────────────────────────────────────┤
-│  2. PASSIVE RECONNAISSANCE ($0) — 26 checks                         │
-│     Source maps, sinks, secrets, headers, CSP, CORS, JWT, cookies,  │
-│     TLS audit (sslyze), vulnerable JS libraries (NVD/OSV.dev CVE)  │
+│  2. PASSIVE RECONNAISSANCE ($0) — 26 checks + hardcoded secrets     │
+│     Source maps, sinks, headers, CSP, CORS, JWT, cookies,           │
+│     TLS audit (sslyze), vulnerable JS libraries (NVD/OSV.dev CVE), │
+│     hardcoded secret scanner (17 TruffleHog-style regex patterns    │
+│     in JS bundles + authenticated HTML — AWS, Stripe, GitHub PATs,  │
+│     Slack, Google, SendGrid, JWT, master/service tokens)            │
 │     Runs on seed host AND passively-discovered in-scope sub-domains │
 ├─────────────────────────────────────────────────────────────────────┤
 │  3. API BASELINE (if Postman/OpenAPI imported)                      │
@@ -128,6 +135,11 @@ uvicorn web.app:app --host 0.0.0.0 --port 8080
 ├─────────────────────────────────────────────────────────────────────┤
 │  6. RUNTIME VERIFICATION                                            │
 │     Replay payloads against live target → CONFIRMED / DISPROVED     │
+├─────────────────────────────────────────────────────────────────────┤
+│  6b. DETERMINISTIC CVSS SEVERITY ($0)                               │
+│     severity.py: CWE profile matching → CVSS v3.1 score →          │
+│     severity bucket. Evidence-adjusted (±0.5 for confirmed/weak).   │
+│     LLM severity preserved as llm_severity for comparison           │
 ├─────────────────────────────────────────────────────────────────────┤
 │  7. TRIAGE ENGINE ($0)                                              │
 │     3-layer classification → CWE/CVSS enrichment → verdicts         │
@@ -168,11 +180,12 @@ uvicorn web.app:app --host 0.0.0.0 --port 8080
 │   ├── mcp-server.md            #   MCP integration guide
 │   └── troubleshooting.md       #   Error handling & debugging
 ├── scanners/ai_agent/           # Core scanner engine
-│   ├── agent.py                 #   Agent loop & context management
-│   ├── auth.py                  #   Authentication (form/SSO/OAuth)
-│   ├── passive_recon.py         #   Deterministic passive checks
+│   ├── agent.py                 #   Agent loop, context mgmt, multi-identity, retry prompts
+│   ├── auth.py                  #   Authentication (form/SSO/OAuth) + multi-identity (User B/Admin/Tenant B)
+│   ├── severity.py              #   Deterministic CVSS v3.1 severity classifier (XBOW-style)
+│   ├── passive_recon.py         #   Deterministic passive checks + hardcoded secret scanner
 │   ├── llm_config.py            #   LLM routing & cost tracking
-│   ├── prompts.py               #   System + phase prompts
+│   ├── prompts.py               #   System + phase prompts (multi-identity placeholders)
 │   ├── tools.py                 #   30 tools (browser, API, WebSocket, chaining)
 │   ├── api_import.py            #   Postman/OpenAPI parsers
 │   ├── baseline_executor.py     #   API baseline & variable chaining
