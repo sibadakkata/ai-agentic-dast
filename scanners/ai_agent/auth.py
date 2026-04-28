@@ -73,6 +73,8 @@ class ScanTarget:
     scan_intensity: str = "deep"         # light | standard | deep
     exclude_urls: list[str] | None = None  # URLs/paths to skip during crawl and scan
     credentials_b: dict | None = None    # optional User B for BOLA/BFLA two-user testing
+    credentials_admin: dict | None = None   # optional admin-role credentials
+    credentials_tenant_b: dict | None = None  # optional second-tenant credentials
     workflow_id: str | None = None       # saved workflow ID to replay before/during scan
     business_flow: str | None = None     # natural-language business flow description
     # Crawl-only mode: when "crawl_only", the agent skips all OWASP vulnerability
@@ -1217,10 +1219,13 @@ def load_targets_from_dict(t: dict) -> ScanTarget:
     """Create a ScanTarget from a plain dict (used by web UI)."""
     auth = t.get("auth", {}) or {}
     api_imports = t.get("api_imports", {}) or {}
-    creds_b_raw = t.get("credentials_b") or {}
-    creds_b = None
-    if creds_b_raw.get("username") or creds_b_raw.get("password"):
-        creds_b = {"username": creds_b_raw.get("username", ""), "password": creds_b_raw.get("password", "")}
+    def _parse_creds(key: str) -> dict | None:
+        raw = t.get(key) or {}
+        if raw.get("username") or raw.get("password") or raw.get("bearer_token") or raw.get("api_key"):
+            return {k: raw.get(k, "") for k in ("username", "password", "bearer_token", "api_key") if raw.get(k)}
+        return None
+
+    creds_b = _parse_creds("credentials_b")
     return ScanTarget(
         id=t.get("id", "T1"),
         url=t.get("url", ""),
@@ -1246,6 +1251,8 @@ def load_targets_from_dict(t: dict) -> ScanTarget:
         scan_intensity=t.get("scan_intensity", "deep"),
         exclude_urls=t.get("exclude_urls") or None,
         credentials_b=creds_b,
+        credentials_admin=_parse_creds("credentials_admin"),
+        credentials_tenant_b=_parse_creds("credentials_tenant_b"),
         workflow_id=t.get("workflow_id") or None,
         business_flow=t.get("business_flow") or None,
         scan_profile=(t.get("scan_profile") or "vulnerability_scan"),

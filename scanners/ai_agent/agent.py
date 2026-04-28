@@ -1513,42 +1513,65 @@ async def run_scan(
         # domains instead of only the passive TLS/header audit.
         hosts_surfaced_to_llm: set[str] = {_seed_host} if _seed_host else set()
 
-        # ── Authenticate User B for BOLA/BFLA two-user testing ──────
-        user_b_auth_header: dict = {}
-        user_b_cookie_str: str = ""
-        has_user_b = bool(target.credentials_b and
-                          (target.credentials_b.get("username") or target.credentials_b.get("password")))
-        if has_user_b and _use_fast_path:
-            # In fast path we have no browser to drive a login form.  If User B
-            # has a static bearer/api-key we could in principle support BOLA here,
-            # but the current credentials_b schema only carries username/password
-            # — which implies form auth.  Skip with a clear warning.
-            print(f"  [AUTH-B] Skipped — fast path can't drive a login form. "
-                  f"BOLA testing will fall back to single-user mode.")
-            _cb("auth", {"status": "user_b_skipped", "reason": "fast_path_no_browser"})
-            has_user_b = False
-        if has_user_b:
-            print(f"  [AUTH-B] Authenticating User B for BOLA testing...")
-            _cb("auth", {"status": "authenticating_user_b", "url": target.url})
+        # ── Authenticate extra identities (User B, Admin, Tenant B) ──
+        # Each identity is stored as {"label": str, "header": dict, "cookie": str}
+        _extra_identities: list[dict] = []
+
+        async def _auth_extra(label: str, creds: dict | None, tag: str) -> None:
+            if not creds:
+                return
+            has_cred = (creds.get("username") or creds.get("password")
+                        or creds.get("bearer_token") or creds.get("api_key"))
+            if not has_cred:
+                return
+            if _use_fast_path:
+                if creds.get("bearer_token") or creds.get("api_key"):
+                    hdr: dict = {}
+                    if creds.get("bearer_token"):
+                        hdr["Authorization"] = f"Bearer {creds['bearer_token']}"
+                    elif creds.get("api_key"):
+                        hdr["X-Api-Key"] = creds["api_key"]
+                    _extra_identities.append({"label": label, "header": hdr, "cookie": ""})
+                    print(f"  [AUTH-{tag}] {label}: static token (fast path)")
+                    _cb("auth", {"status": f"{tag}_done", "type": "static"})
+                else:
+                    print(f"  [AUTH-{tag}] Skipped — fast path can't drive a login form.")
+                    _cb("auth", {"status": f"{tag}_skipped", "reason": "fast_path_no_browser"})
+                return
+            print(f"  [AUTH-{tag}] Authenticating {label}...")
+            _cb("auth", {"status": f"authenticating_{tag}", "url": target.url})
             try:
-                target_b = ScanTarget(
-                    id=target.id + "_b",
+                tgt = ScanTarget(
+                    id=f"{target.id}_{tag}",
                     url=target.url,
                     scan_mode=target.scan_mode,
-                    credentials=target.credentials_b,
-                    auth_config=target.auth_config,
+                    credentials={k: creds.get(k, "") for k in ("username", "password") if creds.get(k)},
+                    auth_config={
+                        **target.auth_config,
+                        **({"bearer_token": creds["bearer_token"]} if creds.get("bearer_token") else {}),
+                        **({"api_key": creds["api_key"]} if creds.get("api_key") else {}),
+                    },
                 )
-                auth_session_b = await authenticate(browser, target_b, router, model)
-                user_b_auth_header = auth_session_b.get_auth_header()
-                cookies_b = await auth_session_b.page.context.cookies()
-                user_b_cookie_str = "; ".join(f"{c['name']}={c['value']}" for c in cookies_b)
-                await auth_session_b.page.close()
-                print(f"  [AUTH-B] User B auth type: {auth_session_b._auth_type}")
-                _cb("auth", {"status": "user_b_done", "type": auth_session_b._auth_type})
+                sess = await authenticate(browser, tgt, router, model)
+                hdr = sess.get_auth_header()
+                cookies_raw = await sess.page.context.cookies() if sess.page else []
+                cookie_str = "; ".join(f"{c['name']}={c['value']}" for c in cookies_raw)
+                if sess.page:
+                    await sess.page.close()
+                _extra_identities.append({"label": label, "header": hdr, "cookie": cookie_str})
+                print(f"  [AUTH-{tag}] {label} auth type: {sess._auth_type}")
+                _cb("auth", {"status": f"{tag}_done", "type": sess._auth_type})
             except Exception as e:
-                print(f"  [AUTH-B] User B auth failed (non-fatal): {e}")
-                _cb("auth", {"status": "user_b_failed", "error": str(e)})
-                has_user_b = False
+                print(f"  [AUTH-{tag}] {label} auth failed (non-fatal): {e}")
+                _cb("auth", {"status": f"{tag}_failed", "error": str(e)})
+
+        await _auth_extra("User B", target.credentials_b, "user_b")
+        await _auth_extra("Admin", target.credentials_admin, "admin")
+        await _auth_extra("Tenant B", target.credentials_tenant_b, "tenant_b")
+
+        has_user_b = any(i["label"] == "User B" for i in _extra_identities)
+        user_b_auth_header = next((i["header"] for i in _extra_identities if i["label"] == "User B"), {})
+        user_b_cookie_str = next((i["cookie"] for i in _extra_identities if i["label"] == "User B"), "")
 
         # ── Navigate to target & wait for SPA readiness (generic) ────
         # After OIDC/SSO auth the browser may still be on the login URL.
@@ -2010,33 +2033,61 @@ async def run_scan(
                 if ctx:
                     phase_prompt += "\n\n" + ctx
 
-            # Inject User B context into BOLA/authorization phases
+            # Inject multi-identity context into authorization / session phases.
+            # Old placeholders (BOLA-only) + new {multi_identity_context}.
             bola_web_placeholder = "{bola_user_b_web}"
             bola_api_placeholder = "{bola_user_b_api}"
-            if has_user_b and (bola_web_placeholder in phase_prompt or bola_api_placeholder in phase_prompt):
-                user_b_hdr_str = ", ".join(f'"{k}: {v}"' for k, v in user_b_auth_header.items()) if user_b_auth_header else "(none)"
-                user_b_block = (
-                    "\n\n--- TWO-USER BOLA/BFLA TESTING MODE ---\n"
-                    "A second user (User B) has been authenticated. You are currently logged in as User A.\n"
-                    "STEP 1: As User A, browse the application and collect resource IDs (user profiles, orders, "
-                    "documents, settings, etc.). Note every ID you find in URLs, responses, and hidden fields.\n"
-                    "STEP 2: For each resource ID belonging to User A, make the SAME request but with "
-                    "User B's credentials. Use the api_request tool with these EXACT headers to act as User B:\n"
-                    f"  Authorization headers: {user_b_hdr_str}\n"
-                    f"  Cookie: {user_b_cookie_str}\n"
-                    "STEP 3: Compare responses. If User B can read/modify/delete User A's resources, this is "
-                    "a CONFIRMED BOLA (Broken Object Level Authorization) — severity Critical.\n"
-                    "STEP 4: Also test vertical privilege escalation: use User B's creds to access admin-only "
-                    "endpoints or perform privileged actions (BFLA — Broken Function Level Authorization).\n"
-                    "For EVERY test, record: User A's resource ID, the endpoint, User B's response status "
-                    "and body snippet as evidence.\n"
-                    "--- END BOLA MODE ---"
+            multi_id_placeholder = "{multi_identity_context}"
+            _authz_phase_ids = {
+                "web_a01", "web_bfla", "web_session_mgmt", "web_password_reset",
+                "api_authz", "api_auth", "api_bfla", "api_data_exposure",
+            }
+            _has_any_extra = bool(_extra_identities)
+            _needs_injection = (
+                _has_any_extra
+                and (phase.id in _authz_phase_ids
+                     or bola_web_placeholder in phase_prompt
+                     or bola_api_placeholder in phase_prompt
+                     or multi_id_placeholder in phase_prompt)
+            )
+            if _needs_injection:
+                id_lines: list[str] = []
+                for idx_id, ident in enumerate(_extra_identities, 1):
+                    hdr_str = ", ".join(f'"{k}: {v}"' for k, v in ident["header"].items()) if ident["header"] else "(none)"
+                    id_lines.append(
+                        f"  Identity {idx_id} — {ident['label']}:\n"
+                        f"    Authorization header: {hdr_str}\n"
+                        f"    Cookie: {ident['cookie'] or '(none)'}"
+                    )
+                id_block = "\n".join(id_lines)
+                multi_block = (
+                    "\n\n--- MULTI-IDENTITY TESTING MODE ---\n"
+                    f"You are logged in as the PRIMARY user (User A). {len(_extra_identities)} additional "
+                    "identity/ies have been authenticated:\n"
+                    f"{id_block}\n\n"
+                    "For EVERY sensitive endpoint / resource you discover as User A:\n"
+                    "  1. Replay the request with EACH alternative identity's headers (api_request).\n"
+                    "  2. If any alternative identity can access / mutate the resource → CONFIRMED finding:\n"
+                    "     • Same role, different user → 'BOLA — <identity> can <action> <resource>' (Critical)\n"
+                    "     • Lower role accessing higher → 'BFLA — <identity> can <action> <endpoint>' (Critical)\n"
+                    "     • Different tenant accessing data → 'Cross-Tenant Access — <identity>' (Critical)\n"
+                    "  3. Record: endpoint, User A's resource ID, alternative identity used, response "
+                    "status + body snippet.\n"
+                    "  4. For session / API-key endpoints: test cross-identity revocation "
+                    "(User B revoking User A's session/key) and vice versa.\n"
+                    "  5. Admin-only actions: create/delete users, change roles, manage licenses/billing "
+                    "— test with every non-admin identity.\n"
+                    "--- END MULTI-IDENTITY MODE ---"
                 )
-                phase_prompt = phase_prompt.replace(bola_web_placeholder, user_b_block)
-                phase_prompt = phase_prompt.replace(bola_api_placeholder, user_b_block)
+                phase_prompt = phase_prompt.replace(bola_web_placeholder, multi_block)
+                phase_prompt = phase_prompt.replace(bola_api_placeholder, multi_block)
+                phase_prompt = phase_prompt.replace(multi_id_placeholder, multi_block)
+                if multi_id_placeholder not in phase.prompt and phase.id in _authz_phase_ids:
+                    phase_prompt += multi_block
             else:
                 phase_prompt = phase_prompt.replace(bola_web_placeholder, "")
                 phase_prompt = phase_prompt.replace(bola_api_placeholder, "")
+                phase_prompt = phase_prompt.replace(multi_id_placeholder, "")
 
             # Stage-B sibling-host coverage: announce any newly-discovered
             # in-scope sub-domains to the LLM and require it to extend
