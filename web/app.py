@@ -550,22 +550,57 @@ def _find_result_file(scan_id: str) -> str | None:
 
 
 def _load_raw_result_dict(scan_id: str) -> dict | None:
-    """Load raw result document: DB first, then legacy file (and back-fill DB)."""
+    """Load raw result document: DB first, then legacy file (and back-fill DB).
+
+    Defensive: ``_persist_partial_findings`` checkpoints a STRIPPED-DOWN
+    document to the same DB table during the scan (no ``test_log``,
+    no ``phase_log``, no ``pages_list``) and flags it
+    ``metadata.partial = True``. If the final ``_persist_scan_result``
+    write at completion fails, gets skipped, or races a container
+    restart, that partial checkpoint is the last DB write - and the
+    canonical full result file on disk is silently shadowed forever.
+
+    Observed in production on ``scan_20260428_081209_b23cf3``: DB had
+    1.6 MB partial (74 findings, phase_log=0, test_log=0); disk had
+    3.4 MB complete (74 findings, phase_log=37, test_log=138). API
+    served the partial version because the original code returned the
+    DB row unconditionally if it parsed.
+
+    The fix: when the DB version is flagged partial, prefer the
+    on-disk file if one exists and re-persist the full version so
+    subsequent reads are fast. See
+    tests/test_results_endpoint_resilience.py::TestPartialDbFallback.
+    """
     raw = scandb.get_scan_result(scan_id)
+    cached: dict | None = None
     if raw:
         try:
-            return json.loads(raw)
+            cached = json.loads(raw)
         except Exception:
-            pass
+            cached = None
+
+    cached_is_partial = bool(
+        isinstance(cached, dict)
+        and cached.get("metadata", {}).get("partial")
+    )
+    if cached and not cached_is_partial:
+        return cached
+
     fname = _find_result_file(scan_id)
     if fname:
         try:
             data = json.loads(Path(fname).read_text(encoding="utf-8"))
-            _persist_scan_result(scan_id, data)
+            disk_is_partial = bool(
+                isinstance(data, dict)
+                and data.get("metadata", {}).get("partial")
+            )
+            if not disk_is_partial:
+                _persist_scan_result(scan_id, data)
             return data
         except Exception:
             pass
-    return None
+
+    return cached
 
 
 def _backfill_scan_results_from_disk():
@@ -1724,6 +1759,10 @@ async def _run_scan_task(scan_id, target_url, username, password, model, scan_mo
                 if "worker" in data:
                     phase_entry["worker"] = data["worker"]
                     phase_entry["parallel"] = True
+                # Preserve transient-error context from run_phases_parallel so
+                # operators can see WHY a phase shows 0 findings in the live UI.
+                if data.get("error"):
+                    phase_entry["error"] = str(data["error"])[:200]
                 scan["live_phases"].append(phase_entry)
                 _save_scan(scan_id)
                 _persist_partial_findings(scan_id, scan)
@@ -2734,16 +2773,26 @@ async def _get_results_inner(scan_id: str):
 
 
 def _build_test_log_index(test_log: list) -> dict:
-    """Pre-index test_log entries by URL base path and pre-serialize request JSON."""
+    """Pre-index test_log entries by URL base path and pre-serialize request JSON.
+
+    Defensive: ``test_log`` may originate from in-memory ``live_tests`` which
+    is *expected* to hold dicts but has been observed to contain strings/None
+    in production (see test_results_endpoint_resilience.py for the
+    regression fixtures). Skip non-dict entries silently rather than 500.
+    """
     from collections import defaultdict
     idx: dict[str, list] = defaultdict(list)
+    if not isinstance(test_log, list):
+        return dict(idx)
     for t in test_log:
+        if not isinstance(t, dict):
+            continue
         req = t.get("request", {})
         if not isinstance(req, dict):
             continue
         t_url = req.get("url", "") or req.get("endpoint", "")
         url_base = str(t_url).split("?")[0]
-        if not hasattr(t, "_req_json_lower"):
+        if "_req_json_lower" not in t:
             t["_req_json_lower"] = json.dumps(req, default=str).lower()
         if url_base:
             idx[url_base].append(t)
@@ -4019,10 +4068,21 @@ async def download_live_payloads(scan_id: str):
 
 
 def _extract_crawled(summary: dict, test_log: list) -> list[dict]:
+    # Defensive: in-memory ``live_tests`` (line 1734) and on-disk ``summary.test_log``
+    # are *expected* to be a list of dicts, but live agent telemetry has occasionally
+    # produced string entries (e.g. raw stringified JSON or error messages). Guard at
+    # both levels - non-dict ``t`` and non-dict ``t['request']`` - so the read path
+    # never raises AttributeError and breaks the results UI.
     urls = set()
     crawled = []
+    if not isinstance(test_log, list):
+        return crawled
     for t in test_log:
+        if not isinstance(t, dict):
+            continue
         req = t.get("request", {})
+        if not isinstance(req, dict):
+            continue
         url = str(req.get("url", "") or req.get("endpoint", ""))
         method = str(req.get("method", "GET"))
         if url and url not in urls:
@@ -4053,7 +4113,11 @@ def _parse_str_value(v):
 def _extract_payloads_by_endpoint(test_log: list) -> list[dict]:
     from collections import defaultdict
     ep_map: dict[str, list] = defaultdict(list)
+    if not isinstance(test_log, list):
+        return []
     for t in test_log:
+        if not isinstance(t, dict):
+            continue
         req = t.get("request", {})
         if not isinstance(req, dict):
             continue

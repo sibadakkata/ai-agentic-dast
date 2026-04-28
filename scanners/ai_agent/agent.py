@@ -1196,32 +1196,81 @@ async def run_phases_parallel(
     lock = asyncio.Lock()
 
     async def _guarded(idx: int, phase: ScanPhase):
+        # Defensive: an exception inside _run_phase_worker (e.g. transient
+        # Bedrock "All connection attempts failed", browser-context death,
+        # bug in tool execution) MUST NOT cause the phase to vanish from
+        # phase_log. The previous implementation used
+        # ``asyncio.gather(..., return_exceptions=True)`` which silently
+        # turned exceptions into return values that were never inspected;
+        # the phase appeared in ``phases_completed`` but produced 0 entries
+        # in ``phase_log``, masking real failures and losing all findings
+        # the phase had buffered before crashing. See
+        # tests/test_parallel_phase_resilience.py for the regression
+        # fixtures.
         async with sem:
-            f, m = await _run_phase_worker(
-                phase=phase,
-                system_prompt=system_prompt,
-                model=model,
-                router=router,
-                browser=browser,
-                auth_cookies=auth_cookies,
-                http_client=http_client,
-                registry=registry,
-                allowed_domains=allowed_domains,
-                target_url=target_url,
-                cancel_flag=cancel_flag,
-                pause_flag=pause_flag,
-                exclude_urls=exclude_urls,
-                prior_findings=prior_findings,
-                worker_id=idx,
-                on_progress=on_progress,
-                auth_headers=auth_headers,
-            )
+            try:
+                f, m = await _run_phase_worker(
+                    phase=phase,
+                    system_prompt=system_prompt,
+                    model=model,
+                    router=router,
+                    browser=browser,
+                    auth_cookies=auth_cookies,
+                    http_client=http_client,
+                    registry=registry,
+                    allowed_domains=allowed_domains,
+                    target_url=target_url,
+                    cancel_flag=cancel_flag,
+                    pause_flag=pause_flag,
+                    exclude_urls=exclude_urls,
+                    prior_findings=prior_findings,
+                    worker_id=idx,
+                    on_progress=on_progress,
+                    auth_headers=auth_headers,
+                )
+            except ScanCancelled:
+                # Cooperative cancellation: propagate so the orchestrator
+                # can stop the rest of the scan cleanly.
+                raise
+            except Exception as e:
+                logger.exception(
+                    "Parallel phase %s (worker %d) failed: %s",
+                    phase.id, idx, e,
+                )
+                err_repr = f"{type(e).__name__}: {e}"
+                f = []
+                m = {
+                    "phase": phase.id,
+                    "name": phase.name,
+                    "tool_calls": 0,
+                    "findings_count": 0,
+                    "error": err_repr[:500],
+                    "worker": idx,
+                }
+                if on_progress:
+                    try:
+                        on_progress("phase_end", {
+                            "phase": 0,
+                            "name": f"{phase.name} (FAILED)",
+                            "tool_calls": 0,
+                            "findings": 0,
+                            "worker": idx,
+                            "error": err_repr[:200],
+                        })
+                    except Exception:
+                        pass
             async with lock:
                 all_findings.extend(f)
                 all_logs.append(m)
 
     tasks = [_guarded(i, p) for i, p in enumerate(phases)]
-    await asyncio.gather(*tasks, return_exceptions=True)
+    # ``return_exceptions=True`` is still safe here because _guarded never
+    # raises (except for ScanCancelled, which we want to propagate to halt
+    # remaining phases). gather() preserves task ordering even on failure.
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+    for r in results:
+        if isinstance(r, ScanCancelled):
+            raise r
     return all_findings, all_logs
 
 
