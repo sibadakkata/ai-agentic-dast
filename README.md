@@ -49,9 +49,9 @@ This loop runs up to 25 steps per phase. Every finding is then **triaged offline
 
 | Feature | Description | Details |
 |---------|-------------|---------|
-| **Passive Reconnaissance** | 26 deterministic checks: source maps, DOM sinks, **hardcoded secret scanner** (17 TruffleHog-style patterns: AWS keys, Stripe, GitHub PATs, Slack, SendGrid, Google, JWT, master/service tokens, JSON key sweep — with masked evidence), headers, CSP analysis, CORS, JWT, cookies, telemetry leakage, mixed content, clickjacking, **TLS protocol/cipher audit** (deprecated TLS 1.0/1.1, Sweet32/3DES, RC4, EXPORT, NULL, anonymous DH — via `sslyze` fallback), **vulnerable JS library detection** (regex catalog + live NVD/OSV.dev CVE enrichment), and more. Post-auth passive pass also scans authenticated DOM HTML for secrets | Runs before LLM phases, $0 cost |
+| **Passive Reconnaissance** | 26 deterministic checks: source maps, DOM sinks, **hardcoded secret scanner** (17 TruffleHog-style patterns: AWS keys, Stripe, GitHub PATs, Slack, SendGrid, Google, JWT, master/service tokens, JSON key sweep — with masked evidence), headers, CSP analysis, CORS, JWT, cookies, telemetry leakage, mixed content, clickjacking, **TLS protocol/cipher audit** (deprecated TLS 1.0/1.1, Sweet32/3DES, RC4, EXPORT, NULL, anonymous DH — via `sslyze` fallback), **hybrid vulnerable JS library detection** (49-library regex catalog + heuristic CDN-path / filename / banner / package-meta extractors + global JS URL registry that aggregates URLs across auth, SPA crawl, and network listeners + live NVD/OSV.dev CVE enrichment), and more. Post-auth passive pass also scans authenticated DOM HTML for secrets | Runs before LLM phases, $0 cost |
 | **Active Scanning** | 25 web phases + 15 API phases: full OWASP Top 10 + context-aware checks (path traversal, XXE, race conditions, file upload, host header, session mgmt, HTTP smuggling) | [Web Scanning](docs/web-scanning.md) · [API Scanning](docs/api-scanning.md) |
-| **Crawl-Only Profile** | Acunetix-style crawl-only scan mode: discovers URLs, SPA routes, forms, APIs, and in-scope sub-domains **without** sending attack payloads. Still runs passive recon (TLS, headers, JS CVEs) and API baseline. Use to verify coverage before a full scan | Dashboard "Scan Profile" dropdown, `scan_profile: "crawl_only"` via API |
+| **Crawl-Only Profile** | Acunetix-style crawl-only scan mode: discovers URLs, SPA routes, forms, APIs, and in-scope sub-domains **without** sending attack payloads. Still runs passive recon (TLS, headers, JS CVEs) and API baseline; **body fuzzing is now correctly skipped** (was previously leaking through). Use to verify coverage before a full scan | Dashboard "Scan Profile" dropdown, `scan_profile: "crawl_only"` via API |
 | **SPA Sibling-Host Coverage** | Passively harvests in-scope HTTPS sub-domains from browser XHR/fetch/navigation traffic and `robots.txt`/`sitemap.xml`. After every phase, newly discovered hosts get a **passive re-audit** (TLS + security headers — Stage A). At the start of each OWASP phase, new hosts are **surfaced to the LLM** with directives to apply that phase's methodology against them (Stage B) | Works for React/Angular/Vue SPAs where sibling hosts only appear post-auth via network traffic |
 | **Triage Engine** | 3-layer evidence-based classification (TP/FP/Manual Review) with CWE/CVSS | [Triage Engine](docs/triage-engine.md) |
 | **Authentication** | Auto-detect form, SSO/OIDC, OAuth, API key, bearer — with session refresh. Multi-identity: User B, Admin, Tenant B (password, bearer, or API key) authenticated at scan start | Multi-step OIDC, self-healing sessions, fast-path static-token auth |
@@ -72,6 +72,10 @@ This loop runs up to 25 steps per phase. Every finding is then **triaged offline
 | **Finding Deduplication** | Findings are deduped by `(title, url, parameter)` both when seeding prior findings into continue/retry scans and when appending new findings during the run — prevents the UI from double-counting passive-recon results across pre-auth / post-auth passes | `_finding_key`, `_dedupe_findings` in `web/app.py` |
 | **Model ID Resolution** | UI/API callers can pass a display name ("Claude Haiku 4.5 (recommended)"), a short alias ("haiku", "sonnet"), or the full litellm id — the backend normalises all three to a valid litellm model id, preventing "LLM Provider NOT provided" errors | `_resolve_model_id` in `web/app.py`, applied at `/api/scan`, `/api/scan/{id}/retry`, `/api/scan/{id}/rescan` |
 | **Deploy Safety** | Pre-deployment check detects active/paused scans and aborts `deploy.sh` before overwriting a running scanner | `scripts/check_scan_active.py`, integrated in `deploy.sh` |
+| **Parallel-Phase Failure Surfacing** | When phases run concurrently via `asyncio.gather`, worker exceptions used to be silently swallowed by `return_exceptions=True`, leaving missing phases with no trace. Now every worker is wrapped in a guard that logs the failure to `phase_log` with an `error` field and a `(FAILED)` suffix in the live UI, so a transient Bedrock 5xx, Playwright timeout, or LLM-context overflow no longer disappears a phase silently | `run_phases_parallel._guarded` in `agent.py`; UI shows `(FAILED)` + tooltip with error |
+| **LLM Transient-Error Retry** | `LLMRouter.complete` retries up to 3× with 2 / 4 / 8 s exponential back-off on transient signatures: connection failures (`All connection attempts failed`), 502 / 503 / 504, read timeouts, throttling. Terminal errors (`ContextWindowExceeded`, `ContentFiltered`, `MalformedMessages`) bubble immediately so a single bad message doesn't burn 4× cost | `LLMRouter.complete` in `llm_config.py` |
+| **Partial-DB Cache Fallback** | The DB sometimes wrote a partial-checkpoint payload (`metadata.partial=True`) for a scan that later finished cleanly to disk, then served the stale partial blob to the API. The reader now prefers a complete on-disk result over a partial DB record and back-fills the DB on read so subsequent loads serve the full payload | `_load_raw_result_dict` in `web/app.py` |
+| **Body-Fuzz Return-Shape Hardening** | `fuzz_body` early-exit paths (unparseable body, baseline failure) used to return a bare `[]` while the caller did `a, b = await fuzz_body(...)`, crashing phase 4 with `not enough values to unpack (expected 2, got 0)`. Now both early exits return `([], [])`; return type annotation corrected; 23-test scenario suite (`tests/test_scan_error_resilience.py`) audits every tuple-unpack contract in the scanner | `body_fuzzer.py`, `tests/test_body_fuzzer_return_shape.py`, `tests/test_scan_error_resilience.py` |
 
 ## Quick Start
 
@@ -113,7 +117,9 @@ uvicorn web.app:app --host 0.0.0.0 --port 8080
 ├─────────────────────────────────────────────────────────────────────┤
 │  2. PASSIVE RECONNAISSANCE ($0) — 26 checks + hardcoded secrets     │
 │     Source maps, sinks, headers, CSP, CORS, JWT, cookies,           │
-│     TLS audit (sslyze), vulnerable JS libraries (NVD/OSV.dev CVE), │
+│     TLS audit (sslyze), HYBRID vulnerable JS libraries (49-lib      │
+│     catalog + heuristic CDN/filename/banner extractors + global     │
+│     JS URL registry across auth/SPA/network — NVD/OSV.dev CVE),     │
 │     hardcoded secret scanner (17 TruffleHog-style regex patterns    │
 │     in JS bundles + authenticated HTML — AWS, Stripe, GitHub PATs,  │
 │     Slack, Google, SendGrid, JWT, master/service tokens)            │
@@ -183,7 +189,8 @@ uvicorn web.app:app --host 0.0.0.0 --port 8080
 │   ├── agent.py                 #   Agent loop, context mgmt, multi-identity, retry prompts
 │   ├── auth.py                  #   Authentication (form/SSO/OAuth) + multi-identity (User B/Admin/Tenant B)
 │   ├── severity.py              #   Deterministic CVSS v3.1 severity classifier (XBOW-style)
-│   ├── passive_recon.py         #   Deterministic passive checks + hardcoded secret scanner
+│   ├── passive_recon.py         #   Deterministic passive checks + hardcoded secret scanner + hybrid JS lib detection
+│   ├── js_registry.py           #   Global JS URL registry (auth + SPA + network listeners → unified set for CVE audit)
 │   ├── llm_config.py            #   LLM routing & cost tracking
 │   ├── prompts.py               #   System + phase prompts (multi-identity placeholders)
 │   ├── tools.py                 #   30 tools (browser, API, WebSocket, chaining)
