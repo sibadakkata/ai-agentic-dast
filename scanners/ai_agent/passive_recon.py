@@ -3594,6 +3594,10 @@ _JS_LIB_CATALOG: list[dict] = [
         ],
         "content": [
             re.compile(r"jQuery\s+v?(\d+\.\d+\.\d+)", re.I),
+            # Banner without "v" prefix and without /*! requirement — covers
+            # the bare "jQuery JavaScript Library 3.5.1" form found in
+            # SSO bundles like Norton's sso-default-*.js
+            re.compile(r"jQuery\s+JavaScript\s+Library\s+v?(\d+\.\d+\.\d+)", re.I),
             re.compile(r"/\*!\s*jQuery\s+JavaScript\s+Library\s+v?(\d+\.\d+\.\d+)", re.I),
         ],
     },
@@ -3748,7 +3752,439 @@ _JS_LIB_CATALOG: list[dict] = [
         ],
         "content": [re.compile(r"tinymce[^\d]{0,20}majorVersion:\s*[\"'](\d+)", re.I)],
     },
+    # ── Extended catalog ─────────────────────────────────────────────────
+    # Modern frontend frameworks & ecosystem packages that historically
+    # ship CVEs and are commonly seen in enterprise apps.
+    {
+        "name": "next.js",
+        "osv_name": "next",
+        "ecosystem": "npm",
+        "url": [
+            re.compile(r"/next/(\d+\.\d+\.\d+)/", re.I),
+            # Webpack chunks under _next/static/<anything>/next-X.Y.Z*.js
+            re.compile(r"_next/static/(?:[^/]+/)*next[-.](\d+\.\d+\.\d+)", re.I),
+        ],
+        "content": [re.compile(r"\"version\"\s*:\s*\"(\d+\.\d+\.\d+)\"[^}]*\"name\"\s*:\s*\"next\"", re.I)],
+    },
+    {
+        "name": "angular-core",  # Angular 2+
+        "osv_name": "@angular/core",
+        "ecosystem": "npm",
+        "url": [
+            re.compile(r"/@angular/core/(\d+\.\d+\.\d+)/", re.I),
+            re.compile(r"@angular[/_]core[-.](\d+\.\d+\.\d+)", re.I),
+        ],
+        "content": [re.compile(r"@angular/core[^\d]{0,40}(\d+\.\d+\.\d+)", re.I)],
+    },
+    {
+        "name": "mui-material",
+        "osv_name": "@mui/material",
+        "ecosystem": "npm",
+        "url": [
+            re.compile(r"/@mui/material/(\d+\.\d+\.\d+)/", re.I),
+            re.compile(r"@mui[/_]material[-.](\d+\.\d+\.\d+)", re.I),
+        ],
+        "content": [re.compile(r"@mui/material[^\d]{0,40}(\d+\.\d+\.\d+)", re.I)],
+    },
+    {
+        "name": "monaco-editor",
+        "osv_name": "monaco-editor",
+        "ecosystem": "npm",
+        "url": [
+            re.compile(r"/monaco-editor/(\d+\.\d+\.\d+)/", re.I),
+            re.compile(r"monaco-editor[-.](\d+\.\d+\.\d+)", re.I),
+        ],
+        "content": [re.compile(r"monaco-editor[^\d]{0,40}(\d+\.\d+\.\d+)", re.I)],
+    },
+    {
+        "name": "codemirror",
+        "osv_name": "codemirror",
+        "ecosystem": "npm",
+        "url": [
+            re.compile(r"/codemirror/(\d+\.\d+\.\d+)/", re.I),
+            re.compile(r"codemirror-(\d+\.\d+\.\d+)(?:\.min)?\.js", re.I),
+        ],
+        "content": [re.compile(r"CodeMirror\.version\s*=\s*[\"'](\d+\.\d+\.\d+)", re.I)],
+    },
+    {
+        "name": "quill",
+        "osv_name": "quill",
+        "ecosystem": "npm",
+        "url": [
+            re.compile(r"/quill/(\d+\.\d+\.\d+)/", re.I),
+            re.compile(r"quill-(\d+\.\d+\.\d+)(?:\.min)?\.js", re.I),
+        ],
+        "content": [re.compile(r"Quill\.version\s*=\s*[\"'](\d+\.\d+\.\d+)", re.I)],
+    },
+    {
+        "name": "chart.js",
+        "osv_name": "chart.js",
+        "ecosystem": "npm",
+        "url": [
+            re.compile(r"/Chart\.js/(\d+\.\d+\.\d+)/", re.I),
+            re.compile(r"chart\.js[-.](\d+\.\d+\.\d+)", re.I),
+        ],
+        "content": [re.compile(r"Chart\.js\s+v?(\d+\.\d+\.\d+)", re.I)],
+    },
+    {
+        "name": "d3",
+        "osv_name": "d3",
+        "ecosystem": "npm",
+        "url": [
+            re.compile(r"/d3/(\d+\.\d+\.\d+)/", re.I),
+            re.compile(r"d3-(\d+\.\d+\.\d+)(?:\.min)?\.js", re.I),
+        ],
+        "content": [re.compile(r"\bd3\s+v?(\d+\.\d+\.\d+)", re.I)],
+    },
+    {
+        "name": "highcharts",
+        "osv_name": "highcharts",
+        "ecosystem": "npm",
+        "url": [
+            re.compile(r"/highcharts/(\d+\.\d+\.\d+)/", re.I),
+            re.compile(r"highcharts[-.](\d+\.\d+\.\d+)(?:\.min)?\.js", re.I),
+        ],
+        "content": [re.compile(r"Highcharts\s+JS\s+v?(\d+\.\d+\.\d+)", re.I)],
+    },
+    {
+        "name": "crypto-js",
+        "osv_name": "crypto-js",
+        "ecosystem": "npm",
+        "url": [
+            re.compile(r"/crypto-js/(\d+\.\d+\.\d+)/", re.I),
+            re.compile(r"crypto-js[-.](\d+\.\d+\.\d+)(?:\.min)?\.js", re.I),
+        ],
+        "content": [re.compile(r"CryptoJS[^\d]{0,40}(\d+\.\d+\.\d+)", re.I)],
+    },
+    {
+        "name": "jsonwebtoken",
+        "osv_name": "jsonwebtoken",
+        "ecosystem": "npm",
+        "url": [re.compile(r"/jsonwebtoken/(\d+\.\d+\.\d+)/", re.I)],
+        "content": [re.compile(r"jsonwebtoken[^\d]{0,40}(\d+\.\d+\.\d+)", re.I)],
+    },
+    {
+        "name": "socket.io-client",
+        "osv_name": "socket.io-client",
+        "ecosystem": "npm",
+        "url": [
+            re.compile(r"/socket\.io/(\d+\.\d+\.\d+)/", re.I),
+            re.compile(r"socket\.io[-.](\d+\.\d+\.\d+)(?:\.min)?\.js", re.I),
+        ],
+        "content": [re.compile(r"socket\.io\s+v?(\d+\.\d+\.\d+)", re.I)],
+    },
+    {
+        "name": "pdfjs",
+        "osv_name": "pdfjs-dist",
+        "ecosystem": "npm",
+        "url": [
+            re.compile(r"/pdf\.js/(\d+\.\d+\.\d+)/", re.I),
+            re.compile(r"pdf\.?js[-.](\d+\.\d+\.\d+)(?:\.min)?\.js", re.I),
+        ],
+        "content": [re.compile(r"PDF\.js\s+v?(\d+\.\d+\.\d+)", re.I)],
+    },
+    {
+        "name": "jspdf",
+        "osv_name": "jspdf",
+        "ecosystem": "npm",
+        "url": [
+            re.compile(r"/jspdf/(\d+\.\d+\.\d+)/", re.I),
+            re.compile(r"jspdf[-.](\d+\.\d+\.\d+)(?:\.min)?\.js", re.I),
+        ],
+        "content": [re.compile(r"jsPDF\s+v?(\d+\.\d+\.\d+)", re.I)],
+    },
+    {
+        "name": "xlsx",
+        "osv_name": "xlsx",
+        "ecosystem": "npm",
+        "url": [
+            re.compile(r"/xlsx/(\d+\.\d+\.\d+)/", re.I),
+            re.compile(r"xlsx[-.](\d+\.\d+\.\d+)(?:\.min)?\.js", re.I),
+        ],
+        "content": [re.compile(r"XLSX\s+v?(\d+\.\d+\.\d+)", re.I)],
+    },
+    {
+        "name": "ajv",
+        "osv_name": "ajv",
+        "ecosystem": "npm",
+        "url": [re.compile(r"/ajv/(\d+\.\d+\.\d+)/", re.I)],
+        "content": [re.compile(r"\"name\"\s*:\s*\"ajv\"\s*,\s*\"version\"\s*:\s*\"(\d+\.\d+\.\d+)\"", re.I)],
+    },
+    {
+        "name": "marked",
+        "osv_name": "marked",
+        "ecosystem": "npm",
+        "url": [
+            re.compile(r"/marked/(\d+\.\d+\.\d+)/", re.I),
+            re.compile(r"marked[-.](\d+\.\d+\.\d+)(?:\.min)?\.js", re.I),
+        ],
+        "content": [re.compile(r"marked[^\d]{0,30}v?(\d+\.\d+\.\d+)", re.I)],
+    },
+    {
+        "name": "prismjs",
+        "osv_name": "prismjs",
+        "ecosystem": "npm",
+        "url": [
+            re.compile(r"/prism/(\d+\.\d+\.\d+)/", re.I),
+            re.compile(r"prism[-.](\d+\.\d+\.\d+)(?:\.min)?\.js", re.I),
+        ],
+        "content": [re.compile(r"Prism\s+(\d+\.\d+\.\d+)", re.I)],
+    },
+    {
+        "name": "highlight.js",
+        "osv_name": "highlight.js",
+        "ecosystem": "npm",
+        "url": [
+            re.compile(r"/highlight\.js/(\d+\.\d+\.\d+)/", re.I),
+            re.compile(r"highlight\.js[-.](\d+\.\d+\.\d+)", re.I),
+        ],
+        "content": [re.compile(r"Highlight\.js\s+v?(\d+\.\d+\.\d+)", re.I)],
+    },
+    {
+        "name": "swagger-ui",
+        "osv_name": "swagger-ui",
+        "ecosystem": "npm",
+        "url": [
+            re.compile(r"/swagger-ui/(\d+\.\d+\.\d+)/", re.I),
+            re.compile(r"swagger-ui[-.](\d+\.\d+\.\d+)", re.I),
+        ],
+        "content": [re.compile(r"Swagger\s*UI[^\d]{0,40}v?(\d+\.\d+\.\d+)", re.I)],
+    },
+    {
+        "name": "graphql",
+        "osv_name": "graphql",
+        "ecosystem": "npm",
+        "url": [
+            re.compile(r"/graphql/(\d+\.\d+\.\d+)/", re.I),
+            re.compile(r"graphql[-.](\d+\.\d+\.\d+)(?:\.min)?\.js", re.I),
+        ],
+        "content": [re.compile(r"\"name\"\s*:\s*\"graphql\"\s*,\s*\"version\"\s*:\s*\"(\d+\.\d+\.\d+)\"", re.I)],
+    },
+    {
+        "name": "react-router-dom",
+        "osv_name": "react-router-dom",
+        "ecosystem": "npm",
+        "url": [re.compile(r"/react-router-dom/(\d+\.\d+\.\d+)/", re.I)],
+        "content": [re.compile(r"react-router-dom[^\d]{0,40}(\d+\.\d+\.\d+)", re.I)],
+    },
+    {
+        "name": "vue-router",
+        "osv_name": "vue-router",
+        "ecosystem": "npm",
+        "url": [re.compile(r"/vue-router/(\d+\.\d+\.\d+)/", re.I)],
+        "content": [re.compile(r"vue-router\s+v?(\d+\.\d+\.\d+)", re.I)],
+    },
+    {
+        "name": "rxjs",
+        "osv_name": "rxjs",
+        "ecosystem": "npm",
+        "url": [
+            re.compile(r"/rxjs/(\d+\.\d+\.\d+)/", re.I),
+            re.compile(r"rxjs[-.](\d+\.\d+\.\d+)(?:\.min)?\.js", re.I),
+        ],
+        "content": [re.compile(r"\"name\"\s*:\s*\"rxjs\"\s*,\s*\"version\"\s*:\s*\"(\d+\.\d+\.\d+)\"", re.I)],
+    },
+    {
+        "name": "axios",  # extra patterns; main entry above
+        "osv_name": "axios",
+        "ecosystem": "npm",
+        "url": [re.compile(r"axios\.(?:min|umd)?\.?js\?(?:v|ver|version)=(\d+\.\d+\.\d+)", re.I)],
+        "content": [re.compile(r"\"name\"\s*:\s*\"axios\"\s*,\s*\"version\"\s*:\s*\"(\d+\.\d+\.\d+)\"", re.I)],
+    },
+    {
+        "name": "dayjs",
+        "osv_name": "dayjs",
+        "ecosystem": "npm",
+        "url": [
+            re.compile(r"/dayjs/(\d+\.\d+\.\d+)/", re.I),
+            re.compile(r"dayjs[-.](\d+\.\d+\.\d+)(?:\.min)?\.js", re.I),
+        ],
+        "content": [re.compile(r"dayjs[^\d]{0,30}v?(\d+\.\d+\.\d+)", re.I)],
+    },
+    {
+        "name": "luxon",
+        "osv_name": "luxon",
+        "ecosystem": "npm",
+        "url": [
+            re.compile(r"/luxon/(\d+\.\d+\.\d+)/", re.I),
+            re.compile(r"luxon[-.](\d+\.\d+\.\d+)(?:\.min)?\.js", re.I),
+        ],
+        "content": [re.compile(r"\"name\"\s*:\s*\"luxon\"\s*,\s*\"version\"\s*:\s*\"(\d+\.\d+\.\d+)\"", re.I)],
+    },
+    {
+        "name": "date-fns",
+        "osv_name": "date-fns",
+        "ecosystem": "npm",
+        "url": [re.compile(r"/date-fns/(\d+\.\d+\.\d+)/", re.I)],
+        "content": [re.compile(r"\"name\"\s*:\s*\"date-fns\"\s*,\s*\"version\"\s*:\s*\"(\d+\.\d+\.\d+)\"", re.I)],
+    },
+    {
+        "name": "i18next",
+        "osv_name": "i18next",
+        "ecosystem": "npm",
+        "url": [
+            re.compile(r"/i18next/(\d+\.\d+\.\d+)/", re.I),
+            re.compile(r"i18next[-.](\d+\.\d+\.\d+)(?:\.min)?\.js", re.I),
+        ],
+        "content": [re.compile(r"i18next[^\d]{0,40}v?(\d+\.\d+\.\d+)", re.I)],
+    },
+    {
+        "name": "ckeditor5",
+        "osv_name": "@ckeditor/ckeditor5-core",
+        "ecosystem": "npm",
+        "url": [
+            re.compile(r"/ckeditor5/(\d+\.\d+\.\d+)/", re.I),
+            re.compile(r"ckeditor5[-.](\d+\.\d+\.\d+)", re.I),
+        ],
+        "content": [re.compile(r"CKEditor\s+5\s+v?(\d+\.\d+\.\d+)", re.I)],
+    },
+    {
+        "name": "fastify",
+        "osv_name": "fastify",
+        "ecosystem": "npm",
+        "url": [re.compile(r"/fastify/(\d+\.\d+\.\d+)/", re.I)],
+        "content": [re.compile(r"\"name\"\s*:\s*\"fastify\"\s*,\s*\"version\"\s*:\s*\"(\d+\.\d+\.\d+)\"", re.I)],
+    },
+    {
+        "name": "express",
+        "osv_name": "express",
+        "ecosystem": "npm",
+        "url": [re.compile(r"/express/(\d+\.\d+\.\d+)/", re.I)],
+        "content": [re.compile(r"\"name\"\s*:\s*\"express\"\s*,\s*\"version\"\s*:\s*\"(\d+\.\d+\.\d+)\"", re.I)],
+    },
+    {
+        "name": "swagger-ui-dist",
+        "osv_name": "swagger-ui-dist",
+        "ecosystem": "npm",
+        "url": [re.compile(r"/swagger-ui-dist/(\d+\.\d+\.\d+)/", re.I)],
+        "content": [re.compile(r"swagger-ui-dist[^\d]{0,40}(\d+\.\d+\.\d+)", re.I)],
+    },
 ]
+
+
+# ── Heuristic library extractor ────────────────────────────────────────────
+# Catches libraries that don't have a dedicated catalog entry but follow
+# standard npm/cdnjs naming conventions.  Used as a fallback when
+# _extract_js_library() returns nothing for a URL.
+
+# Generic CDN path layout: /<libname>/<version>/...  used by cdnjs, jsdelivr,
+# unpkg.  The libname is the npm package name; version must look like SemVer.
+_HEURISTIC_CDN_PATH = re.compile(
+    r"/([a-z][a-z0-9._-]{2,40})/(\d+\.\d+(?:\.\d+)?)(?:[-+a-z0-9._]*)?/",
+    re.I,
+)
+# Filename layout: <libname>-<version>(.min|.umd|.cjs|.esm|.iife)?.js
+# Version MUST be full SemVer (X.Y.Z) so we don't mis-parse cache-busted
+# files like vendor-1.2.3.js as ("vendor-1", "2.3").  Library names ending
+# in a digit are explicitly disallowed (libname must end in a letter).
+_HEURISTIC_FILENAME = re.compile(
+    r"/([a-z][a-z0-9._-]*?[a-z])[-.]v?(\d+\.\d+\.\d+)"
+    r"(?:[-+a-z0-9.]*)?"
+    r"(?:\.bundle|\.umd|\.cjs|\.esm|\.iife|\.min|\.production|\.development)*\.m?js"
+    r"(?:\?[^/]*)?$",
+    re.I,
+)
+# Generic banner comment near the top of a JS bundle:
+#    /*! <Title> v1.2.3 */    or    /*! <Title> 1.2.3 */
+# Captured groups: 1=title, 2=version
+_HEURISTIC_BANNER = re.compile(
+    r"/\*!?\s*([A-Za-z][\w.\- ]{2,40}?)\s+v?(\d+\.\d+\.\d+)(?:[\s\-+][^*]*)?\*/",
+)
+# package.json-style metadata block embedded in a bundle
+_HEURISTIC_PKG_META = re.compile(
+    r'"name"\s*:\s*"((?!main|app|index|bundle|vendor|runtime|polyfills?)'
+    r"[a-z0-9@/_-]{3,40})\"\s*,\s*"
+    r'"version"\s*:\s*"(\d+\.\d+\.\d+)"',
+    re.I,
+)
+
+# Names that are too generic to be useful npm package candidates.  Skip them
+# to avoid blasting OSV.dev with junk lookups.
+_HEURISTIC_NAME_DENYLIST = frozenset({
+    "main", "vendor", "app", "bundle", "runtime", "polyfills", "polyfill",
+    "chunk", "index", "common", "manifest", "loader", "client", "server",
+    "static", "scripts", "core", "utils", "helpers", "shared", "global",
+    "config", "settings", "init", "boot", "test", "tests", "spec",
+    "module", "modules", "page", "pages", "view", "views", "component",
+    "components", "framework", "library", "embed", "widget", "embeddable",
+    "iframe", "preload", "prefetch", "build", "dist", "min", "umd", "esm",
+    "iife", "production", "development", "amd", "cjs", "node",
+    # Common build-tool artifacts
+    "webpack", "rollup", "parcel", "vite", "esbuild",
+})
+
+
+def _heuristic_extract_library(url: str, content: str = "") -> list[tuple[str, str, str, str]]:
+    """Generic (libname, version) extractor for libraries NOT in
+    ``_JS_LIB_CATALOG``.
+
+    Returns a list of ``(friendly_name, osv_name, ecosystem, version)`` tuples
+    suitable for the same downstream OSV lookup as the catalog entries.
+
+    Conservative on purpose — false positives translate into wasted OSV API
+    calls (or worse, misleading findings).  Filters:
+
+    * Names in :data:`_HEURISTIC_NAME_DENYLIST` are dropped.
+    * Names < 3 chars or all-numeric are dropped.
+    * Versions must be in ``X.Y.Z`` (SemVer) form to be considered.
+    """
+    found: list[tuple[str, str, str, str]] = []
+    seen: set[tuple[str, str]] = set()
+
+    def _accept(name_raw: str, version: str) -> None:
+        if not name_raw or not version:
+            return
+        # Strip leading "@scope/" path prefix if it leaked in
+        name = name_raw.strip().strip("/").lower()
+        if name.startswith("@") and "/" not in name:
+            return
+        if "." not in version:
+            return
+        # SemVer must have at least two dots ("X.Y.Z") OR one dot for
+        # very-popular two-digit versions (we coerce X.Y -> X.Y.0 below).
+        parts = version.split(".")
+        if len(parts) == 2:
+            version = f"{version}.0"
+        elif len(parts) != 3:
+            return
+        # Normalise for filtering
+        bare = name.split("/")[-1]
+        if bare in _HEURISTIC_NAME_DENYLIST:
+            return
+        if len(bare) < 3 or bare.isdigit():
+            return
+        # Reject names that are mostly digits or hashes (looks like a build hash)
+        if sum(c.isdigit() for c in bare) > len(bare) // 2:
+            return
+        key = (name, version)
+        if key in seen:
+            return
+        seen.add(key)
+        # OSV ecosystem assumption: npm.  This is correct for >95% of
+        # browser-loaded JS libraries; OSV.dev returns empty for unknown
+        # combos so a wrong guess is harmless.
+        found.append((name, name, "npm", version))
+
+    if url:
+        m = _HEURISTIC_CDN_PATH.search(url)
+        if m:
+            _accept(m.group(1), m.group(2))
+        m = _HEURISTIC_FILENAME.search(url)
+        if m:
+            _accept(m.group(1), m.group(2))
+
+    if content:
+        # Cap at first ~16 KB so we don't spend too long on huge bundles
+        snippet = content[:16384]
+        for m in _HEURISTIC_BANNER.finditer(snippet):
+            title = m.group(1).strip()
+            # Title -> npm-style name: lowercase, replace spaces with dashes
+            name = re.sub(r"[^a-z0-9._-]", "-", title.lower()).strip("-")
+            _accept(name, m.group(2))
+        for m in _HEURISTIC_PKG_META.finditer(snippet):
+            _accept(m.group(1), m.group(2))
+
+    return found
 
 
 def _extract_js_library(url: str, content: str = "") -> list[tuple[str, str, str, str]]:
@@ -3833,8 +4269,8 @@ async def _check_js_library_vulnerabilities(
     except Exception as e:
         logger.debug("DOM script-ref collection failed: %s", e)
 
-    # ── 3. Content-banner extraction — only for URLs with no URL hit and
-    #      only on first-party JS (third-party already filtered upstream). ─
+    # ── 3. Content-banner extraction — fetch JS content for URLs the URL
+    #      regexes missed and grep the first 16 KB for library banners. ─
     hit_urls = {v[2] for v in candidates.values()}
     remaining = [u for u in (js_urls or []) if u not in hit_urls]
     for u in remaining[:40]:  # cap to keep runtime bounded
@@ -3842,10 +4278,25 @@ async def _check_js_library_vulnerabilities(
             resp = await http_client.get(u, timeout=8.0)
             if resp.status_code != 200:
                 continue
-            snippet = (resp.text or "")[:8000]
+            snippet = (resp.text or "")[:16000]
         except Exception:
             continue
         for name, osv_name, ecosystem, version in _extract_js_library(u, snippet):
+            _add(name, osv_name, ecosystem, version, u)
+        # ── 3b. Heuristic fallback — only if the curated catalog still
+        #        produced no hit for this URL.  Picks up libraries we
+        #        haven't hand-curated (Next.js bundles, MUI, Monaco, etc.)
+        if u not in {v[2] for v in candidates.values()}:
+            for name, osv_name, ecosystem, version in _heuristic_extract_library(u, snippet):
+                _add(name, osv_name, ecosystem, version, u)
+
+    # ── 3c. Heuristic-only pass on URLs we never fetched (URL-pattern only)
+    #       — cheap deterministic check to harvest libraries from CDN paths
+    #       like /next/14.2.3/... or /@mui/material/5.15.10/index.js
+    for u in (js_urls or []):
+        if u in {v[2] for v in candidates.values()}:
+            continue
+        for name, osv_name, ecosystem, version in _heuristic_extract_library(u, ""):
             _add(name, osv_name, ecosystem, version, u)
 
     if not candidates:
