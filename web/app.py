@@ -29,6 +29,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 logger = logging.getLogger(__name__)
 
 from scanners.ai_agent.agent import run_scan, save_results, ScanCancelled
+from scanners.ai_agent.severity import classify_severity
 from scanners.ai_agent.api_import import (
     parse_postman_collection,
     parse_openapi_spec,
@@ -1569,6 +1570,8 @@ async def start_scan(request: Request):
     password = body.get("password", "").strip()
     username_b = body.get("username_b", "").strip()
     password_b = body.get("password_b", "").strip()
+    credentials_admin = body.get("credentials_admin") or {}
+    credentials_tenant_b = body.get("credentials_tenant_b") or {}
     model = _resolve_model_id(body.get("model", ""))
     scan_mode_raw = body.get("scan_mode", "both")
     _MODE_MAP = {"standard": "both", "quick": "both", "deep": "both",
@@ -1640,6 +1643,8 @@ async def start_scan(request: Request):
         "_password": password,
         "_username_b": username_b,
         "_password_b": password_b,
+        "_credentials_admin": credentials_admin,
+        "_credentials_tenant_b": credentials_tenant_b,
         "_api_imports": api_imports,
         "_extra_domains": extra_domains,
     }
@@ -1648,20 +1653,20 @@ async def start_scan(request: Request):
     thread = threading.Thread(
         target=_run_scan_in_thread,
         args=(scan_id, target_url, username, password, model, scan_mode, auth_type, api_imports, extra_domains, cancel_flag, pause_flag),
-        kwargs={"scan_scope": scan_scope, "focus_urls": focus_urls, "focus_areas": focus_areas, "scan_intensity": scan_intensity, "exclude_urls": exclude_urls, "username_b": username_b, "password_b": password_b, "interactive_session": interactive_session, "workflow_id": workflow_id, "business_flow": business_flow, "scan_profile": scan_profile, "skip_passive_sibling_tls": skip_passive_sibling_tls},
+        kwargs={"scan_scope": scan_scope, "focus_urls": focus_urls, "focus_areas": focus_areas, "scan_intensity": scan_intensity, "exclude_urls": exclude_urls, "username_b": username_b, "password_b": password_b, "credentials_admin": credentials_admin, "credentials_tenant_b": credentials_tenant_b, "interactive_session": interactive_session, "workflow_id": workflow_id, "business_flow": business_flow, "scan_profile": scan_profile, "skip_passive_sibling_tls": skip_passive_sibling_tls},
         daemon=True,
     )
     thread.start()
     return {"scan_id": scan_id, "status": "started"}
 
 
-def _run_scan_in_thread(scan_id, target_url, username, password, model, scan_mode, auth_type, api_imports=None, extra_domains=None, cancel_flag=None, pause_flag=None, start_from_phase=0, initial_findings=None, scan_scope="directory", focus_urls=None, focus_areas=None, scan_intensity="deep", exclude_urls=None, username_b="", password_b="", interactive_session=None, workflow_id=None, business_flow=None, scan_profile="vulnerability_scan", skip_passive_sibling_tls=False):
+def _run_scan_in_thread(scan_id, target_url, username, password, model, scan_mode, auth_type, api_imports=None, extra_domains=None, cancel_flag=None, pause_flag=None, start_from_phase=0, initial_findings=None, scan_scope="directory", focus_urls=None, focus_areas=None, scan_intensity="deep", exclude_urls=None, username_b="", password_b="", credentials_admin=None, credentials_tenant_b=None, interactive_session=None, workflow_id=None, business_flow=None, scan_profile="vulnerability_scan", skip_passive_sibling_tls=False):
     """Run scan in a separate thread with its own event loop so the main UI stays responsive."""
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     try:
         loop.run_until_complete(
-            _run_scan_task(scan_id, target_url, username, password, model, scan_mode, auth_type, api_imports, extra_domains, cancel_flag, pause_flag, start_from_phase, initial_findings, scan_scope=scan_scope, focus_urls=focus_urls, focus_areas=focus_areas, scan_intensity=scan_intensity, exclude_urls=exclude_urls, username_b=username_b, password_b=password_b, interactive_session=interactive_session, workflow_id=workflow_id, business_flow=business_flow, scan_profile=scan_profile, skip_passive_sibling_tls=skip_passive_sibling_tls)
+            _run_scan_task(scan_id, target_url, username, password, model, scan_mode, auth_type, api_imports, extra_domains, cancel_flag, pause_flag, start_from_phase, initial_findings, scan_scope=scan_scope, focus_urls=focus_urls, focus_areas=focus_areas, scan_intensity=scan_intensity, exclude_urls=exclude_urls, username_b=username_b, password_b=password_b, credentials_admin=credentials_admin, credentials_tenant_b=credentials_tenant_b, interactive_session=interactive_session, workflow_id=workflow_id, business_flow=business_flow, scan_profile=scan_profile, skip_passive_sibling_tls=skip_passive_sibling_tls)
         )
     finally:
         loop.close()
@@ -1670,7 +1675,7 @@ def _run_scan_in_thread(scan_id, target_url, username, password, model, scan_mod
         INTERACTIVE_BROWSERS.pop(scan_id, None)
 
 
-async def _run_scan_task(scan_id, target_url, username, password, model, scan_mode, auth_type, api_imports=None, extra_domains=None, cancel_flag=None, pause_flag=None, start_from_phase=0, initial_findings=None, scan_scope="directory", focus_urls=None, focus_areas=None, scan_intensity="deep", exclude_urls=None, username_b="", password_b="", interactive_session=None, workflow_id=None, business_flow=None, scan_profile="vulnerability_scan", skip_passive_sibling_tls=False):
+async def _run_scan_task(scan_id, target_url, username, password, model, scan_mode, auth_type, api_imports=None, extra_domains=None, cancel_flag=None, pause_flag=None, start_from_phase=0, initial_findings=None, scan_scope="directory", focus_urls=None, focus_areas=None, scan_intensity="deep", exclude_urls=None, username_b="", password_b="", credentials_admin=None, credentials_tenant_b=None, interactive_session=None, workflow_id=None, business_flow=None, scan_profile="vulnerability_scan", skip_passive_sibling_tls=False):
     try:
         scan = SCANS[scan_id]
         scan["progress"].append("Initializing LLM router...")
@@ -1882,6 +1887,10 @@ async def _run_scan_task(scan_id, target_url, username, password, model, scan_mo
         }
         if username_b or password_b:
             target_dict["credentials_b"] = {"username": username_b, "password": password_b}
+        if credentials_admin and any(credentials_admin.values()):
+            target_dict["credentials_admin"] = credentials_admin
+        if credentials_tenant_b and any(credentials_tenant_b.values()):
+            target_dict["credentials_tenant_b"] = credentials_tenant_b
         target = load_targets_from_dict(target_dict)
 
         scan["progress"].append(f"Starting scan with {model}...")
@@ -2320,6 +2329,8 @@ def _extract_scan_params(old: dict, scan_id: str | None = None) -> dict:
         "password": old.get("_password", ""),
         "username_b": old.get("_username_b", ""),
         "password_b": old.get("_password_b", ""),
+        "credentials_admin": old.get("_credentials_admin") or {},
+        "credentials_tenant_b": old.get("_credentials_tenant_b") or {},
         "api_imports": old.get("_api_imports", {}) or {},
         "extra_domains": old.get("_extra_domains", []) or [],
         "scan_scope": old.get("scan_scope", "directory"),
@@ -2395,7 +2406,7 @@ async def retry_scan(scan_id: str, request: Request):
         args=(scan_id, params["target_url"], params["username"], params["password"],
               model, scan_mode, params["auth_type"], params["api_imports"],
               params["extra_domains"], cancel_flag, pause_flag, start_from, prior_findings),
-        kwargs={"scan_scope": params["scan_scope"], "focus_urls": params["focus_urls"], "focus_areas": params["focus_areas"], "scan_intensity": params["scan_intensity"], "scan_profile": params.get("scan_profile", "vulnerability_scan"), "exclude_urls": params.get("exclude_urls", []), "username_b": params.get("username_b", ""), "password_b": params.get("password_b", ""), "interactive_session": interactive_session, "skip_passive_sibling_tls": params.get("skip_passive_sibling_tls", False)},
+        kwargs={"scan_scope": params["scan_scope"], "focus_urls": params["focus_urls"], "focus_areas": params["focus_areas"], "scan_intensity": params["scan_intensity"], "scan_profile": params.get("scan_profile", "vulnerability_scan"), "exclude_urls": params.get("exclude_urls", []), "username_b": params.get("username_b", ""), "password_b": params.get("password_b", ""), "credentials_admin": params.get("credentials_admin"), "credentials_tenant_b": params.get("credentials_tenant_b"), "interactive_session": interactive_session, "skip_passive_sibling_tls": params.get("skip_passive_sibling_tls", False)},
         daemon=True,
     )
     thread.start()
@@ -2459,6 +2470,8 @@ async def rescan(scan_id: str, request: Request):
         "_password": params["password"],
         "_username_b": params.get("username_b", ""),
         "_password_b": params.get("password_b", ""),
+        "_credentials_admin": params.get("credentials_admin") or {},
+        "_credentials_tenant_b": params.get("credentials_tenant_b") or {},
         "_api_imports": params["api_imports"],
         "_extra_domains": params["extra_domains"],
     }
@@ -2469,7 +2482,7 @@ async def rescan(scan_id: str, request: Request):
         args=(new_id, params["target_url"], params["username"], params["password"],
               model, scan_mode, params["auth_type"], params["api_imports"],
               params["extra_domains"], cancel_flag, pause_flag),
-        kwargs={"scan_scope": params["scan_scope"], "focus_urls": params["focus_urls"], "focus_areas": params["focus_areas"], "scan_intensity": params["scan_intensity"], "scan_profile": params.get("scan_profile", "vulnerability_scan"), "exclude_urls": params.get("exclude_urls", []), "username_b": params.get("username_b", ""), "password_b": params.get("password_b", ""), "interactive_session": interactive_session, "skip_passive_sibling_tls": params.get("skip_passive_sibling_tls", False)},
+        kwargs={"scan_scope": params["scan_scope"], "focus_urls": params["focus_urls"], "focus_areas": params["focus_areas"], "scan_intensity": params["scan_intensity"], "scan_profile": params.get("scan_profile", "vulnerability_scan"), "exclude_urls": params.get("exclude_urls", []), "username_b": params.get("username_b", ""), "password_b": params.get("password_b", ""), "credentials_admin": params.get("credentials_admin"), "credentials_tenant_b": params.get("credentials_tenant_b"), "interactive_session": interactive_session, "skip_passive_sibling_tls": params.get("skip_passive_sibling_tls", False)},
         daemon=True,
     )
     thread.start()
@@ -2623,9 +2636,18 @@ async def _get_results_inner(scan_id: str):
     triaged_findings = []
     overrides = SCANS[scan_id].get("cvss_overrides", {}) if scan_id in SCANS else {}
     for f in findings:
+        # Defensive: legacy result files persisted before deterministic
+        # severity classification only carry the LLM-assigned severity.
+        # Re-classify on read so the AI Raw tab is always normalised.
+        if "cvss" not in f or "cvss_vector" not in f:
+            f.update(classify_severity(f))
         ai_findings.append({
             "title": f.get("title", ""),
             "severity": f.get("severity", ""),
+            "llm_severity": f.get("llm_severity", ""),
+            "cvss": f.get("cvss"),
+            "cvss_vector": f.get("cvss_vector", ""),
+            "cwe": f.get("cwe", ""),
             "owasp": f.get("owasp_category", ""),
             "url": f.get("url", ""),
             "parameter": f.get("parameter", ""),

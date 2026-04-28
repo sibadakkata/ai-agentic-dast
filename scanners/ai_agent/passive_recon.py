@@ -52,16 +52,162 @@ _DANGEROUS_SINKS = [
     (r'setInterval\s*\(\s*["\']', "setInterval with string — potential code injection", "CWE-95", 4.3),
 ]
 
-# ── Secret patterns in JS ─────────────────────────────────────────────
+# ── Secret patterns (JS bundles, HTML, JSON bodies) ───────────────────
+# Each tuple: (regex, short label for finding title). Severity is chosen in
+# :func:`scan_for_hardcoded_secrets` from the label class.
 _SECRET_PATTERNS = [
     (r'''(?:api[_-]?key|apikey)\s*[:=]\s*['"][A-Za-z0-9_\-]{16,}['"]''', "API key"),
     (r'''(?:secret|password|passwd|pwd)\s*[:=]\s*['"][^'"]{8,}['"]''', "Password/Secret"),
     (r'''(?:aws_access_key_id)\s*[:=]\s*['"]AKIA[A-Z0-9]{16}['"]''', "AWS Access Key"),
+    (r'''(?i)aws[_-]?secret[_-]?access[_-]?key\s*[:=]\s*['"]?[A-Za-z0-9/+=]{40}['"]?''', "AWS Secret Access Key"),
     (r'''(?:private[_-]?key)\s*[:=]\s*['"][^'"]{20,}['"]''', "Private key"),
     (r'''Bearer\s+eyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+''', "Hardcoded JWT token"),
     (r'''(?:token)\s*[:=]\s*['"]eyJ[A-Za-z0-9_-]{20,}['"]''', "Hardcoded token"),
     (r'''(?:connection[_-]?string|database[_-]?url)\s*[:=]\s*['"][^'"]{15,}['"]''', "Database connection string"),
+    (r'''(?i)(?:master|internal|service|super)[_-]?(?:key|token|secret)\s*[:=]\s*['"]([^'"]{12,})['"]''', "Master/Service secret"),
+    (r'''\bsk_live_[0-9a-zA-Z]{10,}\b''', "Stripe live secret key"),
+    (r'''\bsk_test_[0-9a-zA-Z]{10,}\b''', "Stripe test secret key"),
+    (r'''\bghp_[0-9a-zA-Z]{36}\b''', "GitHub personal access token"),
+    (r'''\bgithub_pat_[a-zA-Z0-9_]{20,}\b''', "GitHub fine-grained PAT"),
+    (r'''\bxox[baprs]-[0-9a-zA-Z-]{10,}\b''', "Slack API token"),
+    (r'''\bAIza[0-9A-Za-z\-_]{35}\b''', "Google API key"),
+    (r'''\bsg\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{10,}\b''', "SendGrid API key"),
 ]
+
+_SECRET_FP = re.compile(
+    r"(?i)(example|placeholder|changeme|your[-_]?key|insert|xxxx|redacted|"
+    r"dummy|sample|testkey|apikeyhere|lorem|"
+    r"not[-_]?real|fake[-_]?key)",
+)
+
+
+def _secret_match_is_false_positive(raw: str) -> bool:
+    if _SECRET_FP.search(raw):
+        return True
+    low = raw.lower()
+    if "example.com" in low or "localhost" in low:
+        return True
+    return False
+
+
+def _mask_secret_snippet(raw: str, head: int = 16, tail: int = 4) -> str:
+    raw = raw.strip()
+    if len(raw) <= head + tail + 3:
+        return raw[:6] + "…" if len(raw) > 6 else "…"
+    return f"{raw[:head]}…{raw[-tail:]}"
+
+
+def _severity_for_secret_label(label: str) -> tuple[str, float]:
+    """Return (severity, cvss_hint) for passive secret class."""
+    if "Stripe live" in label or "AWS Secret" in label or "Master/Service" in label:
+        return "Critical", 9.1
+    if "GitHub" in label or "Slack" in label or "AWS Access" in label:
+        return "High", 7.5
+    if "Stripe test" in label:
+        return "Medium", 5.3
+    return "High", 7.5
+
+
+def scan_for_hardcoded_secrets(
+    text: str,
+    *,
+    source_url: str = "",
+    source_label: str = "text",
+    max_per_pattern: int = 3,
+) -> list[dict]:
+    """Scan arbitrary text for common hardcoded secret formats (TruffleHog-style).
+
+    Used for first-party JS, authenticated HTML/JSON snippets, and API bodies.
+    Evidence is masked; full secrets are never stored in findings.
+    """
+    if not text or len(text) < 12:
+        return []
+    cap = 2_500_000
+    blob = text if len(text) <= cap else text[:cap]
+    out: list[dict] = []
+    seen: set[str] = set()
+
+    for pattern, secret_type in _SECRET_PATTERNS:
+        try:
+            rx = re.compile(pattern, re.IGNORECASE | re.MULTILINE)
+        except re.error:
+            continue
+        n_hit = 0
+        for m in rx.finditer(blob):
+            raw = m.group(0)
+            if _secret_match_is_false_positive(raw):
+                continue
+            key = f"{secret_type}:{raw[:24]}"
+            if key in seen:
+                continue
+            seen.add(key)
+            masked = _mask_secret_snippet(raw)
+            sev, cvss = _severity_for_secret_label(secret_type)
+            title = f"Hardcoded {secret_type} in {source_label}"
+            evidence = (
+                f"{secret_type} pattern matched in {source_label}. "
+                f"Masked fragment: {masked}"
+            )
+            out.append(_make_finding(
+                title,
+                sev,
+                "CWE-798",
+                cvss,
+                source_url or "(inline)",
+                evidence,
+                payload=f"regex:{secret_type[:40]}",
+                source="passive_recon",
+            ))
+            n_hit += 1
+            if n_hit >= max_per_pattern:
+                break
+
+    for m in _JWT_PATTERN.finditer(blob):
+        raw = m.group(0)
+        if _secret_match_is_false_positive(raw):
+            continue
+        key = f"jwt:{raw[:32]}"
+        if key in seen:
+            continue
+        seen.add(key)
+        masked = _mask_secret_snippet(raw, head=20, tail=8)
+        out.append(_make_finding(
+            f"Hardcoded JWT-shaped token in {source_label}",
+            "High",
+            "CWE-798",
+            7.5,
+            source_url or "(inline)",
+            f"JWT-shaped bearer/value in {source_label}. Masked: {masked}",
+            payload="regex:jwt_shape",
+            source="passive_recon",
+        ))
+        if sum(1 for x in out if "JWT-shaped" in x.get("title", "")) >= max_per_pattern:
+            break
+
+    for m in _SENSITIVE_JSON_KEYS.finditer(blob):
+        key_name = m.group(1)
+        val = m.group(2)
+        if len(val) < 10 or _secret_match_is_false_positive(val):
+            continue
+        key = f"json:{key_name}:{val[:20]}"
+        if key in seen:
+            continue
+        seen.add(key)
+        masked = _mask_secret_snippet(val)
+        out.append(_make_finding(
+            f"Sensitive JSON key `{key_name}` in {source_label}",
+            "High",
+            "CWE-200",
+            7.5,
+            source_url or "(inline)",
+            f"Inline JSON exposes `{key_name}`. Masked value: {masked}",
+            payload=f"json_key:{key_name}",
+            source="passive_recon",
+        ))
+        if sum(1 for x in out if "Sensitive JSON key" in x.get("title", "")) >= max_per_pattern:
+            break
+
+    return out
 
 # ── Internal URL/IP patterns ──────────────────────────────────────────
 _INTERNAL_PATTERNS = [
@@ -280,6 +426,7 @@ async def run_passive_recon(
     on_progress: callable | None = None,
     network_js_urls: set | None = None,
     skip_tls_sibling_discovery: bool = False,
+    extra_text_snippets: list[tuple[str, str]] | None = None,
 ) -> list[dict]:
     """Run all passive recon checks. Returns list of findings.
 
@@ -287,6 +434,8 @@ async def run_passive_recon(
         network_js_urls: optional pre-collected set of .js URLs captured
             via network interception (populated by start_js_network_capture).
             Merged with DOM-snapshot collection for maximum coverage.
+        extra_text_snippets: optional ``(label, text)`` pairs (e.g. authenticated
+            page HTML) scanned with :func:`scan_for_hardcoded_secrets` after JS analysis.
     """
     findings: list[dict] = []
     _cb = on_finding or (lambda f: None)
@@ -340,6 +489,23 @@ async def run_passive_recon(
         findings.append(f)
         _cb(f)
     _progress("passive_step", {"step": "JS analysis", "found": len(js_analysis_findings)})
+
+    for label, blob in extra_text_snippets or []:
+        if not blob or not str(blob).strip():
+            continue
+        extra_secret = scan_for_hardcoded_secrets(
+            str(blob),
+            source_url=target_url,
+            source_label=label,
+        )
+        for f in extra_secret:
+            findings.append(f)
+            _cb(f)
+    if extra_text_snippets:
+        _progress(
+            "passive_step",
+            {"step": "Extra text secret scan", "sources": len(extra_text_snippets)},
+        )
 
     # ── 4. Check sensitive files ──────────────────────────────────────
     sensitive_findings = await _check_sensitive_files(http_client, base_url)
@@ -722,19 +888,11 @@ async def _analyze_js_files(http_client, js_urls: list[str], page) -> list[dict]
                         source="passive_recon",
                     ))
 
-            for pattern, secret_type in _SECRET_PATTERNS:
-                matches = list(re.finditer(pattern, content, re.IGNORECASE))
-                if matches:
-                    redacted = []
-                    for m in matches[:3]:
-                        val = m.group(0)
-                        redacted.append(val[:20] + "..." + val[-4:] if len(val) > 24 else val[:20] + "...")
-                    findings.append(_make_finding(
-                        f"Hardcoded {secret_type} in Client-Side JavaScript",
-                        "High", "CWE-798", 7.5, js_url,
-                        f"{secret_type} found in {js_filename}: {', '.join(redacted)}",
-                        source="passive_recon",
-                    ))
+            findings.extend(scan_for_hardcoded_secrets(
+                content,
+                source_url=js_url,
+                source_label=f"JavaScript ({js_filename})",
+            ))
 
             for pattern, desc in _INTERNAL_PATTERNS:
                 matches = list(re.finditer(pattern, content, re.IGNORECASE))

@@ -800,22 +800,51 @@ input:focus-visible, select:focus-visible, textarea:focus-visible { outline:none
       </div>
       <div class="form-group full" style="margin-top:4px;">
         <div class="expandable" onclick="toggleExpand(this)" style="font-size:13px;font-weight:600;color:var(--text2);letter-spacing:0.3px;">
-          Second User for BOLA / BFLA Testing (Optional)
+          Multi-Identity Testing (Optional)
         </div>
         <div class="expand-content" id="bola-user-section">
           <div style="padding:10px 14px;background:rgba(79,70,229,0.05);border-radius:8px;font-size:12px;color:var(--text2);margin-bottom:12px;line-height:1.6;">
-            Supply a second set of credentials (User B) to enable definitive BOLA/BFLA testing. The scanner will authenticate as User A (primary creds above), collect resource IDs, then switch to User B and attempt to access User A's resources. This proves authorization bypass rather than guessing.
+            Supply additional credentials to enable multi-identity testing. The scanner authenticates every identity at scan start, then replays requests cross-identity to prove BOLA, BFLA, and cross-tenant access.
           </div>
-          <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
-            <div class="form-group">
-              <label>User B — Username</label>
-              <input type="text" id="username-b" placeholder="second user (optional)">
+          <details style="margin-bottom:8px;">
+            <summary style="cursor:pointer;font-size:12px;font-weight:600;color:var(--accent2);">User B (BOLA / BFLA peer)</summary>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:8px;">
+              <div class="form-group">
+                <label>Username</label>
+                <input type="text" id="username-b" placeholder="second user (optional)">
+              </div>
+              <div class="form-group">
+                <label>Password</label>
+                <input type="password" id="password-b" placeholder="second user password">
+              </div>
             </div>
-            <div class="form-group">
-              <label>User B — Password</label>
-              <input type="password" id="password-b" placeholder="second user password">
+          </details>
+          <details style="margin-bottom:8px;">
+            <summary style="cursor:pointer;font-size:12px;font-weight:600;color:var(--accent2);">Admin Identity</summary>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:8px;">
+              <div class="form-group">
+                <label>Username / Bearer</label>
+                <input type="text" id="admin-username" placeholder="admin user or bearer token">
+              </div>
+              <div class="form-group">
+                <label>Password / API Key</label>
+                <input type="password" id="admin-password" placeholder="password or api key">
+              </div>
             </div>
-          </div>
+          </details>
+          <details style="margin-bottom:8px;">
+            <summary style="cursor:pointer;font-size:12px;font-weight:600;color:var(--accent2);">Tenant B (cross-tenant)</summary>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:8px;">
+              <div class="form-group">
+                <label>Username / Bearer</label>
+                <input type="text" id="tenantb-username" placeholder="tenant B user or bearer token">
+              </div>
+              <div class="form-group">
+                <label>Password / API Key</label>
+                <input type="password" id="tenantb-password" placeholder="password or api key">
+              </div>
+            </div>
+          </details>
         </div>
       </div>
       <div class="form-group full">
@@ -1406,6 +1435,14 @@ input:focus-visible, select:focus-visible, textarea:focus-visible { outline:none
 <script>
 
 function esc(s) { if (!s) return ''; var d = document.createElement('div'); d.textContent = (typeof s === 'object' ? JSON.stringify(s, null, 2) : String(s)); return d.innerHTML; }
+function _collectIdentityCreds(userElId, passElId) {
+  var u = (document.getElementById(userElId) || {}).value || '';
+  var p = (document.getElementById(passElId) || {}).value || '';
+  u = u.trim(); p = p.trim();
+  if (!u && !p) return undefined;
+  if (u.startsWith('Bearer ') || u.startsWith('eyJ')) return {bearer_token: u, password: p};
+  return {username: u, password: p};
+}
 
 function _shortModel(m) {
   if (!m || m === '-') return '-';
@@ -2183,6 +2220,8 @@ async function confirmPlan() {
   };
   if (ubEl && ubEl.value.trim()) body.username_b = ubEl.value.trim();
   if (pbEl && pbEl.value.trim()) body.password_b = pbEl.value.trim();
+  body.credentials_admin = _collectIdentityCreds('admin-username', 'admin-password');
+  body.credentials_tenant_b = _collectIdentityCreds('tenantb-username', 'tenantb-password');
   const planCard = document.querySelector('#ai-plan-container .ai-plan-card');
   if (planCard) {
     const btns = planCard.querySelectorAll('button');
@@ -2845,6 +2884,8 @@ async function startScan() {
     body.username_b = usernameB;
     body.password_b = passwordB;
   }
+  body.credentials_admin = _collectIdentityCreds('admin-username', 'admin-password');
+  body.credentials_tenant_b = _collectIdentityCreds('tenantb-username', 'tenantb-password');
 
   const resp = await fetch('/api/scan', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) });
   if (!resp.ok) {
@@ -4453,15 +4494,20 @@ function renderAIRaw(findings) {
   window._aiRawFindings = findings;
   window._lastAIRawFindings = findings;
 
-  var thRow = '<th style="width:30px;"></th><th>#</th><th>Finding</th><th>Severity</th><th>CWE</th><th>URL</th><th>Parameter</th><th style="max-width:160px;">Evidence</th>';
+  var thRow = '<th style="width:30px;"></th><th>#</th><th>Finding</th><th>Severity</th><th title="Deterministic CVSS v3.1 score">CVSS</th><th>CWE</th><th>URL</th><th>Parameter</th><th style="max-width:160px;">Evidence</th>';
 
   function _rawRow(f, rowNum, origIdx) {
     const hasDetail = f.payload || f.evidence || (f.request_response && f.request_response.length);
+    var cvss = (typeof f.cvss === 'number') ? f.cvss.toFixed(1) : '-';
+    var vector = f.cvss_vector || '';
+    var llmSev = f.llm_severity || '';
+    var sevTitle = llmSev && llmSev.toLowerCase() !== (f.severity||'').toLowerCase() ? ('LLM said: ' + llmSev + ' \u2192 normalised to ' + (f.severity||'-')) : '';
     return '<tr onclick="showAIRawFindingDetail(' + origIdx + ')" style="cursor:pointer;" title="Click to view evidence">' +
       '<td style="text-align:center;">' + (hasDetail ? '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--accent2)" stroke-width="2" style="vertical-align:-2px;"><path d="M9 18l6-6-6-6"/></svg>' : '') + '</td>' +
       '<td>' + rowNum + '</td>' +
       '<td><strong>' + esc(f.title) + '</strong></td>' +
-      '<td><span class="severity sev-' + (f.severity||'').toLowerCase() + '">' + (f.severity||'-') + '</span></td>' +
+      '<td' + (sevTitle ? ' title="' + esc(sevTitle) + '"' : '') + '><span class="severity sev-' + (f.severity||'').toLowerCase() + '">' + (f.severity||'-') + '</span></td>' +
+      '<td style="font-size:11px;font-family:var(--font-mono);"' + (vector ? ' title="' + esc(vector) + '"' : '') + '>' + cvss + '</td>' +
       '<td style="font-size:11px">' + _cweLink(f.cwe_hint||f.cwe) + '</td>' +
       '<td style="word-break:break-all;font-size:11px;max-width:200px">' + esc(f.url||'') + '</td>' +
       '<td style="font-size:11px">' + esc(f.parameter||'') + '</td>' +
@@ -6131,9 +6177,20 @@ function showAIRawFindingDetail(idx) {
   const modal = document.getElementById('finding-detail-modal');
   const sevClass = `sev-${(f.severity || 'info').toLowerCase()}`;
 
+  const _cvssVal = (typeof f.cvss === 'number') ? f.cvss.toFixed(1) : '-';
+  const _vector = f.cvss_vector || '';
+  const _llmSev = f.llm_severity || '';
+  const _sevHtml = (_llmSev && _llmSev.toLowerCase() !== (f.severity || '').toLowerCase())
+    ? `<span class="severity ${sevClass}">${esc(f.severity || 'Info')}</span> <span style="font-size:10px;color:var(--text2);" title="LLM-assigned severity, replaced by deterministic CVSS bucket">(LLM: ${esc(_llmSev)})</span>`
+    : `<span class="severity ${sevClass}">${esc(f.severity || 'Info')}</span>`;
+  const _cvssHtml = _vector
+    ? `<span style="font-family:var(--font-mono);font-weight:600;">${_cvssVal}</span> <span style="font-size:10px;color:var(--text2);font-family:var(--font-mono);">${esc(_vector)}</span>`
+    : `<span style="font-family:var(--font-mono);font-weight:600;">${_cvssVal}</span>`;
+
   let metaHtml = '';
   [
-    ['Severity', `<span class="severity ${sevClass}">${esc(f.severity || 'Info')}</span>`],
+    ['Severity', _sevHtml],
+    ['CVSS v3.1', _cvssHtml],
     ['URL', `<a href="${esc(f.url || '')}" target="_blank" style="color:var(--accent2);word-break:break-all;">${esc(f.url || '-')}</a>`],
     ['Parameter', esc(f.parameter || '-')],
     ['Category', esc(f.owasp || '-')],

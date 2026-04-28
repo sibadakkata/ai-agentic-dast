@@ -33,6 +33,7 @@ _*_charts/
 *_Scan_Report.pdf
 test_*.py
 test_*.png
+!tests/test_*.py
 !openclaw-skill/test_skill.py
 oos.py
 Winword.rtf
@@ -70,3 +71,21 @@ imports/*.json
 imports/*.xml
 imports/*.yaml
 imports/*.yml
+
+# POC research data dumps (PII / scan output — never commit)
+avg_usernames.json
+avg_usernames.txt
+community_avg_usernames.txt
+community_avg_users.csv
+community_avg_users.xlsx
+bugb_issues.json
+bugb_classified.json
+bugb_sample.json
+idor_probe_results.json
+norton_ssrf_probe_results.json
+
+# PoC Report transient artifacts
+PoC Report/__pycache__/
+PoC Report/slide_previews/
+PoC Report/backup/
+PoC Report/~$*.xlsx
