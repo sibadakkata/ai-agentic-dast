@@ -338,7 +338,49 @@ Is phase in _ACTIVE_RETRY_PHASES?
 
 Retry prompts are opinionated — they name specific endpoints, specific payload
 sets (e.g. `admin:admin`, `admin@<host>:admin123`, `admin' --`, `' OR 1=1 --`),
-and forbid giving up after 1–2 attempts. See `_RETRY_PROMPTS` in `agent.py`.
+and forbid giving up after 1–2 attempts. See `_RETRY_PROMPTS` in
+`scanners/ai_agent/retry_prompts.py` (the constants module) and
+`_run_smart_retry_pass` in `agent.py` (the execution helper).
+
+### Parallel-mode coverage (regression fix, 29-Apr-2026)
+
+The smart retry originally lived **inline inside the sequential `run_scan`
+loop**. When parallel mode was added on 22-Apr-2026 (commit `ce2cf83 feat(parallel): multi-agent parallel scan`), the new `_run_phase_worker`
+function copied the core scan loop but **omitted the retry block** —
+keeping only a passive evidence-summary call (`tools=[]`).
+
+Symptom in production: 28-Apr-2026, three Sonnet 4.5 scans against the same
+in-house target produced **110 / 74 / 56 findings** on the same code. The
+56-finding scan had **15 phases each running 70–85 tool calls and producing
+zero findings** — exactly the case smart retry was designed to recover, but
+it never fired in the (default) parallel mode.
+
+**Fix.** The constants and decision helpers were lifted to a new module
+`scanners/ai_agent/retry_prompts.py`, and a module-level async helper
+`_run_smart_retry_pass` was added to `agent.py`. The parallel worker
+(`_run_phase_worker`) now calls `should_run_smart_retry` followed by
+`_run_smart_retry_pass` whenever the trigger condition is met, before
+falling through to the cheap evidence-summary branch:
+
+```
+_run_phase_worker
+   ├── main scan loop (unchanged)
+   ├── should_run_smart_retry(phase, ...) ──▶ True?
+   │       └── _run_smart_retry_pass(...) ── tool-enabled retry with tailored prompt
+   └── evidence-summary fallback (no tools) for non-retry-list phases
+```
+
+Regression-tested in `tests/test_smart_retry_in_worker.py`:
+
+- `TestParallelWorkerInvokesSmartRetry::test_worker_calls_smart_retry_for_eligible_phase`
+  — pins that the worker actually calls `_run_smart_retry_pass` on
+  zero-finding phases that are in `_ACTIVE_RETRY_PHASES`. **This is the exact
+  regression introduced by `ce2cf83`** and is the canary against future
+  parallel-path drift.
+- `test_worker_does_NOT_call_retry_for_non_eligible_phase` — recon phases
+  must not retry.
+- `test_retry_failure_does_not_crash_phase` — if the retry helper itself
+  raises, the phase still completes with whatever findings it had.
 
 ### Why hybrid
 
@@ -562,7 +604,7 @@ async def _guarded(idx: int, phase: ScanPhase):
 
 Originally the router only retried `RateLimitError`. Any other transient signature — `ConnectError`, 502/503/504, `ReadTimeout`, throttling — was terminal on first occurrence. In practice this shows up as 1–6 silently-failed phases per scan whenever Bedrock has a ~30 s blip.
 
-The retry loop now treats all of the following as transient and retries up to **3 times** with exponential back-off `2s → 4s → 8s`:
+The retry loop now treats all of the following as transient and retries with exponential back-off `2 → 4 → 8 → 16 → 32 s` by default — **5 retries / ~62 s total back-off**, sized to absorb the regional capacity blips observed on Bedrock cross-region inference profiles (typically clear within 30–60 s):
 
 | Signature | Source |
 |-----------|--------|
@@ -572,7 +614,7 @@ The retry loop now treats all of the following as transient and retries up to **
 | `ReadTimeout`, `TimeoutError`, "timeout" | network / LiteLLM |
 | Provider throttling messages | various |
 
-**Terminal — never retried** (would just burn 4× cost on a deterministic failure):
+**Terminal — never retried** (would just burn ≥1× cost on a deterministic failure):
 
 - `ContextWindowExceeded` — message is too long; bubble so the agent can trim and retry with smaller context
 - `ContentFiltered` — guardrail tripped; bubble so the agent can drop the offending message
@@ -580,6 +622,32 @@ The retry loop now treats all of the following as transient and retries up to **
 - `ScanCancelled` — user stopped
 
 `cancel_flag` is checked between attempts so a user-stop during the back-off is honoured immediately rather than after the next sleep finishes. Tests live in `tests/test_parallel_phase_resilience.py` and `tests/test_scan_error_resilience.py` (Section F).
+
+### Tunable retry budget — `LLM_RETRY_DELAYS`
+
+The default `(2, 4, 8, 16, 32)` lives in `_DEFAULT_RETRY_DELAYS` in `llm_config.py` and is overridable at runtime via the **`LLM_RETRY_DELAYS`** environment variable (comma-separated integers). Total attempts = `len(LLM_RETRY_DELAYS) + 1` (initial call).
+
+| Use case | `LLM_RETRY_DELAYS` | Attempts | Total back-off |
+|----------|--------------------|----------|----------------|
+| Default — production | `2,4,8,16,32` (unset) | 6 | 62 s |
+| Aggressive — shaky region | `2,4,8,16,32,60,120` | 8 | 242 s |
+| Fast-fail dev loop | `0,0` | 3 | 0 s |
+| Original behaviour (pre-Apr 2026) | `2,4,8` | 4 | 14 s |
+
+A garbage value (non-integer, negative, or whitespace-only) falls back to the default and emits a `WARNING` log line — never disables retries. Validated in `tests/test_parallel_phase_resilience.py::TestRouterRetryDelaysAreConfigurable`.
+
+### boto3 / botocore retry layer (below LiteLLM)
+
+`LLMRouter.complete` is the **upper** retry layer. The **lower** layer is boto3's own retry config inside LiteLLM, controlled via env vars (no code change needed):
+
+```bash
+AWS_RETRY_MODE=adaptive    # token-bucket + jittered exponential back-off
+AWS_MAX_ATTEMPTS=10        # was 3 (legacy default)
+```
+
+The two layers stack: a 503 first goes through ~7 transparent boto3 retries (jittered, capped per attempt) before our app-level retry layer ever sees it. In practice ~95 % of regional Bedrock blips never bubble up to `LLMRouter.complete`.
+
+Both env vars are documented in `.env.example` and applied automatically by every Bedrock SDK client LiteLLM constructs.
 
 ---
 
@@ -647,7 +715,8 @@ All three readers now guard with `isinstance(t, dict)` (and analogous checks on 
 
 | File | Role | Key Classes/Functions |
 |------|------|----------------------|
-| `scanners/ai_agent/agent.py` | Scan orchestrator | `run_scan()`, `extract_findings()`, `trim_context()`, `_capture_evidence()` |
+| `scanners/ai_agent/agent.py` | Scan orchestrator | `run_scan()`, `extract_findings()`, `trim_context()`, `_capture_evidence()`, `_run_smart_retry_pass()` (shared by sequential + parallel paths) |
+| `scanners/ai_agent/retry_prompts.py` | Hybrid Smart Retry constants | `_ACTIVE_RETRY_PHASES`, `_RETRY_PROMPTS`, `_PHASE_CORE_KEYWORDS`, `_PHASE_TO_PROMPT_KEY`; `should_run_smart_retry()`, `phase_has_core_finding()` |
 | `scanners/ai_agent/tools.py` | Tool layer | `ScanTools`, `TOOL_DEFINITIONS`, `execute()` |
 | `scanners/ai_agent/prompts.py` | LLM instructions | `SYSTEM_PROMPT`, `WEB_PHASES`, `API_PHASES`, `get_phases()` |
 | `scanners/ai_agent/auth.py` | Authentication | `detect_and_login()`, `AuthSession`, `_detect_captcha()` |

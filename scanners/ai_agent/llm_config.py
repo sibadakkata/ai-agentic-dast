@@ -29,6 +29,50 @@ MODELS = [
     "bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0",
 ]
 
+# ── Transient-error retry budget ──────────────────────────────────────
+# Sleep durations (seconds) BETWEEN retry attempts. Total attempts =
+# len(_DEFAULT_RETRY_DELAYS) + 1 (initial call).
+#
+# Default: 5 retries with 2 / 4 / 8 / 16 / 32 s back-off = 62 s total
+# back-off. Sized to absorb the regional capacity blips observed in
+# production (Bedrock "Bedrock is unable to process your request" 503s
+# typically clear in 30-60 s).
+#
+# Operators can tune at runtime without redeploying via the
+# ``LLM_RETRY_DELAYS`` env var (comma-separated integers), e.g.
+# ``LLM_RETRY_DELAYS=2,4,8,16,32,60`` for 6 retries / ~2 min total.
+_DEFAULT_RETRY_DELAYS: tuple[int, ...] = (2, 4, 8, 16, 32)
+
+
+def _get_retry_delays() -> list[int]:
+    """Resolve retry back-off delays from env or fall back to defaults.
+
+    Falls back to ``_DEFAULT_RETRY_DELAYS`` on any parse error so a
+    fat-fingered env var never disables retries entirely.
+    """
+    raw = os.environ.get("LLM_RETRY_DELAYS", "").strip()
+    if not raw:
+        return list(_DEFAULT_RETRY_DELAYS)
+    try:
+        parsed = [int(x.strip()) for x in raw.split(",") if x.strip()]
+    except ValueError:
+        logger.warning(
+            "Invalid LLM_RETRY_DELAYS=%r (expected comma-separated ints); "
+            "falling back to default %s",
+            raw, list(_DEFAULT_RETRY_DELAYS),
+        )
+        return list(_DEFAULT_RETRY_DELAYS)
+    if not parsed:
+        return list(_DEFAULT_RETRY_DELAYS)
+    if any(d < 0 for d in parsed):
+        logger.warning(
+            "LLM_RETRY_DELAYS=%r contains negative values; "
+            "falling back to default %s",
+            raw, list(_DEFAULT_RETRY_DELAYS),
+        )
+        return list(_DEFAULT_RETRY_DELAYS)
+    return parsed
+
 _BEDROCK_ANTHROPIC_CACHE_MODELS = (
     "anthropic.claude-haiku-4-5",
     "anthropic.claude-sonnet-4",
@@ -163,10 +207,11 @@ class LLMRouter:
     ):
         from .agent import ScanCancelled
 
-        delays = [2, 4, 8]
+        delays = _get_retry_delays()
+        max_attempts = len(delays) + 1
         last_exc: BaseException | None = None
         use_direct = self._use_direct(model) or not self._has_proxy
-        for attempt in range(4):
+        for attempt in range(max_attempts):
             if cancel_flag and cancel_flag.is_set():
                 raise ScanCancelled("Scan stopped by user")
             try:
@@ -225,12 +270,12 @@ class LLMRouter:
                     or "throttling" in err_msg
                     or "throttled" in err_msg
                 )
-                if attempt < 3 and (is_rate_limit or is_transient):
+                if attempt < len(delays) and (is_rate_limit or is_transient):
                     delay = delays[attempt]
                     reason = "rate limit" if is_rate_limit else "transient network/upstream error"
                     logger.warning(
-                        "%s hit for %s, retrying in %ds (attempt %d/3): %s",
-                        reason, model, delay, attempt + 1, str(e)[:200],
+                        "%s hit for %s, retrying in %ds (attempt %d/%d): %s",
+                        reason, model, delay, attempt + 1, max_attempts - 1, str(e)[:200],
                     )
                     for _ in range(delay):
                         if cancel_flag and cancel_flag.is_set():
