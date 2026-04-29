@@ -952,6 +952,200 @@ async def _clone_browser_context(browser, auth_cookies: list[dict], target_url: 
     return context, page
 
 
+async def _run_smart_retry_pass(
+    *,
+    phase: ScanPhase,
+    messages: list[dict],
+    findings: list[dict],
+    phase_evidence: list[dict],
+    phase_findings_before: int,
+    tools,
+    router: LLMRouter,
+    model: str,
+    cancel_flag,
+    on_progress: callable | None = None,
+    metrics: dict | None = None,
+    phase_num: int = 0,
+    total_phases: int = 0,
+) -> tuple[int, int]:
+    """Hybrid Smart Retry — re-run a phase with a tailored prompt.
+
+    Originally lived inline inside the sequential ``run_scan`` loop. Lifted
+    to module scope so the parallel worker (``_run_phase_worker``) can
+    invoke the same retry path. Without this, parallel scans regressed on
+    Sonnet 4.5 (28-Apr-2026: 110 -> 56 findings on the same target) because
+    the worker only did a passive evidence-summary pass with ``tools=[]``,
+    while the sequential path did an active retry with the full tool set
+    and a phase-tailored prompt.
+
+    The caller is responsible for the **trigger condition**
+    (``retry_prompts.should_run_smart_retry``); this helper only
+    *executes* the retry pass once the caller has decided to fire.
+
+    Mutates ``messages`` and ``findings`` in place. Returns
+    ``(retry_new_findings, retry_tool_calls)``.
+    """
+    from . import retry_prompts as _rp
+    _cb = on_progress or (lambda *a, **k: None)
+
+    def _check_cancel():
+        if cancel_flag and cancel_flag.is_set():
+            raise ScanCancelled("Scan stopped by user")
+
+    evidence_text = _format_evidence_buffer(phase_evidence)
+    prompt_key = _rp._PHASE_TO_PROMPT_KEY.get(phase.id, "injection")
+    retry_prompt = _rp._RETRY_PROMPTS[prompt_key].format(
+        name=phase.name, evidence=evidence_text,
+    )
+
+    _cb("phase_start", {
+        "phase": phase_num, "total": total_phases,
+        "name": f"{phase.name} (retry)", "id": f"{phase.id}_retry",
+    })
+    messages.append({"role": "user", "content": retry_prompt})
+
+    phase_evidence_retry: list[dict] = []
+    retry_findings_before = len(findings)
+    retry_tool_calls = 0
+
+    for _retry_step in range(phase.max_steps):
+        _check_cancel()
+        try:
+            _sanitize_all_messages(messages)
+            messages_local = _repair_tool_pairs(messages)
+            response = router.complete(
+                model=model, messages=messages_local,
+                tools=TOOL_DEFINITIONS, cancel_flag=cancel_flag,
+            )
+            messages[:] = messages_local
+        except (ContentFiltered, ContextWindowExceeded, MalformedMessages):
+            break
+        except ScanCancelled:
+            raise
+        _check_cancel()
+        if not response or not getattr(response, "choices", None):
+            break
+
+        msg = response.choices[0].message
+        msg_dict = msg.model_dump() if hasattr(msg, "model_dump") else dict(msg)
+        msg_dict = _sanitize_message(msg_dict)
+        messages.append(msg_dict)
+
+        tool_calls = (
+            msg_dict.get("tool_calls")
+            or getattr(msg, "tool_calls", None)
+            or []
+        )
+        if tool_calls:
+            for tc in tool_calls:
+                _check_cancel()
+                tc_id = tc.get("id") if isinstance(tc, dict) else getattr(tc, "id", "")
+                fn = tc.get("function") if isinstance(tc, dict) else getattr(tc, "function", {})
+                fn_name = fn.get("name") if isinstance(fn, dict) else getattr(fn, "name", "")
+                fn_name = _sanitize_tool_name(fn_name)
+                fn_args = (
+                    fn.get("arguments") if isinstance(fn, dict)
+                    else getattr(fn, "arguments", "{}")
+                )
+                result = await tools.execute(fn_name, fn_args)
+                retry_tool_calls += 1
+                if metrics is not None:
+                    metrics["total_tool_calls"] = (
+                        metrics.get("total_tool_calls", 0) + 1
+                    )
+                messages.append({
+                    "role": "tool", "tool_call_id": tc_id,
+                    "content": _cap_result(result),
+                })
+                try:
+                    args_parsed = (
+                        json.loads(fn_args) if isinstance(fn_args, str)
+                        else fn_args
+                    )
+                except Exception:
+                    args_parsed = {"raw": fn_args}
+                resp_summary = (
+                    {
+                        k: v for k, v in result.items()
+                        if k in (
+                            "status", "url", "error", "reflected", "anomaly",
+                            "body_snippet", "results", "accessible", "title",
+                            "forms",
+                        )
+                    } if isinstance(result, dict) else str(result)[:200]
+                )
+                _cb("tool_call", {
+                    "phase": f"{phase.name} (retry)",
+                    "tool": fn_name,
+                    "request": (
+                        {k: str(v)[:300] for k, v in args_parsed.items()}
+                        if isinstance(args_parsed, dict)
+                        else str(args_parsed)[:400]
+                    ),
+                    "response": (
+                        {k: str(v)[:200] for k, v in resp_summary.items()}
+                        if isinstance(resp_summary, dict)
+                        else str(resp_summary)[:400]
+                    ),
+                })
+                is_sec = fn_name in SECURITY_TEST_TOOLS
+                if not is_sec and fn_name == "navigate":
+                    nav_url = (
+                        (args_parsed.get("url") or "")
+                        if isinstance(args_parsed, dict) else ""
+                    )
+                    if any(m in nav_url for m in _INJECTION_MARKERS):
+                        is_sec = True
+                if is_sec:
+                    if metrics is not None:
+                        metrics.setdefault("test_log", []).append({
+                            "phase": phase.id, "tool": fn_name,
+                            "request": args_parsed,
+                            "response_summary": resp_summary,
+                        })
+                    _capture_evidence(
+                        phase_evidence_retry, fn_name, args_parsed,
+                        resp_summary, result,
+                    )
+            if (
+                retry_tool_calls % 5 == 0
+                and _estimate_tokens(messages) > TRIM_TARGET_TOKENS
+            ):
+                messages[:] = trim_context(messages, max_tokens=TRIM_TARGET_TOKENS)
+        else:
+            content = msg_dict.get("content") or ""
+            retry_f = extract_findings(str(content))
+            if not retry_f and phase_evidence_retry:
+                ev_text = _format_evidence_buffer(phase_evidence_retry)
+                messages.append({"role": "user", "content": ev_text})
+                try:
+                    ev_resp = router.complete(
+                        model=model, messages=messages, tools=[],
+                        cancel_flag=cancel_flag,
+                    )
+                    if ev_resp and getattr(ev_resp, "choices", None):
+                        retry_f = extract_findings(
+                            str(ev_resp.choices[0].message.content or "")
+                        )
+                except Exception:
+                    pass
+            for f in retry_f:
+                f["phase"] = f"{phase.name} (retry)"
+                _match_evidence_to_finding(
+                    f, phase_evidence_retry or phase_evidence,
+                )
+                _cb("finding", f)
+            findings.extend(retry_f)
+            break
+
+    retry_new = len(findings) - retry_findings_before
+    _cb("phase_end", {
+        "phase": phase_num, "name": f"{phase.name} (retry)",
+        "tool_calls": retry_tool_calls, "findings": retry_new,
+    })
+    return retry_new, retry_tool_calls
+
+
 async def _run_phase_worker(
     *,
     phase: ScanPhase,
@@ -1104,6 +1298,69 @@ async def _run_phase_worker(
             if len(messages) > 40:
                 messages = trim_context(messages, max_tokens=TRIM_TARGET_TOKENS)
 
+        # ── Hybrid Smart Retry (active retry with tools + tailored prompt) ──
+        # Originally only fired in the sequential path. Bug introduced
+        # 22-Apr-2026 in commit ce2cf83 (parallel mode rollout): the
+        # worker only had a passive evidence-summary call below, missing
+        # the active retry block. Symptom: parallel Sonnet 4.5 scans
+        # regressed from 110 to 56 findings on 28-Apr-2026 because 15
+        # phases produced 0 findings with full tool-call evidence and got
+        # no second chance. Restored here with a module-level helper that
+        # both paths can share. See ``retry_prompts.py`` and
+        # ``docs/scanner-internals.md`` "Hybrid Smart Retry".
+        from . import retry_prompts as _rp
+        already_retried = bool(getattr(phase, "_retried_in_worker", False))
+        should_retry, retry_reason = _rp.should_run_smart_retry(
+            phase_id=phase.id,
+            phase_new_findings_count=len(findings),
+            findings_for_phase=findings,
+            phase_evidence=phase_evidence,
+            already_retried=already_retried,
+        )
+        if should_retry:
+            phase._retried_in_worker = True
+            print(
+                f"  [W{worker_id}:{phase.id}] [RETRY] {phase.name}: "
+                f"{retry_reason}, retrying with tool calls...",
+                flush=True,
+            )
+            try:
+                retry_new, retry_tools = await _run_smart_retry_pass(
+                    phase=phase,
+                    messages=messages,
+                    findings=findings,
+                    phase_evidence=phase_evidence,
+                    phase_findings_before=0,
+                    tools=tools,
+                    router=router,
+                    model=model,
+                    cancel_flag=cancel_flag,
+                    on_progress=_cb,
+                    metrics=None,  # worker doesn't accumulate global metrics
+                    phase_num=0,
+                    total_phases=0,
+                )
+                phase_tool_calls += retry_tools
+                print(
+                    f"  [W{worker_id}:{phase.id}] [RETRY] +{retry_tools} tool calls, "
+                    f"+{retry_new} findings",
+                    flush=True,
+                )
+            except ScanCancelled:
+                raise
+            except Exception as e:
+                # Retry pass failures must NOT abort the phase. Log and
+                # fall through to the cheap evidence-summary below.
+                logger.warning(
+                    "Smart retry failed for %s in worker %s: %s",
+                    phase.name, worker_id, e,
+                )
+
+        # ── Passive evidence-summary fallback ──
+        # Runs when smart retry did not fire (phase not in
+        # _ACTIVE_RETRY_PHASES) or fired but still produced nothing.
+        # Cheap (no tools, single LLM call) and recovers a few
+        # otherwise-overlooked findings from the existing evidence.
         if not findings and phase_evidence:
             summary_prompt = (
                 f"Phase '{phase.name}' completed with 0 vulnerabilities. "

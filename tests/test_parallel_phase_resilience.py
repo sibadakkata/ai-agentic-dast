@@ -71,6 +71,8 @@ from scanners.ai_agent.llm_config import (  # noqa: E402
     ContextWindowExceeded,
     LLMRouter,
     MalformedMessages,
+    _DEFAULT_RETRY_DELAYS,
+    _get_retry_delays,
 )
 
 
@@ -327,7 +329,14 @@ class TestRouterRetriesTransientErrors:
         assert len(log) == 1, "non-transient errors must NOT be retried"
 
     def test_retry_exhaustion_raises(self, fast_router, monkeypatch):
-        """After all 4 attempts fail with transient errors, raise the last one."""
+        """After all retries are exhausted, raise the last transient error.
+
+        Pinned to 3 retries (= 4 total attempts) via env override so this
+        test stays stable regardless of the default budget. The default
+        budget is exercised separately in
+        ``TestRouterRetryDelaysAreConfigurable``.
+        """
+        monkeypatch.setenv("LLM_RETRY_DELAYS", "0,0,0")
         log = self._patch_direct(monkeypatch, fast_router, [
             ConnectionError("All connection attempts failed (1)"),
             ConnectionError("All connection attempts failed (2)"),
@@ -336,7 +345,7 @@ class TestRouterRetriesTransientErrors:
         ])
         with pytest.raises(ConnectionError, match="All connection attempts failed"):
             fast_router.complete("bedrock/test-model", messages=[{"role": "user", "content": "hi"}])
-        assert len(log) == 4, "should have made all 4 attempts"
+        assert len(log) == 4, "should have made all 4 attempts (1 initial + 3 retries)"
 
     def test_terminal_errors_never_retried(self, fast_router, monkeypatch):
         """``ContentFiltered``, ``ContextWindowExceeded``, ``MalformedMessages`` are terminal."""
@@ -353,7 +362,143 @@ class TestRouterRetriesTransientErrors:
             assert len(log) == 1, f"terminal error {expected_exc.__name__} must NOT retry"
 
 
-# ── Contract D: end-to-end: transient error inside worker recovers ────
+# ── Contract D: retry budget is configurable via LLM_RETRY_DELAYS env ────
+
+
+class TestRouterRetryDelaysAreConfigurable:
+    """Pin: the retry budget is **operator-tunable at runtime** without
+    redeploying. This was added to recover from sustained Bedrock 503
+    blips that lasted longer than the original 14 s back-off window
+    (3 retries × 2/4/8 s).
+
+    Default budget: 5 retries with 2 / 4 / 8 / 16 / 32 s back-off (62 s
+    total). Override with ``LLM_RETRY_DELAYS=2,4,8,16,32,60`` etc.
+    """
+
+    def test_default_delays_used_when_env_unset(self, monkeypatch):
+        monkeypatch.delenv("LLM_RETRY_DELAYS", raising=False)
+        assert _get_retry_delays() == list(_DEFAULT_RETRY_DELAYS)
+
+    def test_default_is_five_retries_totalling_62_seconds(self):
+        # The exact knob shipped in this PR. If anyone changes the
+        # default, this test forces them to think about whether tests
+        # downstream still hold.
+        assert _DEFAULT_RETRY_DELAYS == (2, 4, 8, 16, 32)
+        assert sum(_DEFAULT_RETRY_DELAYS) == 62
+
+    def test_LLM_RETRY_DELAYS_env_overrides_default(self, monkeypatch):
+        monkeypatch.setenv("LLM_RETRY_DELAYS", "1,2,3,4,5,6")
+        assert _get_retry_delays() == [1, 2, 3, 4, 5, 6]
+
+    def test_LLM_RETRY_DELAYS_tolerates_whitespace(self, monkeypatch):
+        monkeypatch.setenv("LLM_RETRY_DELAYS", "  2 , 4 ,  8  ")
+        assert _get_retry_delays() == [2, 4, 8]
+
+    def test_LLM_RETRY_DELAYS_empty_string_uses_default(self, monkeypatch):
+        monkeypatch.setenv("LLM_RETRY_DELAYS", "")
+        assert _get_retry_delays() == list(_DEFAULT_RETRY_DELAYS)
+
+    def test_LLM_RETRY_DELAYS_whitespace_only_uses_default(self, monkeypatch):
+        monkeypatch.setenv("LLM_RETRY_DELAYS", "    ")
+        assert _get_retry_delays() == list(_DEFAULT_RETRY_DELAYS)
+
+    def test_LLM_RETRY_DELAYS_falls_back_on_invalid_value(self, monkeypatch):
+        # Garbage env must NEVER disable retries entirely - that would
+        # silently regress the fix this branch is shipping.
+        monkeypatch.setenv("LLM_RETRY_DELAYS", "not,numbers,here")
+        assert _get_retry_delays() == list(_DEFAULT_RETRY_DELAYS)
+
+    def test_LLM_RETRY_DELAYS_falls_back_on_negative_values(self, monkeypatch):
+        # Negative delays would either crash time.sleep or be a foot-gun.
+        monkeypatch.setenv("LLM_RETRY_DELAYS", "2,4,-1,8")
+        assert _get_retry_delays() == list(_DEFAULT_RETRY_DELAYS)
+
+    def test_extended_default_budget_recovers_from_4_consecutive_503s(
+        self, monkeypatch
+    ):
+        """End-to-end: with the new default budget, a sustained 4-attempt
+        Bedrock outage that the old 3-retry code WOULD HAVE LOST is
+        absorbed and the call eventually succeeds.
+
+        Old behaviour (delays=[2,4,8], 4 attempts): would raise after 4.
+        New behaviour (delays=[2,4,8,16,32], 6 attempts): retries 5 times,
+        recovers on the 5th call.
+        """
+        monkeypatch.delenv("LLM_RETRY_DELAYS", raising=False)
+        monkeypatch.setattr(
+            "scanners.ai_agent.llm_config.time.sleep",
+            lambda _s: None,
+        )
+        router = LLMRouter(models=["bedrock/test-model"])
+        router._has_proxy = False
+        good_response = MagicMock()
+
+        seq = iter([
+            ConnectionError("All connection attempts failed (1)"),
+            ConnectionError("All connection attempts failed (2)"),
+            ConnectionError("All connection attempts failed (3)"),
+            ConnectionError("All connection attempts failed (4)"),
+            good_response,
+        ])
+        call_count = {"n": 0}
+
+        def fake_direct(*args, **kwargs):
+            call_count["n"] += 1
+            action = next(seq)
+            if isinstance(action, BaseException):
+                raise action
+            return action
+
+        monkeypatch.setattr(router, "_direct_complete", fake_direct)
+        monkeypatch.setattr(router, "_track", lambda *a, **k: None)
+
+        result = router.complete(
+            "bedrock/test-model", messages=[{"role": "user", "content": "hi"}],
+        )
+        assert result is good_response
+        assert call_count["n"] == 5, (
+            "expected 4 transient failures + 1 success = 5 calls; the OLD "
+            "3-retry code would have raised after 4 calls and lost the phase"
+        )
+
+    def test_custom_short_budget_via_env_exhausts_correctly(self, monkeypatch):
+        """Operator can also REDUCE the budget for fast-fail dev loops."""
+        monkeypatch.setenv("LLM_RETRY_DELAYS", "0,0")  # 1 + 2 = 3 attempts
+        monkeypatch.setattr(
+            "scanners.ai_agent.llm_config.time.sleep",
+            lambda _s: None,
+        )
+        router = LLMRouter(models=["bedrock/test-model"])
+        router._has_proxy = False
+
+        # Messages must include a transient signature ("All connection
+        # attempts failed", "503", "timeout", etc.) — otherwise the
+        # router treats them as non-transient and raises on attempt 1.
+        seq = iter([
+            ConnectionError("All connection attempts failed 1"),
+            ConnectionError("All connection attempts failed 2"),
+            ConnectionError("All connection attempts failed 3"),
+            ConnectionError("All connection attempts failed 4"),
+        ])
+        call_count = {"n": 0}
+
+        def fake_direct(*args, **kwargs):
+            call_count["n"] += 1
+            raise next(seq)
+
+        monkeypatch.setattr(router, "_direct_complete", fake_direct)
+        monkeypatch.setattr(router, "_track", lambda *a, **k: None)
+
+        with pytest.raises(ConnectionError):
+            router.complete(
+                "bedrock/test-model", messages=[{"role": "user", "content": "hi"}],
+            )
+        assert call_count["n"] == 3, (
+            "with LLM_RETRY_DELAYS=0,0 we should make 3 attempts (1 initial + 2 retries)"
+        )
+
+
+# ── Contract E: end-to-end: transient error inside worker recovers ────
 
 
 class TestEndToEndTransientErrorIsAbsorbed:
