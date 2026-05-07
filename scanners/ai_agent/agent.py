@@ -25,6 +25,7 @@ from .auth import (
     can_use_http_only_auth,
     detect_app_type,
 )
+from .active_baseline import run_bare_root_sqli_probe
 from .llm_config import ContentFiltered, ContextWindowExceeded, MalformedMessages, LLMRouter
 from .passive_recon import (
     run_host_delta_passive_check,
@@ -2223,6 +2224,74 @@ async def run_scan(
             focus_areas=getattr(target, "focus_areas", None),
             scan_profile=getattr(target, "scan_profile", "vulnerability_scan"),
         )
+
+        # ── Active Baseline: Bare-Root SQLi probe ─────────────────────
+        # Deterministic, non-LLM check that catches the
+        # ``GET /?"+IF(...,SLEEP(5),NULL)+"`` family of bugs (Avira
+        # bug-bounty class). The LLM-driven SQLi phase reasons about
+        # named query/body parameters and reliably misses the bare-root
+        # raw-query-string injection point. This probe runs once over
+        # all in-scope hosts, deduplicated against the global findings
+        # buffer, before the parallel OWASP phases kick off so the
+        # finding survives even if the SQLi worker dies (which it did
+        # for the 07-May-2026 Avira scan due to a ws_connect timeout).
+        if (
+            getattr(target, "scan_profile", "vulnerability_scan") != "crawl_only"
+            and any(p.id == "web_a03_sqli" for p in phases)
+        ):
+            try:
+                ab_hosts: set[str] = set()
+                for url in metrics.get("pages_list", []) or []:
+                    try:
+                        host = (urlparse(url).hostname or "").lower()
+                    except Exception:
+                        continue
+                    if host and _is_in_scope(url, allowed_domains):
+                        ab_hosts.add(host)
+                target_host = (urlparse(target.url).hostname or "").lower()
+                if target_host:
+                    ab_hosts.add(target_host)
+
+                if ab_hosts:
+                    p = _next_phase()
+                    _cb("phase_start", {
+                        "phase": p, "total": 0,
+                        "name": "Active Baseline (Bare-Root SQLi)",
+                        "id": "active_baseline_sqli",
+                    })
+
+                    def _ab_progress(event, data):
+                        _cb("progress_msg", {"message": f"[ACTIVE-BASELINE] {event}: {data}"})
+
+                    ab_findings = await run_bare_root_sqli_probe(
+                        http_client,
+                        sorted(ab_hosts),
+                        on_finding=lambda f: _cb("finding", {**f, "phase": "Active Baseline (Bare-Root SQLi)"}),
+                        on_progress=_ab_progress,
+                        cancel_flag=cancel_flag,
+                    )
+                    findings.extend(ab_findings)
+                    _cb("phase_end", {
+                        "phase": p,
+                        "name": "Active Baseline (Bare-Root SQLi)",
+                        "tool_calls": len(ab_hosts) * 5,
+                        "findings": len(ab_findings),
+                    })
+                    if ab_findings:
+                        print(
+                            f"  [ACTIVE-BASELINE] Bare-root SQLi: "
+                            f"{len(ab_findings)} finding(s) across "
+                            f"{len(ab_hosts)} hosts"
+                        )
+                    else:
+                        print(
+                            f"  [ACTIVE-BASELINE] Bare-root SQLi: "
+                            f"no hits across {len(ab_hosts)} hosts"
+                        )
+            except Exception as e:
+                print(f"  [ACTIVE-BASELINE] Failed (non-fatal): {e}")
+                logger.warning("Active baseline probe failed: %s", e, exc_info=True)
+
         system_prompt = build_system_prompt(target, registry, app_info, extra_domains=extra_domains)
         if passive_findings:
             passive_summary = _format_passive_for_llm(passive_findings)
