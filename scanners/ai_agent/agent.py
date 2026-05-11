@@ -25,7 +25,18 @@ from .auth import (
     can_use_http_only_auth,
     detect_app_type,
 )
-from .active_baseline import run_bare_root_sqli_probe
+from .active_baseline import (
+    run_bare_root_sqli_probe,
+    run_cache_poisoning_probe,
+    run_reflected_xss_probe,
+    run_ssrf_probe,
+)
+from .subdomain_takeover import (
+    _resolve_cname,
+    _match_provider,
+    build_takeover_findings,
+    TakeoverResult,
+)
 from .llm_config import ContentFiltered, ContextWindowExceeded, MalformedMessages, LLMRouter
 from .passive_recon import (
     run_host_delta_passive_check,
@@ -1880,11 +1891,82 @@ async def run_scan(
         user_b_auth_header = next((i["header"] for i in _extra_identities if i["label"] == "User B"), {})
         user_b_cookie_str = next((i["cookie"] for i in _extra_identities if i["label"] == "User B"), "")
 
-        # ── Navigate to target & wait for SPA readiness (generic) ────
-        # After OIDC/SSO auth the browser may still be on the login URL.
-        # We must land on the actual target host before passive recon can
-        # find SPA resources (iframes, CDN scripts, dynamic chunks).
+        # ── Pre-connect DNS takeover check ──────────────────────────
+        # Before trying HTTP, resolve the target's CNAME chain. If the
+        # target itself is a dangling subdomain (NXDOMAIN + CNAME to a
+        # claimable provider), emit the finding and short-circuit — there
+        # is no HTTP service to scan.
         target_host = urlparse(target.url).hostname or ""
+        _takeover_short_circuit = False
+        try:
+            cname_chain, is_nxdomain = await _resolve_cname(target_host)
+            if cname_chain or is_nxdomain:
+                matched_providers = _match_provider(cname_chain, target_host)
+                if matched_providers and is_nxdomain:
+                    for prov in matched_providers:
+                        tr = TakeoverResult(
+                            hostname=target_host,
+                            vulnerable=True,
+                            service=prov.service,
+                            evidence=(
+                                f"CNAME chain: {' -> '.join(cname_chain) or target_host} "
+                                f"resolves to NXDOMAIN. The CNAME target matches "
+                                f"{prov.service} which is claimable."
+                            ),
+                            cname_chain=cname_chain,
+                            severity=prov.severity,
+                            confidence="High",
+                        )
+                        for f in build_takeover_findings([tr]):
+                            findings.append(f)
+                            _cb("finding", {**f, "phase": "Pre-Connect DNS Check"})
+                    print(f"  [DNS] Subdomain takeover: {target_host} -> NXDOMAIN "
+                          f"(CNAME: {' -> '.join(cname_chain)}), "
+                          f"provider: {', '.join(p.service for p in matched_providers)}")
+                    _cb("progress_msg", {
+                        "message": f"Target {target_host} is a dangling subdomain "
+                                   f"(takeover possible via {matched_providers[0].service}). "
+                                   f"No HTTP service to scan."
+                    })
+                    _takeover_short_circuit = True
+                elif is_nxdomain and not cname_chain:
+                    tr = TakeoverResult(
+                        hostname=target_host,
+                        vulnerable=True,
+                        service="Unknown (dangling DNS)",
+                        evidence=(
+                            f"{target_host} resolves to NXDOMAIN with no CNAME. "
+                            f"The DNS record is orphaned — potential takeover if "
+                            f"the domain registration lapses or a wildcard is present."
+                        ),
+                        cname_chain=[],
+                        severity="Medium",
+                        confidence="Medium",
+                    )
+                    for f in build_takeover_findings([tr]):
+                        findings.append(f)
+                        _cb("finding", {**f, "phase": "Pre-Connect DNS Check"})
+                    print(f"  [DNS] {target_host} -> NXDOMAIN (no CNAME, orphaned record)")
+                elif cname_chain and not is_nxdomain and matched_providers:
+                    logger.info("CNAME chain for %s matches %s but host resolves — not dangling",
+                                target_host, [p.service for p in matched_providers])
+        except Exception as e:
+            logger.debug("Pre-connect DNS check failed (non-fatal): %s", e)
+
+        if _takeover_short_circuit:
+            metrics["phases_completed"] = 1
+            metrics["phase_log"].append({
+                "phase": 1, "name": "Pre-Connect DNS Takeover",
+                "findings": len(findings), "tool_calls": 0,
+                "skipped_reason": "target_is_dangling_subdomain",
+            })
+            if hasattr(http_client, "aclose"):
+                await http_client.aclose()
+            if browser:
+                await browser.close()
+            return findings, metrics
+
+        # ── Navigate to target & wait for SPA readiness (generic) ────
         landed_on_target = False
         if _use_fast_path:
             # No browser to navigate; treat as landed so downstream passive
@@ -2288,6 +2370,55 @@ async def run_scan(
                             f"  [ACTIVE-BASELINE] Bare-root SQLi: "
                             f"no hits across {len(ab_hosts)} hosts"
                         )
+
+                    # ── Cache Poisoning probe ────────────────────────
+                    p = _next_phase()
+                    _cb("phase_start", {"phase": p, "total": 0, "name": "Active Baseline (Cache Poisoning)", "id": "active_baseline_cache"})
+                    cp_findings = await run_cache_poisoning_probe(
+                        http_client,
+                        sorted(ab_hosts),
+                        on_finding=lambda f: _cb("finding", {**f, "phase": "Active Baseline (Cache Poisoning)"}),
+                        on_progress=_ab_progress,
+                        cancel_flag=cancel_flag,
+                    )
+                    findings.extend(cp_findings)
+                    _cb("phase_end", {"phase": p, "name": "Active Baseline (Cache Poisoning)",
+                                      "tool_calls": len(ab_hosts) * 7, "findings": len(cp_findings)})
+                    if cp_findings:
+                        print(f"  [ACTIVE-BASELINE] Cache Poisoning: {len(cp_findings)} finding(s)")
+
+                    # ── Reflected XSS probe ──────────────────────────
+                    p = _next_phase()
+                    _cb("phase_start", {"phase": p, "total": 0, "name": "Active Baseline (Reflected XSS)", "id": "active_baseline_xss"})
+                    xss_findings = await run_reflected_xss_probe(
+                        http_client,
+                        sorted(ab_hosts),
+                        on_finding=lambda f: _cb("finding", {**f, "phase": "Active Baseline (Reflected XSS)"}),
+                        on_progress=_ab_progress,
+                        cancel_flag=cancel_flag,
+                    )
+                    findings.extend(xss_findings)
+                    _cb("phase_end", {"phase": p, "name": "Active Baseline (Reflected XSS)",
+                                      "tool_calls": len(ab_hosts) * 8, "findings": len(xss_findings)})
+                    if xss_findings:
+                        print(f"  [ACTIVE-BASELINE] Reflected XSS: {len(xss_findings)} finding(s)")
+
+                    # ── SSRF Bypass probe ────────────────────────────
+                    p = _next_phase()
+                    _cb("phase_start", {"phase": p, "total": 0, "name": "Active Baseline (SSRF Bypass)", "id": "active_baseline_ssrf"})
+                    ssrf_findings = await run_ssrf_probe(
+                        http_client,
+                        sorted(ab_hosts),
+                        on_finding=lambda f: _cb("finding", {**f, "phase": "Active Baseline (SSRF Bypass)"}),
+                        on_progress=_ab_progress,
+                        cancel_flag=cancel_flag,
+                    )
+                    findings.extend(ssrf_findings)
+                    _cb("phase_end", {"phase": p, "name": "Active Baseline (SSRF Bypass)",
+                                      "tool_calls": len(ab_hosts) * 10, "findings": len(ssrf_findings)})
+                    if ssrf_findings:
+                        print(f"  [ACTIVE-BASELINE] SSRF Bypass: {len(ssrf_findings)} finding(s)")
+
             except Exception as e:
                 print(f"  [ACTIVE-BASELINE] Failed (non-fatal): {e}")
                 logger.warning("Active baseline probe failed: %s", e, exc_info=True)

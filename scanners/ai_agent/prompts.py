@@ -1760,7 +1760,7 @@ def build_system_prompt(
             "This is a quick reconnaissance-level scan. Be fast and efficient:\n"
             "- Per input/parameter: test 3-5 payloads maximum per vulnerability class\n"
             "- Use only the most common/effective payloads (top canonical examples)\n"
-            "- Skip edge cases, encoding variations, and WAF bypass techniques\n"
+            "- Skip edge cases and encoding variations (EXCEPT for XSS — always try WAF bypass payloads for XSS: case variation, event handlers, SVG/IMG tags, encoding tricks)\n"
             "- Max 15 actions per page/endpoint. Move on quickly if no obvious indicator\n"
             "- Prioritize breadth over depth — check more pages with fewer payloads each\n"
             "- Skip low-severity checks (info-level headers, verbose errors, etc.)"

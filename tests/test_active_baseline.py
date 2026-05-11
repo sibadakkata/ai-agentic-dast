@@ -248,5 +248,173 @@ def test_bare_root_probe_emits_no_finding_when_only_one_attack_hits_then_confirm
     )
 
 
+# ═══════════════════════════════════════════════════════════════════════
+# Tests for run_cache_poisoning_probe
+# ═══════════════════════════════════════════════════════════════════════
+from scanners.ai_agent.active_baseline import run_cache_poisoning_probe
+
+
+class _FakeCachePoisonResponse:
+    def __init__(self, text="", headers=None, status_code=200):
+        self.text = text
+        self.headers = headers or {}
+        self.status_code = status_code
+
+
+class _CachePoisonClient:
+    """Simulates a server that reflects X-Forwarded-Host into the body."""
+    def __init__(self, *, reflect=True, cached=False):
+        self._reflect = reflect
+        self._cached = cached
+        self._poisoned_url = None
+        self._canary = None
+
+    async def get(self, url, timeout=None, headers=None, **_kw):
+        headers = headers or {}
+        xfh = headers.get("X-Forwarded-Host", "")
+        if xfh and "cpcanary" in xfh:
+            self._canary = xfh
+            self._poisoned_url = url
+            if self._reflect:
+                return _FakeCachePoisonResponse(
+                    text=f'<meta http-equiv="refresh" content="0;url=https://{xfh}/">',
+                )
+            return _FakeCachePoisonResponse(text="<html>clean</html>")
+        if self._cached and self._poisoned_url == url and self._canary:
+            return _FakeCachePoisonResponse(
+                text=f'<meta http-equiv="refresh" content="0;url=https://{self._canary}/">',
+            )
+        return _FakeCachePoisonResponse(text="<html>clean</html>")
+
+
+def test_cache_poison_reflected_and_cached():
+    client = _CachePoisonClient(reflect=True, cached=True)
+    findings = _run_async(run_cache_poisoning_probe(client, ["cp.example.invalid"]))
+    assert len(findings) >= 1
+    f = findings[0]
+    assert "Cache Poisoning" in f["title"]
+    assert f["severity"] == "High"
+    assert f["confidence"] == "High"
+    assert "CACHED" in f["evidence"]
+
+
+def test_cache_poison_reflected_but_not_cached():
+    client = _CachePoisonClient(reflect=True, cached=False)
+    findings = _run_async(run_cache_poisoning_probe(client, ["cp2.example.invalid"]))
+    assert len(findings) >= 1
+    f = findings[0]
+    assert f["severity"] == "Medium"
+    assert "not cached" in f["evidence"]
+
+
+def test_cache_poison_no_reflection():
+    client = _CachePoisonClient(reflect=False, cached=False)
+    findings = _run_async(run_cache_poisoning_probe(client, ["clean.example.invalid"]))
+    assert findings == []
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Tests for run_reflected_xss_probe
+# ═══════════════════════════════════════════════════════════════════════
+from scanners.ai_agent.active_baseline import run_reflected_xss_probe
+
+
+class _XSSClient:
+    """Simulates a server that reflects query param values in HTML body."""
+    def __init__(self, *, reflect_canary=True, reflect_payload=True):
+        self._reflect_canary = reflect_canary
+        self._reflect_payload = reflect_payload
+
+    async def get(self, url, timeout=None, headers=None, **_kw):
+        from urllib.parse import urlparse, parse_qs
+        parsed = urlparse(url)
+        params = parse_qs(parsed.query)
+        for k, vals in params.items():
+            for v in vals:
+                if "xsscanary" in v:
+                    if self._reflect_canary:
+                        return _FakeCachePoisonResponse(text=f"<html>Results for: {v}</html>")
+                    return _FakeCachePoisonResponse(text="<html>safe</html>")
+                if "<script>" in v.lower() or "<img" in v.lower() or "<svg" in v.lower() or "onfocus" in v.lower():
+                    if self._reflect_payload:
+                        return _FakeCachePoisonResponse(text=f"<html>Results for: {v}</html>")
+                    return _FakeCachePoisonResponse(text="<html>safe</html>")
+        if "xsscanary" in parsed.path:
+            if self._reflect_canary:
+                return _FakeCachePoisonResponse(text=f"<html>Path: {parsed.path}</html>")
+        return _FakeCachePoisonResponse(text="<html>page</html>")
+
+
+def test_xss_finds_reflected_payload():
+    client = _XSSClient(reflect_canary=True, reflect_payload=True)
+    findings = _run_async(run_reflected_xss_probe(client, ["xss.example.invalid"]))
+    assert len(findings) >= 1
+    f = findings[0]
+    assert "XSS" in f["title"]
+    assert f["severity"] == "High"
+    assert f["cwe"] == "CWE-79"
+
+
+def test_xss_no_finding_when_canary_not_reflected():
+    client = _XSSClient(reflect_canary=False, reflect_payload=False)
+    findings = _run_async(run_reflected_xss_probe(client, ["safe.example.invalid"]))
+    assert findings == []
+
+
+def test_xss_canary_reflected_but_payload_encoded():
+    client = _XSSClient(reflect_canary=True, reflect_payload=False)
+    findings = _run_async(run_reflected_xss_probe(client, ["encoded.example.invalid"]))
+    assert findings == [], "if payload is not reflected verbatim, no finding"
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Tests for run_ssrf_probe
+# ═══════════════════════════════════════════════════════════════════════
+from scanners.ai_agent.active_baseline import run_ssrf_probe
+
+
+class _SSRFClient:
+    """Simulates a server that fetches user-supplied URLs (SSRF)."""
+    def __init__(self, *, vulnerable=True):
+        self._vulnerable = vulnerable
+
+    async def get(self, url, timeout=None, headers=None, **_kw):
+        from urllib.parse import urlparse, parse_qs
+        parsed = urlparse(url)
+        params = parse_qs(parsed.query)
+        for k, vals in params.items():
+            for v in vals:
+                if "169.254.169.254" in v or "0xa9fea9fe" in v or "2852039166" in v:
+                    if self._vulnerable:
+                        return _FakeCachePoisonResponse(
+                            text="ami-id\ninstance-type\nhostname",
+                            status_code=200,
+                        )
+                    return _FakeCachePoisonResponse(text="blocked", status_code=403)
+                if "127.0.0.1" in v or "0x7f000001" in v or "2130706433" in v or "[::1]" in v or "127.1" in v:
+                    if self._vulnerable:
+                        return _FakeCachePoisonResponse(text="<html>internal</html>" * 10, status_code=200)
+                    return _FakeCachePoisonResponse(text="blocked", status_code=403)
+                if "example.com" in v:
+                    return _FakeCachePoisonResponse(text="ok", status_code=200)
+        return _FakeCachePoisonResponse(text="not found", status_code=404)
+
+
+def test_ssrf_detects_metadata_access():
+    client = _SSRFClient(vulnerable=True)
+    findings = _run_async(run_ssrf_probe(client, ["ssrf.example.invalid"]))
+    assert len(findings) >= 1
+    f = findings[0]
+    assert "SSRF" in f["title"]
+    assert f["cwe"] == "CWE-918"
+    assert f["severity"] in ("Critical", "High")
+
+
+def test_ssrf_no_finding_when_blocked():
+    client = _SSRFClient(vulnerable=False)
+    findings = _run_async(run_ssrf_probe(client, ["secure.example.invalid"]))
+    assert findings == []
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
