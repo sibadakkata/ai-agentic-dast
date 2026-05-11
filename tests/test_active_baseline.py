@@ -368,6 +368,117 @@ def test_xss_canary_reflected_but_payload_encoded():
 
 
 # ═══════════════════════════════════════════════════════════════════════
+# Tests for JS-context XSS detection (BUGB-3057 pattern)
+# ═══════════════════════════════════════════════════════════════════════
+from scanners.ai_agent.active_baseline import _classify_canary_context
+
+
+def test_classify_canary_in_event_handler_attr():
+    body = """<html><body>
+    <a href="#" onclick="return toggle_link('foo', 'xsscanary12345');">Click</a>
+    </body></html>"""
+    ctx = _classify_canary_context(body, "xsscanary12345")
+    assert ctx == "event_handler_attr"
+
+
+def test_classify_canary_in_script_block():
+    body = """<html><script>
+    var s = "xsscanary12345";
+    </script></html>"""
+    ctx = _classify_canary_context(body, "xsscanary12345")
+    assert ctx == "script_block"
+
+
+def test_classify_canary_in_javascript_uri():
+    body = '<a href="javascript:alert(\'xsscanary12345\')">x</a>'
+    ctx = _classify_canary_context(body, "xsscanary12345")
+    assert ctx == "javascript_uri"
+
+
+def test_classify_canary_in_html_body():
+    body = "<html><body>Search results: <p>xsscanary12345</p></body></html>"
+    ctx = _classify_canary_context(body, "xsscanary12345")
+    assert ctx == "html_body"
+
+
+def test_classify_canary_not_present():
+    body = "<html>nothing here</html>"
+    ctx = _classify_canary_context(body, "xsscanary12345")
+    assert ctx is None
+
+
+def test_classify_canary_in_safe_attribute_only():
+    body = '<input type="text" value="xsscanary12345">'
+    ctx = _classify_canary_context(body, "xsscanary12345")
+    assert ctx is None, "canary inside safe value attr should not classify as XSS sink"
+
+
+class _JSContextXSSClient:
+    """Simulates BUGB-3057: Avast ipm-maptiles-stage reflecting `style`
+    parameter into an onclick handler. WAF blocks <, >, =, /, comma but
+    allows quote breakout via ')-payload-('."""
+    def __init__(self, *, vulnerable=True):
+        self._vulnerable = vulnerable
+
+    async def get(self, url, timeout=None, headers=None, **_kw):
+        from urllib.parse import urlparse, parse_qs, unquote
+        parsed = urlparse(url)
+        params = parse_qs(parsed.query)
+        style = params.get("style", [""])[0]
+        decoded = unquote(style)
+        if not decoded:
+            return _FakeCachePoisonResponse(text="<html>no style</html>")
+
+        if any(c in decoded for c in ["<", ">", "/", ","]):
+            return _FakeCachePoisonResponse(text="<html>blocked by WAF</html>", status_code=403)
+
+        if self._vulnerable:
+            html = (
+                "<html><body>"
+                f"<a href=\"#\" onclick=\"return toggle_link('foo', '{decoded}');\">Map</a>"
+                "</body></html>"
+            )
+            return _FakeCachePoisonResponse(text=html)
+        else:
+            safe = (
+                decoded
+                .replace("&", "&amp;")
+                .replace("'", "&#39;")
+                .replace('"', "&quot;")
+                .replace("`", "&#96;")
+                .replace("(", "&#40;")
+                .replace(")", "&#41;")
+                .replace(";", "&#59;")
+            )
+            html = (
+                "<html><body>"
+                f"<a href=\"#\" onclick=\"return toggle_link('foo', '{safe}');\">Map</a>"
+                "</body></html>"
+            )
+            return _FakeCachePoisonResponse(text=html)
+
+
+def test_xss_js_context_detects_bugb_3057_pattern():
+    client = _JSContextXSSClient(vulnerable=True)
+    findings = _run_async(run_reflected_xss_probe(client, ["maptiles.example.invalid"]))
+    assert len(findings) >= 1, "expected JS-context XSS finding"
+    js_findings = [f for f in findings if f.get("_xss_context") in ("event_handler_attr", "script_block", "javascript_uri")]
+    assert len(js_findings) >= 1, f"expected at least one JS-context finding, got {[f.get('_xss_context') for f in findings]}"
+    f = js_findings[0]
+    assert f["severity"] == "Critical"
+    assert f["parameter"] == "query_style"
+    assert "JavaScript Context" in f["title"]
+    assert "BUGB-3057" in f["evidence"]
+    assert f["cwe"] == "CWE-79"
+
+
+def test_xss_js_context_no_finding_when_safely_escaped():
+    client = _JSContextXSSClient(vulnerable=False)
+    findings = _run_async(run_reflected_xss_probe(client, ["safe.example.invalid"]))
+    assert findings == [], "safely-escaped JS context must not produce finding"
+
+
+# ═══════════════════════════════════════════════════════════════════════
 # Tests for run_ssrf_probe
 # ═══════════════════════════════════════════════════════════════════════
 from scanners.ai_agent.active_baseline import run_ssrf_probe

