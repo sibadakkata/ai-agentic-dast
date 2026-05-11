@@ -30,6 +30,9 @@ from .active_baseline import (
     run_cache_poisoning_probe,
     run_reflected_xss_probe,
     run_ssrf_probe,
+    run_open_redirect_probe,
+    run_sensitive_path_probe,
+    run_salesforce_probe,
 )
 from .subdomain_takeover import (
     _resolve_cname,
@@ -2420,6 +2423,55 @@ async def run_scan(
                                       "tool_calls": len(ab_hosts) * 10, "findings": len(ssrf_findings)})
                     if ssrf_findings:
                         print(f"  [ACTIVE-BASELINE] SSRF Bypass: {len(ssrf_findings)} finding(s)")
+
+                    # ── Open Redirect probe ───────────────────────────
+                    p = _next_phase()
+                    _cb("phase_start", {"phase": p, "total": 0, "name": "Active Baseline (Open Redirect)", "id": "active_baseline_redirect"})
+                    redirect_findings = await run_open_redirect_probe(
+                        http_client,
+                        sorted(ab_hosts),
+                        crawled_urls=metrics.get("pages_list") or [],
+                        on_finding=lambda f: _cb("finding", {**f, "phase": "Active Baseline (Open Redirect)"}),
+                        on_progress=_ab_progress,
+                        cancel_flag=cancel_flag,
+                    )
+                    findings.extend(redirect_findings)
+                    _cb("phase_end", {"phase": p, "name": "Active Baseline (Open Redirect)",
+                                      "tool_calls": len(ab_hosts) * 6, "findings": len(redirect_findings)})
+                    if redirect_findings:
+                        print(f"  [ACTIVE-BASELINE] Open Redirect: {len(redirect_findings)} finding(s)")
+
+                    # ── Sensitive Path probe ──────────────────────────
+                    p = _next_phase()
+                    _cb("phase_start", {"phase": p, "total": 0, "name": "Active Baseline (Sensitive Paths)", "id": "active_baseline_paths"})
+                    path_findings = await run_sensitive_path_probe(
+                        http_client,
+                        sorted(ab_hosts),
+                        on_finding=lambda f: _cb("finding", {**f, "phase": "Active Baseline (Sensitive Paths)"}),
+                        on_progress=_ab_progress,
+                        cancel_flag=cancel_flag,
+                    )
+                    findings.extend(path_findings)
+                    _cb("phase_end", {"phase": p, "name": "Active Baseline (Sensitive Paths)",
+                                      "tool_calls": len(ab_hosts) * 20, "findings": len(path_findings)})
+                    if path_findings:
+                        print(f"  [ACTIVE-BASELINE] Sensitive Paths: {len(path_findings)} finding(s)")
+
+                    # ── Salesforce Misconfig probe ────────────────────
+                    p = _next_phase()
+                    _cb("phase_start", {"phase": p, "total": 0, "name": "Active Baseline (Salesforce)", "id": "active_baseline_salesforce"})
+                    sf_findings = await run_salesforce_probe(
+                        http_client,
+                        sorted(ab_hosts),
+                        on_finding=lambda f: _cb("finding", {**f, "phase": "Active Baseline (Salesforce)"}),
+                        on_progress=_ab_progress,
+                        cancel_flag=cancel_flag,
+                    )
+                    findings.extend(sf_findings)
+                    _cb("phase_end", {"phase": p, "name": "Active Baseline (Salesforce)",
+                                      "tool_calls": len(ab_hosts) * 5, "findings": len(sf_findings)})
+                    if sf_findings:
+                        print(f"  [ACTIVE-BASELINE] Salesforce: {len(sf_findings)} finding(s)")
 
             except Exception as e:
                 print(f"  [ACTIVE-BASELINE] Failed (non-fatal): {e}")

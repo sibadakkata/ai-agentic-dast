@@ -1043,12 +1043,566 @@ async def run_ssrf_probe(
     return findings
 
 
+# ═══════════════════════════════════════════════════════════════════════
+# GAP 5 — Open Redirect Probe
+# ═══════════════════════════════════════════════════════════════════════
+#
+# Bug bounty researchers find open redirects in parameters like
+# ?redirect=, ?next=, ?url=, ?dest=, ?lp= that accept external URLs.
+# This probe discovers redirect-like params and tests with an external canary.
+
+_REDIRECT_PARAM_HINTS = _re.compile(
+    r"(redirect|redir|next|url|goto|dest|target|return|returnurl"
+    r"|continue|forward|out|link|to|ref|lp|callback|_externalContentRedirect"
+    r"|ReturnUrl|backUrl|back_url|successUrl|failUrl|errorUrl|cancelUrl)",
+    _re.IGNORECASE,
+)
+
+_REDIRECT_CANARY_DOMAIN = "evil.example.com"
+_REDIRECT_PAYLOADS: list[tuple[str, str]] = [
+    ("plain_url", f"https://{_REDIRECT_CANARY_DOMAIN}/redir"),
+    ("double_slash", f"//{_REDIRECT_CANARY_DOMAIN}/redir"),
+    ("backslash_bypass", f"https://{_REDIRECT_CANARY_DOMAIN}%2f.."),
+    ("at_bypass", f"https://legitimate.com@{_REDIRECT_CANARY_DOMAIN}/"),
+    ("null_byte", f"https://{_REDIRECT_CANARY_DOMAIN}/%00"),
+    ("encoded_slash", f"https:%2F%2F{_REDIRECT_CANARY_DOMAIN}/redir"),
+]
+
+
+async def run_open_redirect_probe(
+    http_client,
+    hosts: Iterable[str],
+    *,
+    crawled_urls: Iterable[str] | None = None,
+    on_finding: callable | None = None,
+    on_progress: callable | None = None,
+    cancel_flag=None,
+) -> list[dict]:
+    """Probe each host for open redirect via dynamically discovered params."""
+    findings: list[dict] = []
+    _emit = on_finding or (lambda f: None)
+    _progress = on_progress or (lambda event, data: None)
+
+    targets = _normalize_hosts(hosts)
+    if not targets:
+        return findings
+
+    from urllib.parse import urlparse as _urlparse, parse_qs as _parse_qs
+    _crawled_by_host: dict[str, list[str]] = {}
+    for curl in (crawled_urls or []):
+        try:
+            h = (_urlparse(curl).hostname or "").lower()
+            if h:
+                _crawled_by_host.setdefault(h, []).append(curl)
+        except Exception:
+            continue
+
+    _progress("active_baseline_start", {
+        "probe": "open_redirect", "hosts": len(targets),
+    })
+
+    for host in targets:
+        if cancel_flag is not None and getattr(cancel_flag, "is_set", lambda: False)():
+            break
+        base_url = f"https://{host}"
+
+        discovered: set[str] = set()
+        try:
+            page_resp = await http_client.get(
+                base_url, timeout=10.0, follow_redirects=True,
+                headers=_PROBE_HEADERS,
+            )
+            discovered.update(_discover_params_from_html(page_resp.text[:500_000], base_url))
+        except Exception:
+            pass
+
+        for curl in _crawled_by_host.get(host, [])[:20]:
+            try:
+                parsed = _urlparse(curl)
+                for k in _parse_qs(parsed.query or ""):
+                    discovered.add(k.lower())
+                cresp = await http_client.get(
+                    curl, timeout=8.0, follow_redirects=True, headers=_PROBE_HEADERS,
+                )
+                discovered.update(_discover_params_from_html(cresp.text[:300_000], curl))
+            except Exception:
+                continue
+
+        redirect_params = [p for p in discovered if _REDIRECT_PARAM_HINTS.search(p)]
+        if not redirect_params:
+            redirect_params = ["redirect", "next", "url", "dest", "returnurl", "lp"]
+
+        for param in redirect_params[:10]:
+            if cancel_flag is not None and getattr(cancel_flag, "is_set", lambda: False)():
+                break
+            for payload_label, payload_url in _REDIRECT_PAYLOADS:
+                test_url = f"{base_url}?{param}={payload_url}"
+                try:
+                    resp = await http_client.get(
+                        test_url, timeout=10.0, follow_redirects=False,
+                        headers=_PROBE_HEADERS,
+                    )
+                except Exception:
+                    continue
+
+                is_redirect = False
+                location = str(resp.headers.get("location", ""))
+
+                if resp.status_code in (301, 302, 303, 307, 308):
+                    if _REDIRECT_CANARY_DOMAIN in location:
+                        is_redirect = True
+
+                if _REDIRECT_CANARY_DOMAIN in resp.text[:50_000]:
+                    meta_match = _re.search(
+                        r'<meta[^>]*http-equiv\s*=\s*["\']?refresh[^>]*'
+                        + _re.escape(_REDIRECT_CANARY_DOMAIN),
+                        resp.text[:50_000], _re.IGNORECASE,
+                    )
+                    if meta_match:
+                        is_redirect = True
+
+                if not is_redirect:
+                    continue
+
+                f = {
+                    "title": f"Open Redirect via {param}",
+                    "severity": "Medium",
+                    "confidence": "High",
+                    "owasp_category": "A01:2021",
+                    "cwe": "CWE-601",
+                    "url": test_url,
+                    "parameter": param,
+                    "payload": payload_url,
+                    "evidence": (
+                        f"Server responds with {resp.status_code} redirecting to "
+                        f"'{location}' when '{param}' is set to an external URL. "
+                        f"Payload variant: {payload_label}."
+                    ),
+                    "remediation": (
+                        "Validate redirect destinations against an allow-list of "
+                        "permitted domains. Never use user-controlled input directly "
+                        "in Location headers or meta refresh tags."
+                    ),
+                    "phase": "Active Baseline (Open Redirect)",
+                    "tool": "active_baseline.open_redirect_probe",
+                    "_finding_source": "active_baseline",
+                    "_payload_label": payload_label,
+                }
+                findings.append(f)
+                _emit(f)
+                break
+
+    _progress("active_baseline_end", {
+        "probe": "open_redirect", "findings": len(findings),
+    })
+    return findings
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# GAP 6 — Sensitive Path / Info Disclosure Probe
+# ═══════════════════════════════════════════════════════════════════════
+#
+# Checks for well-known sensitive paths: phpinfo, .env, .git/config,
+# debug endpoints, status pages, etc. that leak server configuration.
+
+_SENSITIVE_PATHS: list[tuple[str, str, list[str]]] = [
+    ("phpinfo", "/index.php", ["phpinfo()", "PHP Version", "System =>"]),
+    ("phpinfo_info", "/info.php", ["phpinfo()", "PHP Version"]),
+    ("phpinfo_test", "/test.php", ["phpinfo()", "PHP Version"]),
+    ("phpinfo_phpinfo", "/phpinfo.php", ["phpinfo()", "PHP Version"]),
+    ("dotenv", "/.env", ["DB_PASSWORD", "APP_KEY", "SECRET"]),
+    ("git_config", "/.git/config", ["[core]", "[remote"]),
+    ("git_head", "/.git/HEAD", ["ref: refs/"]),
+    ("ds_store", "/.DS_Store", []),
+    ("wp_config_bak", "/wp-config.php.bak", ["DB_NAME", "DB_PASSWORD"]),
+    ("server_status", "/server-status", ["Apache Server Status", "Total accesses"]),
+    ("debug_vars", "/debug/vars", []),
+    ("actuator", "/actuator", ["_links", "self"]),
+    ("actuator_env", "/actuator/env", ["activeProfiles", "propertySources"]),
+    ("elmah", "/elmah.axd", ["Error Log for"]),
+    ("trace", "/trace", []),
+    ("swagger_json", "/swagger.json", ["swagger", "paths"]),
+    ("api_docs", "/api-docs", ["swagger", "openapi"]),
+    ("graphql", "/graphql", []),
+    ("robots_txt", "/robots.txt", ["Disallow"]),
+    ("sitemap", "/sitemap.xml", ["<urlset", "<sitemapindex"]),
+]
+
+
+async def run_sensitive_path_probe(
+    http_client,
+    hosts: Iterable[str],
+    *,
+    on_finding: callable | None = None,
+    on_progress: callable | None = None,
+    cancel_flag=None,
+) -> list[dict]:
+    """Check each host for well-known sensitive/debug paths."""
+    findings: list[dict] = []
+    _emit = on_finding or (lambda f: None)
+    _progress = on_progress or (lambda event, data: None)
+
+    targets = _normalize_hosts(hosts)
+    if not targets:
+        return findings
+
+    _progress("active_baseline_start", {
+        "probe": "sensitive_paths", "hosts": len(targets),
+    })
+
+    for host in targets:
+        if cancel_flag is not None and getattr(cancel_flag, "is_set", lambda: False)():
+            break
+
+        for path_label, path, fingerprints in _SENSITIVE_PATHS:
+            if cancel_flag is not None and getattr(cancel_flag, "is_set", lambda: False)():
+                break
+            test_url = f"https://{host}{path}"
+            try:
+                resp = await http_client.get(
+                    test_url, timeout=8.0, follow_redirects=True,
+                    headers=_PROBE_HEADERS,
+                )
+            except Exception:
+                continue
+
+            if resp.status_code != 200:
+                continue
+
+            body = resp.text[:100_000]
+            if not fingerprints:
+                if resp.status_code == 200 and len(body) > 100:
+                    if path_label in ("ds_store", "debug_vars", "trace", "graphql"):
+                        pass
+                    else:
+                        continue
+                else:
+                    continue
+
+            matched = [fp for fp in fingerprints if fp.lower() in body.lower()]
+            if not matched and fingerprints:
+                continue
+
+            if path_label.startswith("phpinfo"):
+                sev = "High"
+                title = f"PHP Information Disclosure ({path})"
+                cwe = "CWE-200"
+            elif path_label in ("dotenv", "wp_config_bak"):
+                sev = "Critical"
+                title = f"Sensitive Configuration File Exposed ({path})"
+                cwe = "CWE-538"
+            elif path_label.startswith("git"):
+                sev = "High"
+                title = f"Git Repository Exposed ({path})"
+                cwe = "CWE-538"
+            elif path_label.startswith("actuator"):
+                sev = "High"
+                title = f"Spring Actuator Exposed ({path})"
+                cwe = "CWE-200"
+            else:
+                sev = "Medium"
+                title = f"Sensitive Path Accessible ({path})"
+                cwe = "CWE-200"
+
+            f = {
+                "title": title,
+                "severity": sev,
+                "confidence": "High" if matched else "Medium",
+                "owasp_category": "A01:2021",
+                "cwe": cwe,
+                "url": test_url,
+                "parameter": path,
+                "payload": f"GET {path}",
+                "evidence": (
+                    f"Path '{path}' returned HTTP {resp.status_code} with "
+                    f"fingerprints: {matched or 'content present'}. "
+                    f"Content-Type: {resp.headers.get('content-type', 'n/a')}. "
+                    f"Body preview: {body[:200]}"
+                ),
+                "remediation": (
+                    f"Remove or restrict access to '{path}'. For phpinfo, "
+                    f"delete the file in production. For .env/.git, add deny "
+                    f"rules to the web server configuration."
+                ),
+                "phase": "Active Baseline (Sensitive Paths)",
+                "tool": "active_baseline.sensitive_path_probe",
+                "_finding_source": "active_baseline",
+                "_path_label": path_label,
+            }
+            findings.append(f)
+            _emit(f)
+
+    _progress("active_baseline_end", {
+        "probe": "sensitive_paths", "findings": len(findings),
+    })
+    return findings
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# GAP 7 — Salesforce Misconfiguration Probe
+# ═══════════════════════════════════════════════════════════════════════
+#
+# Detects Salesforce Experience Cloud/Community instances and probes
+# for common misconfigurations: exposed Aura endpoints, public object
+# access, and PII-leaking API endpoints.
+
+_SALESFORCE_DOMAIN_PATTERNS = [
+    _re.compile(r"\.my\.site\.com$", _re.IGNORECASE),
+    _re.compile(r"\.force\.com$", _re.IGNORECASE),
+    _re.compile(r"\.salesforce\.com$", _re.IGNORECASE),
+    _re.compile(r"\.my\.salesforce\.com$", _re.IGNORECASE),
+    _re.compile(r"\.sandbox\.my\.site\.com$", _re.IGNORECASE),
+]
+
+_SALESFORCE_AURA_PATHS = [
+    "/s/sfsites/aura",
+    "/aura",
+]
+
+_SALESFORCE_OBJECTS_TO_PROBE = [
+    "Account", "Contact", "Case", "Lead", "Opportunity",
+    "Article_Feedback__c", "Knowledge__kav",
+    "User", "Task", "Event", "ContentDocument",
+]
+
+_SALESFORCE_API_VERSIONS = ["v58.0", "v57.0", "v56.0", "v55.0"]
+
+
+def _is_salesforce_host(host: str) -> bool:
+    """Check if a hostname looks like a Salesforce instance."""
+    return any(p.search(host) for p in _SALESFORCE_DOMAIN_PATTERNS)
+
+
+async def run_salesforce_probe(
+    http_client,
+    hosts: Iterable[str],
+    *,
+    on_finding: callable | None = None,
+    on_progress: callable | None = None,
+    cancel_flag=None,
+) -> list[dict]:
+    """Detect Salesforce instances and probe for misconfigurations."""
+    findings: list[dict] = []
+    _emit = on_finding or (lambda f: None)
+    _progress = on_progress or (lambda event, data: None)
+
+    targets = _normalize_hosts(hosts)
+    if not targets:
+        return findings
+
+    _progress("active_baseline_start", {
+        "probe": "salesforce_misconfig", "hosts": len(targets),
+    })
+
+    for host in targets:
+        if cancel_flag is not None and getattr(cancel_flag, "is_set", lambda: False)():
+            break
+
+        # Step 1: Check if Salesforce (by domain or by response headers/body)
+        is_sf = _is_salesforce_host(host)
+        sf_evidence = []
+
+        if not is_sf:
+            try:
+                resp = await http_client.get(
+                    f"https://{host}/", timeout=10.0, follow_redirects=True,
+                    headers=_PROBE_HEADERS,
+                )
+                body = resp.text[:100_000].lower()
+                hdrs = str(resp.headers).lower()
+                if any(x in body for x in [
+                    "salesforce", "lightning", "aura", "sfdc",
+                    "community-", "sfdcpage",
+                ]):
+                    is_sf = True
+                    sf_evidence.append("Salesforce markers in page body")
+                if "x-sfdc" in hdrs or "sfdc" in hdrs:
+                    is_sf = True
+                    sf_evidence.append("SFDC headers detected")
+            except Exception:
+                continue
+
+        if not is_sf:
+            continue
+
+        _progress("active_baseline_step", {
+            "host": host, "step": "salesforce_detected",
+            "evidence": sf_evidence or ["domain pattern match"],
+        })
+
+        base_url = f"https://{host}"
+
+        # Step 2: Probe Aura endpoint (unauthenticated)
+        for aura_path in _SALESFORCE_AURA_PATHS:
+            if cancel_flag is not None and getattr(cancel_flag, "is_set", lambda: False)():
+                break
+            aura_url = f"{base_url}{aura_path}"
+            try:
+                aura_payload = {
+                    "message": '{"actions":[{"id":"1;a","descriptor":"aura://RecordUiController/getObjectInfo","params":{"objectApiName":"Account"}}]}',
+                    "aura.context": '{"mode":"PROD","fwuid":"1"}',
+                    "aura.token": "null",
+                }
+                resp = await http_client.post(
+                    aura_url, data=aura_payload, timeout=10.0,
+                    headers={**_PROBE_HEADERS, "Content-Type": "application/x-www-form-urlencoded"},
+                )
+                body = resp.text[:50_000]
+            except Exception:
+                continue
+
+            if resp.status_code == 200 and ('"actions"' in body or '"objectInfos"' in body):
+                f = {
+                    "title": f"Salesforce Aura Endpoint Exposed ({aura_path})",
+                    "severity": "High",
+                    "confidence": "High",
+                    "owasp_category": "A01:2021",
+                    "cwe": "CWE-284",
+                    "url": aura_url,
+                    "parameter": "aura.token=null",
+                    "payload": "getObjectInfo(Account)",
+                    "evidence": (
+                        f"Aura endpoint at {aura_path} responds with object metadata "
+                        f"when accessed without authentication. Status: {resp.status_code}. "
+                        f"Body preview: {body[:300]}"
+                    ),
+                    "remediation": (
+                        "Restrict Aura endpoint access with proper guest user "
+                        "permissions. Review Salesforce sharing rules and ensure "
+                        "guest users cannot access sensitive objects."
+                    ),
+                    "phase": "Active Baseline (Salesforce)",
+                    "tool": "active_baseline.salesforce_probe",
+                    "_finding_source": "active_baseline",
+                }
+                findings.append(f)
+                _emit(f)
+
+        # Step 3: Probe REST API for public object access
+        for api_ver in _SALESFORCE_API_VERSIONS[:2]:
+            if cancel_flag is not None and getattr(cancel_flag, "is_set", lambda: False)():
+                break
+            api_base = f"{base_url}/services/data/{api_ver}"
+            try:
+                api_resp = await http_client.get(
+                    api_base, timeout=10.0, follow_redirects=True,
+                    headers=_PROBE_HEADERS,
+                )
+                if api_resp.status_code != 200:
+                    continue
+            except Exception:
+                continue
+
+            f = {
+                "title": "Salesforce REST API Publicly Accessible",
+                "severity": "Critical",
+                "confidence": "High",
+                "owasp_category": "A01:2021",
+                "cwe": "CWE-284",
+                "url": api_base,
+                "parameter": f"/services/data/{api_ver}",
+                "payload": f"GET /services/data/{api_ver}",
+                "evidence": (
+                    f"Salesforce REST API at {api_base} returned HTTP "
+                    f"{api_resp.status_code} without authentication. "
+                    f"Body: {api_resp.text[:300]}"
+                ),
+                "remediation": (
+                    "Restrict API access to authenticated users. Configure "
+                    "guest user profiles to deny API access. Review org-wide "
+                    "sharing defaults."
+                ),
+                "phase": "Active Baseline (Salesforce)",
+                "tool": "active_baseline.salesforce_probe",
+                "_finding_source": "active_baseline",
+            }
+            findings.append(f)
+            _emit(f)
+
+            for obj in _SALESFORCE_OBJECTS_TO_PROBE:
+                if cancel_flag is not None and getattr(cancel_flag, "is_set", lambda: False)():
+                    break
+                obj_url = f"{api_base}/sobjects/{obj}/describe"
+                try:
+                    obj_resp = await http_client.get(
+                        obj_url, timeout=8.0, follow_redirects=True,
+                        headers=_PROBE_HEADERS,
+                    )
+                    if obj_resp.status_code == 200:
+                        obj_body = obj_resp.text[:20_000]
+                        if '"fields"' in obj_body or '"name"' in obj_body:
+                            f = {
+                                "title": f"Salesforce Object '{obj}' Schema Publicly Accessible",
+                                "severity": "High",
+                                "confidence": "High",
+                                "owasp_category": "A01:2021",
+                                "cwe": "CWE-284",
+                                "url": obj_url,
+                                "parameter": f"sobjects/{obj}/describe",
+                                "payload": f"GET {obj_url}",
+                                "evidence": (
+                                    f"Object '{obj}' schema is accessible without auth. "
+                                    f"Response includes field definitions. "
+                                    f"Preview: {obj_body[:200]}"
+                                ),
+                                "remediation": (
+                                    f"Remove guest user access to '{obj}'. Review "
+                                    f"field-level security and object permissions."
+                                ),
+                                "phase": "Active Baseline (Salesforce)",
+                                "tool": "active_baseline.salesforce_probe",
+                                "_finding_source": "active_baseline",
+                            }
+                            findings.append(f)
+                            _emit(f)
+                except Exception:
+                    continue
+            break
+
+        # Step 4: Check for staging/sandbox exposure
+        if "sandbox" in host.lower() or "stg" in host.lower() or "stage" in host.lower():
+            f = {
+                "title": f"Salesforce Staging/Sandbox Publicly Accessible ({host})",
+                "severity": "High",
+                "confidence": "Medium",
+                "owasp_category": "A05:2021",
+                "cwe": "CWE-200",
+                "url": base_url,
+                "parameter": "hostname",
+                "payload": host,
+                "evidence": (
+                    f"Host '{host}' appears to be a Salesforce staging/sandbox "
+                    f"environment that is publicly accessible. Staging environments "
+                    f"may contain production data clones including PII."
+                ),
+                "remediation": (
+                    "Restrict sandbox access via IP allowlisting. Ensure "
+                    "sandbox data is anonymized. Never clone production PII "
+                    "into staging."
+                ),
+                "phase": "Active Baseline (Salesforce)",
+                "tool": "active_baseline.salesforce_probe",
+                "_finding_source": "active_baseline",
+            }
+            findings.append(f)
+            _emit(f)
+
+    _progress("active_baseline_end", {
+        "probe": "salesforce_misconfig", "findings": len(findings),
+    })
+    return findings
+
+
 __all__ = [
     "run_bare_root_sqli_probe",
     "run_cache_poisoning_probe",
     "run_reflected_xss_probe",
     "run_ssrf_probe",
+    "run_open_redirect_probe",
+    "run_sensitive_path_probe",
+    "run_salesforce_probe",
     "_discover_params_from_html",
     "_discover_ssrf_params",
     "_classify_canary_context",
+    "_is_salesforce_host",
 ]
