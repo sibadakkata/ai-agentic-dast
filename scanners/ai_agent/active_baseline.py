@@ -58,10 +58,11 @@ logger = logging.getLogger(__name__)
 
 # ── Bare-root SQLi probe payloads ──────────────────────────────────────
 # Each tuple: (label, raw_query_string). The query string is appended to
-# the host root as ``GET /?<query>&_ab=1``. The trailing ``_ab=1`` keeps
-# the payload as the FIRST query token (so a backend that concatenates
-# only the raw query gets the injection at the start of its SQL literal)
-# and gives a reliable cache-buster on each retry.
+# the host root using the bug-bounty report shape:
+# ``GET /?<query>?ninjeee=sectest`` (note the second ``?``).
+# This keeps the payload as the FIRST query token (so a backend that
+# concatenates only the raw query gets the injection at the start of its
+# SQL literal) while still adding a deterministic marker.
 #
 # All payloads expect MySQL-flavour ``SLEEP(5)``. Postgres / MSSQL
 # variants are tested too so the probe can fire across DB vendors.
@@ -95,6 +96,23 @@ _ABSOLUTE_THRESHOLD_S = 4.0
 _REQUEST_TIMEOUT_S = 15.0   # > SLEEP_SECONDS + 5s tolerance
 _PER_HOST_CAP_S = 60.0      # circuit-breaker: stop probing a host that's slow
 
+# These headers mirror the bug-bounty PoC enough to avoid some edge-layer
+# bot/WAF blocks that otherwise return an immediate 403 before the origin
+# app is reached (which would mask a real time-based delay signal).
+_PROBE_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36"
+    ),
+    "Accept": "*/*",
+    "Accept-Language": "en-US,en;q=0.5",
+    "Pragma": "no-cache",
+    "Cache-Control": "no-cache",
+    "Accept-Encoding": "identity",
+    "X-BugBounty": "1",
+    "X-Intigriti-Username": "1",
+}
+
 
 async def _timed_get(http_client, url: str) -> tuple[float, int | None]:
     """Send a single GET and return (elapsed_seconds, status_code).
@@ -104,7 +122,15 @@ async def _timed_get(http_client, url: str) -> tuple[float, int | None]:
     """
     started = time.perf_counter()
     try:
-        resp = await http_client.get(url, timeout=_REQUEST_TIMEOUT_S)
+        # Do NOT follow redirects. Vulnerable origins can still introduce a
+        # delay before responding with a redirect; following it would hide
+        # the delay from this measurement.
+        resp = await http_client.get(
+            url,
+            timeout=_REQUEST_TIMEOUT_S,
+            follow_redirects=False,
+            headers=_PROBE_HEADERS,
+        )
         elapsed = time.perf_counter() - started
         return elapsed, resp.status_code
     except Exception as exc:  # network, timeout, TLS, anything
@@ -121,7 +147,7 @@ def _build_finding(
     confirmed: bool,
 ) -> dict:
     """Render a structured AI-Raw finding dict for a confirmed hit."""
-    full_url = f"https://{host}/?{raw_query}&_ab=1"
+    full_url = f"https://{host}/?{raw_query}%3Fninjeee%3Dsectest"
     decoded = (
         raw_query
         .replace("%27", "'")
@@ -141,9 +167,9 @@ def _build_finding(
         "parameter": "(raw query string)",
         "payload": decoded,
         "evidence": (
-            f"Control GET https://{host}/?_ab=1 returned in "
+            f"Control GET https://{host}/?ninjeee=sectest returned in "
             f"{control_elapsed:.2f}s. "
-            f"Attack GET https://{host}/?{decoded}&_ab=1 returned in "
+            f"Attack GET https://{host}/?{decoded}?ninjeee=sectest returned in "
             f"{attack_elapsed:.2f}s "
             f"(delta {attack_elapsed - control_elapsed:.2f}s). "
             f"SLEEP({_SLEEP_SECONDS}) was triggered, indicating the raw "
@@ -199,8 +225,8 @@ async def run_bare_root_sqli_probe(
     """Probe every host's bare root URL for time-based blind SQLi.
 
     For each host:
-      1. Send control ``GET https://<host>/?_ab=1`` and record elapsed.
-      2. For each payload, send ``GET https://<host>/?<payload>&_ab=1``
+      1. Send control ``GET https://<host>/?ninjeee=sectest`` and record elapsed.
+      2. For each payload, send ``GET https://<host>/?<payload>?ninjeee=sectest``
          and record elapsed.
       3. If any attack >= control + 3.0s AND >= 4.0s absolute, send the
          attack a second time to rule out network jitter.
@@ -249,7 +275,7 @@ async def run_bare_root_sqli_probe(
 
         host_started = time.perf_counter()
 
-        control_url = f"https://{host}/?_ab=1"
+        control_url = f"https://{host}/?ninjeee=sectest"
         control_elapsed, control_status = await _timed_get(http_client, control_url)
         if control_status is None:
             _progress("active_baseline_step", {
@@ -266,7 +292,7 @@ async def run_bare_root_sqli_probe(
                     "host": host, "step": "host_budget_exceeded",
                 })
                 break
-            attack_url = f"https://{host}/?{payload}&_ab=1"
+            attack_url = f"https://{host}/?{payload}%3Fninjeee%3Dsectest"
             attack_elapsed, attack_status = await _timed_get(http_client, attack_url)
             if attack_status is None:
                 # Transport / TLS / DNS error - NOT a SQLi signal even if

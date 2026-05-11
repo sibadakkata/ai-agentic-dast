@@ -52,7 +52,7 @@ class _FakeAsyncHttpClient:
         self._raise = raise_on_attack
         self.calls: list[tuple[str, float]] = []
 
-    async def get(self, url: str, timeout: float | None = None):
+    async def get(self, url: str, timeout: float | None = None, **_kwargs):
         is_attack = (
             "SLEEP" in url.upper()
             or "PG_SLEEP" in url.upper()
@@ -197,7 +197,7 @@ def test_bare_root_probe_skips_host_when_control_fails():
         def __init__(self) -> None:
             self.calls: list[str] = []
 
-        async def get(self, url, timeout=None):
+        async def get(self, url, timeout=None, **_kwargs):
             self.calls.append(url)
             await asyncio.sleep(0.001)
             raise RuntimeError("control failed")
