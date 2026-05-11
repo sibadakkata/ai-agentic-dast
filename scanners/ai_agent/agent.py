@@ -2263,13 +2263,17 @@ async def run_scan(
                                 "request": {"fields": data["fields_count"], "mode": data["mode"]},
                                 "response": {},
                             })
-                    fuzz_results, ep_llm_findings = await fuzz_body(
-                        http_client, br.method, br.url, br.request_body,
-                        headers=br.request_headers, on_progress=_fuzz_progress,
-                        llm_router=router, llm_model=model,
-                    )
-                    all_fuzz_results.extend(fuzz_results)
-                    all_llm_findings.extend(ep_llm_findings)
+                    try:
+                        fuzz_results, ep_llm_findings = await fuzz_body(
+                            http_client, br.method, br.url, br.request_body,
+                            headers=br.request_headers, on_progress=_fuzz_progress,
+                            llm_router=router, llm_model=model,
+                        )
+                        all_fuzz_results.extend(fuzz_results)
+                        all_llm_findings.extend(ep_llm_findings)
+                    except Exception as fuzz_err:
+                        logger.warning("Body fuzzing failed for %s %s: %s", br.method, br.url, fuzz_err)
+                        print(f"  [BODY-FUZZ] Skipping {br.method} {br.url}: {fuzz_err}")
                 body_fuzz_context = fmt_fuzz(all_fuzz_results, all_llm_findings)
                 anomalies = sum(1 for r in all_fuzz_results if r.anomaly)
                 llm_issues = len(all_llm_findings)
