@@ -1993,8 +1993,8 @@ async def _run_scan_task(scan_id, target_url, username, password, model, scan_mo
         _cost = sum(c.get("cost_usd", 0) for c in cost_summary) if isinstance(cost_summary, list) else None
         phases_done = len(scan.get("live_phases", []))
         SCANS[scan_id].update({
-            "status": "cancelled",
-            "error": f"Scan stopped by user after {phases_done} phase(s). {len(partial_findings)} finding(s) preserved.",
+            "status": "completed",
+            "error": f"Scan stopped early by user after {phases_done} phase(s). {len(partial_findings)} finding(s) preserved.",
             "duration": round(duration, 1),
             "cost": _cost,
             "total_tokens": _tok,
@@ -2002,7 +2002,7 @@ async def _run_scan_task(scan_id, target_url, username, password, model, scan_mo
             "findings_count": len(partial_findings),
             "result_file": os.path.basename(filepath) if filepath else None,
             "phases_completed": phases_done,
-            "progress": SCANS[scan_id]["progress"] + ["Scan cancelled by user."],
+            "progress": SCANS[scan_id]["progress"] + ["Scan stopped early — results saved and triaged."],
         })
         SCANS[scan_id].pop("auth_challenge", None)
         SCANS[scan_id].pop("interactive_browser", None)
@@ -2184,7 +2184,7 @@ async def stop_scan(scan_id: str):
         pause.clear()
     s["status"] = "stopping"
     s["_stop_requested_at"] = time.time()
-    s["progress"] = s.get("progress", []) + ["Stop requested by user — cancelling..."]
+    s["progress"] = s.get("progress", []) + ["Stop requested by user — finishing up and saving results..."]
     _save_scan(scan_id)
     _schedule_force_cancel(scan_id)
     return {"scan_id": scan_id, "status": "stopping", "message": "Scan will stop within a few seconds."}
