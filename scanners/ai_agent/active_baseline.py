@@ -619,6 +619,7 @@ async def run_reflected_xss_probe(
     http_client,
     hosts: Iterable[str],
     *,
+    crawled_urls: Iterable[str] | None = None,
     on_finding: callable | None = None,
     on_progress: callable | None = None,
     cancel_flag=None,
@@ -626,9 +627,14 @@ async def run_reflected_xss_probe(
     """Probe each host for reflected XSS using dynamic parameter discovery.
 
     For every in-scope host:
-      1. Fetch the root page and discover all query params in the HTML.
-      2. For each param, inject a canary and classify the reflection context.
-      3. Send context-appropriate payloads and confirm verbatim reflection.
+      1. Fetch the root page AND any crawled_urls for that host.
+      2. Discover all query params from all fetched pages.
+      3. For each param, inject a canary and classify the reflection context.
+      4. Send context-appropriate payloads and confirm verbatim reflection.
+
+    The crawled_urls parameter accepts URLs discovered by the SPA crawler
+    or any other source — their query params and page content are merged
+    into the discovery pool for the matching host.
     """
     findings: list[dict] = []
     _emit = on_finding or (lambda f: None)
@@ -637,6 +643,17 @@ async def run_reflected_xss_probe(
     targets = _normalize_hosts(hosts)
     if not targets:
         return findings
+
+    # Group crawled URLs by host for efficient lookup.
+    from urllib.parse import urlparse as _urlparse, parse_qs as _parse_qs
+    _crawled_by_host: dict[str, list[str]] = {}
+    for curl in (crawled_urls or []):
+        try:
+            h = (_urlparse(curl).hostname or "").lower()
+            if h:
+                _crawled_by_host.setdefault(h, []).append(curl)
+        except Exception:
+            continue
 
     _progress("active_baseline_start", {
         "probe": "reflected_xss", "hosts": len(targets),
@@ -650,17 +667,38 @@ async def run_reflected_xss_probe(
             break
         base_url = f"https://{host}"
 
-        # ── Step 1: Fetch page and discover parameters ────────────
+        # ── Step 1: Fetch root page + crawled pages, discover params ──
+        discovered: set[str] = set()
+
+        # Root page
         try:
             page_resp = await http_client.get(
                 base_url, timeout=10.0, follow_redirects=True,
                 headers=_PROBE_HEADERS,
             )
             page_html = page_resp.text[:500_000]
+            discovered.update(_discover_params_from_html(page_html, base_url))
         except Exception:
-            page_html = ""
+            pass
 
-        discovered = _discover_params_from_html(page_html, base_url)
+        # Crawled pages for this host (from SPA crawler, Burp import, etc.)
+        for curl in _crawled_by_host.get(host, [])[:20]:
+            try:
+                # Extract params directly from the crawled URL itself
+                parsed = _urlparse(curl)
+                for k in _parse_qs(parsed.query or ""):
+                    discovered.add(k.lower())
+                # Also fetch the page and parse its HTML for more params
+                cresp = await http_client.get(
+                    curl, timeout=8.0, follow_redirects=True,
+                    headers=_PROBE_HEADERS,
+                )
+                discovered.update(
+                    _discover_params_from_html(cresp.text[:300_000], curl)
+                )
+            except Exception:
+                continue
+
         if not discovered:
             discovered = set(_FALLBACK_PARAMS)
 
@@ -856,6 +894,7 @@ async def run_ssrf_probe(
     http_client,
     hosts: Iterable[str],
     *,
+    crawled_urls: Iterable[str] | None = None,
     on_finding: callable | None = None,
     on_progress: callable | None = None,
     cancel_flag=None,
@@ -869,6 +908,16 @@ async def run_ssrf_probe(
     if not targets:
         return findings
 
+    from urllib.parse import urlparse as _urlparse, parse_qs as _parse_qs
+    _crawled_by_host: dict[str, list[str]] = {}
+    for curl in (crawled_urls or []):
+        try:
+            h = (_urlparse(curl).hostname or "").lower()
+            if h:
+                _crawled_by_host.setdefault(h, []).append(curl)
+        except Exception:
+            continue
+
     _progress("active_baseline_start", {
         "probe": "ssrf_bypass", "hosts": len(targets),
     })
@@ -878,17 +927,31 @@ async def run_ssrf_probe(
             break
         base_url = f"https://{host}"
 
-        # Discover URL-accepting params from the page
+        # Discover URL-accepting params from root + crawled pages
+        combined_html = ""
         try:
             page_resp = await http_client.get(
                 base_url, timeout=10.0, follow_redirects=True,
                 headers=_PROBE_HEADERS,
             )
-            page_html = page_resp.text[:500_000]
+            combined_html = page_resp.text[:500_000]
         except Exception:
-            page_html = ""
+            pass
 
-        ssrf_params = _discover_ssrf_params(page_html)
+        for curl in _crawled_by_host.get(host, [])[:20]:
+            try:
+                parsed = _urlparse(curl)
+                for k in _parse_qs(parsed.query or ""):
+                    combined_html += f' href="?{k}=https://x"'
+                cresp = await http_client.get(
+                    curl, timeout=8.0, follow_redirects=True,
+                    headers=_PROBE_HEADERS,
+                )
+                combined_html += cresp.text[:300_000]
+            except Exception:
+                continue
+
+        ssrf_params = _discover_ssrf_params(combined_html)
         _progress("active_baseline_step", {
             "host": host, "step": "ssrf_params_discovered",
             "count": len(ssrf_params), "params": ssrf_params[:20],

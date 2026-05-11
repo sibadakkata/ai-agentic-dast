@@ -2393,6 +2393,7 @@ async def run_scan(
                     xss_findings = await run_reflected_xss_probe(
                         http_client,
                         sorted(ab_hosts),
+                        crawled_urls=metrics.get("pages_list") or [],
                         on_finding=lambda f: _cb("finding", {**f, "phase": "Active Baseline (Reflected XSS)"}),
                         on_progress=_ab_progress,
                         cancel_flag=cancel_flag,
@@ -2409,6 +2410,7 @@ async def run_scan(
                     ssrf_findings = await run_ssrf_probe(
                         http_client,
                         sorted(ab_hosts),
+                        crawled_urls=metrics.get("pages_list") or [],
                         on_finding=lambda f: _cb("finding", {**f, "phase": "Active Baseline (SSRF Bypass)"}),
                         on_progress=_ab_progress,
                         cancel_flag=cancel_flag,

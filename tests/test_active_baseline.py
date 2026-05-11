@@ -546,6 +546,23 @@ def test_xss_js_context_no_finding_when_safely_escaped():
     assert findings == [], "safely-escaped JS context must not produce finding"
 
 
+def test_xss_crawled_urls_feeds_discovery():
+    """When crawled_urls includes a page with ?style=, the probe discovers
+    and tests that param even if the root page doesn't link to it."""
+    client = _JSContextXSSClient(vulnerable=True)
+    findings = _run_async(run_reflected_xss_probe(
+        client,
+        ["maptiles.example.invalid"],
+        crawled_urls=["https://maptiles.example.invalid/maps?style=default&key=abc"],
+    ))
+    assert len(findings) >= 1, "crawled_urls should feed params into discovery"
+    js_findings = [
+        f for f in findings
+        if f.get("_xss_context") in ("event_handler_attr", "script_block", "javascript_uri")
+    ]
+    assert len(js_findings) >= 1
+
+
 # ═══════════════════════════════════════════════════════════════════════
 # Tests for run_ssrf_probe (dynamic discovery)
 # ═══════════════════════════════════════════════════════════════════════
