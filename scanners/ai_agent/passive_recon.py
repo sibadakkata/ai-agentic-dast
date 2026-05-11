@@ -22,6 +22,9 @@ Runs before the LLM scan phases. Checks for:
       the landing-page DOM, robots.txt, and sitemap.xml
     — uses sslyze (if installed) for authoritative cipher enumeration,
       falling back to native OpenSSL per-cipher probes
+  - Subdomain takeover detection (46-provider fingerprint DB + CNAME
+    chain resolution + Certificate Transparency + DNS wordlist enum)
+  - Email/DNS security (SPF/DKIM/DMARC/MX validation)
   - Vulnerable JavaScript library detection (OSV.dev + NVD enrichment)
 """
 from __future__ import annotations

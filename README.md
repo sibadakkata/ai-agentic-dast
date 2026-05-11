@@ -13,7 +13,7 @@ A single LLM agent drives a real Chromium browser and HTTP client through the OW
 │  ┌─────────────┐   ┌──────────────┐   ┌────────────────────────────┐ │
 │  │    Auth      │──▶│   Passive    │──▶│     LLM Deep Scan          │ │
 │  │  (auto-     │   │   Recon      │   │  (25 web + 15 API phases)  │ │
-│  │  detect +   │   │ (26 checks + │   │  + enriched retry prompts  │ │
+│  │  detect +   │   │ (29 checks + │   │  + enriched retry prompts  │ │
 │  │  multi-id)  │   │  secrets)    │   │                            │ │
 │  └─────────────┘   └──────────────┘   └─────────────┬──────────────┘ │
 │                                                      │                │
@@ -49,7 +49,7 @@ This loop runs up to 25 steps per phase. Every finding is then **triaged offline
 
 | Feature | Description | Details |
 |---------|-------------|---------|
-| **Passive Reconnaissance** | 26 deterministic checks: source maps, DOM sinks, **hardcoded secret scanner** (17 TruffleHog-style patterns: AWS keys, Stripe, GitHub PATs, Slack, SendGrid, Google, JWT, master/service tokens, JSON key sweep — with masked evidence), headers, CSP analysis, CORS, JWT, cookies, telemetry leakage, mixed content, clickjacking, **TLS protocol/cipher audit** (deprecated TLS 1.0/1.1, Sweet32/3DES, RC4, EXPORT, NULL, anonymous DH — via `sslyze` fallback), **hybrid vulnerable JS library detection** (49-library regex catalog + heuristic CDN-path / filename / banner / package-meta extractors + global JS URL registry that aggregates URLs across auth, SPA crawl, and network listeners + live NVD/OSV.dev CVE enrichment), and more. Post-auth passive pass also scans authenticated DOM HTML for secrets | Runs before LLM phases, $0 cost |
+| **Passive Reconnaissance** | 29 deterministic checks: source maps, DOM sinks, **hardcoded secret scanner** (17 TruffleHog-style patterns: AWS keys, Stripe, GitHub PATs, Slack, SendGrid, Google, JWT, master/service tokens, JSON key sweep — with masked evidence), headers, CSP analysis, CORS, JWT, cookies, telemetry leakage, mixed content, clickjacking, **TLS protocol/cipher audit** (deprecated TLS 1.0/1.1, Sweet32/3DES, RC4, EXPORT, NULL, anonymous DH — via `sslyze` fallback), **hybrid vulnerable JS library detection** (49-library regex catalog + heuristic CDN-path / filename / banner / package-meta extractors + global JS URL registry that aggregates URLs across auth, SPA crawl, and network listeners + live NVD/OSV.dev CVE enrichment), **subdomain takeover detection** (46-provider fingerprint DB, DNS CNAME chain resolution, Certificate Transparency enumeration, HTTP response fingerprinting — covers AWS S3, GitHub Pages, Heroku, Azure, Netlify, Vercel, Shopify, Fastly, and 38 more), **email/DNS security** (SPF/DKIM/DMARC/MX validation — detects missing or misconfigured email authentication), and more. Post-auth passive pass also scans authenticated DOM HTML for secrets | Runs before LLM phases, $0 cost |
 | **Active Scanning** | 25 web phases + 15 API phases: full OWASP Top 10 + context-aware checks (path traversal, XXE, race conditions, file upload, host header, session mgmt, HTTP smuggling) | [Web Scanning](docs/web-scanning.md) · [API Scanning](docs/api-scanning.md) |
 | **Crawl-Only Profile** | Acunetix-style crawl-only scan mode: discovers URLs, SPA routes, forms, APIs, and in-scope sub-domains **without** sending attack payloads. Still runs passive recon (TLS, headers, JS CVEs) and API baseline; **body fuzzing is now correctly skipped** (was previously leaking through). Use to verify coverage before a full scan | Dashboard "Scan Profile" dropdown, `scan_profile: "crawl_only"` via API |
 | **SPA Sibling-Host Coverage** | Passively harvests in-scope HTTPS sub-domains from browser XHR/fetch/navigation traffic and `robots.txt`/`sitemap.xml`. After every phase, newly discovered hosts get a **passive re-audit** (TLS + security headers — Stage A). At the start of each OWASP phase, new hosts are **surfaced to the LLM** with directives to apply that phase's methodology against them (Stage B) | Works for React/Angular/Vue SPAs where sibling hosts only appear post-auth via network traffic |
@@ -76,6 +76,9 @@ This loop runs up to 25 steps per phase. Every finding is then **triaged offline
 | **LLM Transient-Error Retry** | `LLMRouter.complete` retries up to 3× with 2 / 4 / 8 s exponential back-off on transient signatures: connection failures (`All connection attempts failed`), 502 / 503 / 504, read timeouts, throttling. Terminal errors (`ContextWindowExceeded`, `ContentFiltered`, `MalformedMessages`) bubble immediately so a single bad message doesn't burn 4× cost | `LLMRouter.complete` in `llm_config.py` |
 | **Partial-DB Cache Fallback** | The DB sometimes wrote a partial-checkpoint payload (`metadata.partial=True`) for a scan that later finished cleanly to disk, then served the stale partial blob to the API. The reader now prefers a complete on-disk result over a partial DB record and back-fills the DB on read so subsequent loads serve the full payload | `_load_raw_result_dict` in `web/app.py` |
 | **Body-Fuzz Return-Shape Hardening** | `fuzz_body` early-exit paths (unparseable body, baseline failure) used to return a bare `[]` while the caller did `a, b = await fuzz_body(...)`, crashing phase 4 with `not enough values to unpack (expected 2, got 0)`. Now both early exits return `([], [])`; return type annotation corrected; 23-test scenario suite (`tests/test_scan_error_resilience.py`) audits every tuple-unpack contract in the scanner | `body_fuzzer.py`, `tests/test_body_fuzzer_return_shape.py`, `tests/test_scan_error_resilience.py` |
+| **Subdomain Takeover Detection** | Detects dangling DNS records pointing to unclaimed third-party services. 46-provider fingerprint database covering AWS S3, CloudFront, Elastic Beanstalk, GitHub Pages, Heroku, Azure (Web Apps, Blob, Traffic Manager), Netlify, Shopify, Fastly, Vercel, Google Cloud Storage, Wix, Webflow, Render, Fly.io, and 30 more. Detection via: (1) DNS CNAME chain resolution with `dnspython`, (2) NXDOMAIN detection for abandoned service instances, (3) HTTP response fingerprint matching against known takeover strings, (4) Subdomain enumeration via Certificate Transparency (crt.sh) + 75-prefix DNS wordlist. Concurrent checking with configurable semaphore | `subdomain_takeover.py`, `subdomain_enum.py`, integrated in passive recon step 26 |
+| **Email/DNS Security** | Validates email authentication configuration for the target domain: SPF record presence and enforcement level (+all/~all/-all, lookup count, multiple records), DMARC policy analysis (none/quarantine/reject, subdomain policy, pct, reporting URIs), DKIM selector probing (22 common selectors including google, selector1/2, mandrill, amazonses, sendgrid), MX record security (null MX, IP-based MX). Only flags findings when the domain actually handles email (MX-aware). Generates actionable remediation guidance per finding | `dns_security.py`, integrated in passive recon step 27 |
+| **Active Baseline (Bug Bounty PoC Shape)** | Time-based blind SQLi probes use bug-bounty-researcher request patterns (`?payload?ninjeee=sectest` double-? shape) with realistic browser User-Agent headers to bypass WAF/bot-detection layers that block scanner-like traffic. Does NOT follow redirects so delay signals are measured at the vulnerable origin | `active_baseline.py`, `_PROBE_HEADERS` |
 
 ## Quick Start
 
@@ -115,14 +118,17 @@ uvicorn web.app:app --host 0.0.0.0 --port 8080
 │     Auto-detect auth type → login → capture session → auto-refresh  │
 │     Multi-identity: also authenticate User B, Admin, Tenant B       │
 ├─────────────────────────────────────────────────────────────────────┤
-│  2. PASSIVE RECONNAISSANCE ($0) — 26 checks + hardcoded secrets     │
+│  2. PASSIVE RECONNAISSANCE ($0) — 29 checks + hardcoded secrets     │
 │     Source maps, sinks, headers, CSP, CORS, JWT, cookies,           │
 │     TLS audit (sslyze), HYBRID vulnerable JS libraries (49-lib      │
 │     catalog + heuristic CDN/filename/banner extractors + global     │
 │     JS URL registry across auth/SPA/network — NVD/OSV.dev CVE),     │
 │     hardcoded secret scanner (17 TruffleHog-style regex patterns    │
 │     in JS bundles + authenticated HTML — AWS, Stripe, GitHub PATs,  │
-│     Slack, Google, SendGrid, JWT, master/service tokens)            │
+│     Slack, Google, SendGrid, JWT, master/service tokens),           │
+│     SUBDOMAIN TAKEOVER (46-provider CNAME fingerprints + CT enum    │
+│     + DNS wordlist + HTTP response matching),                        │
+│     EMAIL/DNS SECURITY (SPF/DKIM/DMARC/MX validation)               │
 │     Runs on seed host AND passively-discovered in-scope sub-domains │
 ├─────────────────────────────────────────────────────────────────────┤
 │  3. API BASELINE (if Postman/OpenAPI imported)                      │
@@ -176,7 +182,7 @@ uvicorn web.app:app --host 0.0.0.0 --port 8080
 │   ├── system-prompt-guide.md   #   ★ How the LLM system prompt & phases work
 │   ├── scanner-internals.md     #   ★ E2E scan flow, evidence, retries, context mgmt
 │   ├── contributing.md          #   ★ How to add phases, tools, optimize detection
-│   ├── security-checks.md       #   Complete reference: all 65 check categories
+│   ├── security-checks.md       #   Complete reference: all 69 check categories
 │   ├── triage-engine.md         #   Triage engine deep dive
 │   ├── api-scanning.md          #   How API scanning works (walkthrough)
 │   ├── web-scanning.md          #   How website scanning works
@@ -190,10 +196,14 @@ uvicorn web.app:app --host 0.0.0.0 --port 8080
 │   ├── auth.py                  #   Authentication (form/SSO/OAuth) + multi-identity (User B/Admin/Tenant B)
 │   ├── severity.py              #   Deterministic CVSS v3.1 severity classifier (XBOW-style)
 │   ├── passive_recon.py         #   Deterministic passive checks + hardcoded secret scanner + hybrid JS lib detection
+│   ├── subdomain_takeover.py    #   Subdomain takeover detection (46-provider fingerprint DB + CNAME + HTTP matching)
+│   ├── subdomain_enum.py        #   Subdomain enumeration (Certificate Transparency + DNS wordlist)
+│   ├── dns_security.py          #   Email/DNS security checks (SPF/DKIM/DMARC/MX validation)
 │   ├── js_registry.py           #   Global JS URL registry (auth + SPA + network listeners → unified set for CVE audit)
 │   ├── llm_config.py            #   LLM routing & cost tracking
 │   ├── prompts.py               #   System + phase prompts (multi-identity placeholders)
 │   ├── tools.py                 #   30 tools (browser, API, WebSocket, chaining)
+│   ├── active_baseline.py       #   Deterministic bare-root SQLi probe (time-based blind, PoC-shaped)
 │   ├── api_import.py            #   Postman/OpenAPI parsers
 │   ├── baseline_executor.py     #   API baseline & variable chaining
 │   └── body_fuzzer.py           #   Hybrid body fuzzer
@@ -245,7 +255,7 @@ python scripts/run_regression_ec2.py --pytest # same, plus pytest tests/
 | [System Prompt Guide](docs/system-prompt-guide.md) | **How the LLM is instructed** — system prompt structure, phase prompts, payload methodology, finding format |
 | [Scanner Internals](docs/scanner-internals.md) | **E2E scan flow** — tool execution, evidence buffer, evidence summary, context trimming, finding extraction |
 | [Contributing & Extending](docs/contributing.md) | **How to add new phases, tools, and optimize detection** — step-by-step guide for team members |
-| [Security Checks](docs/security-checks.md) | Complete reference of all 65 check categories — passive recon, web phases, API phases, CWE/OWASP coverage |
+| [Security Checks](docs/security-checks.md) | Complete reference of all 69 check categories — passive recon (inc. subdomain takeover, DNS security), web phases, API phases, CWE/OWASP coverage |
 | [Triage Engine](docs/triage-engine.md) | How TP/FP classification works, confidence scoring, CVSS adjustment |
 | [API Scanning](docs/api-scanning.md) | Step-by-step walkthrough with banking API example |
 | [Web Scanning](docs/web-scanning.md) | Browser-based scanning, SPA handling, 25 OWASP + context-aware phases |
