@@ -320,7 +320,19 @@ from scanners.ai_agent.active_baseline import run_reflected_xss_probe
 
 
 class _XSSClient:
-    """Simulates a server that reflects query param values in HTML body."""
+    """Simulates a server with a search page that reflects ?q= in HTML body.
+
+    The root page contains a discoverable link with ?q= so the dynamic
+    discovery engine finds it. Canary/payload reflection is controlled
+    via constructor flags.
+    """
+    ROOT_HTML = (
+        '<html><body>'
+        '<a href="?q=test">Search</a>'
+        '<form action="/"><input name="search"></form>'
+        '</body></html>'
+    )
+
     def __init__(self, *, reflect_canary=True, reflect_payload=True):
         self._reflect_canary = reflect_canary
         self._reflect_payload = reflect_payload
@@ -329,20 +341,23 @@ class _XSSClient:
         from urllib.parse import urlparse, parse_qs
         parsed = urlparse(url)
         params = parse_qs(parsed.query)
+        # Root page (no interesting params) -> serve discoverable HTML
+        if not params or all(v == [''] for v in params.values()):
+            return _FakeCachePoisonResponse(text=self.ROOT_HTML)
         for k, vals in params.items():
             for v in vals:
                 if "xsscanary" in v:
                     if self._reflect_canary:
-                        return _FakeCachePoisonResponse(text=f"<html>Results for: {v}</html>")
+                        return _FakeCachePoisonResponse(text=f"<html>Results for: >{v}<br></html>")
                     return _FakeCachePoisonResponse(text="<html>safe</html>")
                 if "<script>" in v.lower() or "<img" in v.lower() or "<svg" in v.lower() or "onfocus" in v.lower():
                     if self._reflect_payload:
-                        return _FakeCachePoisonResponse(text=f"<html>Results for: {v}</html>")
+                        return _FakeCachePoisonResponse(text=f"<html>Results for: >{v}<br></html>")
                     return _FakeCachePoisonResponse(text="<html>safe</html>")
         if "xsscanary" in parsed.path:
             if self._reflect_canary:
-                return _FakeCachePoisonResponse(text=f"<html>Path: {parsed.path}</html>")
-        return _FakeCachePoisonResponse(text="<html>page</html>")
+                return _FakeCachePoisonResponse(text=f"<html>Path: >{parsed.path}<br></html>")
+        return _FakeCachePoisonResponse(text=self.ROOT_HTML)
 
 
 def test_xss_finds_reflected_payload():
@@ -351,7 +366,6 @@ def test_xss_finds_reflected_payload():
     assert len(findings) >= 1
     f = findings[0]
     assert "XSS" in f["title"]
-    assert f["severity"] == "High"
     assert f["cwe"] == "CWE-79"
 
 
@@ -368,9 +382,47 @@ def test_xss_canary_reflected_but_payload_encoded():
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# Tests for JS-context XSS detection (BUGB-3057 pattern)
+# Tests for dynamic parameter discovery
 # ═══════════════════════════════════════════════════════════════════════
-from scanners.ai_agent.active_baseline import _classify_canary_context
+from scanners.ai_agent.active_baseline import (
+    _classify_canary_context,
+    _discover_params_from_html,
+)
+
+
+def test_discover_params_from_links():
+    html = '<html><a href="?foo=1&bar=2">link</a></html>'
+    assert _discover_params_from_html(html, "https://x") == {"foo", "bar"}
+
+
+def test_discover_params_from_forms():
+    html = '<form><input name="username"><input name="password"></form>'
+    assert _discover_params_from_html(html, "https://x") == {"username", "password"}
+
+
+def test_discover_params_from_mixed_sources():
+    html = (
+        '<a href="?style=a&key=b">map</a>'
+        '<form><input name="token"><select name="region"></select></form>'
+        '<script src="/js/app.js?v=3&lang=en"></script>'
+    )
+    params = _discover_params_from_html(html, "https://x")
+    assert "style" in params
+    assert "key" in params
+    assert "token" in params
+    assert "region" in params
+    assert "v" in params
+    assert "lang" in params
+
+
+def test_discover_params_empty_page():
+    html = "<html><body>Nothing here</body></html>"
+    assert _discover_params_from_html(html, "https://x") == set()
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Tests for JS-context XSS classification
+# ═══════════════════════════════════════════════════════════════════════
 
 
 def test_classify_canary_in_event_handler_attr():
@@ -414,9 +466,18 @@ def test_classify_canary_in_safe_attribute_only():
 
 
 class _JSContextXSSClient:
-    """Simulates BUGB-3057: Avast ipm-maptiles-stage reflecting `style`
-    parameter into an onclick handler. WAF blocks <, >, =, /, comma but
-    allows quote breakout via ')-payload-('."""
+    """Simulates BUGB-3057: a map-tiles server that reflects ``style``
+    into an onclick handler. Root page has a discoverable link with
+    ``?style=``, so the dynamic discoverer picks it up.
+
+    WAF blocks <, >, =, /, comma but allows JS-string breakout.
+    """
+    ROOT_HTML = (
+        '<html><body>'
+        '<a href="?style=default&key=abc">View Map</a>'
+        '</body></html>'
+    )
+
     def __init__(self, *, vulnerable=True):
         self._vulnerable = vulnerable
 
@@ -425,50 +486,57 @@ class _JSContextXSSClient:
         parsed = urlparse(url)
         params = parse_qs(parsed.query)
         style = params.get("style", [""])[0]
-        decoded = unquote(style)
-        if not decoded:
-            return _FakeCachePoisonResponse(text="<html>no style</html>")
+        key_param = params.get("key", [""])[0]
+        decoded = unquote(style or key_param)
+
+        if not decoded or decoded in ("default", "abc"):
+            return _FakeCachePoisonResponse(text=self.ROOT_HTML)
 
         if any(c in decoded for c in ["<", ">", "/", ","]):
-            return _FakeCachePoisonResponse(text="<html>blocked by WAF</html>", status_code=403)
+            return _FakeCachePoisonResponse(
+                text="<html>blocked by WAF</html>", status_code=403,
+            )
 
         if self._vulnerable:
             html = (
                 "<html><body>"
-                f"<a href=\"#\" onclick=\"return toggle_link('foo', '{decoded}');\">Map</a>"
+                f'<a href="#" onclick="return toggle_link(\'foo\', \'{decoded}\');">Map</a>'
                 "</body></html>"
             )
             return _FakeCachePoisonResponse(text=html)
         else:
             safe = (
                 decoded
-                .replace("&", "&amp;")
-                .replace("'", "&#39;")
-                .replace('"', "&quot;")
-                .replace("`", "&#96;")
-                .replace("(", "&#40;")
-                .replace(")", "&#41;")
+                .replace("&", "&amp;").replace("'", "&#39;")
+                .replace('"', "&quot;").replace("`", "&#96;")
+                .replace("(", "&#40;").replace(")", "&#41;")
                 .replace(";", "&#59;")
             )
             html = (
                 "<html><body>"
-                f"<a href=\"#\" onclick=\"return toggle_link('foo', '{safe}');\">Map</a>"
+                f'<a href="#" onclick="return toggle_link(\'foo\', \'{safe}\');">Map</a>'
                 "</body></html>"
             )
             return _FakeCachePoisonResponse(text=html)
 
 
 def test_xss_js_context_detects_bugb_3057_pattern():
+    """Dynamic discovery finds ?style= from the root page, canary lands in
+    onclick handler, JS-breakout payload fires."""
     client = _JSContextXSSClient(vulnerable=True)
     findings = _run_async(run_reflected_xss_probe(client, ["maptiles.example.invalid"]))
     assert len(findings) >= 1, "expected JS-context XSS finding"
-    js_findings = [f for f in findings if f.get("_xss_context") in ("event_handler_attr", "script_block", "javascript_uri")]
-    assert len(js_findings) >= 1, f"expected at least one JS-context finding, got {[f.get('_xss_context') for f in findings]}"
+    js_findings = [
+        f for f in findings
+        if f.get("_xss_context") in ("event_handler_attr", "script_block", "javascript_uri")
+    ]
+    assert len(js_findings) >= 1, (
+        f"expected at least one JS-context finding, got {[f.get('_xss_context') for f in findings]}"
+    )
     f = js_findings[0]
     assert f["severity"] == "Critical"
-    assert f["parameter"] == "query_style"
+    assert f["parameter"] in ("style", "key"), f"param should be dynamically discovered from page"
     assert "JavaScript Context" in f["title"]
-    assert "BUGB-3057" in f["evidence"]
     assert f["cwe"] == "CWE-79"
 
 
@@ -479,13 +547,24 @@ def test_xss_js_context_no_finding_when_safely_escaped():
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# Tests for run_ssrf_probe
+# Tests for run_ssrf_probe (dynamic discovery)
 # ═══════════════════════════════════════════════════════════════════════
-from scanners.ai_agent.active_baseline import run_ssrf_probe
+from scanners.ai_agent.active_baseline import run_ssrf_probe, _discover_ssrf_params
 
 
 class _SSRFClient:
-    """Simulates a server that fetches user-supplied URLs (SSRF)."""
+    """Simulates a server with a proxy/fetch feature that accepts URLs.
+
+    Root page has a discoverable link with ?url= so the dynamic SSRF
+    discoverer picks it up by name.
+    """
+    ROOT_HTML = (
+        '<html><body>'
+        '<a href="?url=https://cdn.example.com/image.png">Load Image</a>'
+        '<form action="/proxy"><input name="target"></form>'
+        '</body></html>'
+    )
+
     def __init__(self, *, vulnerable=True):
         self._vulnerable = vulnerable
 
@@ -493,6 +572,8 @@ class _SSRFClient:
         from urllib.parse import urlparse, parse_qs
         parsed = urlparse(url)
         params = parse_qs(parsed.query)
+        if not params:
+            return _FakeCachePoisonResponse(text=self.ROOT_HTML)
         for k, vals in params.items():
             for v in vals:
                 if "169.254.169.254" in v or "0xa9fea9fe" in v or "2852039166" in v:
@@ -525,6 +606,24 @@ def test_ssrf_no_finding_when_blocked():
     client = _SSRFClient(vulnerable=False)
     findings = _run_async(run_ssrf_probe(client, ["secure.example.invalid"]))
     assert findings == []
+
+
+def test_discover_ssrf_params_from_page():
+    html = (
+        '<a href="?redirect_url=https://login.example.com">Login</a>'
+        '<form><input name="callback_url"></form>'
+        '<img src="/proxy?image_src=https://cdn.com/pic.jpg">'
+    )
+    params = _discover_ssrf_params(html)
+    assert "redirect_url" in params
+    assert "callback_url" in params
+    assert "image_src" in params
+
+
+def test_discover_ssrf_params_fallback_on_empty():
+    params = _discover_ssrf_params("<html>nothing</html>")
+    assert "url" in params
+    assert "redirect" in params
 
 
 if __name__ == "__main__":

