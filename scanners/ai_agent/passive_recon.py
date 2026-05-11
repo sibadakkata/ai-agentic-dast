@@ -674,11 +674,80 @@ async def run_passive_recon(
         _cb(f)
     _progress("passive_step", {"step": "TLS audit", "found": len(tls_findings)})
 
-    # ── 26. Technology fingerprinting (context for LLM) ───────────────
+    # ── 26. Subdomain takeover detection ──────────────────────────────
+    try:
+        from .subdomain_takeover import check_subdomain_takeover, build_takeover_findings
+        from .subdomain_enum import enumerate_subdomains
+        # Gather subdomains from multiple sources:
+        # 1. Page DOM + robots/sitemap (already passive-harvested)
+        # 2. Certificate Transparency logs (crt.sh)
+        # 3. Common prefix DNS resolution
+        takeover_hosts_set: set[str] = set()
+        seed_host = (urlparse(target_url).hostname or "").lower()
+
+        try:
+            if page:
+                takeover_hosts_set |= await _harvest_hosts_from_page(page)
+            takeover_hosts_set |= await _harvest_hosts_from_robots_sitemap(http_client, target_url)
+        except Exception as e:
+            logger.debug("Passive host harvest for takeover failed: %s", e)
+
+        # Active subdomain enumeration (CT + DNS)
+        try:
+            enumerated = await enumerate_subdomains(
+                target_url, http_client,
+                progress_callback=lambda evt, data: _progress("passive_step", {"step": f"Subdomain enum: {evt}", **data}),
+            )
+            takeover_hosts_set.update(enumerated)
+        except Exception as e:
+            logger.debug("Subdomain enumeration failed: %s", e)
+
+        # Filter: remove seed, keep only in-scope
+        takeover_hosts_set.discard(seed_host)
+        takeover_hosts = [h for h in takeover_hosts_set if _host_in_scope(h, target_url, None)]
+
+        if takeover_hosts:
+            takeover_results = await check_subdomain_takeover(
+                takeover_hosts, http_client,
+                progress_callback=lambda evt, data: _progress("passive_step", {"step": f"Subdomain takeover: {evt}", **data}),
+            )
+            takeover_findings = build_takeover_findings(takeover_results)
+            for f in takeover_findings:
+                findings.append(f)
+                _cb(f)
+            _progress("passive_step", {"step": "Subdomain takeover", "checked": len(takeover_hosts), "found": len(takeover_findings)})
+        else:
+            _progress("passive_step", {"step": "Subdomain takeover", "checked": 0, "found": 0})
+    except Exception as e:
+        logger.debug("Subdomain takeover check failed: %s", e)
+        _progress("passive_step", {"step": "Subdomain takeover", "error": str(e)})
+
+    # ── 27. Email/DNS security (SPF/DKIM/DMARC) ────────────────────────
+    try:
+        from .dns_security import check_dns_security, build_dns_security_findings
+        target_domain = (urlparse(target_url).hostname or "").lower()
+        # Strip 'www.' to check the apex domain
+        if target_domain.startswith("www."):
+            target_domain = target_domain[4:]
+        if target_domain:
+            dns_results = await check_dns_security(
+                target_domain,
+                progress_callback=lambda evt, data: _progress("passive_step", {"step": f"DNS security: {evt}", **data}),
+            )
+            dns_findings = build_dns_security_findings(dns_results)
+            for f in dns_findings:
+                findings.append(f)
+                _cb(f)
+            _progress("passive_step", {"step": "Email/DNS security", "found": len(dns_findings)})
+    except Exception as e:
+        logger.debug("DNS security check failed: %s", e)
+        _progress("passive_step", {"step": "Email/DNS security", "error": str(e)})
+
+    # ── 28. Technology fingerprinting (context for LLM) ───────────────
     tech_fingerprint = await _fingerprint_technologies(page, http_client, target_url, js_urls)
     _progress("passive_step", {"step": "Tech fingerprint", "technologies": list(tech_fingerprint.get("technologies", {}).keys())})
 
-    # ── 27. Vulnerable JavaScript library detection (OSV.dev + NVD) ───
+    # ── 29. Vulnerable JavaScript library detection (OSV.dev + NVD) ───
     try:
         js_lib_findings = await _check_js_library_vulnerabilities(
             http_client, js_urls, page=page, target_url=target_url,
@@ -4466,6 +4535,25 @@ async def run_http_only_passive_recon(
             target_url=target_url, tech_fingerprint=tech_fingerprint,
         ),
     )
+
+    # Email/DNS security (SPF/DKIM/DMARC) — HTTP-only mode
+    try:
+        from .dns_security import check_dns_security, build_dns_security_findings
+        target_domain = (urlparse(target_url).hostname or "").lower()
+        if target_domain.startswith("www."):
+            target_domain = target_domain[4:]
+        if target_domain:
+            dns_results = await check_dns_security(
+                target_domain,
+                progress_callback=lambda evt, data: _progress("passive_step", {"step": f"DNS security: {evt}", **data}),
+            )
+            dns_findings = build_dns_security_findings(dns_results)
+            for f in dns_findings:
+                findings.append(f)
+                _cb(f)
+            _progress("passive_step", {"step": "Email/DNS security", "found": len(dns_findings)})
+    except Exception as e:
+        logger.debug("DNS security check (HTTP-only) failed: %s", e)
 
     _progress("passive_end", {"total_findings": len(findings), "mode": "http_only"})
     logger.info("HTTP-only passive recon complete: %d findings", len(findings))
