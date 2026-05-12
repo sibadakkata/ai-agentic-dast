@@ -2721,6 +2721,8 @@ async def _get_results_inner(scan_id: str):
             "verified": f.get("verified", False),
             "verification_method": triaged.get("verification_method", "none"),
             "verification_evidence": triaged.get("verification_evidence", ""),
+            "exploitation_tier": triaged.get("exploitation_tier", ""),
+            "triage_narrative": triaged.get("triage_narrative", {}),
         }
 
         key = f"{triaged.get('title', '')}||{triaged.get('url', '')}"

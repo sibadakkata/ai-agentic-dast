@@ -97,6 +97,8 @@ Returns `triaged_findings` (post-triage), `ai_findings` (raw AI output), `crawle
 - `reason`: Triage engine explanation with runtime evidence
 - `verified`: boolean, `verification_method`, `verification_evidence`
 - `cwe`, `cvss`, `cvss_vector`, `cve`
+- `exploitation_tier`: `validated` (exploitation proven) or `informational` (detected, not proven)
+- `triage_narrative`: structured object with `ai_tested` (what the AI did) and `triage_validated` (how triage engine verified)
 
 Each `ai_finding` (raw) now includes deterministic CVSS fields:
 - `severity`: CVSS-bucket severity (deterministic via `severity.py`)

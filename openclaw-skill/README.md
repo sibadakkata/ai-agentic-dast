@@ -1,6 +1,6 @@
 # AI Agentic Scanner - OpenClaw Skill
 
-An [OpenClaw](https://github.com/openclaw/openclaw) skill that lets you trigger and manage AI-powered DAST security scans through natural language chat. The scanner features deterministic CVSS v3.1 severity classification, multi-identity testing (User B/Admin/Tenant B), hardcoded secret scanning, and enriched retry prompts for injection and access control phases.
+An [OpenClaw](https://github.com/openclaw/openclaw) skill that lets you trigger and manage AI-powered DAST security scans through natural language chat. The scanner features deterministic CVSS v3.1 severity classification, multi-identity testing (User B/Admin/Tenant B), hardcoded secret scanning (with Shannon entropy validation), exploitation tiers (validated/informational), SPA catch-all false-positive detection, finding deduplication, enriched retry prompts, and step-by-step triage narratives showing what the AI tested vs how the triage engine validated each finding.
 
 ## Architecture
 
@@ -184,21 +184,23 @@ Output:
 ```
 RESULTS: https://www.avg.com/cs-cz/homepage#pc
 AI findings (raw)  : 48
-Triaged findings   : 48
-Severity breakdown : {"Critical": 13, "High": 14, "Medium": 8, "Low": 4, "Info": 9}
+Triaged findings   : 32 (after dedup)
+Severity breakdown : {"Critical": 5, "High": 10, "Medium": 8, "Low": 6, "Info": 3}
 
-True Positives   : 24
-False Positives  : 24
-Precision        : 50%
+True Positives   : 24  (Validated: 8, Informational: 16)
+False Positives  : 8   (SPA catch-all: 3, Fake secrets: 2, No evidence: 3)
+Precision        : 75%
 
 --- TRUE POSITIVES ---
 [Medium      ] Absence of Rate Limiting on Security-Critical Endpoints
                URL: https://api.example.com/v1/promo/validate
-               Reason: [RUNTIME VERIFIED] All 15 rapid requests accepted. No 429.
+               Tier: VALIDATED
+               Reason: [RUNTIME VERIFIED] All 50 rapid requests accepted. No 429.
 
 [Critical    ] Credential Brute Force Attack - No Account Lockout
                URL: https://login.example.com/sso/embedded/login
-               Reason: [RUNTIME VERIFIED] All 15 rapid requests accepted. No 429.
+               Tier: VALIDATED
+               Reason: [RUNTIME VERIFIED] All 50 rapid requests accepted. No 429.
 ...
 ```
 

@@ -5,12 +5,17 @@ Three-layer classification:
   Layer 2: Confidence scoring from HTTP evidence patterns
   Layer 3: NEEDS_VERIFICATION for unknowns -> human queue
 
+Exploitation tiers (post-classification):
+  VALIDATED     = Proven exploitable (runtime confirmed, reflection in body, etc.)
+  INFORMATIONAL = Detected/suspected but exploitation not proven
+
 No target-specific logic. No LLM calls. No hardcoded URLs.
 CVE data from NVD/OSV (via cve_lookup.py).
 CWE mappings for generic weakness categories.
 """
 
 import json
+import math
 import re
 import os
 import sys
@@ -114,6 +119,127 @@ CWE_PROFILES = {
     "method_override":  {"cwe": "CWE-650", "cvss": 6.5, "vec": "AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:H/A:N"},
     "attack_chain":     {"cwe": "CWE-20",  "cvss": 8.1, "vec": "AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:N"},
 }
+
+
+# ══════════════════════════════════════════════════════════════════════
+# SECRET VALIDATION: entropy + framework constant detection
+# ══════════════════════════════════════════════════════════════════════
+
+FRAMEWORK_CONSTANTS = frozenset([
+    "$$row_internal", "$$row_number", "$$row_id",
+    "__react_devtools", "__react_fiber", "__react_internal",
+    "__vue__", "__vue_app__", "__nuxt__",
+    "ng-version", "ng-app", "ng-controller",
+    "__next_data__", "__next_loaded_pages__",
+    "__webpack_require__", "__webpack_modules__",
+    "process.env.node_env", "process.env.public_url",
+    "__sentry_dsn__", "__sentry_release__",
+    "eclairng", "aura_token", "aura_context",
+])
+
+def _shannon_entropy(s: str) -> float:
+    """Calculate Shannon entropy of a string. High entropy = likely a real secret."""
+    if not s:
+        return 0.0
+    freq = {}
+    for c in s:
+        freq[c] = freq.get(c, 0) + 1
+    length = len(s)
+    return -sum((count / length) * math.log2(count / length) for count in freq.values())
+
+
+def _is_fake_secret(value: str) -> bool:
+    """Return True if value looks like a framework constant, not a real secret."""
+    v_lower = value.lower().strip().strip("\"'`")
+    if v_lower in FRAMEWORK_CONSTANTS:
+        return True
+    if any(v_lower.startswith(p) for p in ("$$", "__", "ng-", "react-")):
+        if _shannon_entropy(v_lower) < 3.0:
+            return True
+    if len(v_lower) < 8 and _shannon_entropy(v_lower) < 3.5:
+        return True
+    readable_words = ["internal", "external", "default", "public", "private",
+                      "master", "service", "config", "test", "demo", "example",
+                      "placeholder", "changeme", "password", "secret", "token"]
+    if any(w in v_lower for w in readable_words) and _shannon_entropy(v_lower) < 3.5:
+        return True
+    return False
+
+
+# ══════════════════════════════════════════════════════════════════════
+# EXPLOITATION TIER: classify proof level after triage verdict
+# ══════════════════════════════════════════════════════════════════════
+
+def _assign_exploitation_tier(result, finding):
+    """Add exploitation_tier field: 'validated' or 'informational'.
+
+    VALIDATED = exploitation proven (runtime confirmed, payload reflected,
+                specific error content, timing differential confirmed)
+    INFORMATIONAL = detected but not proven exploitable (pattern match,
+                    config check, missing header, no active exploitation)
+    """
+    if result.get("verdict") in ("FALSE_POSITIVE", "NOT_A_FINDING"):
+        result["exploitation_tier"] = "n/a"
+        return
+
+    tier = "informational"  # default
+
+    reason = (result.get("reason") or "").lower()
+    verification = (result.get("verification_method") or "").lower()
+
+    if "[runtime verified]" in reason or "runtime_confirmed" in verification:
+        tier = "validated"
+    elif "reflected" in reason and "payload" in reason:
+        tier = "validated"
+    elif any(kw in reason for kw in ["confirmed", "proven", "demonstrated"]):
+        if "deterministic" in verification or result.get("confidence", 0) >= 6:
+            tier = "validated"
+    elif result.get("verification_method") == "passive_deterministic":
+        vuln_type = (finding.get("title") or "").lower()
+        if any(k in vuln_type for k in ["subdomain takeover", "dangling", ".git/", ".env",
+                                         "rce", "sqli", "command injection"]):
+            tier = "validated"
+    elif any(kw in reason for kw in ["sql error", "root:x:", "uid=", "gid=",
+                                      "ami-id", "instance-id", "file:///",
+                                      "xss confirmed"]):
+        tier = "validated"
+
+    result["exploitation_tier"] = tier
+
+
+# ══════════════════════════════════════════════════════════════════════
+# DEDUPLICATION: merge findings by (host + CWE + parameter)
+# ══════════════════════════════════════════════════════════════════════
+
+def deduplicate(findings):
+    """Remove duplicate findings, keeping the highest-severity instance.
+
+    Dedup key: (target_host, cwe, parameter). If no CWE, falls back to
+    (target_host, title_normalized).
+    """
+    SEV_RANK = {"Critical": 0, "High": 1, "Medium": 2, "Low": 3, "Info": 4,
+                "Not Exploitable": 5, "TBD": 6}
+
+    seen = {}
+    for f in findings:
+        url = f.get("url", "") or ""
+        host = url.split("//")[-1].split("/")[0].split(":")[0].lower() if "//" in url else ""
+        cwe = f.get("cwe", "") or ""
+        param = (f.get("parameter", "") or "").lower().strip()
+        title_norm = re.sub(r"[^a-z0-9]", "", (f.get("title", "") or "").lower())[:40]
+
+        if cwe:
+            key = (host, cwe, param)
+        else:
+            key = (host, title_norm, param)
+
+        sev = f.get("final_severity", "Low")
+        rank = SEV_RANK.get(sev, 4)
+
+        if key not in seen or rank < SEV_RANK.get(seen[key].get("final_severity", "Low"), 4):
+            seen[key] = f
+
+    return list(seen.values())
 
 
 def _passive_recon_action(title: str) -> str:
@@ -660,8 +786,18 @@ def _compute_confidence(finding, tests, statuses, bodies, evidence):
             score += 3
 
     # HTTP 200 with large response (potential data leak)
+    # BUT penalize if this looks like a SPA catch-all (HTML response for non-HTML URL)
+    _spa_markers = ("<!doctype", "<html", "__react", "__vue__", "ng-version")
     if any(s == 200 for s in statuses) and not all_redirects:
-        score += 1
+        url_lower = str(finding.get("url", "")).lower()
+        is_file_probe = any(ext in url_lower for ext in (
+            ".git/", ".env", ".svn/", "wp-config", "web.config", ".bak",
+        ))
+        body_is_spa = any(any(m in b for m in _spa_markers) for b in bodies)
+        if is_file_probe and body_is_spa:
+            score -= 5  # SPA catch-all returning index.html for sensitive file path
+        else:
+            score += 1
 
     # HTTP 500 without specific error = weak signal
     if any(s == 500 for s in statuses):
@@ -794,6 +930,111 @@ def _resolve_inconclusive(finding, title, confidence, statuses, bodies,
 
 
 # ══════════════════════════════════════════════════════════════════════
+# TRIAGE NARRATIVE: step-by-step breakdown for end users
+# ══════════════════════════════════════════════════════════════════════
+
+def _build_triage_narrative(finding, result, tests, statuses, bodies):
+    """Build structured narrative separating AI scanner actions from triage validation.
+
+    Returns dict with two sections:
+      ai_tested  - what the AI agent did (payloads, requests, observations)
+      triage_validated - how the triage engine independently verified the claim
+    """
+    title = _safe_str(finding.get("title", ""))
+    url = _safe_str(finding.get("url", ""))
+    payload = _safe_str(finding.get("payload", ""))
+    ev_raw = finding.get("evidence", "") or ""
+    evidence_str = str(ev_raw)[:300] if not isinstance(ev_raw, (dict, list)) else json.dumps(ev_raw, default=str)[:300]
+    source = finding.get("source", "ai")
+    verdict = result.get("verdict", "")
+    tier = result.get("exploitation_tier", "informational")
+    verification_method = result.get("verification_method", "none")
+
+    # --- Section 1: What the AI Agent Tested ---
+    ai_steps = []
+
+    if source == "passive_recon" or finding.get("finding_type") == "passive_recon":
+        ai_steps.append(f"Passively analyzed JavaScript/HTML at: {url[:120]}")
+        if evidence_str:
+            ai_steps.append(f"Detected pattern: {evidence_str[:150]}")
+    else:
+        if url:
+            ai_steps.append(f"Targeted endpoint: {url[:120]}")
+        if payload:
+            ai_steps.append(f"Injected payload: {payload[:150]}")
+        elif evidence_str:
+            ai_steps.append(f"Observed: {evidence_str[:150]}")
+
+        if finding.get("request_response"):
+            rr = finding["request_response"]
+            num_reqs = len(rr) if isinstance(rr, list) else 1
+            ai_steps.append(f"Sent {num_reqs} HTTP request(s) and captured response(s)")
+
+        rv_method = finding.get("verification_method", "")
+        if rv_method and rv_method != "none":
+            ai_steps.append(f"Runtime verification attempted: {rv_method}")
+
+        rv_evidence = finding.get("verification_evidence", "")
+        if rv_evidence:
+            ai_steps.append(f"AI verification result: {str(rv_evidence)[:120]}")
+
+    ai_severity = _safe_str(finding.get("severity", "Info"))
+    ai_steps.append(f"AI classified as: {ai_severity}")
+
+    # --- Section 2: How Triage Engine Validated ---
+    triage_steps = []
+
+    if statuses:
+        status_summary = ", ".join(str(s) for s in sorted(set(statuses))[:5])
+        triage_steps.append(f"Checked HTTP response codes: [{status_summary}]")
+
+    if bodies:
+        body_lengths = [len(b) for b in bodies[:5]]
+        triage_steps.append(f"Analyzed {len(bodies)} response body/bodies ({min(body_lengths)}-{max(body_lengths)} bytes)")
+
+    reason = result.get("reason", "")
+    if "[RUNTIME VERIFIED]" in reason:
+        triage_steps.append("Runtime replay confirmed exploitation")
+    elif "[RUNTIME DISPROVED]" in reason:
+        triage_steps.append("Runtime replay failed to reproduce the issue")
+    elif "[PASSIVE RECON]" in reason:
+        triage_steps.append("Deterministic pattern match (no network replay needed)")
+    elif "SPA catch-all" in reason:
+        triage_steps.append("Detected SPA catch-all: response is HTML app shell, not actual file content")
+    elif "fake secret" in reason.lower() or "framework constant" in reason.lower():
+        triage_steps.append("Entropy analysis: value is a framework constant, not a real secret")
+    elif "reflected" in reason.lower() and "payload" in reason.lower():
+        triage_steps.append("Confirmed: injected payload reflected in response body")
+    elif "sql error" in reason.lower():
+        triage_steps.append("Confirmed: SQL error strings found in response body")
+    elif "no sql" in reason.lower() or "no internal" in reason.lower() or "not reflected" in reason.lower():
+        triage_steps.append("Searched response body for exploitation evidence - none found")
+
+    if result.get("cwe"):
+        triage_steps.append(f"Mapped to: {result['cwe']}")
+    if result.get("cvss") and result["cvss"] > 0:
+        triage_steps.append(f"CVSS scored: {result['cvss']:.1f}")
+
+    final_sev = result.get("final_severity", "Info")
+    if final_sev != ai_severity:
+        triage_steps.append(f"Severity adjusted: {ai_severity} -> {final_sev}")
+    else:
+        triage_steps.append(f"Severity confirmed: {final_sev}")
+
+    triage_steps.append(f"Verdict: {verdict.replace('_', ' ')}")
+    if tier and tier != "n/a":
+        triage_steps.append(f"Exploitation tier: {tier}")
+
+    if reason:
+        triage_steps.append(f"Reasoning: {reason[:200]}")
+
+    return {
+        "ai_tested": ai_steps,
+        "triage_validated": triage_steps,
+    }
+
+
+# ══════════════════════════════════════════════════════════════════════
 # LAYER 1 + 2 + 3: Main classify function
 # ══════════════════════════════════════════════════════════════════════
 
@@ -816,6 +1057,9 @@ def classify(finding, test_log, _index=None):
         if isinstance(conf, (int, float)):
             r["confidence_score"] = min(conf + 2, 10)
         r.setdefault("corroborated", True)
+
+    _assign_exploitation_tier(r, finding)
+    r["triage_narrative"] = _build_triage_narrative(finding, r, tests, statuses, bodies)
 
     return r
 
@@ -940,6 +1184,107 @@ def _classify_inner(finding, test_log, _index=None):
                 r.update(**inc_decision)
                 return r
             r["reason"] = f"[RUNTIME INCONCLUSIVE] {rv_evidence} — using pattern analysis as fallback."
+
+    # ==================================================================
+    # LAYER 0B: SPA CATCH-ALL DETECTOR
+    # SPAs (React, Angular, Vue) return index.html with 200 for ANY path.
+    # The AI sees "200 OK" for /.git/HEAD and claims the file is exposed,
+    # but the response is just the SPA shell. Detect and downgrade these.
+    # ==================================================================
+
+    _SENSITIVE_FILE_EXTENSIONS = (
+        ".git/", ".env", ".svn/", ".htaccess", ".htpasswd",
+        "wp-config", "web.config", "config.php", ".DS_Store",
+        ".bak", ".old", ".swp", ".sql", ".dump",
+    )
+    _SPA_MARKERS = (
+        "<!doctype", "<html", "<!DOCTYPE",
+        "__react", "__vue__", "ng-version", "ng-app",
+        "<div id=\"root\"", "<div id=\"app\"",
+        "<noscript>", "manifest.json",
+    )
+    is_sensitive_file_claim = (
+        any(ext in url for ext in _SENSITIVE_FILE_EXTENSIONS) or
+        ("sensitive file" in title and "accessible" in title)
+    )
+    if is_sensitive_file_claim and statuses:
+        has_200 = any(s == 200 for s in statuses)
+        body_is_html = any(
+            any(marker in b for marker in _SPA_MARKERS)
+            for b in bodies
+        )
+        # Real .git/HEAD contains "ref: refs/heads/" — never HTML
+        # Real .env contains KEY=VALUE lines — never HTML
+        body_has_real_content = any(
+            any(sig in b for sig in [
+                "ref: refs/heads/", "[core]", "[remote",  # .git
+                "db_password", "api_key=", "secret_key=", # .env
+                "<?php", "define(", "getenv(",            # wp-config
+                "<configuration>", "<appSettings>",       # web.config
+            ])
+            for b in bodies
+        )
+        all_404_or_403 = all(s in (404, 403, 410) for s in statuses) if statuses else False
+        if all_404_or_403:
+            r.update(
+                verdict="FALSE_POSITIVE",
+                final_severity="Not Exploitable",
+                cwe="",
+                reason=f"Sensitive file path returned HTTP {statuses[0]} — "
+                       "file is not accessible. The AI reported it based on "
+                       "the probe attempt, not actual file content.",
+                dev_action="No action required — the file is not exposed.",
+            )
+            return r
+        if has_200 and body_is_html and not body_has_real_content:
+            r.update(
+                verdict="FALSE_POSITIVE",
+                final_severity="Not Exploitable",
+                cwe="",
+                reason="SPA catch-all: server returns the app shell (index.html) "
+                       "for any URL path including sensitive file paths. "
+                       "HTTP 200 does not mean the file is accessible — "
+                       "the response body is HTML, not file content.",
+                dev_action="No action required — the file is not actually exposed.",
+            )
+            return r
+
+    # ==================================================================
+    # LAYER 0C: HARDCODED SECRET VALIDATION
+    # Filter out framework constants and low-entropy values the AI
+    # incorrectly flagged as hardcoded secrets/API keys.
+    # ==================================================================
+    is_secret_claim = any(k in title for k in [
+        "hardcoded", "api key", "secret in", "password in javascript",
+        "master secret", "service secret", "embedded credential",
+    ])
+    if is_secret_claim:
+        ev_str = str(ev_raw)
+        secret_patterns = re.findall(
+            r'["\']([^"\']{3,80})["\']', ev_str
+        )
+        evidence_value = ""
+        for pat in secret_patterns:
+            if any(k in pat.lower() for k in ["key", "secret", "token", "password", "api"]):
+                continue
+            if len(pat) >= 3:
+                evidence_value = pat
+                break
+        if not evidence_value and secret_patterns:
+            evidence_value = secret_patterns[0]
+
+        if evidence_value and _is_fake_secret(evidence_value):
+            r.update(
+                verdict="FALSE_POSITIVE",
+                final_severity="Not Exploitable",
+                cwe="",
+                reason=f"Flagged value '{evidence_value[:40]}' is a framework constant "
+                       f"or low-entropy string (Shannon entropy: "
+                       f"{_shannon_entropy(evidence_value):.1f}), not a real secret. "
+                       "Real API keys have high entropy (>4.0) and are 20+ random chars.",
+                dev_action="No action — this is not a credential.",
+            )
+            return r
 
     # ==================================================================
     # LAYER 1A: NOT A FINDING - positive observations

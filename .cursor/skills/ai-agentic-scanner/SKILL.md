@@ -26,7 +26,7 @@ description: Builds and runs an LLM-powered agentic web security scanner using L
 ├── scripts/
 │   ├── run_scan.py               # CLI entry point for scanning
 │   ├── report_generator.py       # PDF report generator (auto-discovers results)
-│   ├── triage_engine.py          # 3-layer universal triage engine
+│   ├── triage_engine.py          # 3-layer universal triage engine + exploitation tiers + entropy filter + dedup + narrative
 │   ├── cve_lookup.py             # NVD + OSV.dev dynamic CVE lookup
 │   └── check_scan_active.py      # Pre-deploy scan-active safety check
 ├── results/
@@ -58,7 +58,7 @@ Build all code first. Present the plan. Wait for explicit user approval before e
 | Pre-triage severity | **Deterministic CVSS v3.1** via `severity.py` — CWE profile matching + evidence-keyword adjustment | XBOW-style: reproducible severity independent of LLM mood; `llm_severity` preserved for comparison |
 | Secret scanning | **17 TruffleHog-style regex patterns** in `passive_recon.py` — runs on JS bundles + post-auth HTML | Catches hardcoded AWS keys, Stripe, GitHub PATs, Slack, Google, SendGrid, JWT tokens, master secrets |
 | Multi-identity | **3 extra identities** (User B, Admin, Tenant B) authenticated at scan start, injected into 8 auth-class phases | Enables cross-user, cross-role, cross-tenant testing (BOLA/BFLA/IDOR) without manual replay |
-| Triage | **Offline, evidence-based** — no LLM used for triage | Deterministic rules + confidence scoring, zero cost, reproducible |
+| Triage | **Offline, evidence-based** — no LLM used for triage | Deterministic rules + confidence scoring + exploitation tiers (validated/informational) + Shannon entropy secret filter + SPA catch-all detector + dedup by (host, CWE, param) + step-by-step narrative, zero cost, reproducible |
 | Cost tracking | **Per-call accumulation** via `litellm.completion_cost()` | Accurate token + dollar tracking per model |
 
 ## Scan Modes
@@ -150,7 +150,7 @@ AI Agentic Scanner Components:
 - [x] Step 4: prompts.py (system + scan prompts per OWASP category + multi-identity placeholders)
 - [x] Step 5: agent.py (agent loop with SPA detection + dynamic endpoint discovery + enriched retry prompts)
 - [x] Step 6: auth.py (SSO / OAuth / SAML / MFA / form / token auth + session monitor + multi-identity)
-- [x] Step 7: triage_engine.py (3-layer universal evidence-based triage)
+- [x] Step 7: triage_engine.py (3-layer universal evidence-based triage + exploitation tiers + entropy secret filter + SPA catch-all + dedup + narrative)
 - [x] Step 8: cve_lookup.py (NVD + OSV.dev dynamic CVE/CVSS)
 - [x] Step 9: report_generator.py (PDF with clickable summaries, curl evidence)
 - [x] Step 10: run_scan.py (CLI entry point)
@@ -644,6 +644,89 @@ imports/
 | WebSocket refused | Log and skip WS phase, continue HTTP testing |
 | SPA route detection stalls | Fall back to link-based crawl |
 | Any unhandled error | Partial results saved, error logged to `results/errors.log` |
+
+## MCP Server (External AI Assistant Integration)
+
+The scanner exposes all capabilities via an MCP (Model Context Protocol) server in `mcp_server.py`. This allows any MCP-compatible client (Cursor, Claude Desktop, Open Claw, custom agents) to operate the scanner.
+
+### 17 Available Tools
+
+| Tool | Purpose |
+|------|---------|
+| `health_check` | Verify scanner connectivity |
+| `start_scan` | Begin a new security scan |
+| `get_scan_status` | Poll current scan progress |
+| `wait_for_scan` | Block until scan completes |
+| `stop_scan` | Cancel a running scan |
+| `retry_scan` | Resume from last completed phase |
+| `rescan` | Create a fresh re-run |
+| `delete_scan` | Stop + permanently remove |
+| `list_scans` | List all scan history |
+| `get_scan_results` | Full results with findings (includes exploitation_tier, triage_narrative per finding) |
+| `get_findings_summary` | Human-readable summary with validated/informational breakdown |
+| `query_findings` | Search/filter across scans |
+| `get_scan_stats` | Aggregated statistics |
+| `get_live_activity` | Real-time progress for running scans |
+| `generate_report` | Create PDF report |
+| `download_payloads` | Export all tested payloads |
+| `upload_api_spec` | Upload Postman/OpenAPI for API scanning |
+| `list_models` | Available LLM models |
+
+### Setup for Cursor
+
+Add to `.cursor/mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "agentic-web-scanner": {
+      "command": "python",
+      "args": ["mcp_server.py"],
+      "env": {
+        "SCANNER_URL": "http://your-scanner:8080",
+        "SCANNER_USER": "dast-admin",
+        "SCANNER_PASS": "your-password"
+      }
+    }
+  }
+}
+```
+
+### Setup for Claude Desktop / Open Claw
+
+```json
+{
+  "mcpServers": {
+    "agentic-web-scanner": {
+      "command": "python",
+      "args": ["/path/to/mcp_server.py"],
+      "env": {
+        "SCANNER_URL": "http://your-scanner:8080",
+        "SCANNER_USER": "dast-admin",
+        "SCANNER_PASS": "your-password"
+      }
+    }
+  }
+}
+```
+
+### SSE Transport (for remote MCP clients)
+
+```bash
+SCANNER_URL=http://your-scanner:8080 SCANNER_PASS=secret python mcp_server.py --transport sse --port 3001
+```
+
+Then connect the client to `http://localhost:3001/sse`.
+
+### Error Handling
+
+All tools return structured JSON errors when:
+- Scanner is unreachable (`connection_failed`)
+- Credentials are wrong (`authentication_failed`)
+- Scan ID doesn't exist (`not_found`)
+- Request times out (`timeout`)
+
+Check for an `"error"` key in any response.
 
 ## Additional Resources
 
