@@ -1228,6 +1228,35 @@ async def _run_phase_worker(
             if ctx:
                 phase_prompt += "\n\n" + ctx
 
+        # Inject discovered URL parameters from registry into XSS/injection phases
+        if phase.id in ("web_a03_xss", "api_injection") and registry:
+            try:
+                param_urls = []
+                for ep in registry.get_all():
+                    qp = getattr(ep, "query_params", None) or {}
+                    url = getattr(ep, "url", "") or ""
+                    if qp:
+                        param_urls.append(f"  - {url} → params: {list(qp.keys())}")
+                    elif url:
+                        from urllib.parse import parse_qs as _pqs_w
+                        parsed = urlparse(url)
+                        if parsed.query:
+                            param_urls.append(
+                                f"  - {url} → params: {list(_pqs_w(parsed.query).keys())}"
+                            )
+                if param_urls:
+                    vuln_type = "XSS" if phase.id == "web_a03_xss" else "injection"
+                    phase_prompt += (
+                        "\n\n*** PRE-DISCOVERED PARAMETERS (from recon) ***\n"
+                        "The following URLs with query parameters were discovered during recon.\n"
+                        f"You MUST test each parameter for {vuln_type} vulnerabilities:\n"
+                        + "\n".join(param_urls[:30])
+                        + "\nTest EVERY parameter listed above. Do NOT skip any."
+                    )
+                    print(f"  [{phase.id}] Injected {len(param_urls)} pre-discovered param URLs into prompt")
+            except Exception:
+                pass
+
         messages: list[dict] = [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": phase_prompt},
@@ -2175,6 +2204,33 @@ async def run_scan(
             except Exception as e:
                 print(f"  [SPA] Failed (non-fatal): {e}")
                 logger.warning("SPA crawl failed: %s", e, exc_info=True)
+
+        # ── Extract <a href> URLs with query params from the live page ──
+        # The SPA crawl captures XHR/fetch traffic but misses regular HTML
+        # links. This programmatic extraction ensures URL parameters hidden
+        # in <a href> (e.g. ?key=, ?style=) are discovered regardless of
+        # whether the LLM clicks them during recon.
+        if page is not None:
+            try:
+                href_urls = await page.evaluate(
+                    "() => [...document.querySelectorAll('a[href]')]"
+                    ".map(a => a.href).filter(h => h.startsWith('http'))"
+                )
+                _href_added = 0
+                for href in (href_urls or []):
+                    if not _is_in_scope(href, allowed_domains):
+                        continue
+                    if href not in metrics["pages_list"]:
+                        metrics["pages_list"].append(href)
+                        metrics["pages_crawled"] += 1
+                        _cb("crawl", {"url": href, "type": "page",
+                                      "tool": "href_extract",
+                                      "count": metrics["pages_crawled"]})
+                        _href_added += 1
+                if _href_added:
+                    print(f"  [HREF] Extracted {_href_added} link URLs from page")
+            except Exception as e:
+                logger.debug("href extraction failed (non-fatal): %s", e)
 
         # ── Baseline Execution (happy path, no LLM) ──
         baseline_context = ""
@@ -3848,6 +3904,41 @@ async def run_scan(
         # ── Parallel Vuln-Testing Fan-Out ─────────────────────────────
         if run_in_parallel:
             _check_cancel()
+            # Inject crawled URLs with query params into registry so parallel
+            # workers (especially XSS) know about discovered parameters.
+            from urllib.parse import parse_qs as _pqs
+            _pages = metrics.get("pages_list", [])
+            _injected = 0
+            print(f"  [PARAM-INJECT] pages_list has {len(_pages)} URLs")
+            for page_url in _pages:
+                try:
+                    parsed = urlparse(page_url)
+                    if not (parsed.query and parsed.scheme in ("http", "https")):
+                        continue
+                    qp = {k: v[0] if v else ""
+                          for k, v in _pqs(parsed.query, keep_blank_values=True).items()}
+                    if not qp:
+                        continue
+                    from scanners.ai_agent.api_import import APIEndpoint
+                    registry.add([APIEndpoint(
+                        method="GET",
+                        url=page_url,
+                        path=parsed.path or "/",
+                        headers={},
+                        query_params=qp,
+                        body=None,
+                        body_type="none",
+                        auth_type="none",
+                        auth_value=None,
+                        tags=["crawled"],
+                        variables={},
+                        original_name=f"crawled:{parsed.path}",
+                    )])
+                    _injected += 1
+                except Exception:
+                    pass
+            if _injected:
+                print(f"  [PARAM-INJECT] Injected {_injected} URLs with query params into registry")
             print(f"  [PARALLEL] Launching {len(run_in_parallel)} vuln phases concurrently...")
             _cb("parallel_start", {
                 "phases": [p.id for p in run_in_parallel],

@@ -330,19 +330,32 @@ WEB_PHASES: list[ScanPhase] = [
         name="Cross-Site Scripting",
         prompt=(
             "Test for XSS systematically. Follow these steps:\n\n"
+            "STEP 0 — DISCOVER ALL PARAMETERS (DO THIS FIRST, BEFORE ANYTHING ELSE):\n"
+            "  - navigate() to the TARGET URL (the root page)\n"
+            "  - Call get_links() — this returns ALL <a> tags, buttons, and navigation on the page\n"
+            "  - For EACH link returned: call click() or navigate() to that link\n"
+            "  - After EACH click: examine the resulting URL — look for ANY query parameter "
+            "(e.g. ?id=, ?q=, ?search=, ?callback=, ?redirect=, ?name=, ?page=, ?token=)\n"
+            "  - Build a list of ALL discovered URL parameters — these are your XSS targets\n"
+            "  - ALSO use execute_js to extract all href attributes: "
+            "execute_js(\"return [...document.querySelectorAll('a[href]')].map(a=>a.href)\")\n"
+            "  - If the page has navigation/menu items, click EACH one and check for params\n"
+            "  - DO NOT SKIP THIS STEP. DO NOT jump to API testing before clicking all page links.\n\n"
             "STEP 1 — FIND ALL REFLECTION POINTS (MANDATORY): You MUST test each of these:\n"
-            "  a) SEARCH functionality: Navigate to the search page/bar. Use fuzz_parameter on "
+            "  a) ALL PARAMETERS DISCOVERED IN STEP 0: Test each one with a canary first (xss8q3k), "
+            "then with context-appropriate payloads.\n"
+            "  b) SEARCH functionality: Navigate to the search page/bar. Use fuzz_parameter on "
             "the search endpoint (e.g. /rest/products/search?q=, /search?q=, /#/search?q=).\n"
-            "  b) URL PARAMETERS on all pages: Check every route that accepts ?id=, ?q=, ?name=, "
+            "  c) URL PARAMETERS on all pages: Check every route that accepts ?id=, ?q=, ?name=, "
             "?order=, ?track= etc. Use api_request with a canary to find reflections.\n"
-            "  c) FORMS: Call get_forms on every page. Test each form input field.\n"
-            "  d) API ENDPOINTS: Use api_request to POST XSS payloads to API endpoints that "
+            "  d) FORMS: Call get_forms on every page. Test each form input field.\n"
+            "  e) API ENDPOINTS: Use api_request to POST XSS payloads to API endpoints that "
             "accept user data (user registration, product creation, feedback, comments). "
             "Then check if the data is rendered unescaped when retrieved.\n"
-            "  e) SPA ROUTES with params: For Angular/React/Vue, navigate to routes that display "
+            "  f) SPA ROUTES with params: For Angular/React/Vue, navigate to routes that display "
             "URL parameters: /#/track-result?id=PAYLOAD, /#/search?q=PAYLOAD, etc.\n"
-            "  f) ERROR PAGES: Request a non-existent path and check if the path is reflected.\n"
-            "  g) HTTP HEADERS: Test if User-Agent, Referer, or custom headers are stored and "
+            "  g) ERROR PAGES: Request a non-existent path and check if the path is reflected.\n"
+            "  h) HTTP HEADERS: Test if User-Agent, Referer, or custom headers are stored and "
             "reflected back (persisted XSS through headers).\n\n"
             "STEP 2 — DOM-BASED XSS (MANDATORY for SPAs):\n"
             "  - Navigate with XSS in URL fragment/hash:\n"
@@ -367,6 +380,8 @@ WEB_PHASES: list[ScanPhase] = [
             "  Event handlers: <input onfocus=alert(1) autofocus> , <details open ontoggle=alert(1)>\n"
             "  Attribute escape: \" onmouseover=alert(1) x=\" , ' onfocus=alert(1) autofocus='\n"
             "  JS context: ';alert(1)// , \";alert(1)// , </script><script>alert(1)//\n"
+            "  JS function-call breakout: x')-alert(1)-(' , x\")-alert(1)-(\" , x`)-alert(1)-(`\n"
+            "  JS assignment breakout: x';alert(1);var b=' , x\";alert(1);var b=\"\n"
             "  Encoded: %3Cscript%3Ealert(1)%3C/script%3E , &#x3c;script&#x3e;alert(1)\n"
             "  Polyglots: '\"><img src=x onerror=alert(1)>// , '\"><svg/onload=alert(1)>\n"
             "  Template injection: {{constructor.constructor('alert(1)')()}} , ${alert(1)}\n"
@@ -1642,7 +1657,7 @@ def get_phases(scan_mode: str, app_info: dict | None = None,
     phases: list[ScanPhase] = []
     has_websockets = app_info.get("has_websockets", True)
 
-    skip_recon = scan_scope == "url_only"
+    skip_recon = scan_scope == "url_only" and not focus_areas
     allowed_ids = _resolve_focus_phases(focus_areas or [])
 
     if scan_mode in ("website", "both"):
