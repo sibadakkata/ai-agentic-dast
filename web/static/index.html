@@ -4647,6 +4647,12 @@ var _FINDING_TYPE_RULES = [
   [/dns|subdomain/i, 'DNS & Subdomain'],
   [/deseriali[sz]/i, 'Deserialization'],
   [/timing|enumerat/i, 'Timing & Enumeration'],
+  [/prompt.?inject|llm01|jailbreak|dan.?attack/i, 'LLM: Prompt Injection'],
+  [/system.?prompt.?leak|prompt.?leakage|llm07/i, 'LLM: Prompt Leakage'],
+  [/sensitive.?information.*llm|llm02|llm.?info.?disclos/i, 'LLM: Info Disclosure'],
+  [/improper.?output|llm05|llm.?output/i, 'LLM: Output Handling'],
+  [/excessive.?agency|llm06/i, 'LLM: Excessive Agency'],
+  [/unbounded.?consumption|llm10|token.?stuff/i, 'LLM: Unbounded Consumption'],
 ];
 
 function _inferFindingType(f) {
@@ -4674,6 +4680,25 @@ var _OWASP_TITLES = {
   'A08': 'Software & Data Integrity',
   'A09': 'Logging & Monitoring',
   'A10': 'Server-Side Request Forgery',
+};
+
+var _OWASP_LLM_TITLES = {
+  'LLM01': 'Prompt Injection',
+  'LLM02': 'Sensitive Information Disclosure',
+  'LLM03': 'Supply Chain Vulnerabilities',
+  'LLM04': 'Data and Model Poisoning',
+  'LLM05': 'Improper Output Handling',
+  'LLM06': 'Excessive Agency',
+  'LLM07': 'System Prompt Leakage',
+  'LLM08': 'Vector and Embedding Weaknesses',
+  'LLM09': 'Misinformation',
+  'LLM10': 'Unbounded Consumption',
+};
+
+var _CAT_TO_OWASP_LLM = {
+  'LLM: Prompt Injection': 'LLM01', 'LLM: Info Disclosure': 'LLM02',
+  'LLM: Output Handling': 'LLM05', 'LLM: Excessive Agency': 'LLM06',
+  'LLM: Prompt Leakage': 'LLM07', 'LLM: Unbounded Consumption': 'LLM10',
 };
 
 var _PCI_DSS_TITLES = {
@@ -4761,7 +4786,7 @@ function setGroupBy(mode) {
 }
 
 function _grpButtonsHtml() {
-  var modes = [['category','Issue Category'],['owasp','OWASP'],['severity','Severity'],['pci_dss','PCI DSS'],['sans25','SANS 25']];
+  var modes = [['category','Issue Category'],['owasp','OWASP'],['owasp_llm','OWASP LLM'],['severity','Severity'],['pci_dss','PCI DSS'],['sans25','SANS 25']];
   var html = '<div style="display:inline-flex;align-items:center;gap:6px;"><span style="font-size:11px;font-weight:600;color:var(--text2);">Group by</span><div style="display:inline-flex;gap:2px;border:1px solid var(--border);border-radius:6px;overflow:hidden;">';
   modes.forEach(function(m) {
     var active = _groupByMode === m[0];
@@ -4834,6 +4859,13 @@ function _getGroupKey(f) {
     }
     return code;
   }
+  if (_groupByMode === 'owasp_llm') {
+    var raw = f.owasp_llm || f.owasp_category || '';
+    if (/^LLM\d{2}$/.test(raw)) return raw;
+    var cat = _inferFindingType(f);
+    var inferred = _CAT_TO_OWASP_LLM[cat];
+    return inferred || 'Other (Web)';
+  }
   if (_groupByMode === 'severity') {
     var s = (f.final_severity || f.severity || 'Info');
     s = s.charAt(0).toUpperCase() + s.slice(1).toLowerCase();
@@ -4859,6 +4891,9 @@ function _getGroupLabel(key) {
   if (_groupByMode === 'owasp' && key !== 'Other') {
     return '<span class="cat-id">' + key + '</span> ' + esc(_OWASP_TITLES[key] || key);
   }
+  if (_groupByMode === 'owasp_llm' && key !== 'Other (Web)') {
+    return '<span class="cat-id">' + key + '</span> ' + esc(_OWASP_LLM_TITLES[key] || key);
+  }
   if (_groupByMode === 'pci_dss' && key !== 'Other') {
     return '<span class="cat-id">Req ' + key + '</span> ' + esc(_PCI_DSS_TITLES[key] || key);
   }
@@ -4870,6 +4905,11 @@ function _getGroupLabel(key) {
 
 function _getGroupSorter() {
   if (_groupByMode === 'owasp') return _owaspSort;
+  if (_groupByMode === 'owasp_llm') return function(a, b) {
+    if (a === 'Other (Web)') return 1;
+    if (b === 'Other (Web)') return -1;
+    return a.localeCompare(b);
+  };
   if (_groupByMode === 'severity') return _sevSort;
   if (_groupByMode === 'pci_dss') return _pciSort;
   if (_groupByMode === 'sans25') return _sans25Sort;

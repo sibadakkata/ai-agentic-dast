@@ -138,6 +138,20 @@ The core scanning logic follows an **Observe-Think-Act-Analyze-Plan** cycle:
 | 24 | `web_password_reset` | Password Reset Flow | A07 | ✓ Token predictability |
 | 25 | `web_session_mgmt` | Session Management | A07 | ✓ Fixation, rotation, concurrent sessions |
 
+### LLM Application Security Phase (conditional)
+
+When the scanner detects chatbot/AI-powered features (via `llm_detect.py` DOM + network heuristics), it auto-includes an LLM security phase. This phase is **deterministic** -- it does not use the LLM agent loop.
+
+| Phase ID | Name | Probes | Detection |
+|----------|------|--------|-----------|
+| `web_llm_security` | LLM Application Security (OWASP LLM Top 10) | 37 built-in + Garak (optional) | Pattern-matching/regex, $0 LLM cost |
+
+**Built-in probes (llm_baseline.py):** 10 prompt injection, 8 info disclosure, 5 output handling, 5 excessive agency, 6 prompt leakage, 3 unbounded consumption.
+
+**Garak (optional):** If installed (`pip install garak`), runs NVIDIA's 50+ probe battery via subprocess. Garak is NOT required -- the scanner works without it.
+
+Force LLM testing on any target with `focus_areas: ["LLM"]`.
+
 ### API Phases (15)
 
 | # | Phase ID | Name | Focus | Context-Aware |

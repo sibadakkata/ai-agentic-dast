@@ -1467,6 +1467,10 @@ _FOCUS_PHASE_MAP: dict[str, set[str]] = {
     "method override": {"api_method_override"},
     "chain": {"attack_chain_analysis"},
     "attack chain": {"attack_chain_analysis"},
+    "llm": {"web_llm_security"},
+    "llm security": {"web_llm_security"},
+    "chatbot": {"web_llm_security"},
+    "prompt injection": {"web_llm_security"},
 }
 
 _RECON_PHASE_IDS = {"web_recon", "api_recon"}
@@ -1631,6 +1635,24 @@ CRAWL_ONLY_PHASE = ScanPhase(
     applies_to="both",
 )
 
+# ---------------------------------------------------------------------------
+# LLM Application Security phase -- runs deterministic probes (llm_baseline)
+# and optionally Garak.  This phase does NOT use the normal LLM agent loop;
+# the orchestrator intercepts it by phase ID and calls the dedicated runner.
+# ---------------------------------------------------------------------------
+LLM_SECURITY_PHASE = ScanPhase(
+    id="web_llm_security",
+    name="LLM Application Security (OWASP LLM Top 10)",
+    prompt=(
+        "This phase tests LLM-powered features (chatbots, AI assistants) "
+        "for prompt injection, data leakage, excessive agency, and other "
+        "OWASP LLM Top 10 vulnerabilities using deterministic probe batteries."
+    ),
+    max_steps=1,
+    applies_to="website",
+    parallel_ok=False,
+)
+
 
 def get_phases(scan_mode: str, app_info: dict | None = None,
                scan_scope: str = "directory",
@@ -1677,6 +1699,13 @@ def get_phases(scan_mode: str, app_info: dict | None = None,
             if allowed_ids is not None and p.id not in allowed_ids:
                 continue
             phases.append(p)
+
+    # Conditionally add LLM security phase when LLM features are detected
+    # or when the user explicitly requests it via focus_areas.
+    _has_llm = app_info.get("has_llm_chat", False)
+    _llm_forced = allowed_ids is not None and "web_llm_security" in allowed_ids
+    if (_has_llm or _llm_forced) and scan_mode in ("website", "both"):
+        phases.append(LLM_SECURITY_PHASE)
 
     if phases and (allowed_ids is None or "attack_chain_analysis" in allowed_ids):
         phases.append(ATTACK_CHAIN_PHASE)

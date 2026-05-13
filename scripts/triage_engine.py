@@ -118,6 +118,13 @@ CWE_PROFILES = {
     "content_type_confusion": {"cwe": "CWE-436", "cvss": 5.3, "vec": "AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N"},
     "method_override":  {"cwe": "CWE-650", "cvss": 6.5, "vec": "AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:H/A:N"},
     "attack_chain":     {"cwe": "CWE-20",  "cvss": 8.1, "vec": "AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:N"},
+    # LLM application security (OWASP Top 10 for LLM Applications 2025)
+    "llm_prompt_injection":    {"cwe": "CWE-77",  "cvss": 8.1, "vec": "AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:N"},
+    "llm_info_disclosure":     {"cwe": "CWE-200", "cvss": 7.5, "vec": "AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N"},
+    "llm_output_handling":     {"cwe": "CWE-79",  "cvss": 6.1, "vec": "AV:N/AC:L/PR:N/UI:R/S:C/C:L/I:L/A:N"},
+    "llm_excessive_agency":    {"cwe": "CWE-269", "cvss": 8.8, "vec": "AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"},
+    "llm_prompt_leakage":      {"cwe": "CWE-200", "cvss": 5.3, "vec": "AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N"},
+    "llm_unbounded_consumption": {"cwe": "CWE-400", "cvss": 5.3, "vec": "AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:L"},
 }
 
 

@@ -723,6 +723,9 @@ All three readers now guard with `isinstance(t, dict)` (and analogous checks on 
 | `scanners/ai_agent/llm_config.py` | LLM routing | `LLMRouter`, `ModelUsage`, cost tracking |
 | `scanners/ai_agent/passive_recon.py` | Passive checks | 29 deterministic security checks; hybrid JS-library detection (catalog + heuristic + OSV.dev) |
 | `scanners/ai_agent/js_registry.py` | Global JS URL registry | `JSUrlRegistry` — collects every JS URL the scanner encounters across auth, SPA, and the network listener; in-scope filtering happens here. Used by passive recon's CVE audit so library detection isn't scoped to the seed page only |
+| `scanners/ai_agent/llm_detect.py` | LLM app detection | DOM/network heuristics to identify chatbot/AI features (confidence scoring) |
+| `scanners/ai_agent/llm_baseline.py` | LLM security probes | 37 deterministic probes: prompt injection, info disclosure, output handling, excessive agency, prompt leakage, DoS ($0 LLM cost) |
+| `scanners/ai_agent/garak_runner.py` | Garak orchestration | Optional NVIDIA Garak integration: config generation, subprocess execution, JSONL result parsing |
 | `scanners/ai_agent/api_import.py` | API parsers | Postman, OpenAPI, Burp → `EndpointRegistry` |
 | `scanners/ai_agent/baseline_executor.py` | API baseline | Happy-path execution, variable chaining |
 | `scanners/ai_agent/body_fuzzer.py` | Body fuzzing | LLM-planned, engine-executed fuzzing |

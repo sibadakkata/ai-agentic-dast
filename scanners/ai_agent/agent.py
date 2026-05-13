@@ -55,6 +55,9 @@ from .prompts import (
 )
 from .severity import classify_severity
 from .tools import TOOL_DEFINITIONS, ScanTools
+from .llm_detect import detect_llm_features
+from .llm_baseline import run_all_probes as run_llm_baseline_probes
+from .garak_runner import run_garak, is_garak_available
 
 logger = logging.getLogger(__name__)
 
@@ -1180,6 +1183,7 @@ async def _run_phase_worker(
     worker_id: int,
     on_progress: callable | None = None,
     auth_headers: dict | None = None,
+    crawled_urls: list[str] | None = None,
 ) -> tuple[list[dict], dict]:
     """Run a single scan phase in an isolated browser context.
 
@@ -1228,8 +1232,20 @@ async def _run_phase_worker(
             if ctx:
                 phase_prompt += "\n\n" + ctx
 
-        # Inject discovered URL parameters from registry into XSS/injection phases
-        if phase.id in ("web_a03_xss", "api_injection") and registry:
+        # Inject discovered URL parameters from registry into all injection-class phases
+        _PARAM_INJECTION_PHASES = {
+            "web_a03_xss": "XSS",
+            "web_a03_sqli": "SQL injection",
+            "web_a03_cmdi": "command injection",
+            "web_a03_ssti": "template injection (SSTI)",
+            "web_a03_path_traversal": "path traversal",
+            "web_a03_xxe": "XXE",
+            "web_a10": "SSRF",
+            "web_extras": "CRLF/CSRF injection",
+            "api_injection": "injection",
+            "api_ssrf": "SSRF",
+        }
+        if phase.id in _PARAM_INJECTION_PHASES and registry:
             try:
                 param_urls = []
                 for ep in registry.get_all():
@@ -1245,7 +1261,7 @@ async def _run_phase_worker(
                                 f"  - {url} → params: {list(_pqs_w(parsed.query).keys())}"
                             )
                 if param_urls:
-                    vuln_type = "XSS" if phase.id == "web_a03_xss" else "injection"
+                    vuln_type = _PARAM_INJECTION_PHASES[phase.id]
                     phase_prompt += (
                         "\n\n*** PRE-DISCOVERED PARAMETERS (from recon) ***\n"
                         "The following URLs with query parameters were discovered during recon.\n"
@@ -1256,6 +1272,17 @@ async def _run_phase_worker(
                     print(f"  [{phase.id}] Injected {len(param_urls)} pre-discovered param URLs into prompt")
             except Exception:
                 pass
+
+        if crawled_urls:
+            _urls_sample = crawled_urls[:40]
+            phase_prompt += (
+                "\n\n*** CRAWLED PAGES (from recon) ***\n"
+                "The following pages were discovered during crawling. "
+                "Navigate directly to relevant ones instead of re-exploring:\n"
+                + "\n".join(f"  - {u}" for u in _urls_sample)
+            )
+            if len(crawled_urls) > 40:
+                phase_prompt += f"\n  ... and {len(crawled_urls) - 40} more"
 
         messages: list[dict] = [
             {"role": "system", "content": system_prompt},
@@ -1483,6 +1510,7 @@ async def run_phases_parallel(
     on_progress: callable | None = None,
     max_workers: int = MAX_PARALLEL_WORKERS,
     auth_headers: dict | None = None,
+    crawled_urls: list[str] | None = None,
 ) -> tuple[list[dict], list[dict]]:
     """Run multiple scan phases concurrently with a semaphore cap.
 
@@ -1573,6 +1601,69 @@ async def run_phases_parallel(
         if isinstance(r, ScanCancelled):
             raise r
     return all_findings, all_logs
+
+
+async def _run_llm_security_phase(
+    *,
+    app_info: dict,
+    http_client,
+    page=None,
+    on_progress=None,
+    cancel_flag=None,
+    auth_headers: dict | None = None,
+) -> list[dict]:
+    """Orchestrate deterministic LLM security probes.
+
+    Runs ``llm_baseline`` (always) and ``garak_runner`` (when installed).
+    Returns normalised findings.
+    """
+    _cb = on_progress or (lambda *a, **k: None)
+    findings: list[dict] = []
+
+    llm_endpoints = app_info.get("llm_endpoints", [])
+    if not llm_endpoints:
+        logger.info("No LLM endpoints discovered -- skipping LLM probes")
+        return findings
+
+    endpoint = llm_endpoints[0]
+    print(f"  [LLM-SEC] Testing LLM endpoint: {endpoint}")
+    _cb("llm_security_start", {"endpoint": endpoint, "total_probes": 37})
+
+    # 1. Run built-in deterministic probes
+    try:
+        baseline_findings = await run_llm_baseline_probes(
+            http_client=http_client,
+            endpoint=endpoint,
+            headers=auth_headers,
+            on_progress=_cb,
+            cancel_flag=cancel_flag,
+        )
+        findings.extend(baseline_findings)
+        print(f"  [LLM-SEC] Baseline probes: {len(baseline_findings)} findings")
+    except Exception as e:
+        logger.warning("LLM baseline probes failed: %s", e)
+
+    # 2. Run Garak if available
+    if is_garak_available():
+        try:
+            garak_findings = await run_garak(
+                target_endpoint=endpoint,
+                headers=auth_headers,
+                on_progress=_cb,
+            )
+            findings.extend(garak_findings)
+            print(f"  [LLM-SEC] Garak probes: {len(garak_findings)} findings")
+        except Exception as e:
+            logger.warning("Garak runner failed: %s", e)
+    else:
+        print("  [LLM-SEC] Garak not installed -- skipping (pip install garak)")
+
+    # Apply deterministic severity classification
+    for f in findings:
+        classify_severity(f)
+
+    _cb("llm_security_done", {"findings_count": len(findings)})
+    return findings
 
 
 async def run_scan(
@@ -2075,12 +2166,26 @@ async def run_scan(
 
         # Detect app type AFTER navigation (not on the login page)
         if _use_fast_path:
-            # Pure API scan — no SPA/framework detection needed.
+            # Pure API scan -- no SPA/framework detection needed.
             app_info = {"is_spa": False, "framework": "api_only", "has_websockets": False}
         else:
             app_info = await detect_app_type(page)
-        print(f"  [DETECT] SPA: {app_info.get('is_spa')}, Framework: {app_info.get('framework')}, WebSockets: {app_info.get('has_websockets')}")
-        _cb("detect", {"is_spa": app_info.get("is_spa"), "framework": app_info.get("framework")})
+
+        # Detect LLM-powered features (chatbot, AI assistant, etc.)
+        try:
+            _network_log = []
+            if hasattr(tools, "get_network_log_raw"):
+                _network_log = tools.get_network_log_raw()
+            llm_info = await detect_llm_features(
+                page=page, http_client=http_client,
+                network_log=_network_log,
+            )
+            app_info.update(llm_info)
+        except Exception as e:
+            logger.debug("LLM feature detection failed (non-fatal): %s", e)
+
+        print(f"  [DETECT] SPA: {app_info.get('is_spa')}, Framework: {app_info.get('framework')}, WebSockets: {app_info.get('has_websockets')}, LLM Chat: {app_info.get('has_llm_chat', False)}")
+        _cb("detect", {"is_spa": app_info.get("is_spa"), "framework": app_info.get("framework"), "has_llm_chat": app_info.get("has_llm_chat", False)})
 
         def _passive_progress(event, data):
             if event == "out_of_scope":
@@ -2635,6 +2740,39 @@ async def run_scan(
             phase_findings_before = len(findings)
             print(f"  [{phase_num}/{total_phases}] Phase: {phase.name} ({phase.id})...", end="", flush=True)
             _cb("phase_start", {"phase": phase_num, "total": total_phases, "name": phase.name, "id": phase.id})
+
+            # ── LLM Security Phase intercept (deterministic, no LLM agent) ──
+            if phase.id == "web_llm_security":
+                try:
+                    llm_findings = await _run_llm_security_phase(
+                        app_info=app_info or {},
+                        http_client=http_client,
+                        page=page,
+                        on_progress=_cb,
+                        cancel_flag=cancel_flag,
+                        auth_headers={},
+                    )
+                    for f in llm_findings:
+                        f.setdefault("phase", phase.name)
+                        _cb("finding", f)
+                    findings.extend(llm_findings)
+                    print(f" {len(llm_findings)} findings")
+                except ScanCancelled:
+                    raise
+                except Exception as e:
+                    logger.warning("LLM security phase failed (non-fatal): %s", e)
+                    print(f" ERROR: {e}")
+
+                metrics["phases_completed"] += 1
+                metrics["phase_log"].append({
+                    "phase": phase.id, "name": phase.name,
+                    "tool_calls": 0,
+                    "findings_count": len(llm_findings) if 'llm_findings' in dir() else 0,
+                })
+                _cb("phase_end", {"phase": phase_num, "name": phase.name,
+                                  "tool_calls": 0,
+                                  "findings": len(findings) - phase_findings_before})
+                continue
 
             phase_prompt = phase.prompt
 
@@ -3900,6 +4038,41 @@ async def run_scan(
                             "Use these to inform your remaining scan phases."})
                 except Exception as e:
                     logger.warning("Post-auth passive recon failed (non-fatal): %s", e)
+
+                # ── GAP 2+6: Re-extract <a href> and <form action> URLs after LLM recon ──
+                # The LLM navigated/interacted with the SPA during recon, which may
+                # have revealed new links and forms (lazy-loaded content, post-auth
+                # pages). Re-scrape the DOM now to capture everything the LLM uncovered.
+                if page is not None:
+                    try:
+                        post_recon_urls = await page.evaluate("""() => {
+                            const urls = new Set();
+                            document.querySelectorAll('a[href]').forEach(a => {
+                                if (a.href && a.href.startsWith('http')) urls.add(a.href);
+                            });
+                            document.querySelectorAll('form[action]').forEach(f => {
+                                try {
+                                    const u = new URL(f.action, location.href);
+                                    if (u.protocol.startsWith('http')) urls.add(u.href);
+                                } catch {}
+                            });
+                            return [...urls];
+                        }""")
+                        _post_added = 0
+                        for href in (post_recon_urls or []):
+                            if not _is_in_scope(href, allowed_domains):
+                                continue
+                            if href not in metrics["pages_list"]:
+                                metrics["pages_list"].append(href)
+                                metrics["pages_crawled"] += 1
+                                _cb("crawl", {"url": href, "type": "page",
+                                              "tool": "post_recon_extract",
+                                              "count": metrics["pages_crawled"]})
+                                _post_added += 1
+                        if _post_added:
+                            print(f"  [POST-RECON] Extracted {_post_added} new URLs (hrefs+forms) after LLM recon")
+                    except Exception as e:
+                        logger.debug("Post-recon URL extraction failed (non-fatal): %s", e)
 
         # ── Parallel Vuln-Testing Fan-Out ─────────────────────────────
         if run_in_parallel:
