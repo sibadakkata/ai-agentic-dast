@@ -28,7 +28,7 @@ User clicks "Start Scan" (UI or API)
 │     Load target URL → wait for SPA readiness            │
 ├─────────────────────────────────────────────────────────┤
 │  4. PASSIVE RECON ($0)                                   │
-│     24 deterministic checks (no LLM)                    │
+│     29 deterministic checks (no LLM)                    │
 │     Findings added directly to results                  │
 ├─────────────────────────────────────────────────────────┤
 │  5. API BASELINE (if endpoints imported)                 │
@@ -49,7 +49,7 @@ User clicks "Start Scan" (UI or API)
 │       f. Extract findings when LLM stops                │
 │       g. Evidence grounding check                       │
 │       h. Hybrid smart retry (tool-enabled, tailored     │
-│          prompt) for 15 active-retry phases when the    │
+│          prompt) for 20 active-retry phases when the    │
 │          core vuln class is missing; otherwise cheap    │
 │          evidence-summary pass                          │
 │       i. Trim context if needed                         │
@@ -79,7 +79,7 @@ User clicks "Start Scan" (UI or API)
 
 ### Architecture
 
-`ScanTools` wraps Playwright's `Page` and `httpx.AsyncClient` into 30 security-testing tools that the LLM can call.
+`ScanTools` wraps Playwright's `Page` and `httpx.AsyncClient` into 31 security-testing tools that the LLM can call.
 
 ```
 LLM decides to call tool
@@ -386,7 +386,7 @@ Regression-tested in `tests/test_smart_retry_in_worker.py`:
 
 | | Always-active retry (old) | Evidence summary only | **Hybrid (current)** |
 |---|---|---|---|
-| **When retry fires** | Any phase with 0 findings | Any phase with 0 findings | 15 high-impact phases, on 0 findings **or** missing core class |
+| **When retry fires** | Any phase with 0 findings | Any phase with 0 findings | 20 high-impact phases, on 0 findings **or** missing core class |
 | **Tool access** | Full tools | None | Full tools (Branch A) / none (Branch B) |
 | **Cost on low-value phases** | ~2x phase cost | ~$0.001 | ~$0.001 (Branch B) |
 | **Recovers missed credentials / IDOR / SQLi?** | Sometimes | No (tool-less analysis can't brute-force) | Yes — tool-enabled second pass with tailored payloads |
@@ -721,7 +721,7 @@ All three readers now guard with `isinstance(t, dict)` (and analogous checks on 
 | `scanners/ai_agent/prompts.py` | LLM instructions | `SYSTEM_PROMPT`, `WEB_PHASES`, `API_PHASES`, `get_phases()` |
 | `scanners/ai_agent/auth.py` | Authentication | `detect_and_login()`, `AuthSession`, `_detect_captcha()` |
 | `scanners/ai_agent/llm_config.py` | LLM routing | `LLMRouter`, `ModelUsage`, cost tracking |
-| `scanners/ai_agent/passive_recon.py` | Passive checks | 24 deterministic security checks; hybrid JS-library detection (catalog + heuristic + OSV.dev) |
+| `scanners/ai_agent/passive_recon.py` | Passive checks | 29 deterministic security checks; hybrid JS-library detection (catalog + heuristic + OSV.dev) |
 | `scanners/ai_agent/js_registry.py` | Global JS URL registry | `JSUrlRegistry` — collects every JS URL the scanner encounters across auth, SPA, and the network listener; in-scope filtering happens here. Used by passive recon's CVE audit so library detection isn't scoped to the seed page only |
 | `scanners/ai_agent/api_import.py` | API parsers | Postman, OpenAPI, Burp → `EndpointRegistry` |
 | `scanners/ai_agent/baseline_executor.py` | API baseline | Happy-path execution, variable chaining |

@@ -22,7 +22,7 @@ The scanner is built around a **single LLM agent** that drives a real browser an
 │   └────┬─────┘  └────┬─────┘  └────┬─────┘  └──────┬───────┘  │
 │        │              │             │                │          │
 │   ┌────▼──────────────▼─────────────▼────────────────▼───────┐ │
-│   │                    TOOL LAYER (30 tools)                  │ │
+│   │                    TOOL LAYER (31 tools)                  │ │
 │   │  Browser: navigate, click, fill, screenshot               │ │
 │   │  Injection: inject_payload, fuzz_parameter                │ │
 │   │  Observation: get_page_source, get_cookies, get_network   │ │
@@ -101,7 +101,7 @@ The core scanning logic follows an **Observe-Think-Act-Analyze-Plan** cycle:
               │     │ - Try new param? │
               │     │ - Done?          │
               └─────└──────────────────┘
-                   (up to 25 steps per phase)
+                   (up to 50 steps per phase)
 ```
 
 ## Scan Phases
@@ -179,7 +179,7 @@ The core scanning logic follows an **Observe-Think-Act-Analyze-Plan** cycle:
 | Mechanism | File | Purpose |
 |-----------|------|---------|
 | **Evidence Buffer** | `agent.py` | Preserves compact test records that survive context trimming |
-| **Hybrid Smart Retry** | `agent.py` `_ACTIVE_RETRY_PHASES`, `_PHASE_CORE_KEYWORDS`, `_RETRY_PROMPTS` | Tool-enabled second pass with phase-tailored prompts for 15 high-impact phases, fired when the phase has 0 findings **or** when findings exist but the phase's core vulnerability class (e.g. credential crack for auth, IDOR for BAC) is missing. Other phases use a cheap evidence-summary pass |
+| **Hybrid Smart Retry** | `retry_prompts.py` `_ACTIVE_RETRY_PHASES`, `_PHASE_CORE_KEYWORDS`, `_RETRY_PROMPTS` | Tool-enabled second pass with phase-tailored prompts for 20 high-impact phases, fired when the phase has 0 findings **or** when findings exist but the phase's core vulnerability class (e.g. credential crack for auth, IDOR for BAC) is missing. Other phases use a cheap evidence-summary pass |
 | **Finding Deduplication** | `web/app.py` `_finding_key`, `_dedupe_findings` | Dedups findings by `(title, url, parameter)` when seeding continue/retry scans and when appending live findings — avoids double-counting passive recon across pre-auth/post-auth passes |
 | **Model ID Resolution** | `web/app.py` `_resolve_model_id` | Normalises display names / aliases / raw litellm ids at every scan-start endpoint — prevents "LLM Provider NOT provided" errors from the UI |
 | **Min Security Calls** | `agent.py` `_MIN_SECURITY_CALLS` | Forces LLM to make enough tool calls before concluding (22 phases) |
@@ -188,7 +188,7 @@ The core scanning logic follows an **Observe-Think-Act-Analyze-Plan** cycle:
 
 > Deep dive on these mechanisms: [Scanner Internals](scanner-internals.md)
 
-## Tool System (30 Tools)
+## Tool System (31 Tools)
 
 | Category | Tools | Purpose |
 |----------|-------|---------|
@@ -214,7 +214,7 @@ The auth module (`auth.py`) handles:
 
 ## Passive Reconnaissance
 
-Before any LLM calls, 24 deterministic check categories run at $0 cost:
+Before any LLM calls, 29 deterministic check categories run at $0 cost:
 
 **Information Disclosure**
 - Exposed JavaScript source maps (`.js.map` files accessible in production)

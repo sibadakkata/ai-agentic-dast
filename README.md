@@ -39,11 +39,11 @@ Each scan phase runs a continuous **Observe → Think → Act → Analyze → Pl
 
 1. **Observe** — Agent reads current context: HTTP responses, page source, cookies, network logs, prior findings
 2. **Think** — LLM reasons about attack surface, tech stack, and plausible vulnerabilities
-3. **Act** — LLM calls tools (30 available: navigate, inject, fuzz, API request, token testing, exploit chaining, etc.)
+3. **Act** — LLM calls tools (31 available: navigate, inject, fuzz, API request, token testing, exploit chaining, etc.)
 4. **Analyze** — Tool results are interpreted: does the response indicate a vulnerability?
 5. **Plan** — LLM decides next action: go deeper, try different parameter, or conclude phase
 
-This loop runs up to 25 steps per phase. Every finding is then **triaged offline** by a deterministic 3-layer engine ($0 LLM cost).
+This loop runs up to 50 steps per phase (20–50 depending on phase complexity). Every finding is then **triaged offline** by a deterministic 3-layer engine ($0 LLM cost).
 
 ## Key Features
 
@@ -73,7 +73,7 @@ This loop runs up to 25 steps per phase. Every finding is then **triaged offline
 | **Model ID Resolution** | UI/API callers can pass a display name ("Claude Haiku 4.5 (recommended)"), a short alias ("haiku", "sonnet"), or the full litellm id — the backend normalises all three to a valid litellm model id, preventing "LLM Provider NOT provided" errors | `_resolve_model_id` in `web/app.py`, applied at `/api/scan`, `/api/scan/{id}/retry`, `/api/scan/{id}/rescan` |
 | **Deploy Safety** | Pre-deployment check detects active/paused scans and aborts `deploy.sh` before overwriting a running scanner | `scripts/check_scan_active.py`, integrated in `deploy.sh` |
 | **Parallel-Phase Failure Surfacing** | When phases run concurrently via `asyncio.gather`, worker exceptions used to be silently swallowed by `return_exceptions=True`, leaving missing phases with no trace. Now every worker is wrapped in a guard that logs the failure to `phase_log` with an `error` field and a `(FAILED)` suffix in the live UI, so a transient Bedrock 5xx, Playwright timeout, or LLM-context overflow no longer disappears a phase silently | `run_phases_parallel._guarded` in `agent.py`; UI shows `(FAILED)` + tooltip with error |
-| **LLM Transient-Error Retry** | `LLMRouter.complete` retries up to 3× with 2 / 4 / 8 s exponential back-off on transient signatures: connection failures (`All connection attempts failed`), 502 / 503 / 504, read timeouts, throttling. Terminal errors (`ContextWindowExceeded`, `ContentFiltered`, `MalformedMessages`) bubble immediately so a single bad message doesn't burn 4× cost | `LLMRouter.complete` in `llm_config.py` |
+| **LLM Transient-Error Retry** | `LLMRouter.complete` retries up to 5× with 2 / 4 / 8 / 16 / 32 s exponential back-off (~62 s total) on transient signatures: connection failures (`All connection attempts failed`), 502 / 503 / 504, read timeouts, throttling. Tunable at runtime via `LLM_RETRY_DELAYS` env var. Terminal errors (`ContextWindowExceeded`, `ContentFiltered`, `MalformedMessages`) bubble immediately so a single bad message doesn't burn 6× cost | `LLMRouter.complete` in `llm_config.py` |
 | **Partial-DB Cache Fallback** | The DB sometimes wrote a partial-checkpoint payload (`metadata.partial=True`) for a scan that later finished cleanly to disk, then served the stale partial blob to the API. The reader now prefers a complete on-disk result over a partial DB record and back-fills the DB on read so subsequent loads serve the full payload | `_load_raw_result_dict` in `web/app.py` |
 | **Body-Fuzz Return-Shape Hardening** | `fuzz_body` early-exit paths (unparseable body, baseline failure) used to return a bare `[]` while the caller did `a, b = await fuzz_body(...)`, crashing phase 4 with `not enough values to unpack (expected 2, got 0)`. Now both early exits return `([], [])`; return type annotation corrected; 23-test scenario suite (`tests/test_scan_error_resilience.py`) audits every tuple-unpack contract in the scanner | `body_fuzzer.py`, `tests/test_body_fuzzer_return_shape.py`, `tests/test_scan_error_resilience.py` |
 | **Subdomain Takeover Detection** | Detects dangling DNS records pointing to unclaimed third-party services. 46-provider fingerprint database covering AWS S3, CloudFront, Elastic Beanstalk, GitHub Pages, Heroku, Azure (Web Apps, Blob, Traffic Manager), Netlify, Shopify, Fastly, Vercel, Google Cloud Storage, Wix, Webflow, Render, Fly.io, and 30 more. Detection via: (1) DNS CNAME chain resolution with `dnspython`, (2) NXDOMAIN detection for abandoned service instances, (3) HTTP response fingerprint matching against known takeover strings, (4) Subdomain enumeration via Certificate Transparency (crt.sh) + 75-prefix DNS wordlist. Concurrent checking with configurable semaphore | `subdomain_takeover.py`, `subdomain_enum.py`, integrated in passive recon step 26 |
@@ -199,22 +199,28 @@ uvicorn web.app:app --host 0.0.0.0 --port 8080
 │   ├── web-ui.md                #   Web UI features & configuration
 │   ├── mcp-server.md            #   MCP integration guide
 │   └── troubleshooting.md       #   Error handling & debugging
-├── scanners/ai_agent/           # Core scanner engine
-│   ├── agent.py                 #   Agent loop, context mgmt, multi-identity, retry prompts
+├── scanners/ai_agent/           # Core scanner engine (21 modules)
+│   ├── agent.py                 #   Agent loop, context mgmt, multi-identity, parallel phases
 │   ├── auth.py                  #   Authentication (form/SSO/OAuth) + multi-identity (User B/Admin/Tenant B)
 │   ├── severity.py              #   Deterministic CVSS v3.1 severity classifier (XBOW-style)
 │   ├── passive_recon.py         #   Deterministic passive checks + hardcoded secret scanner + hybrid JS lib detection
+│   ├── retry_prompts.py         #   Hybrid Smart Retry — phase-tailored re-prompt constants for 20 phases
 │   ├── subdomain_takeover.py    #   Subdomain takeover detection (46-provider fingerprint DB + CNAME + HTTP matching)
 │   ├── subdomain_enum.py        #   Subdomain enumeration (Certificate Transparency + DNS wordlist)
 │   ├── dns_security.py          #   Email/DNS security checks (SPF/DKIM/DMARC/MX validation)
 │   ├── js_registry.py           #   Global JS URL registry (auth + SPA + network listeners → unified set for CVE audit)
-│   ├── llm_config.py            #   LLM routing & cost tracking
+│   ├── spa_crawler.py           #   SPA-aware crawling (route extraction, XHR capture, sibling host discovery)
+│   ├── llm_config.py            #   LLM routing, prompt caching, cost tracking, transient retry (5× backoff)
 │   ├── prompts.py               #   System + phase prompts (multi-identity placeholders)
-│   ├── tools.py                 #   30 tools (browser, API, WebSocket, chaining)
-│   ├── active_baseline.py       #   Deterministic bare-root SQLi probe (time-based blind, PoC-shaped)
-│   ├── api_import.py            #   Postman/OpenAPI parsers
+│   ├── tools.py                 #   31 tools (browser, API, WebSocket, chaining)
+│   ├── active_baseline.py       #   Deterministic probes: SQLi, XSS, SSRF, cache poisoning, open redirect, sensitive paths
+│   ├── api_import.py            #   Postman/OpenAPI/Burp XML parsers
 │   ├── baseline_executor.py     #   API baseline & variable chaining
-│   └── body_fuzzer.py           #   Hybrid body fuzzer
+│   ├── body_fuzzer.py           #   Hybrid body fuzzer
+│   ├── model_discovery.py       #   Bedrock model listing & alias resolution
+│   ├── oob.py                   #   Out-of-band interaction helpers (SSRF/XXE callbacks)
+│   ├── scan_state.py            #   Scan state persistence & crash recovery
+│   └── workflow.py              #   Multi-step workflow / business-flow scanning
 ├── scripts/
 │   ├── triage_engine.py         #   3-layer triage engine + exploitation tiers + entropy filter + dedup + narrative
 │   ├── cve_lookup.py            #   NVD + OSV.dev CVE lookup

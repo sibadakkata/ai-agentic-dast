@@ -19,7 +19,7 @@ description: Builds and runs an LLM-powered agentic web security scanner using L
 │   ├── passive_recon.py          # Deterministic passive checks + hardcoded secret scanner (17 patterns)
 │   ├── llm_config.py             # LiteLLM routing + cost tracking
 │   ├── prompts.py                # System + phase prompts (multi-identity placeholders for 8 auth-class phases)
-│   ├── tools.py                  # 30 tools (browser, API, WebSocket, token, exploit chaining)
+│   ├── tools.py                  # 31 tools (browser, API, WebSocket, token, exploit chaining)
 │   ├── api_import.py             # Postman/Burp/OpenAPI parsers
 │   ├── baseline_executor.py      # API happy-path executor + auto-chaining
 │   └── body_fuzzer.py            # Hybrid body fuzzer (LLM-planned + deterministic)
@@ -143,7 +143,7 @@ python scripts/run_scan.py --dry-run
 AI Agentic Scanner Components:
 - [x] Step 1: LLM connectivity (LiteLLM proxy / Bedrock / direct)
 - [x] Step 2: llm_config.py (hybrid model routing + cost tracking)
-- [x] Step 3: tools.py (30 tools — browser + SPA + WebSocket + API + token + exploit chaining)
+- [x] Step 3: tools.py (31 tools — browser + SPA + WebSocket + API + token + exploit chaining)
 - [x] Step 3b: api_import.py (Postman / Burp / OpenAPI parsers)
 - [x] Step 3c: baseline_executor.py (API happy-path execution + variable auto-chaining)
 - [x] Step 3d: body_fuzzer.py (hybrid body fuzzing: LLM plans → deterministic execution → LLM anomaly analysis)
@@ -285,7 +285,7 @@ Location: `scanners/ai_agent/tools.py`
 | `test_auth_bypass(endpoint, methods)` | Try endpoint without auth / with tampered tokens | list of {method, status, accessible} |
 | `test_method_override(endpoint)` | Try PUT/DELETE/PATCH on GET-only endpoints | list of {method, status, response_snippet} |
 
-**Total: 30 tools.** All return structured dicts, truncated to stay within token limits. Tool definitions use OpenAI function calling format. The `fuzz_parameter` tool supports query, body (JSON with dot-notation), header, and path fuzzing. The `test_token_security` tool performs comprehensive JWT/bearer token analysis. Additional tools include `chain_exploit` (multi-step exploit chaining across findings) and `report_finding` (structured finding submission).
+**Total: 31 tools.** All return structured dicts, truncated to stay within token limits. Tool definitions use OpenAI function calling format. The `fuzz_parameter` tool supports query, body (JSON with dot-notation), header, and path fuzzing. The `test_token_security` tool performs comprehensive JWT/bearer token analysis. Additional tools include `chain_exploit` (multi-step exploit chaining across findings) and `report_finding` (structured finding submission).
 
 ## Step 3b: Build api_import.py
 
