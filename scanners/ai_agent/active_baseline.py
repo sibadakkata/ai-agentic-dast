@@ -1593,6 +1593,455 @@ async def run_salesforce_probe(
     return findings
 
 
+# ═══════════════════════════════════════════════════════════════════════
+# GAP 8 — GraphQL Introspection Probe
+# ═══════════════════════════════════════════════════════════════════════
+#
+# Many GraphQL endpoints ship with introspection enabled in production,
+# leaking the entire schema (types, queries, mutations, internal fields).
+# This probe sends the standard introspection query to common GraphQL
+# paths and flags any endpoint that returns a valid schema.
+
+_GRAPHQL_PATHS = [
+    "/graphql", "/graphql/", "/graphiql", "/api/graphql",
+    "/v1/graphql", "/v2/graphql", "/query", "/gql",
+]
+
+_INTROSPECTION_QUERY = '{"query":"{ __schema { types { name fields { name } } } }"}'
+
+_INTROSPECTION_FULL = (
+    '{"query":"{ __schema { queryType { name } mutationType { name } '
+    'subscriptionType { name } types { name kind description fields(includeDeprecated:true) '
+    '{ name args { name type { name kind ofType { name kind } } } type { name kind '
+    'ofType { name kind } } } } directives { name description locations args '
+    '{ name type { name kind ofType { name kind } } } } } }"}'
+)
+
+
+async def run_graphql_introspection_probe(
+    http_client,
+    hosts: Iterable[str],
+    *,
+    on_finding: callable | None = None,
+    on_progress: callable | None = None,
+    cancel_flag=None,
+) -> list[dict]:
+    """Probe each host for enabled GraphQL introspection."""
+    findings: list[dict] = []
+    _emit = on_finding or (lambda f: None)
+    _progress = on_progress or (lambda event, data: None)
+
+    targets = _normalize_hosts(hosts)
+    if not targets:
+        return findings
+
+    _progress("active_baseline_start", {
+        "probe": "graphql_introspection", "hosts": len(targets),
+    })
+
+    gql_headers = {**_PROBE_HEADERS, "Content-Type": "application/json"}
+
+    for host in targets:
+        if cancel_flag is not None and getattr(cancel_flag, "is_set", lambda: False)():
+            break
+
+        for gql_path in _GRAPHQL_PATHS:
+            if cancel_flag is not None and getattr(cancel_flag, "is_set", lambda: False)():
+                break
+            url = f"https://{host}{gql_path}"
+            try:
+                resp = await http_client.post(
+                    url, content=_INTROSPECTION_QUERY, timeout=10.0,
+                    headers=gql_headers,
+                )
+                body = resp.text[:100_000]
+            except Exception:
+                continue
+
+            if resp.status_code != 200:
+                continue
+
+            has_schema = '"__schema"' in body and '"types"' in body
+            if not has_schema:
+                # Try GET with query param (some servers prefer this)
+                try:
+                    get_resp = await http_client.get(
+                        f"{url}?query={{__schema{{types{{name}}}}}}",
+                        timeout=10.0, headers=_PROBE_HEADERS,
+                    )
+                    body = get_resp.text[:100_000]
+                    has_schema = '"__schema"' in body and '"types"' in body
+                except Exception:
+                    pass
+
+            if not has_schema:
+                continue
+
+            # Count types and mutations for evidence
+            type_count = body.count('"name"')
+            has_mutations = '"mutationType"' in body and body.count('"mutationType":null') == 0
+
+            sev = "High" if has_mutations else "Medium"
+
+            f = {
+                "title": f"GraphQL Introspection Enabled ({gql_path})",
+                "severity": sev,
+                "confidence": "High",
+                "owasp_category": "A01:2021",
+                "cwe": "CWE-200",
+                "url": url,
+                "parameter": gql_path,
+                "payload": "{ __schema { types { name fields { name } } } }",
+                "evidence": (
+                    f"GraphQL introspection is enabled at {url}. "
+                    f"Schema exposes ~{type_count} named fields. "
+                    f"Mutations exposed: {'yes' if has_mutations else 'no'}. "
+                    f"Body preview: {body[:300]}"
+                ),
+                "remediation": (
+                    "Disable introspection in production by setting "
+                    "introspection: false in your GraphQL server config. "
+                    "Use schema-level authorization for all queries and mutations."
+                ),
+                "phase": "Active Baseline (GraphQL Introspection)",
+                "tool": "active_baseline.graphql_introspection_probe",
+                "_finding_source": "active_baseline",
+            }
+            findings.append(f)
+            _emit(f)
+            break  # one hit per host is enough
+
+    _progress("active_baseline_end", {
+        "probe": "graphql_introspection", "findings": len(findings),
+    })
+    return findings
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# GAP 9 — HTTP Request Smuggling Baseline Probes
+# ═══════════════════════════════════════════════════════════════════════
+#
+# Tests for CL-TE and TE-CL desync by sending ambiguous Content-Length
+# and Transfer-Encoding headers. A successful smuggle causes the front-
+# end and back-end to disagree on message boundaries, which an attacker
+# can exploit for cache poisoning, auth bypass, or request hijacking.
+#
+# These probes use a *timing-based* detection method (like the SQLi
+# probe): the smuggled suffix is a partial request that causes the
+# back-end to wait for the next bytes, introducing a measurable delay.
+
+_SMUGGLE_TIMEOUT_S = 10.0
+_SMUGGLE_DELTA_S = 3.0
+
+
+async def run_http_smuggling_probe(
+    http_client,
+    hosts: Iterable[str],
+    *,
+    on_finding: callable | None = None,
+    on_progress: callable | None = None,
+    cancel_flag=None,
+) -> list[dict]:
+    """Probe each host for CL-TE and TE-CL HTTP request smuggling."""
+    findings: list[dict] = []
+    _emit = on_finding or (lambda f: None)
+    _progress = on_progress or (lambda event, data: None)
+
+    targets = _normalize_hosts(hosts)
+    if not targets:
+        return findings
+
+    _progress("active_baseline_start", {
+        "probe": "http_smuggling", "hosts": len(targets),
+    })
+
+    import httpx as _httpx  # noqa: E401 — need raw transport
+
+    for host in targets:
+        if cancel_flag is not None and getattr(cancel_flag, "is_set", lambda: False)():
+            break
+        base_url = f"https://{host}/"
+
+        # ── Control: normal POST to measure baseline latency ──
+        control_start = time.perf_counter()
+        try:
+            await http_client.post(
+                base_url, content="x=1", timeout=_SMUGGLE_TIMEOUT_S,
+                headers={**_PROBE_HEADERS, "Content-Type": "application/x-www-form-urlencoded"},
+            )
+        except Exception:
+            continue
+        control_elapsed = time.perf_counter() - control_start
+
+        # ── CL-TE probe ──
+        # Front-end uses Content-Length, back-end uses Transfer-Encoding.
+        # We send a body that CL says is short but TE says has a chunked
+        # trailer containing a partial request → back-end hangs waiting.
+        cl_te_body = "0\r\n\r\nGET /cl-te-probe HTTP/1.1\r\nHost: {host}\r\n\r\n"
+        cl_te_headers = {
+            **_PROBE_HEADERS,
+            "Content-Type": "application/x-www-form-urlencoded",
+            "Content-Length": str(len(cl_te_body)),
+            "Transfer-Encoding": "chunked",
+        }
+        probe_start = time.perf_counter()
+        try:
+            await http_client.post(
+                base_url, content=cl_te_body, timeout=_SMUGGLE_TIMEOUT_S,
+                headers=cl_te_headers,
+            )
+        except Exception:
+            pass
+        cl_te_elapsed = time.perf_counter() - probe_start
+
+        if (cl_te_elapsed - control_elapsed) >= _SMUGGLE_DELTA_S:
+            f = {
+                "title": "HTTP Request Smuggling (CL-TE Desync)",
+                "severity": "Critical",
+                "confidence": "Medium",
+                "owasp_category": "A05:2021",
+                "cwe": "CWE-444",
+                "url": base_url,
+                "parameter": "Content-Length / Transfer-Encoding",
+                "payload": "CL-TE: chunked body with trailing partial request",
+                "evidence": (
+                    f"Control POST: {control_elapsed:.2f}s, CL-TE probe: "
+                    f"{cl_te_elapsed:.2f}s (delta {cl_te_elapsed - control_elapsed:.2f}s). "
+                    f"The back-end appears to interpret Transfer-Encoding: chunked "
+                    f"while the front-end uses Content-Length, causing a desync."
+                ),
+                "remediation": (
+                    "Configure the front-end proxy to normalize Transfer-Encoding "
+                    "headers and reject ambiguous requests. Ensure both layers "
+                    "agree on message boundaries."
+                ),
+                "phase": "Active Baseline (HTTP Smuggling)",
+                "tool": "active_baseline.http_smuggling_probe",
+                "_finding_source": "active_baseline",
+                "_variant": "CL-TE",
+            }
+            findings.append(f)
+            _emit(f)
+
+        # ── TE-CL probe ──
+        # Front-end uses Transfer-Encoding, back-end uses Content-Length.
+        te_cl_body = "5e\r\nPOST /te-cl-probe HTTP/1.1\r\nHost: {host}\r\nContent-Length: 15\r\n\r\nx=1\r\n0\r\n\r\n"
+        te_cl_headers = {
+            **_PROBE_HEADERS,
+            "Content-Type": "application/x-www-form-urlencoded",
+            "Content-Length": "4",
+            "Transfer-Encoding": "chunked",
+        }
+        probe_start = time.perf_counter()
+        try:
+            await http_client.post(
+                base_url, content=te_cl_body, timeout=_SMUGGLE_TIMEOUT_S,
+                headers=te_cl_headers,
+            )
+        except Exception:
+            pass
+        te_cl_elapsed = time.perf_counter() - probe_start
+
+        if (te_cl_elapsed - control_elapsed) >= _SMUGGLE_DELTA_S:
+            f = {
+                "title": "HTTP Request Smuggling (TE-CL Desync)",
+                "severity": "Critical",
+                "confidence": "Medium",
+                "owasp_category": "A05:2021",
+                "cwe": "CWE-444",
+                "url": base_url,
+                "parameter": "Transfer-Encoding / Content-Length",
+                "payload": "TE-CL: mismatched Content-Length with chunked encoding",
+                "evidence": (
+                    f"Control POST: {control_elapsed:.2f}s, TE-CL probe: "
+                    f"{te_cl_elapsed:.2f}s (delta {te_cl_elapsed - control_elapsed:.2f}s). "
+                    f"The back-end appears to use Content-Length while the front-end "
+                    f"uses Transfer-Encoding: chunked."
+                ),
+                "remediation": (
+                    "Reject requests that contain both Content-Length and "
+                    "Transfer-Encoding headers. Configure the front-end "
+                    "to strip or normalize Transfer-Encoding before forwarding."
+                ),
+                "phase": "Active Baseline (HTTP Smuggling)",
+                "tool": "active_baseline.http_smuggling_probe",
+                "_finding_source": "active_baseline",
+                "_variant": "TE-CL",
+            }
+            findings.append(f)
+            _emit(f)
+
+    _progress("active_baseline_end", {
+        "probe": "http_smuggling", "findings": len(findings),
+    })
+    return findings
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# GAP 10 — OAuth/OIDC Flow Security Probes
+# ═══════════════════════════════════════════════════════════════════════
+#
+# Checks for common OAuth 2.0 / OpenID Connect misconfigurations:
+#   1. Open redirect in authorization endpoint (redirect_uri not validated)
+#   2. PKCE not enforced (code_challenge not required)
+#   3. Token endpoint accepts credentials in query string
+#   4. OIDC discovery endpoint exposes sensitive metadata
+
+_OIDC_DISCOVERY_PATHS = [
+    "/.well-known/openid-configuration",
+    "/.well-known/oauth-authorization-server",
+]
+
+_OAUTH_AUTHORIZE_PATHS = [
+    "/oauth/authorize", "/authorize", "/oauth2/authorize",
+    "/connect/authorize", "/auth/realms/master/protocol/openid-connect/auth",
+]
+
+
+async def run_oauth_oidc_probe(
+    http_client,
+    hosts: Iterable[str],
+    *,
+    on_finding: callable | None = None,
+    on_progress: callable | None = None,
+    cancel_flag=None,
+) -> list[dict]:
+    """Probe each host for OAuth/OIDC misconfigurations."""
+    findings: list[dict] = []
+    _emit = on_finding or (lambda f: None)
+    _progress = on_progress or (lambda event, data: None)
+
+    targets = _normalize_hosts(hosts)
+    if not targets:
+        return findings
+
+    _progress("active_baseline_start", {
+        "probe": "oauth_oidc", "hosts": len(targets),
+    })
+
+    import json as _json  # noqa: E401
+
+    for host in targets:
+        if cancel_flag is not None and getattr(cancel_flag, "is_set", lambda: False)():
+            break
+        base_url = f"https://{host}"
+
+        # ── OIDC Discovery ──
+        for disc_path in _OIDC_DISCOVERY_PATHS:
+            try:
+                resp = await http_client.get(
+                    f"{base_url}{disc_path}", timeout=10.0,
+                    follow_redirects=True, headers=_PROBE_HEADERS,
+                )
+                if resp.status_code != 200:
+                    continue
+                body = resp.text[:50_000]
+                try:
+                    config = _json.loads(body)
+                except Exception:
+                    continue
+
+                if not isinstance(config, dict) or "issuer" not in config:
+                    continue
+
+                issues = []
+                auth_endpoint = config.get("authorization_endpoint", "")
+                token_endpoint = config.get("token_endpoint", "")
+
+                # Check PKCE support
+                pkce_methods = config.get("code_challenge_methods_supported", [])
+                if not pkce_methods or "S256" not in pkce_methods:
+                    issues.append("PKCE (S256) not listed in code_challenge_methods_supported")
+
+                # Check grant types for implicit flow (insecure)
+                grant_types = config.get("grant_types_supported", [])
+                if "implicit" in grant_types:
+                    issues.append("Implicit grant flow is supported (insecure, tokens in URL fragment)")
+
+                # Check if token endpoint uses TLS
+                if token_endpoint and not token_endpoint.startswith("https://"):
+                    issues.append(f"Token endpoint uses non-HTTPS: {token_endpoint}")
+
+                if issues:
+                    f = {
+                        "title": f"OAuth/OIDC Configuration Issues ({disc_path})",
+                        "severity": "Medium",
+                        "confidence": "High",
+                        "owasp_category": "A07:2021",
+                        "cwe": "CWE-346",
+                        "url": f"{base_url}{disc_path}",
+                        "parameter": disc_path,
+                        "payload": f"GET {disc_path}",
+                        "evidence": (
+                            f"OIDC discovery at {disc_path}: " + "; ".join(issues) +
+                            f". Issuer: {config.get('issuer', 'n/a')}."
+                        ),
+                        "remediation": (
+                            "Enforce PKCE with S256 for all authorization code flows. "
+                            "Disable the implicit grant type. Use HTTPS for all "
+                            "OAuth endpoints. Restrict OIDC discovery to necessary fields."
+                        ),
+                        "phase": "Active Baseline (OAuth/OIDC)",
+                        "tool": "active_baseline.oauth_oidc_probe",
+                        "_finding_source": "active_baseline",
+                    }
+                    findings.append(f)
+                    _emit(f)
+
+                # ── Test redirect_uri validation ──
+                if auth_endpoint:
+                    evil_redirect = "https://evil.example.com/callback"
+                    test_url = (
+                        f"{auth_endpoint}?response_type=code"
+                        f"&client_id=probe_test"
+                        f"&redirect_uri={evil_redirect}"
+                        f"&scope=openid"
+                    )
+                    try:
+                        auth_resp = await http_client.get(
+                            test_url, timeout=10.0, follow_redirects=False,
+                            headers=_PROBE_HEADERS,
+                        )
+                        location = str(auth_resp.headers.get("location", ""))
+                        if "evil.example.com" in location:
+                            f = {
+                                "title": "OAuth Open Redirect via redirect_uri",
+                                "severity": "High",
+                                "confidence": "High",
+                                "owasp_category": "A07:2021",
+                                "cwe": "CWE-601",
+                                "url": test_url,
+                                "parameter": "redirect_uri",
+                                "payload": evil_redirect,
+                                "evidence": (
+                                    f"Authorization endpoint redirects to attacker-controlled "
+                                    f"URL: {location}. The redirect_uri parameter is not "
+                                    f"validated against a whitelist."
+                                ),
+                                "remediation": (
+                                    "Validate redirect_uri against a strict whitelist of "
+                                    "pre-registered callback URLs. Reject any redirect_uri "
+                                    "not exactly matching a registered value."
+                                ),
+                                "phase": "Active Baseline (OAuth/OIDC)",
+                                "tool": "active_baseline.oauth_oidc_probe",
+                                "_finding_source": "active_baseline",
+                            }
+                            findings.append(f)
+                            _emit(f)
+                    except Exception:
+                        pass
+
+                break  # found a valid discovery endpoint
+            except Exception:
+                continue
+
+    _progress("active_baseline_end", {
+        "probe": "oauth_oidc", "findings": len(findings),
+    })
+    return findings
+
+
 __all__ = [
     "run_bare_root_sqli_probe",
     "run_cache_poisoning_probe",
@@ -1601,6 +2050,9 @@ __all__ = [
     "run_open_redirect_probe",
     "run_sensitive_path_probe",
     "run_salesforce_probe",
+    "run_graphql_introspection_probe",
+    "run_http_smuggling_probe",
+    "run_oauth_oidc_probe",
     "_discover_params_from_html",
     "_discover_ssrf_params",
     "_classify_canary_context",

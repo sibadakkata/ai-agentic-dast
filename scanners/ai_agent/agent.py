@@ -33,6 +33,9 @@ from .active_baseline import (
     run_open_redirect_probe,
     run_sensitive_path_probe,
     run_salesforce_probe,
+    run_graphql_introspection_probe,
+    run_http_smuggling_probe,
+    run_oauth_oidc_probe,
 )
 from .subdomain_takeover import (
     _resolve_cname,
@@ -1184,6 +1187,7 @@ async def _run_phase_worker(
     on_progress: callable | None = None,
     auth_headers: dict | None = None,
     crawled_urls: list[str] | None = None,
+    shared_tested: set[str] | None = None,
 ) -> tuple[list[dict], dict]:
     """Run a single scan phase in an isolated browser context.
 
@@ -1215,6 +1219,8 @@ async def _run_phase_worker(
             exclude_urls=exclude_urls,
         )
         tools.set_findings_ref(findings)
+        if shared_tested is not None:
+            tools.set_shared_tested(shared_tested)
 
         phase_prompt = phase.prompt
         if phase.id.startswith("chain_") and prior_findings:
@@ -1523,6 +1529,7 @@ async def run_phases_parallel(
     all_findings: list[dict] = []
     all_logs: list[dict] = []
     lock = asyncio.Lock()
+    shared_tested: set[str] = set()
 
     async def _guarded(idx: int, phase: ScanPhase):
         # Defensive: an exception inside _run_phase_worker (e.g. transient
@@ -1556,6 +1563,7 @@ async def run_phases_parallel(
                     worker_id=idx,
                     on_progress=on_progress,
                     auth_headers=auth_headers,
+                    shared_tested=shared_tested,
                 )
             except ScanCancelled:
                 # Cooperative cancellation: propagate so the orchestrator
@@ -2637,6 +2645,54 @@ async def run_scan(
                                       "tool_calls": len(ab_hosts) * 5, "findings": len(sf_findings)})
                     if sf_findings:
                         print(f"  [ACTIVE-BASELINE] Salesforce: {len(sf_findings)} finding(s)")
+
+                    # ── GraphQL Introspection probe ──────────────────
+                    p = _next_phase()
+                    _cb("phase_start", {"phase": p, "total": 0, "name": "Active Baseline (GraphQL)", "id": "active_baseline_graphql"})
+                    gql_findings = await run_graphql_introspection_probe(
+                        http_client,
+                        sorted(ab_hosts),
+                        on_finding=lambda f: _cb("finding", {**f, "phase": "Active Baseline (GraphQL)"}),
+                        on_progress=_ab_progress,
+                        cancel_flag=cancel_flag,
+                    )
+                    findings.extend(gql_findings)
+                    _cb("phase_end", {"phase": p, "name": "Active Baseline (GraphQL)",
+                                      "tool_calls": len(ab_hosts) * 8, "findings": len(gql_findings)})
+                    if gql_findings:
+                        print(f"  [ACTIVE-BASELINE] GraphQL Introspection: {len(gql_findings)} finding(s)")
+
+                    # ── HTTP Smuggling probe ──────────────────────────
+                    p = _next_phase()
+                    _cb("phase_start", {"phase": p, "total": 0, "name": "Active Baseline (HTTP Smuggling)", "id": "active_baseline_smuggling"})
+                    smuggle_findings = await run_http_smuggling_probe(
+                        http_client,
+                        sorted(ab_hosts),
+                        on_finding=lambda f: _cb("finding", {**f, "phase": "Active Baseline (HTTP Smuggling)"}),
+                        on_progress=_ab_progress,
+                        cancel_flag=cancel_flag,
+                    )
+                    findings.extend(smuggle_findings)
+                    _cb("phase_end", {"phase": p, "name": "Active Baseline (HTTP Smuggling)",
+                                      "tool_calls": len(ab_hosts) * 3, "findings": len(smuggle_findings)})
+                    if smuggle_findings:
+                        print(f"  [ACTIVE-BASELINE] HTTP Smuggling: {len(smuggle_findings)} finding(s)")
+
+                    # ── OAuth/OIDC probe ──────────────────────────────
+                    p = _next_phase()
+                    _cb("phase_start", {"phase": p, "total": 0, "name": "Active Baseline (OAuth/OIDC)", "id": "active_baseline_oauth"})
+                    oauth_findings = await run_oauth_oidc_probe(
+                        http_client,
+                        sorted(ab_hosts),
+                        on_finding=lambda f: _cb("finding", {**f, "phase": "Active Baseline (OAuth/OIDC)"}),
+                        on_progress=_ab_progress,
+                        cancel_flag=cancel_flag,
+                    )
+                    findings.extend(oauth_findings)
+                    _cb("phase_end", {"phase": p, "name": "Active Baseline (OAuth/OIDC)",
+                                      "tool_calls": len(ab_hosts) * 4, "findings": len(oauth_findings)})
+                    if oauth_findings:
+                        print(f"  [ACTIVE-BASELINE] OAuth/OIDC: {len(oauth_findings)} finding(s)")
 
             except Exception as e:
                 print(f"  [ACTIVE-BASELINE] Failed (non-fatal): {e}")
@@ -4073,6 +4129,67 @@ async def run_scan(
                             print(f"  [POST-RECON] Extracted {_post_added} new URLs (hrefs+forms) after LLM recon")
                     except Exception as e:
                         logger.debug("Post-recon URL extraction failed (non-fatal): %s", e)
+
+        # ── Post-auth SPA re-crawl (smaller budget) ─────────────────
+        if (page is not None
+            and target.scan_mode in ("website", "both")
+            and auth_success
+            and not _use_fast_path):
+            try:
+                from .spa_crawler import run_spa_crawl
+                print("  [SPA-2] Re-crawling SPA post-authentication...")
+                p_spa2 = _next_phase()
+                _cb("phase_start", {"phase": p_spa2, "total": 0,
+                                    "name": "SPA Crawl (post-auth)", "id": "spa_crawl_post_auth"})
+
+                def _spa2_progress(event, data):
+                    _cb("progress_msg", {"message": f"[SPA-2] {event}: {data}"})
+
+                spa2_endpoints, spa2_oos = await run_spa_crawl(
+                    page=page,
+                    target_url=target.url,
+                    target_host=(urlparse(target.url).hostname or "").lower(),
+                    allowed_hosts=allowed_domains,
+                    max_duration_s=30,
+                    max_clicks=30,
+                    on_progress=_spa2_progress,
+                )
+                _spa2_added = 0
+                for ep in spa2_endpoints:
+                    if _is_in_scope(ep.url, allowed_domains):
+                        if ep.url not in metrics["pages_list"]:
+                            metrics["pages_list"].append(ep.url)
+                            metrics["pages_crawled"] += 1
+                            _cb("crawl", {"url": ep.url, "type": "api",
+                                          "tool": "spa_crawl_post_auth",
+                                          "count": metrics["pages_crawled"]})
+                            _spa2_added += 1
+                        registry.add([ep])
+                print(f"  [SPA-2] Post-auth crawl: +{_spa2_added} new endpoints")
+                _cb("phase_end", {"phase": p_spa2, "name": "SPA Crawl (post-auth)",
+                                  "tool_calls": 0, "findings": 0})
+            except Exception as e:
+                logger.debug("Post-auth SPA re-crawl failed (non-fatal): %s", e)
+
+        # ── Crawl coverage metric ────────────────────────────────────
+        _crawled_total = metrics.get("pages_crawled", 0)
+        _crawled_list = metrics.get("pages_list", [])
+        _unique_paths: set[str] = set()
+        for _cu in _crawled_list:
+            try:
+                _unique_paths.add(urlparse(_cu).path)
+            except Exception:
+                pass
+        _coverage = {
+            "total_urls": len(_crawled_list),
+            "unique_paths": len(_unique_paths),
+            "pages_crawled": _crawled_total,
+        }
+        _cb("progress_msg", {"message": f"[CRAWL-COVERAGE] {_coverage}"})
+        if _crawled_total < 5:
+            print(f"  [CRAWL-COVERAGE] Warning: only {_crawled_total} pages crawled. "
+                  f"Coverage may be limited. Consider adding authentication or "
+                  f"increasing crawl budget.")
 
         # ── Parallel Vuln-Testing Fan-Out ─────────────────────────────
         if run_in_parallel:

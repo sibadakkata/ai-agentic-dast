@@ -906,6 +906,46 @@ async def _check_source_maps(http_client, js_urls: list[str]) -> list[dict]:
                         source="passive_recon",
                     ))
                     logger.info("  FOUND: Source map at %s (%.0fKB)", map_url, size_kb)
+
+                    # ── Source map deep scan: extract secrets & endpoints ──
+                    map_text = map_resp.text[:500_000]
+                    _sm_secrets = []
+                    for pat, label in _SECRET_PATTERNS:
+                        for sm in re.finditer(pat, map_text):
+                            val = sm.group(0)[:120]
+                            if not _SECRET_FP.search(val):
+                                _sm_secrets.append((label, val))
+                    if _sm_secrets:
+                        secret_list = "; ".join(f"{l}: {v[:60]}..." for l, v in _sm_secrets[:5])
+                        findings.append(_make_finding(
+                            "Secrets Exposed in JavaScript Source Map",
+                            "High", "CWE-798", 7.5, map_url,
+                            f"Source map contains {len(_sm_secrets)} hardcoded secret(s): "
+                            f"{secret_list}. Original source code is fully recoverable.",
+                            payload=f"GET {map_url}",
+                            source="passive_recon",
+                        ))
+
+                    _sm_endpoints: set[str] = set()
+                    for ep_match in re.finditer(
+                        r'(?:"|\')\s*(/api/[a-zA-Z0-9/_-]{3,60})\s*(?:"|\')', map_text
+                    ):
+                        _sm_endpoints.add(ep_match.group(1))
+                    for ep_match in re.finditer(
+                        r'(?:fetch|axios|httpClient|this\.\$http)\s*(?:\.\w+)?\s*\(\s*["\']([^"\']{5,80})["\']',
+                        map_text,
+                    ):
+                        _sm_endpoints.add(ep_match.group(1))
+                    if _sm_endpoints:
+                        ep_list = ", ".join(sorted(_sm_endpoints)[:15])
+                        findings.append(_make_finding(
+                            "Hidden API Endpoints in JavaScript Source Map",
+                            "Medium", "CWE-200", 5.3, map_url,
+                            f"Source map reveals {len(_sm_endpoints)} API endpoint(s) "
+                            f"not visible in minified JS: {ep_list}",
+                            payload=f"GET {map_url}",
+                            source="passive_recon",
+                        ))
             else:
                 findings.append(_make_finding(
                     "Source Map Reference in JavaScript (Map Not Accessible)",
@@ -2589,6 +2629,48 @@ async def _fingerprint_technologies(page, http_client, target_url: str, js_urls:
         if "cf-ray" in headers: _add("Cloudflare", "high", "CF-Ray header", "cdn")
         if "x-amz-cf-id" in headers: _add("AWS CloudFront", "high", "X-Amz-Cf-Id header", "cdn")
         if "x-vercel-id" in headers: _add("Vercel", "high", "X-Vercel-Id header", "hosting")
+
+        # ── WAF / CDN fingerprinting (expanded) ──────────────────────
+        if "x-sucuri-id" in headers or "x-sucuri-cache" in headers:
+            _add("Sucuri WAF", "high", "X-Sucuri-* header", "waf")
+        if "x-cdn" in headers:
+            _add(f"CDN ({headers['x-cdn']})", "medium", f"X-CDN: {headers['x-cdn']}", "cdn")
+        if any(h in headers for h in ("x-fw-hash", "x-fw-serve", "x-fw-version")):
+            _add("Fastly CDN", "high", "X-FW-* Fastly header", "cdn")
+        if "x-cache" in headers and "fastly" in headers.get("x-cache", "").lower():
+            _add("Fastly CDN", "high", f"X-Cache: {headers['x-cache']}", "cdn")
+        if "x-msedge-ref" in headers:
+            _add("Azure Front Door / CDN", "high", "X-MSEdge-Ref header", "cdn")
+        if "x-azure-ref" in headers:
+            _add("Azure Front Door / CDN", "high", "X-Azure-Ref header", "cdn")
+        if "x-gs-flash-key" in headers or "x-gs-content" in headers:
+            _add("Google Cloud CDN", "medium", "X-GS-* header", "cdn")
+        if "x-iinfo" in headers or "x-cdn" in headers and "incapsula" in headers.get("x-cdn", "").lower():
+            _add("Imperva Incapsula WAF", "high", "X-Iinfo / Incapsula header", "waf")
+        _via = headers.get("via", "").lower()
+        if "varnish" in _via:
+            _add("Varnish Cache", "high", f"Via: {headers.get('via', '')}", "cache")
+        if "squid" in _via:
+            _add("Squid Proxy", "medium", f"Via: {headers.get('via', '')}", "proxy")
+        if "x-kong-" in " ".join(headers.keys()):
+            _add("Kong API Gateway", "high", "X-Kong-* headers", "gateway")
+        if "x-envoy-upstream-service-time" in headers:
+            _add("Envoy Proxy", "high", "X-Envoy-Upstream-Service-Time header", "proxy")
+        # WAF block page signatures in body
+        _waf_sigs = {
+            "access denied | sucuri": "Sucuri WAF",
+            "attention required! | cloudflare": "Cloudflare WAF",
+            "request blocked": "Generic WAF",
+            "web application firewall": "Generic WAF",
+            "modsecurity": "ModSecurity WAF",
+            "fortiweb": "FortiWeb WAF",
+            "barracuda": "Barracuda WAF",
+            "f5 big-ip": "F5 BIG-IP WAF",
+        }
+        for sig, waf_name in _waf_sigs.items():
+            if sig in body_lower:
+                _add(waf_name, "medium", f"WAF signature in body: '{sig}'", "waf")
+                break
 
         # ── Cookie-based detection ───────────────────────────────────
         cookies = resp.headers.get_list("set-cookie") if hasattr(resp.headers, "get_list") else []
