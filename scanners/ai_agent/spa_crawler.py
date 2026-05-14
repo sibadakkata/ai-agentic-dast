@@ -413,6 +413,157 @@ async def _interact_context(
     return local_clicks
 
 
+_ROUTE_EXTRACT_JS = r"""() => {
+    const routes = new Set();
+    const addRoute = (path) => {
+        if (!path || typeof path !== 'string') return;
+        path = path.trim();
+        if (path.startsWith('/') && !path.startsWith('//') &&
+            path.length < 200 && !/\.(js|css|png|jpg|svg|ico|woff|map)$/i.test(path) &&
+            !/[:*{]/.test(path)) {
+            routes.add(path);
+        }
+    };
+
+    // Next.js
+    try {
+        const nd = window.__NEXT_DATA__;
+        if (nd && nd.props && nd.props.pageProps) {
+            Object.keys(nd.page ? {[nd.page]: 1} : {}).forEach(addRoute);
+        }
+        if (nd && nd.buildManifest && nd.buildManifest.sortedPages) {
+            nd.buildManifest.sortedPages.forEach(addRoute);
+        }
+        if (window.__BUILD_MANIFEST) {
+            Object.keys(window.__BUILD_MANIFEST).forEach(addRoute);
+        }
+    } catch {}
+
+    // Nuxt
+    try {
+        const nuxt = window.__NUXT__ || window.$nuxt;
+        if (nuxt && nuxt.$options && nuxt.$options.router) {
+            const r = nuxt.$options.router;
+            (r.options && r.options.routes || []).forEach(rt => addRoute(rt.path));
+        }
+    } catch {}
+
+    // Vue Router (standalone)
+    try {
+        const app = document.querySelector('#app');
+        if (app && app.__vue_app__) {
+            const router = app.__vue_app__.config.globalProperties.$router;
+            if (router) {
+                router.getRoutes().forEach(rt => addRoute(rt.path));
+            }
+        }
+    } catch {}
+
+    // Angular
+    try {
+        const ng = window.ng;
+        if (ng) {
+            const roots = document.querySelectorAll('[ng-version]');
+            roots.forEach(root => {
+                try {
+                    const injector = ng.getComponent(root);
+                    if (injector && injector.router) {
+                        injector.router.config.forEach(rt => addRoute('/' + (rt.path || '')));
+                    }
+                } catch {}
+            });
+        }
+    } catch {}
+
+    // React Router (data in window.__remixManifest or inline script)
+    try {
+        if (window.__remixManifest && window.__remixManifest.routes) {
+            Object.values(window.__remixManifest.routes).forEach(rt => addRoute(rt.path));
+        }
+    } catch {}
+
+    // Generic: parse <a href> that look like SPA routes
+    try {
+        document.querySelectorAll('a[href^="/"]').forEach(a => {
+            const h = a.getAttribute('href');
+            if (h && !h.startsWith('//')) addRoute(h.split('?')[0].split('#')[0]);
+        });
+    } catch {}
+
+    // Sidebar / nav links often have data-href or routerLink
+    try {
+        document.querySelectorAll('[routerLink], [data-href], [ng-reflect-router-link]').forEach(el => {
+            const v = el.getAttribute('routerLink') ||
+                      el.getAttribute('data-href') ||
+                      el.getAttribute('ng-reflect-router-link') || '';
+            addRoute(v);
+        });
+    } catch {}
+
+    return [...routes];
+}"""
+
+
+async def _walk_spa_routes(
+    page, target_url: str, allowed_hosts: set, deadline: float,
+    captured_ref: list, seen_keys: set,
+    on_progress,
+) -> list[str]:
+    """Extract SPA routes from framework globals and navigate to each.
+
+    The existing network listener on the page captures XHRs fired by
+    each route, expanding endpoint coverage without extra clicks.
+    """
+    try:
+        routes = await page.evaluate(_ROUTE_EXTRACT_JS)
+    except Exception as e:
+        logger.debug("SPA route extraction failed: %s", e)
+        return []
+
+    if not routes:
+        return []
+
+    parsed_target = urlparse(target_url)
+    base = f"{parsed_target.scheme}://{parsed_target.netloc}"
+    visited: list[str] = []
+
+    # Deduplicate against already-seen URLs
+    existing_paths = set()
+    for key in seen_keys:
+        parts = key.split("|")
+        if len(parts) >= 3:
+            existing_paths.add(urlparse(parts[2]).path)
+
+    routes = [r for r in routes if r not in existing_paths]
+    routes = routes[:20]  # cap to avoid burning budget
+
+    on_progress("spa_routes_found", {"count": len(routes)})
+    print(f"  [SPA] Route walker found {len(routes)} candidate routes")
+
+    for route in routes:
+        if time.time() >= deadline:
+            break
+        full_url = base + route
+        host = (urlparse(full_url).hostname or "").lower()
+        if not _host_allowed(host, allowed_hosts):
+            continue
+
+        pre_count = len(captured_ref)
+        try:
+            await page.goto(full_url, wait_until="domcontentloaded", timeout=10000)
+            await asyncio.sleep(1.5)
+        except Exception as e:
+            logger.debug("Route walk failed for %s: %s", route, e)
+            continue
+
+        new_captures = len(captured_ref) - pre_count
+        visited.append(route)
+        if new_captures:
+            print(f"    [SPA] Route {route} -> +{new_captures} endpoints")
+
+    return visited
+
+
 async def run_spa_crawl(
     page,
     target_url: str,
@@ -584,6 +735,15 @@ async def run_spa_crawl(
 
         if processed_frames:
             print(f"  [SPA] Processed {processed_frames} in-scope frames")
+
+        # ── SPA route walker: extract routes from framework globals ──
+        if time.time() < deadline and click_budget[0] > 0:
+            route_urls = await _walk_spa_routes(
+                page, target_url, allowed_hosts, deadline, captured, seen_keys,
+                _progress,
+            )
+            if route_urls:
+                print(f"  [SPA] Route walker visited {len(route_urls)} SPA routes")
 
         try:
             await page.wait_for_load_state("networkidle", timeout=5000)
