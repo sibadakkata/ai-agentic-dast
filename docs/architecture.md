@@ -228,10 +228,10 @@ The auth module (`auth.py`) handles:
 
 ## Passive Reconnaissance
 
-Before any LLM calls, 29 deterministic check categories run at $0 cost:
+Before any LLM calls, 29+ deterministic check categories run at $0 cost:
 
 **Information Disclosure**
-- Exposed JavaScript source maps (`.js.map` files accessible in production)
+- Exposed JavaScript source maps (`.js.map` files accessible in production) — **plus deep scan: extracts hardcoded secrets and hidden API endpoints from map contents**
 - Hardcoded secrets/tokens in client-side JavaScript
 - Internal URLs/IPs leaked in source code
 - Sensitive files (`.git/`, `.env`, `wp-config.php`)
@@ -257,6 +257,7 @@ Before any LLM calls, 29 deterministic check categories run at $0 cost:
 - HSTS preload readiness (max-age, includeSubDomains)
 - Clickjacking (both X-Frame-Options and frame-ancestors missing)
 - Cache-Control on authenticated pages
+- **WAF/CDN fingerprinting** (15+ products: Cloudflare, Akamai, Fastly, Azure Front Door, Sucuri, Imperva, Kong, Envoy, Varnish, ModSecurity, FortiWeb, Barracuda, F5 BIG-IP — via headers + response body signatures)
 
 **Session & Token Security**
 - Cookie security audit (Secure, HttpOnly, SameSite flags)

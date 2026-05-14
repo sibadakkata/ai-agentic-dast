@@ -715,13 +715,13 @@ All three readers now guard with `isinstance(t, dict)` (and analogous checks on 
 
 | File | Role | Key Classes/Functions |
 |------|------|----------------------|
-| `scanners/ai_agent/agent.py` | Scan orchestrator | `run_scan()`, `extract_findings()`, `trim_context()`, `_capture_evidence()`, `_run_smart_retry_pass()` (shared by sequential + parallel paths) |
+| `scanners/ai_agent/agent.py` | Scan orchestrator | `run_scan()`, `extract_findings()`, `trim_context()`, `_capture_evidence()`, `_run_smart_retry_pass()`, post-auth SPA re-crawl, crawl coverage metric, parallel worker dedup via `shared_tested` |
 | `scanners/ai_agent/retry_prompts.py` | Hybrid Smart Retry constants | `_ACTIVE_RETRY_PHASES`, `_RETRY_PROMPTS`, `_PHASE_CORE_KEYWORDS`, `_PHASE_TO_PROMPT_KEY`; `should_run_smart_retry()`, `phase_has_core_finding()` |
-| `scanners/ai_agent/tools.py` | Tool layer | `ScanTools`, `TOOL_DEFINITIONS`, `execute()` |
+| `scanners/ai_agent/tools.py` | Tool layer | `ScanTools`, `TOOL_DEFINITIONS`, `execute()`, `_detect_waf_block()`, `set_shared_tested()` |
 | `scanners/ai_agent/prompts.py` | LLM instructions | `SYSTEM_PROMPT`, `WEB_PHASES`, `API_PHASES`, `get_phases()` |
 | `scanners/ai_agent/auth.py` | Authentication | `detect_and_login()`, `AuthSession`, `_detect_captcha()` |
 | `scanners/ai_agent/llm_config.py` | LLM routing | `LLMRouter`, `ModelUsage`, cost tracking |
-| `scanners/ai_agent/passive_recon.py` | Passive checks | 29 deterministic security checks; hybrid JS-library detection (catalog + heuristic + OSV.dev) |
+| `scanners/ai_agent/passive_recon.py` | Passive checks | 29+ deterministic checks; hybrid JS-library detection; WAF/CDN fingerprinting (15+ products); source map deep scan (secrets + API endpoints) |
 | `scanners/ai_agent/js_registry.py` | Global JS URL registry | `JSUrlRegistry` — collects every JS URL the scanner encounters across auth, SPA, and the network listener; in-scope filtering happens here. Used by passive recon's CVE audit so library detection isn't scoped to the seed page only |
 | `scanners/ai_agent/llm_detect.py` | LLM app detection | DOM/network heuristics to identify chatbot/AI features (confidence scoring) |
 | `scanners/ai_agent/llm_baseline.py` | LLM security probes | 37 deterministic probes: prompt injection, info disclosure, output handling, excessive agency, prompt leakage, DoS ($0 LLM cost) |
