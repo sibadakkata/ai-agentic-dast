@@ -10,12 +10,12 @@ A single LLM agent drives a real Chromium browser and HTTP client through the OW
 ┌───────────────────────────────────────────────────────────────────────┐
 │                          SCAN PIPELINE                                │
 │                                                                       │
-│  ┌─────────────┐   ┌──────────────┐   ┌────────────────────────────┐ │
-│  │    Auth      │──▶│   Passive    │──▶│     LLM Deep Scan          │ │
-│  │  (auto-     │   │   Recon      │   │  (25 web + 15 API phases)  │ │
-│  │  detect +   │   │ (29 checks + │   │  + enriched retry prompts  │ │
-│  │  multi-id)  │   │  secrets)    │   │                            │ │
-│  └─────────────┘   └──────────────┘   └─────────────┬──────────────┘ │
+│  ┌─────────────┐   ┌──────────────┐   ┌──────────────┐   ┌─────────┐ │
+│  │    Auth      │──▶│   Passive    │──▶│    Active    │──▶│  LLM    │ │
+│  │  (auto-     │   │   Recon      │   │   Baseline   │   │  Deep   │ │
+│  │  detect +   │   │ (29 checks + │   │  (10 probes  │   │  Scan   │ │
+│  │  multi-id)  │   │  secrets)    │   │  + DOM XSS)  │   │ (40 ph) │ │
+│  └─────────────┘   └──────────────┘   └──────────────┘   └────┬────┘ │
 │                                                      │                │
 │                                        ┌─────────────▼──────────────┐ │
 │                                        │  Attack Chain Analysis      │ │
@@ -80,7 +80,7 @@ This loop runs up to 50 steps per phase (20–50 depending on phase complexity).
 | **Body-Fuzz Return-Shape Hardening** | `fuzz_body` early-exit paths (unparseable body, baseline failure) used to return a bare `[]` while the caller did `a, b = await fuzz_body(...)`, crashing phase 4 with `not enough values to unpack (expected 2, got 0)`. Now both early exits return `([], [])`; return type annotation corrected; 23-test scenario suite (`tests/test_scan_error_resilience.py`) audits every tuple-unpack contract in the scanner | `body_fuzzer.py`, `tests/test_body_fuzzer_return_shape.py`, `tests/test_scan_error_resilience.py` |
 | **Subdomain Takeover Detection** | Detects dangling DNS records pointing to unclaimed third-party services. 46-provider fingerprint database covering AWS S3, CloudFront, Elastic Beanstalk, GitHub Pages, Heroku, Azure (Web Apps, Blob, Traffic Manager), Netlify, Shopify, Fastly, Vercel, Google Cloud Storage, Wix, Webflow, Render, Fly.io, and 30 more. Detection via: (1) DNS CNAME chain resolution with `dnspython`, (2) NXDOMAIN detection for abandoned service instances, (3) HTTP response fingerprint matching against known takeover strings, (4) Subdomain enumeration via Certificate Transparency (crt.sh) + 75-prefix DNS wordlist. Concurrent checking with configurable semaphore | `subdomain_takeover.py`, `subdomain_enum.py`, integrated in passive recon step 26 |
 | **Email/DNS Security** | Validates email authentication configuration for the target domain: SPF record presence and enforcement level (+all/~all/-all, lookup count, multiple records), DMARC policy analysis (none/quarantine/reject, subdomain policy, pct, reporting URIs), DKIM selector probing (22 common selectors including google, selector1/2, mandrill, amazonses, sendgrid), MX record security (null MX, IP-based MX). Only flags findings when the domain actually handles email (MX-aware). Generates actionable remediation guidance per finding | `dns_security.py`, integrated in passive recon step 27 |
-| **Active Baseline (10 Probes)** | Deterministic active probes ($0 LLM cost): bare-root SQLi (time-based blind), cache poisoning (unkeyed header reflection), reflected XSS (dynamic param discovery + context-aware escalation), SSRF bypass (cloud metadata + IP encoding), open redirect, sensitive path disclosure, Salesforce misconfiguration, **GraphQL introspection** (8 common paths, mutation exposure), **HTTP request smuggling** (CL-TE + TE-CL timing desync), **OAuth/OIDC** (PKCE enforcement, implicit flow, redirect_uri validation). All use realistic browser UA to bypass WAF | `active_baseline.py` |
+| **Active Baseline (10 Probes + DOM XSS)** | Deterministic active probes ($0 LLM cost): bare-root SQLi (time-based blind), cache poisoning (unkeyed header reflection), **reflected XSS** (dynamic param discovery + 4-layer detection: direct reflection, cross-endpoint fallback, propagation-aware multi-page test, HTML attribute context breakout), **Playwright DOM XSS probe** (browser-verified: injects payloads into URL params, navigates pages, clicks links, listens for `alert()` dialogs — replicates manual pentester workflow), SSRF bypass (cloud metadata + IP encoding), open redirect, sensitive path disclosure, Salesforce misconfiguration, **GraphQL introspection** (8 common paths, mutation exposure), **HTTP request smuggling** (CL-TE + TE-CL timing desync), **OAuth/OIDC** (PKCE enforcement, implicit flow, redirect_uri validation). All use realistic browser UA to bypass WAF | `active_baseline.py` |
 | **Exploitation Tiers** | Every finding is assigned `validated` (exploitation proven: runtime confirmed, payload reflected, SQL error returned) or `informational` (detected but not proven: pattern match, missing header, config check). Inspired by XBOW's "proof over probability" methodology | `_assign_exploitation_tier()` in `triage_engine.py` |
 | **Entropy-Based Secret Filtering** | Hardcoded "secrets" detected in JS are validated via Shannon entropy calculation + framework constant detection (38 known patterns: `$$ROW_INTERNAL`, `__react_devtools`, `ng-version`, etc.). Low-entropy or known-constant values are auto-classified as FALSE_POSITIVE | `_shannon_entropy()`, `_is_fake_secret()` in `triage_engine.py` |
 | **SPA Catch-All Detection** | Detects when SPAs (React/Angular/Vue) return the app shell for sensitive file paths (e.g., `/.git/HEAD` returns `index.html` with 200). Marks these as FALSE_POSITIVE instead of real file disclosure findings | Layer 0B in `triage_engine.py` |
@@ -141,6 +141,13 @@ uvicorn web.app:app --host 0.0.0.0 --port 8080
 ├─────────────────────────────────────────────────────────────────────┤
 │  4. HYBRID BODY FUZZING (POST/PUT/PATCH endpoints)                  │
 │     LLM plans payloads ($0.001) → engine executes → LLM analyzes   │
+├─────────────────────────────────────────────────────────────────────┤
+│  4b. ACTIVE BASELINE ($0) — 10 probes + Playwright DOM XSS         │
+│     SQLi (time-based), reflected XSS (4-layer: direct, cross-      │
+│     endpoint, propagation-aware, attribute context breakout),       │
+│     DOM XSS (Playwright: navigate, click links, detect alert()),   │
+│     SSRF bypass, cache poisoning, open redirect, sensitive paths,   │
+│     Salesforce, GraphQL introspection, HTTP smuggling, OAuth/OIDC   │
 ├─────────────────────────────────────────────────────────────────────┤
 │  5. LLM DEEP SCAN (25 web + 15 API phases)                         │
 │     OWASP Top 10 + context-aware: race, upload, host header, etc.  │
@@ -212,7 +219,7 @@ uvicorn web.app:app --host 0.0.0.0 --port 8080
 │   ├── llm_config.py            #   LLM routing, prompt caching, cost tracking, transient retry (5× backoff)
 │   ├── prompts.py               #   System + phase prompts (multi-identity placeholders)
 │   ├── tools.py                 #   31 tools (browser, API, WebSocket, chaining) + WAF detection + parallel dedup
-│   ├── active_baseline.py       #   10 deterministic probes: SQLi, XSS, SSRF, cache poisoning, open redirect, sensitive paths, Salesforce, GraphQL, HTTP smuggling, OAuth/OIDC
+│   ├── active_baseline.py       #   10 deterministic probes + Playwright DOM XSS: SQLi, reflected XSS (4-layer: direct/cross-endpoint/propagation/attribute), DOM XSS (browser-verified alert() detection), SSRF, cache poisoning, open redirect, sensitive paths, Salesforce, GraphQL, HTTP smuggling, OAuth/OIDC
 │   ├── llm_detect.py            #   LLM app detection: DOM/network heuristics for chatbot/AI features
 │   ├── llm_baseline.py          #   37 deterministic LLM security probes (OWASP LLM Top 10, $0 cost)
 │   ├── garak_runner.py          #   Garak (NVIDIA) orchestration: config gen, subprocess, JSONL parsing
