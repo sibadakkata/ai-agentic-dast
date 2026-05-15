@@ -2772,6 +2772,44 @@ async def run_scan(
         has_body_fuzz = bool(body_fuzz_context)
         has_workflow = workflow_replayed or bool(getattr(target, "business_flow", None))
 
+        # ── MULTI-AGENT MODE (XBOW-style) ─────────────────────────────
+        # When scan_profile == "multi_agent", skip the normal sequential/
+        # parallel phase pipeline and run specialist agents instead.
+        _scan_profile = getattr(target, "scan_profile", "vulnerability_scan")
+        if _scan_profile == "multi_agent":
+            from .orchestrator import run_multi_agent_scan
+            from .multi_agent_context import SharedScanContext
+
+            print("  [MULTI-AGENT] XBOW-style multi-agent mode activated")
+            _cb("progress_msg", {"message": "[MULTI-AGENT] Running specialist agents in parallel..."})
+
+            ma_context = SharedScanContext(
+                target_url=target.url,
+                hosts=list(ab_hosts) if 'ab_hosts' in dir() else [urlparse(target.url).hostname or ""],
+                scan_id=getattr(target, "scan_id", ""),
+                crawled_urls=metrics.get("pages_list") or [],
+                auth_token=str(getattr(auth_session, "token", "")) if auth_session else "",
+            )
+
+            ma_findings = await run_multi_agent_scan(
+                context=ma_context,
+                llm_router=router,
+                tool_registry={},
+                browser=browser,
+                http_client=http_client,
+                on_finding=lambda f: _cb("finding", f),
+                on_progress=lambda event, data: _cb("progress_msg", {
+                    "message": f"[MULTI-AGENT] {event}: {data}",
+                }),
+                cancel_flag=cancel_flag,
+            )
+            findings.extend(ma_findings)
+            print(f"  [MULTI-AGENT] Complete: {len(ma_findings)} findings from specialist agents")
+
+            _cb("progress_msg", {"message": f"[MULTI-AGENT] {len(ma_findings)} findings from {len(ma_context.agent_metrics)} agents"})
+
+            return findings, metrics
+
         # ── Split phases into sequential (recon) vs parallel (vuln testing) ──
         # Recon phases (parallel_ok=False) MUST run first sequentially.
         # Vuln testing phases (parallel_ok=True) can run concurrently.

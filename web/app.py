@@ -1635,7 +1635,7 @@ async def start_scan(request: Request):
     if scan_scope not in ("url_only", "directory", "full_site"):
         scan_scope = "directory"
 
-    if scan_profile not in ("vulnerability_scan", "crawl_only"):
+    if scan_profile not in ("vulnerability_scan", "crawl_only", "multi_agent"):
         scan_profile = "vulnerability_scan"
     # Crawl-only is incompatible with focus_areas (focus_areas selects vuln
     # categories; crawl-only tests nothing). Silently drop focus_areas in

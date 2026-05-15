@@ -119,8 +119,8 @@ def test_bare_root_probe_dedupes_input_hosts():
             "http://dup.example.invalid:8080",
         ],
     ))
-    # 1 control + len(payloads) attack requests for the single dedup'd host
-    expected = 1 + len(_BARE_ROOT_PAYLOADS)
+    # 1 control + len(payloads) attack + 1 param-discovery fetch
+    expected = 1 + len(_BARE_ROOT_PAYLOADS) + 1
     assert len(client.calls) == expected, (
         f"expected {expected} calls for one dedup'd host, got {len(client.calls)}: "
         f"{[c[0] for c in client.calls]}"
@@ -208,9 +208,9 @@ def test_bare_root_probe_skips_host_when_control_fails():
         ["bad.example.invalid"],
     ))
     assert findings == []
-    # Only the control request should have been attempted.
-    assert len(client.calls) == 1, (
-        f"expected exactly 1 (control) call when control fails, got {len(client.calls)}"
+    # Control + param-discovery fetch (both error, so no attacks).
+    assert len(client.calls) == 2, (
+        f"expected 2 calls (control + param-discovery) when control fails, got {len(client.calls)}"
     )
 
 
