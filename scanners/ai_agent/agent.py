@@ -29,6 +29,7 @@ from .active_baseline import (
     run_bare_root_sqli_probe,
     run_cache_poisoning_probe,
     run_reflected_xss_probe,
+    run_dom_xss_probe,
     run_ssrf_probe,
     run_open_redirect_probe,
     run_sensitive_path_probe,
@@ -2579,6 +2580,24 @@ async def run_scan(
                                       "tool_calls": len(ab_hosts) * 8, "findings": len(xss_findings)})
                     if xss_findings:
                         print(f"  [ACTIVE-BASELINE] Reflected XSS: {len(xss_findings)} finding(s)")
+
+                    # ── DOM XSS probe (Playwright) ─────────────────
+                    if browser is not None:
+                        p = _next_phase()
+                        _cb("phase_start", {"phase": p, "total": 0, "name": "Active Baseline (DOM XSS)", "id": "active_baseline_dom_xss"})
+                        dom_xss_findings = await run_dom_xss_probe(
+                            browser,
+                            sorted(ab_hosts),
+                            crawled_urls=metrics.get("pages_list") or [],
+                            on_finding=lambda f: _cb("finding", {**f, "phase": "Active Baseline (DOM XSS)"}),
+                            on_progress=_ab_progress,
+                            cancel_flag=cancel_flag,
+                        )
+                        findings.extend(dom_xss_findings)
+                        _cb("phase_end", {"phase": p, "name": "Active Baseline (DOM XSS)",
+                                          "tool_calls": len(ab_hosts) * 10, "findings": len(dom_xss_findings)})
+                        if dom_xss_findings:
+                            print(f"  [ACTIVE-BASELINE] DOM XSS: {len(dom_xss_findings)} finding(s)")
 
                     # ── SSRF Bypass probe ────────────────────────────
                     p = _next_phase()
