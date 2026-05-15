@@ -2772,7 +2772,7 @@ async def run_scan(
         has_body_fuzz = bool(body_fuzz_context)
         has_workflow = workflow_replayed or bool(getattr(target, "business_flow", None))
 
-        # ── MULTI-AGENT MODE (XBOW-style) ─────────────────────────────
+        # ── MULTI-AGENT MODE ──────────────────────────────────────────
         # When scan_profile == "multi_agent", skip the normal sequential/
         # parallel phase pipeline and run specialist agents instead.
         _scan_profile = getattr(target, "scan_profile", "vulnerability_scan")
@@ -2780,7 +2780,7 @@ async def run_scan(
             from .orchestrator import run_multi_agent_scan
             from .multi_agent_context import SharedScanContext
 
-            print("  [MULTI-AGENT] XBOW-style multi-agent mode activated")
+            print("  [MULTI-AGENT] Multi-agent mode activated — specialist agents in parallel")
             _cb("progress_msg", {"message": "[MULTI-AGENT] Running specialist agents in parallel..."})
 
             ma_context = SharedScanContext(
@@ -2793,11 +2793,14 @@ async def run_scan(
 
             ma_findings = await run_multi_agent_scan(
                 context=ma_context,
-                llm_router=router,
-                tool_registry={},
-                browser=browser,
-                http_client=http_client,
-                on_finding=lambda f: _cb("finding", f),
+                model=model,
+                router=router,
+                tools=tools,
+                tool_definitions=TOOL_DEFINITIONS,
+                on_finding=lambda f: (
+                    findings.append(f),
+                    _cb("finding", f),
+                ),
                 on_progress=lambda event, data: _cb("progress_msg", {
                     "message": f"[MULTI-AGENT] {event}: {data}",
                 }),
