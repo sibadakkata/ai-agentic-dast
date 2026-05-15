@@ -2525,7 +2525,8 @@ async def run_scan(
                     ab_findings = await run_bare_root_sqli_probe(
                         http_client,
                         sorted(ab_hosts),
-                        on_finding=lambda f: _cb("finding", {**f, "phase": "Active Baseline (Bare-Root SQLi)"}),
+                        crawled_urls=metrics.get("pages_list") or [],
+                        on_finding=lambda f: _cb("finding", {**f, "phase": "Active Baseline (SQLi)"}),
                         on_progress=_ab_progress,
                         cancel_flag=cancel_flag,
                     )
@@ -2554,6 +2555,7 @@ async def run_scan(
                     cp_findings = await run_cache_poisoning_probe(
                         http_client,
                         sorted(ab_hosts),
+                        crawled_urls=metrics.get("pages_list") or [],
                         on_finding=lambda f: _cb("finding", {**f, "phase": "Active Baseline (Cache Poisoning)"}),
                         on_progress=_ab_progress,
                         cancel_flag=cancel_flag,

