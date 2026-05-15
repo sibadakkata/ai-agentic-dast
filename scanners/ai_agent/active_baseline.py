@@ -842,79 +842,120 @@ async def run_reflected_xss_probe(
         # Some params (e.g. ?key=) don't reflect on their source page
         # but DO propagate through <a href> links to sub-pages where
         # they reflect in HTML attributes or JS context.  Pattern:
-        #   root?key=canary → <a href="/sub/?key=canary"> → sub-page reflects
+        #   page?key=canary → <a href="/sub/?key=canary"> → sub-page reflects
+        # Test the root page AND crawled HTML sub-pages (not just root).
         _propagated_params = set(rp[0] for rp in reflection_points)
         _unreflected = [p for p in sorted(discovered)
                         if p not in _propagated_params]
+
+        _prop_pages = [base_url]
+        for _cu in _deduped[:30]:
+            _cu_lower = _cu.lower()
+            if not any(_cu_lower.endswith(e) for e in _static_exts):
+                _cu_p = _urlparse(_cu)
+                _cu_base = f"{_cu_p.scheme}://{_cu_p.netloc}{_cu_p.path or '/'}"
+                if _cu_base != base_url and _cu_base not in _prop_pages:
+                    _prop_pages.append(_cu_base)
+        # Cap to avoid excessive requests
+        _prop_pages = _prop_pages[:10]
+
         for param in _unreflected[:5]:
             if cancel_flag is not None and getattr(cancel_flag, "is_set", lambda: False)():
                 break
             if len(reflection_points) >= 15:
                 break
-            try:
-                prop_url = f"{base_url}?{param}={canary}"
-                prop_resp = await http_client.get(
-                    prop_url, timeout=10.0, follow_redirects=True,
-                    headers=_PROBE_HEADERS,
-                )
-                prop_html = prop_resp.text[:500_000]
-                # Extract <a href> links that carry the canary forward
-                prop_links = _re.findall(
-                    r'<a\b[^>]*\bhref\s*=\s*["\']([^"\']*' +
-                    _re.escape(canary) + r'[^"\']*)["\']',
-                    prop_html, _re.IGNORECASE,
-                )
-                if not prop_links:
-                    # Also check href without quotes
+            _found_prop = False
+            for seed_page in _prop_pages:
+                if _found_prop:
+                    break
+                try:
+                    sep = "&" if "?" in seed_page else "?"
+                    prop_url = f"{seed_page}{sep}{param}={canary}"
+                    prop_resp = await http_client.get(
+                        prop_url, timeout=10.0, follow_redirects=True,
+                        headers=_PROBE_HEADERS,
+                    )
+                    prop_html = prop_resp.text[:500_000]
+
+                    # Check if the canary reflects directly on this page
+                    direct_ctx = _classify_canary_context(
+                        prop_html[:200_000], canary)
+                    if direct_ctx:
+                        prop_parsed = _urlparse(seed_page)
+                        prop_base = f"{prop_parsed.scheme}://{prop_parsed.netloc}{prop_parsed.path or '/'}"
+                        param_tpl = "?" + param + "={canary}"
+                        reflection_points.append(
+                            (param, param_tpl, direct_ctx, prop_base))
+                        _progress("active_baseline_step", {
+                            "host": host,
+                            "step": "xss_propagation_direct_reflection",
+                            "param": param, "context": direct_ctx,
+                            "source_url": prop_base,
+                        })
+                        _found_prop = True
+                        break
+
+                    # Extract <a href> links that carry the canary forward
+                    _canary_esc = _re.escape(canary)
                     prop_links = _re.findall(
-                        r'<a\b[^>]*\bhref\s*=\s*([^\s>]*' +
-                        _re.escape(canary) + r'[^\s>]*)',
+                        r'<a\b[^>]*\bhref\s*=\s*["\']([^"\']*' +
+                        _canary_esc + r'[^"\']*)["\']',
                         prop_html, _re.IGNORECASE,
                     )
-                if not prop_links:
-                    continue
-
-                _progress("active_baseline_step", {
-                    "host": host, "step": "xss_propagation_detected",
-                    "param": param, "link_count": len(prop_links),
-                })
-
-                # Follow up to 3 propagated links
-                for link_href in prop_links[:3]:
-                    # Resolve relative URLs
-                    if link_href.startswith("//"):
-                        follow_url = "https:" + link_href
-                    elif link_href.startswith("/"):
-                        follow_url = f"https://{host}{link_href}"
-                    elif link_href.startswith("http"):
-                        follow_url = link_href
-                    else:
-                        follow_url = f"{base_url}/{link_href}"
-
-                    try:
-                        sub_resp = await http_client.get(
-                            follow_url, timeout=10.0, follow_redirects=True,
-                            headers=_PROBE_HEADERS,
+                    if not prop_links:
+                        prop_links = _re.findall(
+                            r'<a\b[^>]*\bhref\s*=\s*([^\s>]*' +
+                            _canary_esc + r'[^\s>]*)',
+                            prop_html, _re.IGNORECASE,
                         )
-                        sub_ctx = _classify_canary_context(
-                            sub_resp.text[:200_000], canary)
-                        if sub_ctx:
-                            sub_parsed = _urlparse(follow_url)
-                            sub_base = f"{sub_parsed.scheme}://{sub_parsed.netloc}{sub_parsed.path or '/'}"
-                            param_tpl = "?" + param + "={canary}"
-                            reflection_points.append(
-                                (param, param_tpl, sub_ctx, sub_base))
-                            _progress("active_baseline_step", {
-                                "host": host,
-                                "step": "xss_propagation_reflection",
-                                "param": param, "context": sub_ctx,
-                                "source_url": sub_base,
-                            })
-                            break
-                    except Exception:
+                    if not prop_links:
                         continue
-            except Exception:
-                continue
+
+                    _progress("active_baseline_step", {
+                        "host": host, "step": "xss_propagation_detected",
+                        "param": param, "seed_page": seed_page,
+                        "link_count": len(prop_links),
+                    })
+
+                    for link_href in prop_links[:3]:
+                        if link_href.startswith("//"):
+                            follow_url = "https:" + link_href
+                        elif link_href.startswith("/"):
+                            follow_url = f"https://{host}{link_href}"
+                        elif link_href.startswith("http"):
+                            follow_url = link_href
+                        else:
+                            seed_p = _urlparse(seed_page)
+                            seed_dir = seed_p.path.rsplit("/", 1)[0] if "/" in (seed_p.path or "") else ""
+                            follow_url = f"{seed_p.scheme}://{seed_p.netloc}{seed_dir}/{link_href}"
+
+                        try:
+                            sub_resp = await http_client.get(
+                                follow_url, timeout=10.0,
+                                follow_redirects=True,
+                                headers=_PROBE_HEADERS,
+                            )
+                            sub_ctx = _classify_canary_context(
+                                sub_resp.text[:200_000], canary)
+                            if sub_ctx:
+                                sub_parsed = _urlparse(follow_url)
+                                sub_base = f"{sub_parsed.scheme}://{sub_parsed.netloc}{sub_parsed.path or '/'}"
+                                param_tpl = "?" + param + "={canary}"
+                                reflection_points.append(
+                                    (param, param_tpl, sub_ctx, sub_base))
+                                _progress("active_baseline_step", {
+                                    "host": host,
+                                    "step": "xss_propagation_reflection",
+                                    "param": param, "context": sub_ctx,
+                                    "seed_page": seed_page,
+                                    "source_url": sub_base,
+                                })
+                                _found_prop = True
+                                break
+                        except Exception:
+                            continue
+                except Exception:
+                    continue
 
         if not reflection_points:
             continue
