@@ -844,9 +844,12 @@ async def run_reflected_xss_probe(
         # they reflect in HTML attributes or JS context.  Pattern:
         #   page?key=canary → <a href="/sub/?key=canary"> → sub-page reflects
         # Test the root page AND crawled HTML sub-pages (not just root).
-        _propagated_params = set(rp[0] for rp in reflection_points)
-        _unreflected = [p for p in sorted(discovered)
-                        if p not in _propagated_params]
+        # Run propagation for ALL discovered params — even those already
+        # found via cross-endpoint.  A param may reflect in *different
+        # contexts* on sub-pages (e.g. html_attribute on /styles/…
+        # vs html_body on /data/… JSON), each needing distinct payloads.
+        _already_reflected_on = {(rp[0], rp[3]) for rp in reflection_points}
+        _unreflected = sorted(discovered)
 
         _prop_pages = [base_url]
         for _cu in _deduped[:30]:
@@ -859,15 +862,17 @@ async def run_reflected_xss_probe(
         # Cap to avoid excessive requests
         _prop_pages = _prop_pages[:10]
 
-        for param in _unreflected[:5]:
+        for param in _unreflected[:8]:
             if cancel_flag is not None and getattr(cancel_flag, "is_set", lambda: False)():
                 break
-            if len(reflection_points) >= 15:
+            if len(reflection_points) >= 20:
                 break
             _found_prop = False
             for seed_page in _prop_pages:
                 if _found_prop:
                     break
+                if (param, seed_page) in _already_reflected_on:
+                    continue
                 try:
                     sep = "&" if "?" in seed_page else "?"
                     prop_url = f"{seed_page}{sep}{param}={canary}"
