@@ -1,10 +1,55 @@
 # AI Agentic Web Scanner
 
-LLM-powered Dynamic Application Security Testing (DAST) scanner that works against **any website, API, or SPA**.
+LLM-powered Dynamic Application Security Testing (DAST) scanner that works against **any website, API, SPA, or LLM-powered application**.
 
-A single LLM agent drives a real Chromium browser and HTTP client through the OWASP Top 10, crafting context-aware payloads, interpreting responses, and reporting findings — all autonomously. The agent can chain multiple individual vulnerabilities into multi-step exploit sequences, similar to how a manual pentester escalates access.
+An **XBOW-style multi-agent architecture** deploys 13 specialist agents in parallel — each an expert in its vulnerability class — coordinated by an orchestrator with shared context, inter-agent messaging, and an independent verifier that confirms findings and builds exploit chains. Covers the full **OWASP Web Top 10 (2021)**, **OWASP API Top 10 (2023)**, and **OWASP LLM Top 10 (2025)** — 32 OWASP categories total. Each agent drives a real Chromium browser and HTTP client, crafting context-aware payloads, interpreting responses, and reporting findings autonomously.
 
 ## Architecture
+
+### Multi-Agent Mode (XBOW-style) — `scan_profile: "multi_agent"`
+
+```
+┌──────────────────────────────────────────────────────────────────────────┐
+│                     MULTI-AGENT SCAN PIPELINE                            │
+│                                                                          │
+│  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────────────────────┐ │
+│  │  Auth    │─▶│ Passive  │─▶│  Active  │─▶│  ORCHESTRATOR            │ │
+│  │ (Playw- │  │  Recon   │  │ Baseline │  │                          │ │
+│  │  right)  │  │ (29 chk) │  │ (10+DOM) │  │  Phase 1: RECON AGENT   │ │
+│  └──────────┘  └──────────┘  └──────────┘  │  (map attack surface)   │ │
+│                                             │         │                │ │
+│                                             │         ▼                │ │
+│  ┌─────────────── SHARED CONTEXT BUS ─────────────────────────────┐  │ │
+│  │ endpoints, params, tech stack, auth tokens, inter-agent msgs   │  │ │
+│  └────────────────────────────────────────────────────────────────┘  │ │
+│         │         │         │         │         │         │          │ │
+│  ┌──────▼──┐┌─────▼───┐┌───▼─────┐┌──▼──────┐┌▼────────┐┌▼───────┐ │ │
+│  │  XSS   ││  SQLi   ││  Auth   ││ Inject  ││  API    ││ SSRF   │ │ │
+│  │ Agent  ││  Agent  ││  Agent  ││  Agent  ││  Agent  ││ Agent  │ │ │
+│  └────────┘└─────────┘└─────────┘└─────────┘└─────────┘└────────┘ │ │
+│  ┌────────┐┌─────────┐┌─────────┐┌─────────┐┌─────────┐┌────────┐ │ │
+│  │ Config ││  CSRF   ││ BizLogic││ Deser   ││ LLM/AI  ││Smuggle │ │ │
+│  │ Agent  ││  Agent  ││  Agent  ││  Agent  ││  Agent  ││ Agent  │ │ │
+│  └────────┘└─────────┘└─────────┘└─────────┘└─────────┘└────────┘ │ │
+│  ┌────────┐      13 SPECIALISTS IN PARALLEL                       │ │
+│  │SupplyC ││                                                      │ │
+│  │ Agent  ││                                                      │ │
+│  └────────┘│         │                                            │ │
+│            │         ▼                                            │ │
+│            │  Phase 3: VERIFIER AGENT                             │ │
+│            │  (replay attacks, confirm, build exploit chains)     │ │
+│            └──────────────────────────────────────────────────────┘ │
+│                              │                                       │
+│  ┌─────────────┐  ┌─────────▼────┐  ┌──────────────┐                │
+│  │   Report    │◀─│   Triage     │◀─│  CVSS        │                │
+│  │ (PDF/Excel) │  │   Engine     │  │  Severity    │                │
+│  └─────────────┘  └──────────────┘  └──────────────┘                │
+│                                                                      │
+│  Infrastructure: AWS Bedrock (Claude/Mistral) · Playwright · FastAPI │
+└──────────────────────────────────────────────────────────────────────────┘
+```
+
+### Standard Mode — `scan_profile: "vulnerability_scan"` (default)
 
 ```
 ┌───────────────────────────────────────────────────────────────────────┐
@@ -49,6 +94,7 @@ This loop runs up to 50 steps per phase (20–50 depending on phase complexity).
 
 | Feature | Description | Details |
 |---------|-------------|---------|
+| **Multi-Agent Architecture (XBOW-style)** | 15 agents (13 specialists + recon + verifier) run in parallel, each with a deeply focused system prompt for its vulnerability class. Shared context bus enables inter-agent communication, dedup, and cross-agent findings. Verifier replays all findings and builds exploit chains. Covers **OWASP Web Top 10** (A01-A10), **API Top 10** (API1-API10), and **LLM Top 10** (LLM01-LLM10) — 32 OWASP categories. Agents: XSS, SQLi, Auth/IDOR, Injection (CMDI/SSTI/LFI/XXE/LDAP), API (GraphQL/WS/mass-assign), SSRF, Config/Crypto, CSRF, Business Logic/Race Conditions, Deserialization, LLM/AI Security, HTTP Smuggling, Supply Chain | `specialist_prompts.py`, `orchestrator.py`, `multi_agent_context.py` |
 | **Passive Reconnaissance** | 29 deterministic checks: source maps (**+ deep scan: extracts secrets & hidden API endpoints from `.js.map` contents**), DOM sinks, **hardcoded secret scanner** (17 TruffleHog-style patterns), headers, CSP analysis, CORS, JWT, cookies, telemetry leakage, mixed content, clickjacking, **TLS protocol/cipher audit** (via `sslyze` fallback), **hybrid vulnerable JS library detection** (49-library catalog + NVD/OSV.dev CVE enrichment), **subdomain takeover detection** (46-provider fingerprint DB), **email/DNS security** (SPF/DKIM/DMARC/MX), **WAF/CDN fingerprinting** (15+ products: Cloudflare, Akamai, Fastly, Azure Front Door, Sucuri, Imperva Incapsula, Kong, Envoy, Varnish, ModSecurity, FortiWeb, Barracuda, F5 BIG-IP — via headers + response body signatures). Post-auth passive pass also scans authenticated DOM HTML for secrets | Runs before LLM phases, $0 cost |
 | **Active Scanning** | 25 web phases + 15 API phases + LLM security phase + 10 deterministic active baseline probes: full OWASP Top 10 + context-aware checks (path traversal, XXE, race conditions, file upload, host header, session mgmt, HTTP smuggling, GraphQL introspection, OAuth/OIDC) | [Web Scanning](docs/web-scanning.md) · [API Scanning](docs/api-scanning.md) |
 | **LLM Application Security** | Auto-detects chatbot/AI-powered features via DOM heuristics and network traffic analysis. Runs 37 deterministic probes covering OWASP Top 10 for LLM Applications (LLM01 Prompt Injection, LLM02 Info Disclosure, LLM05 Output Handling, LLM06 Excessive Agency, LLM07 Prompt Leakage, LLM10 Unbounded Consumption). Optionally runs Garak (NVIDIA) probe battery for 50+ additional probe families. All detection is pattern-matching/regex -- zero LLM cost on detection side. Force with `focus_areas: ["LLM"]` | `llm_detect.py`, `llm_baseline.py`, `garak_runner.py`; Garak is optional (`pip install garak`) |
@@ -119,6 +165,37 @@ uvicorn web.app:app --host 0.0.0.0 --port 8080
 > Full deployment guide: [docs/deployment.md](docs/deployment.md)
 
 ## Scan Pipeline
+
+### Multi-Agent Mode (XBOW)
+
+Select **"Multi-Agent (XBOW)"** in the Scan Profile dropdown or set `scan_profile: "multi_agent"` via API.
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│  1. AUTH + PASSIVE RECON + ACTIVE BASELINE (same as standard mode)  │
+├─────────────────────────────────────────────────────────────────────┤
+│  2. ORCHESTRATOR deploys 15 agents:                                 │
+│     Phase 1: RECON AGENT (sequential) — maps full attack surface    │
+│     Phase 2: 13 SPECIALISTS (parallel) — each focused on its class  │
+│       ┌─────┬─────┬──────┬────────┬─────┬──────┬────────┐          │
+│       │ XSS │ SQLi│ Auth │Inject  │ API │ SSRF │ Config │          │
+│       ├─────┼─────┼──────┼────────┼─────┼──────┼────────┤          │
+│       │CSRF │BizLo│Deser │ LLM/AI │Smug │Supply│        │          │
+│       └─────┴─────┴──────┴────────┴─────┴──────┴────────┘          │
+│     Phase 3: VERIFIER AGENT (sequential) — confirms + chains        │
+├─────────────────────────────────────────────────────────────────────┤
+│  3. TRIAGE + CVSS + REPORT (same as standard mode)                  │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+**Shared Context Bus:** All agents read/write to `SharedScanContext` — discovered endpoints, params, tech stack, auth tokens, findings from other agents, and inter-agent messages. Thread-safe via `asyncio.Lock`.
+
+**OWASP Coverage (32 categories):**
+- **Web Top 10 (2021):** A01 (Auth/CSRF), A02 (Crypto), A03 (XSS/SQLi/Injection), A04 (Design/BizLogic), A05 (Config/Smuggling), A06 (Supply Chain), A07 (Auth), A08 (Deserialization), A09 (Logging), A10 (SSRF)
+- **API Top 10 (2023):** API1-API3 (Auth/BOLA/BOPLA), API4 (Rate Limit), API5 (BFLA), API6 (BizFlow), API7 (SSRF), API8 (Config), API9 (Inventory), API10 (Unsafe Consumption)
+- **LLM Top 10 (2025):** LLM01-LLM10 (Prompt Injection, Info Disclosure, Supply Chain, Poisoning, Output Handling, Excessive Agency, Prompt Leakage, Embeddings, Misinformation, Unbounded Consumption)
+
+### Standard Mode (default)
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
@@ -205,7 +282,7 @@ uvicorn web.app:app --host 0.0.0.0 --port 8080
 │   ├── web-ui.md                #   Web UI features & configuration
 │   ├── mcp-server.md            #   MCP integration guide
 │   └── troubleshooting.md       #   Error handling & debugging
-├── scanners/ai_agent/           # Core scanner engine (21 modules)
+├── scanners/ai_agent/           # Core scanner engine (24 modules)
 │   ├── agent.py                 #   Agent loop, context mgmt, multi-identity, parallel phases
 │   ├── auth.py                  #   Authentication (form/SSO/OAuth) + multi-identity (User B/Admin/Tenant B)
 │   ├── severity.py              #   Deterministic CVSS v3.1 severity classifier (XBOW-style)
@@ -219,6 +296,9 @@ uvicorn web.app:app --host 0.0.0.0 --port 8080
 │   ├── llm_config.py            #   LLM routing, prompt caching, cost tracking, transient retry (5× backoff)
 │   ├── prompts.py               #   System + phase prompts (multi-identity placeholders)
 │   ├── tools.py                 #   31 tools (browser, API, WebSocket, chaining) + WAF detection + parallel dedup
+│   ├── specialist_prompts.py    #   XBOW multi-agent: 15 specialist agent definitions (13 + recon + verifier) covering OWASP Web/API/LLM Top 10
+│   ├── orchestrator.py          #   XBOW multi-agent: orchestrator (recon -> parallel specialists -> verifier)
+│   ├── multi_agent_context.py   #   XBOW multi-agent: shared context bus (endpoints, params, findings, messages, dedup)
 │   ├── active_baseline.py       #   10 deterministic probes + Playwright DOM XSS: SQLi, reflected XSS (4-layer: direct/cross-endpoint/propagation/attribute), DOM XSS (browser-verified alert() detection), SSRF, cache poisoning, open redirect, sensitive paths, Salesforce, GraphQL, HTTP smuggling, OAuth/OIDC
 │   ├── llm_detect.py            #   LLM app detection: DOM/network heuristics for chatbot/AI features
 │   ├── llm_baseline.py          #   37 deterministic LLM security probes (OWASP LLM Top 10, $0 cost)
