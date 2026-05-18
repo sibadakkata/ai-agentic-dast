@@ -2791,19 +2791,48 @@ async def run_scan(
                 auth_token=str(getattr(auth_session, "token", "")) if auth_session else "",
             )
 
+            _ma_agent_idx = [0]
+            _ma_total_agents = [15]
+
+            def _ma_progress(event, data):
+                if event == "multi_agent_start":
+                    agents = data.get("agents", [])
+                    _ma_total_agents[0] = len(agents)
+                    _cb("scan_start", {"total_phases": len(agents)})
+                    _cb("progress_msg", {"message": f"[MULTI-AGENT] Starting {len(agents)} specialist agents..."})
+                elif event == "agent_start":
+                    _ma_agent_idx[0] += 1
+                    _cb("phase_start", {
+                        "phase": _ma_agent_idx[0],
+                        "total": _ma_total_agents[0],
+                        "name": f"Multi-Agent ({data.get('name', data.get('agent', '?'))})",
+                    })
+                elif event == "agent_end":
+                    _cb("phase_end", {
+                        "phase": _ma_agent_idx[0],
+                        "name": f"Multi-Agent ({data.get('agent', '?')})",
+                        "tool_calls": data.get("tool_calls", 0),
+                        "findings": data.get("findings", 0),
+                    })
+                elif event == "agent_step":
+                    _cb("progress_msg", {
+                        "message": f"[MULTI-AGENT] agent={data.get('agent','?')} step={data.get('step',0)} tool_calls={data.get('tool_calls',0)} findings={data.get('findings',0)}",
+                    })
+                elif event == "multi_agent_end":
+                    _cb("progress_msg", {
+                        "message": f"[MULTI-AGENT] Complete: {data.get('total_findings',0)} findings from {data.get('agents_run',0)} agents in {data.get('elapsed_s',0):.0f}s",
+                    })
+                else:
+                    _cb("progress_msg", {"message": f"[MULTI-AGENT] {event}: {data}"})
+
             ma_findings = await run_multi_agent_scan(
                 context=ma_context,
                 model=model,
                 router=router,
                 tools=tools,
                 tool_definitions=TOOL_DEFINITIONS,
-                on_finding=lambda f: (
-                    findings.append(f),
-                    _cb("finding", f),
-                ),
-                on_progress=lambda event, data: _cb("progress_msg", {
-                    "message": f"[MULTI-AGENT] {event}: {data}",
-                }),
+                on_finding=lambda f: _cb("finding", f),
+                on_progress=_ma_progress,
                 cancel_flag=cancel_flag,
             )
             findings.extend(ma_findings)

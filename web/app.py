@@ -1143,6 +1143,7 @@ async def list_scans(
             "total_tokens": info.get("total_tokens") or info.get("live_tokens", 0),
             "findings_count": info.get("findings_count"),
             "scan_mode": info.get("scan_mode", ""),
+            "scan_profile": info.get("scan_profile", "vulnerability_scan"),
             "phases_completed": info.get("phases_completed", len(info.get("live_phases", []))),
         }
         if info.get("status") == "running":

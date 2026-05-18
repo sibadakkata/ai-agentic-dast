@@ -1,16 +1,12 @@
-"""XBOW-style multi-agent orchestrator.
+"""Multi-agent orchestrator.
 
 Coordinates specialist agents: runs recon first, then fans out specialist
 agents in parallel, collects findings, runs the verifier, and merges
 everything into a unified result set.
 
 The orchestrator reuses the existing ScanTools + TOOL_DEFINITIONS + LLMRouter
-from the main scanner   each specialist agent gets its own system prompt but
+from the main scanner -- each specialist agent gets its own system prompt but
 shares the same authenticated browser, HTTP client, and tool implementations.
-
-Usage from agent.py:
-    from .orchestrator import run_multi_agent_scan
-    findings = await run_multi_agent_scan(...)
 """
 from __future__ import annotations
 
@@ -44,7 +40,7 @@ async def _run_specialist_worker(
     """Run a single specialist agent through its focused attack loop.
 
     Uses the same router.complete() + tools.execute() pattern as the
-    main scan phases   the specialist just gets a different system prompt.
+    main scan phases.
     """
     agent_name = agent_def.name
     agent_id = agent_def.id
@@ -71,7 +67,18 @@ async def _run_specialist_worker(
         f"description, url, and evidence."
     )
 
-    messages = [{"role": "system", "content": system_prompt}]
+    # Bedrock requires at least one user message after the system message.
+    initial_user_msg = (
+        f"You are the {agent_name} specialist. Begin testing "
+        f"{context.target_url} now. Use your tools to probe for "
+        f"vulnerabilities in your domain. Start by examining the target "
+        f"and any discovered endpoints listed in the context above."
+    )
+
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": initial_user_msg},
+    ]
     findings: list[dict] = []
     total_tool_calls = 0
 
@@ -266,13 +273,6 @@ async def run_multi_agent_scan(
     1. Recon agent runs first (sequential) -- populates shared context
     2. Specialist agents run in parallel -- each focused on its vuln class
     3. Verifier agent runs last -- re-confirms findings and builds chains
-
-    Args:
-        context: shared scan context (pre-populated with crawled URLs, auth, etc.)
-        model: LLM model ID (e.g. "bedrock/anthropic.claude...")
-        router: LLMRouter instance (same as main scan)
-        tools: ScanTools instance (same as main scan -- has .execute())
-        tool_definitions: TOOL_DEFINITIONS list (OpenAI function-calling schema)
     """
     _progress = on_progress or (lambda event, data: None)
     all_findings: list[dict] = []
