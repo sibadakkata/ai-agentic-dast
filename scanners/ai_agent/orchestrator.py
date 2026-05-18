@@ -80,9 +80,15 @@ async def _run_specialist_worker(
         f"=== END CONTEXT ===\n\n"
         f"Target: {context.target_url}\n"
         f"Hosts in scope: {', '.join(context.hosts)}\n"
-        f"You have {agent_def.max_steps} tool-call steps. Use them wisely.\n"
-        f"Report findings by calling report_finding with title, severity, "
-        f"description, url, and evidence."
+        f"You have {agent_def.max_steps} tool-call steps. Use them wisely.\n\n"
+        f"CRITICAL RULES FOR REPORTING FINDINGS:\n"
+        f"- ONLY report findings you have CONFIRMED with a tool call\n"
+        f"- You MUST include actual evidence (HTTP response, error message, "
+        f"reflected payload) in the evidence field\n"
+        f"- Do NOT report theoretical or speculative vulnerabilities\n"
+        f"- Do NOT report the same finding twice -- check if you already reported it\n"
+        f"- severity must be one of: Critical, High, Medium, Low, Info\n"
+        f"- If a test shows the target is NOT vulnerable, do NOT report it"
     )
 
     endpoint_list = ""
@@ -289,6 +295,36 @@ def _build_context_summary(context: SharedScanContext,
     return "\n\n".join(parts) if parts else "(No recon data yet)"
 
 
+def _deduplicate_findings(findings: list[dict]) -> list[dict]:
+    """Remove duplicate findings from multiple specialist agents.
+
+    Keeps the highest-severity instance when multiple agents report the same
+    issue. Dedup key: (host, normalized_title, url_path). This runs BEFORE
+    the triage engine's own dedup pass, so it uses raw severity from the LLM.
+    """
+    import re
+    SEV_RANK = {"Critical": 0, "High": 1, "Medium": 2, "Low": 3, "Info": 4}
+
+    seen: dict[tuple, dict] = {}
+    for f in findings:
+        url = f.get("url", "") or ""
+        host = url.split("//")[-1].split("/")[0].split(":")[0].lower() if "//" in url else ""
+        path = url.split("//")[-1].split("/", 1)[1] if "//" in url and "/" in url.split("//")[-1] else ""
+        path = path.split("?")[0].rstrip("/").lower()
+        title_norm = re.sub(r"[^a-z0-9]", "", (f.get("title", "") or "").lower())[:50]
+        vuln_type = (f.get("vuln_type", "") or "").lower().strip()
+
+        key = (host, title_norm) if not vuln_type else (host, vuln_type, path)
+
+        sev = f.get("severity", "Info")
+        rank = SEV_RANK.get(sev, 4)
+
+        if key not in seen or rank < SEV_RANK.get(seen[key].get("severity", "Info"), 4):
+            seen[key] = f
+
+    return list(seen.values())
+
+
 def _agent_is_done(content: str) -> bool:
     """Check if the agent explicitly declares it has finished all testing.
 
@@ -439,10 +475,16 @@ async def run_multi_agent_scan(
         for agent_findings in results:
             all_findings.extend(agent_findings)
 
+        pre_dedup = len(all_findings)
+        all_findings = _deduplicate_findings(all_findings)
         _progress("multi_agent_phase", {
             "phase": "specialists", "status": "complete",
             "total_findings": len(all_findings),
+            "pre_dedup": pre_dedup,
+            "removed_duplicates": pre_dedup - len(all_findings),
         })
+        logger.info("Dedup: %d -> %d findings (removed %d duplicates)",
+                     pre_dedup, len(all_findings), pre_dedup - len(all_findings))
 
     # -- Phase 3: Verifier (sequential, uses shared tools) --
     if "verifier" in agents_to_run and all_findings:

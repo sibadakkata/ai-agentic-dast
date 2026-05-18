@@ -15,7 +15,7 @@ description: Builds and runs an LLM-powered agentic web security scanner using L
 ├── scanners/ai_agent/
 │   ├── agent.py                  # Core agent loop, context mgmt, multi-identity, enriched retry prompts
 │   ├── auth.py                   # Authentication (form/SSO/OAuth/MFA) + multi-identity (User B/Admin/Tenant B)
-│   ├── severity.py               # Deterministic CVSS v3.1 severity classifier (XBOW-style, $0 cost)
+│   ├── severity.py               # Deterministic CVSS v3.1 severity classifier ($0 cost)
 │   ├── passive_recon.py          # Deterministic passive checks + hardcoded secret scanner (17 patterns)
 │   ├── llm_config.py             # LiteLLM routing + cost tracking
 │   ├── prompts.py                # System + phase prompts (multi-identity placeholders for 8 auth-class phases)
@@ -55,7 +55,7 @@ Build all code first. Present the plan. Wait for explicit user approval before e
 | Payload generation | **Hybrid** — LLM plans payloads (1 call), engine executes, LLM analyzes anomalies (1 call) | Smart (~$0.003/endpoint): LLM plans + identifies IDOR/biz-logic/auth issues from responses |
 | API endpoint import | Postman/Burp/OpenAPI parsed into a unified endpoint registry | Enables testing APIs that aren't discoverable via crawling |
 | Static payload catalog | **Fallback only** — body_fuzzer.py has regex-classified payloads as fallback when LLM planning fails | Primary path is always LLM-planned |
-| Pre-triage severity | **Deterministic CVSS v3.1** via `severity.py` — CWE profile matching + evidence-keyword adjustment | XBOW-style: reproducible severity independent of LLM mood; `llm_severity` preserved for comparison |
+| Pre-triage severity | **Deterministic CVSS v3.1** via `severity.py` — CWE profile matching + evidence-keyword adjustment | Reproducible severity independent of LLM mood; `llm_severity` preserved for comparison |
 | Secret scanning | **17 TruffleHog-style regex patterns** in `passive_recon.py` — runs on JS bundles + post-auth HTML | Catches hardcoded AWS keys, Stripe, GitHub PATs, Slack, Google, SendGrid, JWT tokens, master secrets |
 | Multi-identity | **3 extra identities** (User B, Admin, Tenant B) authenticated at scan start, injected into 8 auth-class phases | Enables cross-user, cross-role, cross-tenant testing (BOLA/BFLA/IDOR) without manual replay |
 | Triage | **Offline, evidence-based** — no LLM used for triage | Deterministic rules + confidence scoring + exploitation tiers (validated/informational) + Shannon entropy secret filter + SPA catch-all detector + dedup by (host, CWE, param) + step-by-step narrative, zero cost, reproducible |
@@ -154,7 +154,7 @@ AI Agentic Scanner Components:
 - [x] Step 8: cve_lookup.py (NVD + OSV.dev dynamic CVE/CVSS)
 - [x] Step 9: report_generator.py (PDF with clickable summaries, curl evidence)
 - [x] Step 10: run_scan.py (CLI entry point)
-- [x] Step 11: severity.py (deterministic CVSS v3.1 severity — XBOW-style pre-triage classification)
+- [x] Step 11: severity.py (deterministic CVSS v3.1 severity — pre-triage classification)
 - [x] Step 12: passive_recon hardcoded secret scanner (17 TruffleHog-style patterns + post-auth DOM scan)
 - [x] Step 13: Multi-identity testing (User B / Admin / Tenant B — 8 authorization-class phases)
 ```
