@@ -284,7 +284,7 @@ After classification, every finding is assigned an **exploitation tier** indicat
 | **informational** | Detected but not proven | Pattern match, missing header, config check, no active exploitation attempt succeeded |
 | **n/a** | Not applicable | FALSE_POSITIVE or NOT_A_FINDING verdicts |
 
-This is inspired by XBOW's "proof over probability" methodology — separating findings that would hold up in a bug bounty submission (validated) from those that are observations requiring manual verification (informational).
+This follows a "proof over probability" methodology — separating findings that would hold up in a bug bounty submission (validated) from those that are observations requiring manual verification (informational).
 
 ## Deduplication
 

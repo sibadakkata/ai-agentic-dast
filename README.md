@@ -2,11 +2,11 @@
 
 LLM-powered Dynamic Application Security Testing (DAST) scanner that works against **any website, API, SPA, or LLM-powered application**.
 
-An **XBOW-style multi-agent architecture** deploys 13 specialist agents in parallel — each an expert in its vulnerability class — coordinated by an orchestrator with shared context, inter-agent messaging, and an independent verifier that confirms findings and builds exploit chains. Covers the full **OWASP Web Top 10 (2021)**, **OWASP API Top 10 (2023)**, and **OWASP LLM Top 10 (2025)** — 32 OWASP categories total. Each agent drives a real Chromium browser and HTTP client, crafting context-aware payloads, interpreting responses, and reporting findings autonomously.
+A **multi-agent architecture** deploys 13 specialist agents in parallel — each an expert in its vulnerability class — coordinated by an orchestrator with shared context, inter-agent messaging, and an independent verifier that confirms findings and builds exploit chains. Covers the full **OWASP Web Top 10 (2021)**, **OWASP API Top 10 (2023)**, and **OWASP LLM Top 10 (2025)** — 32 OWASP categories total. Each agent drives a real Chromium browser and HTTP client, crafting context-aware payloads, interpreting responses, and reporting findings autonomously.
 
 ## Architecture
 
-### Multi-Agent Mode (XBOW-style) — `scan_profile: "multi_agent"`
+### Multi-Agent Mode — `scan_profile: "multi_agent"`
 
 ```
 ┌──────────────────────────────────────────────────────────────────────────┐
@@ -94,7 +94,7 @@ This loop runs up to 50 steps per phase (20–50 depending on phase complexity).
 
 | Feature | Description | Details |
 |---------|-------------|---------|
-| **Multi-Agent Architecture (XBOW-style)** | 15 agents (13 specialists + recon + verifier) run in parallel, each with a deeply focused system prompt for its vulnerability class. Shared context bus enables inter-agent communication, dedup, and cross-agent findings. Verifier replays all findings and builds exploit chains. Covers **OWASP Web Top 10** (A01-A10), **API Top 10** (API1-API10), and **LLM Top 10** (LLM01-LLM10) — 32 OWASP categories. Agents: XSS, SQLi, Auth/IDOR, Injection (CMDI/SSTI/LFI/XXE/LDAP), API (GraphQL/WS/mass-assign), SSRF, Config/Crypto, CSRF, Business Logic/Race Conditions, Deserialization, LLM/AI Security, HTTP Smuggling, Supply Chain | `specialist_prompts.py`, `orchestrator.py`, `multi_agent_context.py` |
+| **Multi-Agent Architecture** | 15 agents (13 specialists + recon + verifier) run in parallel, each with a deeply focused system prompt for its vulnerability class. Shared context bus enables inter-agent communication, dedup, and cross-agent findings. Verifier replays all findings and builds exploit chains. Covers **OWASP Web Top 10** (A01-A10), **API Top 10** (API1-API10), and **LLM Top 10** (LLM01-LLM10) — 32 OWASP categories. Agents: XSS, SQLi, Auth/IDOR, Injection (CMDI/SSTI/LFI/XXE/LDAP), API (GraphQL/WS/mass-assign), SSRF, Config/Crypto, CSRF, Business Logic/Race Conditions, Deserialization, LLM/AI Security, HTTP Smuggling, Supply Chain | `specialist_prompts.py`, `orchestrator.py`, `multi_agent_context.py` |
 | **Passive Reconnaissance** | 29 deterministic checks: source maps (**+ deep scan: extracts secrets & hidden API endpoints from `.js.map` contents**), DOM sinks, **hardcoded secret scanner** (17 TruffleHog-style patterns), headers, CSP analysis, CORS, JWT, cookies, telemetry leakage, mixed content, clickjacking, **TLS protocol/cipher audit** (via `sslyze` fallback), **hybrid vulnerable JS library detection** (49-library catalog + NVD/OSV.dev CVE enrichment), **subdomain takeover detection** (46-provider fingerprint DB), **email/DNS security** (SPF/DKIM/DMARC/MX), **WAF/CDN fingerprinting** (15+ products: Cloudflare, Akamai, Fastly, Azure Front Door, Sucuri, Imperva Incapsula, Kong, Envoy, Varnish, ModSecurity, FortiWeb, Barracuda, F5 BIG-IP — via headers + response body signatures). Post-auth passive pass also scans authenticated DOM HTML for secrets | Runs before LLM phases, $0 cost |
 | **Active Scanning** | 25 web phases + 15 API phases + LLM security phase + 10 deterministic active baseline probes: full OWASP Top 10 + context-aware checks (path traversal, XXE, race conditions, file upload, host header, session mgmt, HTTP smuggling, GraphQL introspection, OAuth/OIDC) | [Web Scanning](docs/web-scanning.md) · [API Scanning](docs/api-scanning.md) |
 | **LLM Application Security** | Auto-detects chatbot/AI-powered features via DOM heuristics and network traffic analysis. Runs 37 deterministic probes covering OWASP Top 10 for LLM Applications (LLM01 Prompt Injection, LLM02 Info Disclosure, LLM05 Output Handling, LLM06 Excessive Agency, LLM07 Prompt Leakage, LLM10 Unbounded Consumption). Optionally runs Garak (NVIDIA) probe battery for 50+ additional probe families. All detection is pattern-matching/regex -- zero LLM cost on detection side. Force with `focus_areas: ["LLM"]` | `llm_detect.py`, `llm_baseline.py`, `garak_runner.py`; Garak is optional (`pip install garak`) |
@@ -104,7 +104,7 @@ This loop runs up to 50 steps per phase (20–50 depending on phase complexity).
 | **Triage Engine** | 3-layer evidence-based classification (TP/FP/Manual Review) with CWE/CVSS, exploitation tiers (validated/informational), entropy-based secret filtering, SPA catch-all detection, deduplication by (host + CWE + parameter), and step-by-step triage narrative separating AI actions from engine validation | [Triage Engine](docs/triage-engine.md) |
 | **Authentication** | Auto-detect form, SSO/OIDC, OAuth, API key, bearer — with session refresh. Multi-identity: User B, Admin, Tenant B (password, bearer, or API key) authenticated at scan start | Multi-step OIDC, self-healing sessions, fast-path static-token auth |
 | **Multi-Identity Testing** | Supply up to 3 extra identities (User B, Admin, Tenant B) via UI or API. All identities are authenticated at scan start; their credentials are injected into **all 8 authorization-class phases** (not just BOLA). Supports username/password, bearer tokens, and API keys — including fast-path static-token auth | Cross-user BOLA, cross-role BFLA, cross-tenant access, session/key revocation, license generation |
-| **Deterministic CVSS Severity** | AI Raw findings get a deterministic CVSS v3.1 score and severity bucket (`severity.py`) based on CWE profile + evidence keywords — independent of LLM mood. LLM's original severity preserved as `llm_severity` for comparison | XBOW-style pre-triage classification, UI shows CVSS column + LLM-vs-deterministic tooltip |
+| **Deterministic CVSS Severity** | AI Raw findings get a deterministic CVSS v3.1 score and severity bucket (`severity.py`) based on CWE profile + evidence keywords — independent of LLM mood. LLM's original severity preserved as `llm_severity` for comparison | Pre-triage classification, UI shows CVSS column + LLM-vs-deterministic tooltip |
 | **Impact Statements** | LLM-generated business impact for every finding, with passive recon fallback | Contextual risk descriptions in reports |
 | **Scan Targeting** | Exclude URLs, focus on specific pages/areas, control scan intensity (light/standard/deep) | Fine-grained scan scope control |
 | **API Import** | Postman (v2.0/v2.1), OpenAPI/Swagger (2.0, 3.0, 3.1) | Baseline execution + hybrid fuzzing |
@@ -127,7 +127,7 @@ This loop runs up to 50 steps per phase (20–50 depending on phase complexity).
 | **Subdomain Takeover Detection** | Detects dangling DNS records pointing to unclaimed third-party services. 46-provider fingerprint database covering AWS S3, CloudFront, Elastic Beanstalk, GitHub Pages, Heroku, Azure (Web Apps, Blob, Traffic Manager), Netlify, Shopify, Fastly, Vercel, Google Cloud Storage, Wix, Webflow, Render, Fly.io, and 30 more. Detection via: (1) DNS CNAME chain resolution with `dnspython`, (2) NXDOMAIN detection for abandoned service instances, (3) HTTP response fingerprint matching against known takeover strings, (4) Subdomain enumeration via Certificate Transparency (crt.sh) + 75-prefix DNS wordlist. Concurrent checking with configurable semaphore | `subdomain_takeover.py`, `subdomain_enum.py`, integrated in passive recon step 26 |
 | **Email/DNS Security** | Validates email authentication configuration for the target domain: SPF record presence and enforcement level (+all/~all/-all, lookup count, multiple records), DMARC policy analysis (none/quarantine/reject, subdomain policy, pct, reporting URIs), DKIM selector probing (22 common selectors including google, selector1/2, mandrill, amazonses, sendgrid), MX record security (null MX, IP-based MX). Only flags findings when the domain actually handles email (MX-aware). Generates actionable remediation guidance per finding | `dns_security.py`, integrated in passive recon step 27 |
 | **Active Baseline (10 Probes + DOM XSS)** | Deterministic active probes ($0 LLM cost): bare-root SQLi (time-based blind), cache poisoning (unkeyed header reflection), **reflected XSS** (dynamic param discovery + 4-layer detection: direct reflection, cross-endpoint fallback, propagation-aware multi-page test, HTML attribute context breakout), **Playwright DOM XSS probe** (browser-verified: injects payloads into URL params, navigates pages, clicks links, listens for `alert()` dialogs — replicates manual pentester workflow), SSRF bypass (cloud metadata + IP encoding), open redirect, sensitive path disclosure, Salesforce misconfiguration, **GraphQL introspection** (8 common paths, mutation exposure), **HTTP request smuggling** (CL-TE + TE-CL timing desync), **OAuth/OIDC** (PKCE enforcement, implicit flow, redirect_uri validation). All use realistic browser UA to bypass WAF | `active_baseline.py` |
-| **Exploitation Tiers** | Every finding is assigned `validated` (exploitation proven: runtime confirmed, payload reflected, SQL error returned) or `informational` (detected but not proven: pattern match, missing header, config check). Inspired by XBOW's "proof over probability" methodology | `_assign_exploitation_tier()` in `triage_engine.py` |
+| **Exploitation Tiers** | Every finding is assigned `validated` (exploitation proven: runtime confirmed, payload reflected, SQL error returned) or `informational` (detected but not proven: pattern match, missing header, config check). Follows "proof over probability" methodology | `_assign_exploitation_tier()` in `triage_engine.py` |
 | **Entropy-Based Secret Filtering** | Hardcoded "secrets" detected in JS are validated via Shannon entropy calculation + framework constant detection (38 known patterns: `$$ROW_INTERNAL`, `__react_devtools`, `ng-version`, etc.). Low-entropy or known-constant values are auto-classified as FALSE_POSITIVE | `_shannon_entropy()`, `_is_fake_secret()` in `triage_engine.py` |
 | **SPA Catch-All Detection** | Detects when SPAs (React/Angular/Vue) return the app shell for sensitive file paths (e.g., `/.git/HEAD` returns `index.html` with 200). Marks these as FALSE_POSITIVE instead of real file disclosure findings | Layer 0B in `triage_engine.py` |
 | **Triage Narrative** | Every triaged finding includes a structured step-by-step breakdown: "What the AI Scanner Tested" (payloads, requests, observations) vs "How Triage Engine Validated" (HTTP codes checked, body analysis, pattern matching, severity adjustment, final verdict) | `_build_triage_narrative()` in `triage_engine.py`, rendered in UI finding detail modal |
@@ -166,9 +166,9 @@ uvicorn web.app:app --host 0.0.0.0 --port 8080
 
 ## Scan Pipeline
 
-### Multi-Agent Mode (XBOW)
+### Multi-Agent Mode
 
-Select **"Multi-Agent (XBOW)"** in the Scan Profile dropdown or set `scan_profile: "multi_agent"` via API.
+Select **"Multi-Agent"** in the Scan Profile dropdown or set `scan_profile: "multi_agent"` via API.
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
@@ -285,7 +285,7 @@ Select **"Multi-Agent (XBOW)"** in the Scan Profile dropdown or set `scan_profil
 ├── scanners/ai_agent/           # Core scanner engine (24 modules)
 │   ├── agent.py                 #   Agent loop, context mgmt, multi-identity, parallel phases
 │   ├── auth.py                  #   Authentication (form/SSO/OAuth) + multi-identity (User B/Admin/Tenant B)
-│   ├── severity.py              #   Deterministic CVSS v3.1 severity classifier (XBOW-style)
+│   ├── severity.py              #   Deterministic CVSS v3.1 severity classifier
 │   ├── passive_recon.py         #   Deterministic passive checks + hardcoded secret scanner + hybrid JS lib detection
 │   ├── retry_prompts.py         #   Hybrid Smart Retry — phase-tailored re-prompt constants for 20 phases
 │   ├── subdomain_takeover.py    #   Subdomain takeover detection (46-provider fingerprint DB + CNAME + HTTP matching)
@@ -296,9 +296,9 @@ Select **"Multi-Agent (XBOW)"** in the Scan Profile dropdown or set `scan_profil
 │   ├── llm_config.py            #   LLM routing, prompt caching, cost tracking, transient retry (5× backoff)
 │   ├── prompts.py               #   System + phase prompts (multi-identity placeholders)
 │   ├── tools.py                 #   31 tools (browser, API, WebSocket, chaining) + WAF detection + parallel dedup
-│   ├── specialist_prompts.py    #   XBOW multi-agent: 15 specialist agent definitions (13 + recon + verifier) covering OWASP Web/API/LLM Top 10
-│   ├── orchestrator.py          #   XBOW multi-agent: orchestrator (recon -> parallel specialists -> verifier)
-│   ├── multi_agent_context.py   #   XBOW multi-agent: shared context bus (endpoints, params, findings, messages, dedup)
+│   ├── specialist_prompts.py    #   Multi-agent: 15 specialist agent definitions (13 + recon + verifier) covering OWASP Web/API/LLM Top 10
+│   ├── orchestrator.py          #   Multi-agent: orchestrator (recon -> parallel specialists -> verifier)
+│   ├── multi_agent_context.py   #   Multi-agent: shared context bus (endpoints, params, findings, messages, dedup)
 │   ├── active_baseline.py       #   10 deterministic probes + Playwright DOM XSS: SQLi, reflected XSS (4-layer: direct/cross-endpoint/propagation/attribute), DOM XSS (browser-verified alert() detection), SSRF, cache poisoning, open redirect, sensitive paths, Salesforce, GraphQL, HTTP smuggling, OAuth/OIDC
 │   ├── llm_detect.py            #   LLM app detection: DOM/network heuristics for chatbot/AI features
 │   ├── llm_baseline.py          #   37 deterministic LLM security probes (OWASP LLM Top 10, $0 cost)

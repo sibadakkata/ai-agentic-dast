@@ -1,4 +1,4 @@
-"""Shared context store for XBOW-style multi-agent scanning.
+"""Shared context store for multi-agent scanning.
 
 All specialist agents read from and write to a single SharedScanContext
 instance.  The orchestrator creates it, passes it to each specialist,

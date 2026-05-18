@@ -5,7 +5,7 @@ self-assigned severity drifts run-to-run and model-to-model. This module
 replaces the LLM severity with a deterministic CVSS-driven severity so
 two scans of the same target always land at the same severity bucket.
 
-Pipeline per finding (XBOW-style):
+Pipeline per finding (multi-agent):
   1. Match the title against an OWASP/CWE keyword map -> profile_key.
   2. Look up the base CVSS + vector + CWE in ``CWE_PROFILES``.
   3. Apply evidence-based adjustments (verification, body keywords,

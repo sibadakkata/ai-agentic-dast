@@ -1,4 +1,4 @@
-"""Specialist agent system prompts for XBOW-style multi-agent scanning.
+"""Specialist agent system prompts for multi-agent scanning.
 
 Each specialist agent gets a focused system prompt that makes it an expert
 in its vulnerability class.  The agent runs a continuous Observe-Think-Act
