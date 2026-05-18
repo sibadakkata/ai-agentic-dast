@@ -85,12 +85,25 @@ async def _run_specialist_worker(
         f"description, url, and evidence."
     )
 
+    endpoint_list = ""
+    if context.endpoints:
+        ep_samples = context.endpoints[:10]
+        ep_lines = [f"  - {ep.method} {ep.url}" for ep in ep_samples]
+        endpoint_list = "\n".join(ep_lines)
+
     initial_user_msg = (
-        f"You are the {agent_name} specialist. Begin testing "
-        f"{context.target_url} now. Use your tools to probe for "
-        f"vulnerabilities in your domain. Start by examining the target "
-        f"and any discovered endpoints listed in the context above."
+        f"BEGIN TESTING NOW. Target: {context.target_url}\n\n"
+        f"Your FIRST tool call should be one of:\n"
+        f"- get_api_endpoints()\n"
+        f"- navigate(url=\"{context.target_url}\")\n"
+        f"- api_request(method=\"GET\", url=\"{context.target_url}\")\n\n"
+        f"Do NOT explain what you plan to do. Just call a tool immediately.\n"
     )
+    if endpoint_list:
+        initial_user_msg += (
+            f"\nEndpoints discovered by recon:\n{endpoint_list}\n"
+            f"Test ALL of these endpoints with your specialist payloads.\n"
+        )
 
     messages = [
         {"role": "system", "content": system_prompt},
@@ -98,6 +111,7 @@ async def _run_specialist_worker(
     ]
     findings: list[dict] = []
     total_tool_calls = 0
+    consecutive_no_tool = 0
 
     for step in range(agent_def.max_steps):
         if cancel_flag is not None and getattr(cancel_flag, "is_set", lambda: False)():
@@ -142,6 +156,7 @@ async def _run_specialist_worker(
         )
 
         if not tool_calls_in_msg:
+            consecutive_no_tool += 1
             content = msg_dict.get("content") or ""
             if content:
                 _progress("agent_thinking", {
@@ -150,8 +165,21 @@ async def _run_specialist_worker(
                 })
             if _agent_is_done(content):
                 break
+            if consecutive_no_tool >= 3:
+                messages.append({
+                    "role": "user",
+                    "content": (
+                        "You have NOT called any tools in your last 3 responses. "
+                        "You MUST call a tool NOW. Do not explain -- just call "
+                        "get_api_endpoints() or navigate() or fuzz_parameter() or "
+                        "api_request(). If you have nothing left to test, say "
+                        "'I have completed all testing' to finish."
+                    ),
+                })
+                consecutive_no_tool = 0
             continue
 
+        consecutive_no_tool = 0
         for tc in tool_calls_in_msg:
             if cancel_flag is not None and getattr(cancel_flag, "is_set", lambda: False)():
                 break
@@ -262,11 +290,23 @@ def _build_context_summary(context: SharedScanContext,
 
 
 def _agent_is_done(content: str) -> bool:
-    """Check if the agent's response indicates it's finished."""
+    """Check if the agent explicitly declares it has finished all testing.
+
+    Only trigger on unambiguous end-of-work declarations -- not casual mentions
+    of "completed" or "done" mid-analysis. The agent must be saying *it* is done,
+    not that a particular test completed.
+    """
     done_signals = [
-        "i have completed", "testing complete", "finished testing",
-        "no more tests", "all parameters tested", "scan complete",
-        "i'm done", "i am done", "that concludes",
+        "i have completed all testing",
+        "i have completed my testing",
+        "all testing is complete",
+        "finished all testing",
+        "no more endpoints to test",
+        "all parameters have been tested",
+        "scan complete. no further",
+        "i'm done testing",
+        "i am done testing",
+        "that concludes my testing",
     ]
     lower = content.lower()
     return any(sig in lower for sig in done_signals)

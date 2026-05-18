@@ -1993,4 +1993,45 @@ TOOL_DEFINITIONS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "report_finding",
+            "description": (
+                "Report a security finding/vulnerability. Call this whenever you discover a vulnerability. "
+                "Provide a clear title, severity, description with evidence, and the affected URL."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "title": {
+                        "type": "string",
+                        "description": "Short descriptive title (e.g. 'Reflected XSS in search parameter')",
+                    },
+                    "severity": {
+                        "type": "string",
+                        "enum": ["Critical", "High", "Medium", "Low", "Info"],
+                        "description": "Severity rating",
+                    },
+                    "description": {
+                        "type": "string",
+                        "description": "Detailed description including what was found, how to reproduce, and impact",
+                    },
+                    "url": {
+                        "type": "string",
+                        "description": "The affected URL or endpoint",
+                    },
+                    "evidence": {
+                        "type": "string",
+                        "description": "Raw evidence: HTTP request/response snippets, error messages, payload that triggered it",
+                    },
+                    "vuln_type": {
+                        "type": "string",
+                        "description": "Vulnerability class (e.g. 'XSS', 'SQLi', 'SSRF', 'IDOR', 'CSRF')",
+                    },
+                },
+                "required": ["title", "severity", "description", "url"],
+            },
+        },
+    },
 ]
