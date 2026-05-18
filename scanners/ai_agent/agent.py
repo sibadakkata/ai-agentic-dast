@@ -2825,12 +2825,27 @@ async def run_scan(
                 else:
                     _cb("progress_msg", {"message": f"[MULTI-AGENT] {event}: {data}"})
 
+            _auth_cookies = []
+            if browser:
+                try:
+                    _ctx = page.context if page else None
+                    if _ctx:
+                        _auth_cookies = await _ctx.cookies()
+                except Exception:
+                    pass
+
             ma_findings = await run_multi_agent_scan(
                 context=ma_context,
                 model=model,
                 router=router,
                 tools=tools,
                 tool_definitions=TOOL_DEFINITIONS,
+                browser=browser,
+                auth_cookies=_auth_cookies,
+                registry=registry,
+                allowed_domains=allowed_domains,
+                auth_session=auth_session,
+                exclude_urls=getattr(target, "exclude_urls", None) or [],
                 on_finding=lambda f: _cb("finding", f),
                 on_progress=_ma_progress,
                 cancel_flag=cancel_flag,

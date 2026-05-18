@@ -164,6 +164,27 @@ uvicorn web.app:app --host 0.0.0.0 --port 8080
 
 > Full deployment guide: [docs/deployment.md](docs/deployment.md)
 
+## Choosing a Scan Profile
+
+The scanner offers three scan profiles. Select from the **Scan Profile** dropdown in the UI or set `scan_profile` via the API.
+
+| Profile | Best for | How it works | Strengths | Limitations |
+|---------|----------|-------------|-----------|-------------|
+| **Vulnerability Scan** (default) | Production apps, thorough audits, bug bounty | Single LLM agent runs 25 web + 15 API phases sequentially/parallel. Each phase has a battle-tested prompt targeting a specific vuln class. Includes smart retry, attack chain analysis, and runtime verification. | Highest finding count. Mature prompts tuned over hundreds of scans. Deep per-phase context. Runtime verification confirms exploitability. | Sequential phases = longer scan time. Single agent can't cross-pollinate findings between vuln classes mid-phase. |
+| **Multi-Agent** | Broad coverage, OWASP compliance, parallel specialist analysis | 13 specialist agents run in parallel, each with an isolated browser + HTTP client. A recon agent maps the surface first, then specialists (XSS, SQLi, Auth, SSRF, etc.) test simultaneously. A verifier confirms findings and builds exploit chains. | Full OWASP Web/API/LLM Top 10 coverage (32 categories). Parallel = faster wall-clock time. Each agent is a domain expert. Agents share context (endpoints, params, findings) in real time. | Newer architecture -- prompts still being tuned. Each agent has a step budget (200 max). May produce fewer findings than standard mode on well-tested targets. |
+| **Crawl Only** | Reconnaissance, attack surface mapping | Discovers URLs, forms, APIs, and parameters without sending any attack payloads. | Zero risk to target. Fast. Good for scoping before a full scan. | No vulnerability testing -- findings are informational only. |
+
+### When to use which?
+
+- **"I want the most findings"** -- use **Vulnerability Scan** (default). It has the most mature prompts and the deepest testing per vuln class.
+- **"I want broad OWASP coverage fast"** -- use **Multi-Agent**. 13 specialists test in parallel, covering all OWASP categories simultaneously.
+- **"I want to compare"** -- run both profiles on the same target (one at a time recommended for heavy targets) and compare findings in the UI.
+- **"I just want to map the surface"** -- use **Crawl Only**. No payloads, no risk.
+
+> **Note:** Both Vulnerability Scan and Multi-Agent share the same foundation: authentication, passive recon (29 checks), and active baseline probes (SQLi, XSS, DOM XSS, SSRF, smuggling, etc.) always run first regardless of profile. The difference is what happens after baseline.
+
+---
+
 ## Scan Pipeline
 
 ### Multi-Agent Mode

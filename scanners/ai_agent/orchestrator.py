@@ -4,9 +4,9 @@ Coordinates specialist agents: runs recon first, then fans out specialist
 agents in parallel, collects findings, runs the verifier, and merges
 everything into a unified result set.
 
-The orchestrator reuses the existing ScanTools + TOOL_DEFINITIONS + LLMRouter
-from the main scanner -- each specialist agent gets its own system prompt but
-shares the same authenticated browser, HTTP client, and tool implementations.
+Each specialist agent gets its own isolated browser context, HTTP client,
+and ScanTools instance -- so parallel agents don't compete for one browser
+page. This mirrors the parallel-worker pattern in agent.py.
 """
 from __future__ import annotations
 
@@ -16,6 +16,8 @@ import logging
 import time
 from typing import Any
 
+import httpx
+
 from .multi_agent_context import SharedScanContext, EndpointInfo
 from .specialist_prompts import (
     SPECIALIST_AGENTS, SpecialistAgent, AgentType,
@@ -23,6 +25,22 @@ from .specialist_prompts import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+async def _clone_browser_context(browser, auth_cookies, target_url):
+    """Create an isolated browser context with cloned auth cookies."""
+    context = await browser.new_context(
+        ignore_https_errors=True,
+        java_script_enabled=True,
+    )
+    if auth_cookies:
+        await context.add_cookies(auth_cookies)
+    page = await context.new_page()
+    try:
+        await page.goto(target_url, wait_until="domcontentloaded", timeout=15000)
+    except Exception:
+        pass
+    return context, page
 
 
 async def _run_specialist_worker(
@@ -39,8 +57,8 @@ async def _run_specialist_worker(
 ) -> list[dict]:
     """Run a single specialist agent through its focused attack loop.
 
-    Uses the same router.complete() + tools.execute() pattern as the
-    main scan phases.
+    Each agent gets its own ScanTools instance (with isolated browser context).
+    Uses the same router.complete() + tools.execute() pattern as the main scan.
     """
     agent_name = agent_def.name
     agent_id = agent_def.id
@@ -67,7 +85,6 @@ async def _run_specialist_worker(
         f"description, url, and evidence."
     )
 
-    # Bedrock requires at least one user message after the system message.
     initial_user_msg = (
         f"You are the {agent_name} specialist. Begin testing "
         f"{context.target_url} now. Use your tools to probe for "
@@ -262,6 +279,12 @@ async def run_multi_agent_scan(
     tools,
     tool_definitions: list[dict],
     *,
+    browser=None,
+    auth_cookies: list[dict] | None = None,
+    registry=None,
+    allowed_domains: set | None = None,
+    auth_session=None,
+    exclude_urls: list[str] | None = None,
     on_finding=None,
     on_progress=None,
     cancel_flag=None,
@@ -270,10 +293,13 @@ async def run_multi_agent_scan(
     """Run the full multi-agent scan pipeline.
 
     Pipeline:
-    1. Recon agent runs first (sequential) -- populates shared context
-    2. Specialist agents run in parallel -- each focused on its vuln class
+    1. Recon agent runs first (sequential) -- uses the shared tools/browser
+    2. Specialist agents run in parallel -- each gets an ISOLATED browser
+       context, HTTP client, and ScanTools instance
     3. Verifier agent runs last -- re-confirms findings and builds chains
     """
+    from .tools import ScanTools
+
     _progress = on_progress or (lambda event, data: None)
     all_findings: list[dict] = []
 
@@ -285,7 +311,7 @@ async def run_multi_agent_scan(
         "target": context.target_url,
     })
 
-    # -- Phase 1: Recon (sequential) --
+    # -- Phase 1: Recon (sequential, uses shared tools) --
     if "recon" in agents_to_run:
         _progress("multi_agent_phase", {"phase": "recon", "status": "starting"})
         recon_agent = get_specialist("recon")
@@ -301,7 +327,7 @@ async def run_multi_agent_scan(
             "endpoints": len(context.endpoints),
         })
 
-    # -- Phase 2: Specialist agents (parallel) --
+    # -- Phase 2: Specialist agents (parallel, isolated contexts) --
     specialist_agents = [
         get_specialist(aid) for aid in agents_to_run
         if aid not in ("recon", "verifier") and aid in SPECIALIST_AGENTS
@@ -316,9 +342,31 @@ async def run_multi_agent_scan(
         })
 
         async def _guarded_worker(agent_def: SpecialistAgent) -> list[dict]:
+            agent_context = None
+            agent_page = None
+            agent_http = None
+            agent_tools = tools
             try:
+                if browser:
+                    agent_context, agent_page = await _clone_browser_context(
+                        browser, auth_cookies or [], context.target_url,
+                    )
+                agent_http = httpx.AsyncClient(
+                    timeout=30.0, verify=False, follow_redirects=True,
+                )
+                agent_tools = ScanTools(
+                    page=agent_page,
+                    http_client=agent_http,
+                    registry=registry,
+                    auth_session=auth_session,
+                    allowed_domains=allowed_domains,
+                    cancel_flag=cancel_flag,
+                    exclude_urls=exclude_urls or [],
+                )
+
                 return await _run_specialist_worker(
-                    agent_def, context, model, router, tools, tool_definitions,
+                    agent_def, context, model, router,
+                    agent_tools, tool_definitions,
                     on_finding=on_finding, on_progress=_progress,
                     cancel_flag=cancel_flag,
                 )
@@ -328,6 +376,22 @@ async def run_multi_agent_scan(
                 context.update_metrics(agent_def.id,
                                        status="failed", error=str(e))
                 return []
+            finally:
+                if agent_http:
+                    try:
+                        await agent_http.aclose()
+                    except Exception:
+                        pass
+                if agent_page:
+                    try:
+                        await agent_page.close()
+                    except Exception:
+                        pass
+                if agent_context:
+                    try:
+                        await agent_context.close()
+                    except Exception:
+                        pass
 
         results = await asyncio.gather(
             *[_guarded_worker(a) for a in specialist_agents],
@@ -340,7 +404,7 @@ async def run_multi_agent_scan(
             "total_findings": len(all_findings),
         })
 
-    # -- Phase 3: Verifier (sequential) --
+    # -- Phase 3: Verifier (sequential, uses shared tools) --
     if "verifier" in agents_to_run and all_findings:
         _progress("multi_agent_phase", {
             "phase": "verifier", "status": "starting",
