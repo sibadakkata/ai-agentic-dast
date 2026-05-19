@@ -8,6 +8,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 RUN playwright install chromium
 
+# Garak (NVIDIA LLM vulnerability scanner) - verify CLI is usable
+RUN python -m garak --help > /dev/null 2>&1 || echo "Garak CLI not on PATH (will use python -m garak)"
+
 COPY scanners/ scanners/
 COPY scripts/ scripts/
 COPY web/ web/

@@ -2346,6 +2346,104 @@ async def run_scan(
             except Exception as e:
                 logger.debug("href extraction failed (non-fatal): %s", e)
 
+        # ── Post-crawl LLM re-detection ──────────────────────────────
+        # The initial detect_llm_features() only sees the landing page.
+        # SPAs like ai.norton.com hide chatbots behind sidebar navigation
+        # (e.g. "Chat with Superparent").  After the SPA crawl + href
+        # extraction we have a richer view of the app, so we re-check:
+        #   1. Network endpoints discovered during crawl
+        #   2. Crawled page URLs that hint at chat/AI features
+        #   3. Navigate to chat-like pages and re-run DOM detection
+        if page is not None and not app_info.get("has_llm_chat", False):
+            from .llm_detect import match_llm_endpoints_from_urls
+            _crawled = metrics.get("pages_list", [])
+            _chat_hints = [u for u in _crawled if any(
+                kw in u.lower() for kw in (
+                    "chat", "copilot", "assist", "ai/", "/ask",
+                    "converse", "superparent", "bot", "/llm",
+                    "/rag", "/generate", "/completions",
+                )
+            )]
+            _api_llm = match_llm_endpoints_from_urls(_crawled)
+
+            if _chat_hints or _api_llm:
+                print(f"  [LLM-REDETECT] Found chat hints in crawled URLs: {_chat_hints[:5]}")
+                if _api_llm:
+                    app_info.setdefault("llm_endpoints", []).extend(_api_llm)
+                    app_info["has_llm_chat"] = True
+                    app_info["confidence"] = max(app_info.get("confidence", 0), 0.7)
+                    print(f"  [LLM-REDETECT] LLM endpoints found: {_api_llm[:3]}")
+                for hint_url in _chat_hints[:3]:
+                    try:
+                        await page.goto(hint_url, wait_until="domcontentloaded", timeout=12000)
+                        await page.wait_for_timeout(2000)
+                        _network_log2 = []
+                        if hasattr(tools, "get_network_log_raw"):
+                            _network_log2 = tools.get_network_log_raw()
+                        llm_recheck = await detect_llm_features(
+                            page=page, http_client=http_client,
+                            network_log=_network_log2,
+                        )
+                        if llm_recheck.get("has_llm_chat"):
+                            app_info.update(llm_recheck)
+                            print(f"  [LLM-REDETECT] Chat UI detected on {hint_url}! "
+                                  f"(confidence={llm_recheck['confidence']:.2f})")
+                            break
+                    except Exception as e:
+                        logger.debug("LLM re-detect navigation to %s failed: %s", hint_url, e)
+                if app_info.get("has_llm_chat"):
+                    _cb("detect", {
+                        "is_spa": app_info.get("is_spa"),
+                        "framework": app_info.get("framework"),
+                        "has_llm_chat": True,
+                    })
+                    _cb("progress_msg", {
+                        "message": "LLM/chatbot features detected after SPA crawl — "
+                                   "LLM security phase will be added",
+                    })
+            else:
+                # Also check sidebar/nav links for chat-like entries
+                try:
+                    _nav_links = await page.evaluate("""() => {
+                        const links = [...document.querySelectorAll('a, button, [role="menuitem"], nav a')];
+                        return links
+                            .map(el => ({text: (el.textContent || '').trim().toLowerCase(),
+                                         href: el.href || ''}))
+                            .filter(l => ['chat', 'copilot', 'assistant', 'ai ', 'ask ', 'bot']
+                                .some(kw => l.text.includes(kw)));
+                    }""")
+                    if _nav_links:
+                        print(f"  [LLM-REDETECT] Found {len(_nav_links)} chat-like nav elements: "
+                              f"{[l['text'][:30] for l in _nav_links[:3]]}")
+                        for link in _nav_links[:2]:
+                            link_href = link.get("href", "")
+                            if link_href and link_href.startswith("http"):
+                                try:
+                                    await page.goto(link_href, wait_until="domcontentloaded", timeout=12000)
+                                    await page.wait_for_timeout(2000)
+                                    _net = tools.get_network_log_raw() if hasattr(tools, "get_network_log_raw") else []
+                                    llm_recheck = await detect_llm_features(
+                                        page=page, http_client=http_client,
+                                        network_log=_net,
+                                    )
+                                    if llm_recheck.get("has_llm_chat"):
+                                        app_info.update(llm_recheck)
+                                        print(f"  [LLM-REDETECT] Chat UI confirmed via nav link!")
+                                        _cb("detect", {
+                                            "is_spa": app_info.get("is_spa"),
+                                            "framework": app_info.get("framework"),
+                                            "has_llm_chat": True,
+                                        })
+                                        _cb("progress_msg", {
+                                            "message": "LLM/chatbot features detected via navigation — "
+                                                       "LLM security phase will be added",
+                                        })
+                                        break
+                                except Exception as e:
+                                    logger.debug("LLM re-detect nav click to %s failed: %s", link_href, e)
+                except Exception as e:
+                    logger.debug("LLM nav-link detection failed (non-fatal): %s", e)
+
         # ── Baseline Execution (happy path, no LLM) ──
         baseline_context = ""
         api_endpoints = registry.get_all()
