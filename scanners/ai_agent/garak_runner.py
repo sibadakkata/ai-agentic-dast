@@ -62,6 +62,9 @@ _OWASP_CWE: dict[str, str] = {
 }
 
 
+_INSTALL_LOCK = False
+
+
 def is_garak_available() -> bool:
     """Check if Garak is installed and importable."""
     return shutil.which("garak") is not None or _try_import()
@@ -73,6 +76,46 @@ def _try_import() -> bool:
         importlib.import_module("garak")
         return True
     except ImportError:
+        return False
+
+
+def _auto_install_garak(on_progress=None) -> bool:
+    """Install Garak on demand when LLM features are detected.
+
+    Runs ``pip install garak`` as a subprocess.  The install persists for
+    the lifetime of the container (until restart).  Returns True on success.
+    """
+    global _INSTALL_LOCK
+    if _INSTALL_LOCK:
+        return is_garak_available()
+    _INSTALL_LOCK = True
+
+    _cb = on_progress or (lambda *a, **k: None)
+    logger.info("Garak not installed — starting on-demand install (this takes ~2-3 min)...")
+    _cb("garak_installing", {"message": "Installing Garak on demand (~2-3 min)..."})
+
+    import subprocess
+    try:
+        result = subprocess.run(
+            [sys.executable, "-m", "pip", "install", "--quiet", "garak>=0.15.0"],
+            capture_output=True, text=True, timeout=600,
+        )
+        if result.returncode == 0:
+            logger.info("Garak installed successfully")
+            _cb("garak_installed", {"message": "Garak installed successfully"})
+            return True
+        else:
+            logger.warning("Garak install failed (exit %d): %s",
+                           result.returncode, result.stderr[:500])
+            _cb("garak_install_failed", {"error": result.stderr[:300]})
+            return False
+    except subprocess.TimeoutExpired:
+        logger.warning("Garak install timed out after 600s")
+        _cb("garak_install_failed", {"error": "Install timed out after 10 min"})
+        return False
+    except Exception as e:
+        logger.warning("Garak install failed: %s", e)
+        _cb("garak_install_failed", {"error": str(e)[:300]})
         return False
 
 
@@ -197,12 +240,13 @@ async def run_garak(
     _cb = on_progress or (lambda *a, **k: None)
 
     if not is_garak_available():
-        logger.warning(
-            "Garak is not installed -- skipping LLM probe battery. "
-            "Install with: pip install garak"
-        )
-        _cb("garak_skip", {"reason": "not_installed"})
-        return []
+        if not _auto_install_garak(on_progress=_cb):
+            logger.warning(
+                "Garak is not installed and auto-install failed — "
+                "skipping LLM probe battery"
+            )
+            _cb("garak_skip", {"reason": "install_failed"})
+            return []
 
     findings: list[dict] = []
     tmpdir = tempfile.mkdtemp(prefix="garak_run_")
