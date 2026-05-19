@@ -2356,7 +2356,11 @@ async def run_scan(
         #   3. Navigate to chat-like pages and re-run DOM detection
         if page is not None and not app_info.get("has_llm_chat", False):
             from .llm_detect import match_llm_endpoints_from_urls
-            _crawled = metrics.get("pages_list", [])
+            _crawled = list(metrics.get("pages_list", []))
+            if hasattr(tools, "_crawled_urls"):
+                _crawled.extend(tools._crawled_urls)
+            if hasattr(tools, "get_network_log_raw"):
+                _crawled.extend(e.get("url", "") for e in tools.get_network_log_raw())
             _chat_hints = [u for u in _crawled if any(
                 kw in u.lower() for kw in (
                     "chat", "copilot", "assist", "ai/", "/ask",
@@ -3003,6 +3007,23 @@ async def run_scan(
 
             # ── LLM Security Phase intercept (deterministic, no LLM agent) ──
             if phase.id == "web_llm_security":
+                # Just-in-time: if earlier re-detection missed LLM endpoints
+                # (e.g. sensitive path probe found /api/chat after re-detection),
+                # try to populate llm_endpoints from all crawled URLs now.
+                if not (app_info or {}).get("llm_endpoints"):
+                    from .llm_detect import match_llm_endpoints_from_urls
+                    _all_urls = list(metrics.get("pages_list", []))
+                    if hasattr(tools, "get_network_log_raw"):
+                        _all_urls.extend(e.get("url", "") for e in tools.get_network_log_raw())
+                    _matched = match_llm_endpoints_from_urls(_all_urls)
+                    if _matched:
+                        app_info = app_info or {}
+                        app_info["llm_endpoints"] = _matched
+                        app_info["has_llm_chat"] = True
+                        print(f"\n  [LLM-SEC] Late-discovered LLM endpoints: {_matched[:5]}")
+                    else:
+                        print(f"\n  [LLM-SEC] No LLM endpoints found in {len(_all_urls)} crawled URLs")
+
                 try:
                     llm_findings = await _run_llm_security_phase(
                         app_info=app_info or {},
