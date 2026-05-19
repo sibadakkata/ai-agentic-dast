@@ -22,29 +22,100 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_TIMEOUT = 300  # 5 min
-_DEFAULT_PROBE_TAGS = ["owasp:llm01", "owasp:llm02", "owasp:llm06", "owasp:llm07"]
+_DEFAULT_TIMEOUT = 900  # 15 min (full probe suite is slow over REST)
+
+# Comprehensive probe list covering all major LLM vulnerability categories
+_DEFAULT_PROBES: list[str] = [
+    "grandma.Slurs",
+    "grandma.Substances",
+    "grandma.Win10",
+    "grandma.Win11",
+    "dan.DanInTheWild",
+    "dan.Ablation_Dan_11_0",
+    "dan.AutoDANCached",
+    "continuation.ContinueSlursReclaimedSlurs",
+    "lmrc.Bullying",
+    "lmrc.Deadnaming",
+    "lmrc.SexualContent",
+    "lmrc.Sexualisation",
+    "lmrc.SlurUsage",
+    "lmrc.QuackMedicine",
+    "atkgen.Tox",
+    "realtoxicityprompts.RTPBlank",
+    "promptinject.HijackHateHumans",
+    "promptinject.HijackKillHumans",
+    "promptinject.HijackLongPrompt",
+    "encoding.InjectBase64",
+    "encoding.InjectROT13",
+    "encoding.InjectHex",
+    "encoding.InjectUnicodeTagChars",
+    "encoding.InjectZalgo",
+    "tap.TAPCached",
+    "dra.DRA",
+    "suffix.GCGCached",
+    "phrasing.PastTense",
+    "phrasing.FutureTense",
+    "goodside.WhoIsRiley",
+    "goodside.ThreatenJSON",
+    "misleading.FalseAssertion",
+    "snowball.GraphConnectivity",
+    "ansiescape.AnsiEscaped",
+    "ansiescape.AnsiRaw",
+    "apikey.CompleteKey",
+    "apikey.GetKey",
+    "exploitation.JinjaTemplatePythonInjection",
+    "exploitation.SQLInjectionEcho",
+    "malwaregen.Payload",
+    "malwaregen.Evasion",
+    "web_injection.MarkdownXSS",
+    "web_injection.MarkdownImageExfil",
+    "web_injection.TaskXSS",
+    "latentinjection.LatentJailbreak",
+    "sysprompt_extraction.SystemPromptExtraction",
+    "topic.WordnetControversial",
+    "divergence.Repeat",
+    "badchars.BadCharacters",
+]
 
 # Mapping from Garak probe family prefixes to OWASP LLM categories
 _PROBE_TO_OWASP: dict[str, str] = {
-    "promptinject": "LLM01",
-    "dan":          "LLM01",
-    "gcg":          "LLM01",
-    "encoding":     "LLM01",
-    "jailbreak":    "LLM01",
-    "leakreplay":   "LLM02",
-    "knownbadsign": "LLM02",
-    "lmrc":         "LLM02",
-    "xss":          "LLM05",
-    "tooluse":      "LLM06",
-    "snowball":     "LLM09",
-    "continuation": "LLM07",
+    "promptinject":  "LLM01",
+    "dan":           "LLM01",
+    "gcg":           "LLM01",
+    "suffix":        "LLM01",
+    "encoding":      "LLM01",
+    "jailbreak":     "LLM01",
+    "tap":           "LLM01",
+    "dra":           "LLM01",
+    "phrasing":      "LLM01",
+    "latentinject":  "LLM01",
+    "goodside":      "LLM01",
+    "sysprompt":     "LLM01",
+    "leakreplay":    "LLM02",
+    "knownbadsign":  "LLM02",
+    "apikey":        "LLM02",
+    "divergence":    "LLM02",
+    "grandma":       "LLM05",
+    "lmrc":          "LLM05",
+    "continuation":  "LLM05",
+    "atkgen":        "LLM05",
+    "realtoxicity":  "LLM05",
+    "topic":         "LLM05",
+    "misleading":    "LLM05",
+    "xss":           "LLM05",
+    "web_injection": "LLM05",
+    "exploitation":  "LLM05",
+    "ansiescape":    "LLM05",
+    "badchars":      "LLM05",
+    "malwaregen":    "LLM06",
+    "tooluse":       "LLM06",
+    "snowball":      "LLM09",
 }
 
 _OWASP_SEVERITY: dict[str, str] = {
     "LLM01": "High",
     "LLM02": "High",
-    "LLM05": "Medium",
+    "LLM05": "High",
     "LLM06": "High",
     "LLM07": "Medium",
     "LLM09": "Low",
@@ -128,20 +199,39 @@ def _generate_config(
     """Generate a Garak YAML config string targeting a REST endpoint."""
     import yaml
 
-    tags = probe_tags or _DEFAULT_PROBE_TAGS
+    tags = probe_tags or _DEFAULT_PROBES
 
-    req_template = request_template or {
-        "messages": [{"role": "user", "content": "$INPUT"}]
-    }
+    # Auto-detect request template based on endpoint path
+    ep_lower = endpoint.lower()
+    if request_template:
+        req_template = request_template
+    elif "neoclaw-agent/chat" in ep_lower:
+        req_template = {
+            "sessionKey": "agent:main:neoclaw-general",
+            "message": [{"type": "message", "role": "user", "content": "$INPUT"}],
+            "model": "openclaw",
+            "agentId": "main",
+            "userId": "neoclaw",
+        }
+    elif "/message" in ep_lower or "/agent/" in ep_lower:
+        req_template = {"message": "$INPUT"}
+    elif "/query" in ep_lower:
+        req_template = {"query": "$INPUT"}
+    elif "/completions" in ep_lower:
+        req_template = {"messages": [{"role": "user", "content": "$INPUT"}]}
+    else:
+        req_template = {"message": "$INPUT"}
+    print(f"  [GARAK] Request template: {req_template}")
 
     merged_headers = {"Content-Type": "application/json"}
     if headers:
         merged_headers.update(headers)
 
     has_cookies = "Cookie" in merged_headers
+    has_bearer = "Authorization" in merged_headers
     logger.info(
-        "Garak config: endpoint=%s, headers=%d (cookies=%s)",
-        endpoint, len(merged_headers), has_cookies,
+        "Garak config: endpoint=%s, headers=%d (cookies=%s, bearer=%s)",
+        endpoint, len(merged_headers), has_cookies, has_bearer,
     )
 
     config: dict[str, Any] = {
@@ -154,9 +244,13 @@ def _generate_config(
                         "method": "post",
                         "headers": merged_headers,
                         "req_template_json_object": req_template,
-                        "response_json": True,
-                        "response_json_field": "$.choices[0].message.content",
-                        "request_timeout": 30,
+                        "response_json": "neoclaw" not in ep_lower,
+                        "response_json_field": (
+                            "$.choices[0].message.content"
+                            if "/completions" in ep_lower
+                            else "$.response"
+                        ),
+                        "request_timeout": 60,
                     }
                 }
             }
@@ -193,22 +287,58 @@ def _normalise_finding(
 ) -> dict | None:
     """Convert a single Garak JSONL hit into the scanner's finding format."""
     status = entry.get("status", "")
-    if status != "fail":
+    # Garak v0.15+ uses numeric status: 1 = fail, 2 = pass
+    if status not in ("fail", 1):
         return None
 
-    probe = entry.get("probe", "unknown")
+    probe = entry.get("probe") or entry.get("probe_classname") or "unknown"
     detector = entry.get("detector", "unknown")
     owasp = _classify_probe(probe)
 
     prompt_text = entry.get("prompt", "")
-    output_text = entry.get("output", "")
+    output_text = entry.get("output") or entry.get("outputs") or ""
+    # v0.15 prompt is a dict with turns
+    if isinstance(prompt_text, dict):
+        turns = prompt_text.get("turns", [])
+        if turns:
+            content = turns[0].get("content", {})
+            prompt_text = content.get("text", "") if isinstance(content, dict) else str(content)
     if isinstance(prompt_text, list):
         prompt_text = " | ".join(str(p) for p in prompt_text)
+    # v0.15 outputs is a list of dicts with text field
     if isinstance(output_text, list):
-        output_text = " | ".join(str(o) for o in output_text)
+        parts = []
+        for o in output_text:
+            if isinstance(o, dict):
+                parts.append(o.get("text", str(o)))
+            else:
+                parts.append(str(o))
+        output_text = " | ".join(parts)
 
     probe_short = probe.rsplit(".", 1)[-1] if "." in probe else probe
     title = f"{probe_short} ({owasp})"
+
+    # Extract chatbot response from SSE stream for display
+    chat_response = str(output_text)[:500]
+    if isinstance(output_text, str) and "event:" in output_text:
+        _parts = []
+        for sse_line in output_text.split("\n"):
+            if sse_line.startswith("data: "):
+                try:
+                    d = json.loads(sse_line[6:])
+                    msg = d.get("message", {})
+                    if isinstance(msg, dict) and msg.get("role") == "assistant":
+                        c = msg.get("content", "")
+                        if isinstance(c, list):
+                            for item in c:
+                                if isinstance(item, dict) and item.get("type") == "text":
+                                    _parts.append(item.get("text", ""))
+                        elif isinstance(c, str):
+                            _parts.append(c)
+                except Exception:
+                    pass
+        if _parts:
+            chat_response = " ".join(_parts)[:500]
 
     return {
         "title": title,
@@ -222,15 +352,24 @@ def _normalise_finding(
         "payload": str(prompt_text)[:300],
         "evidence": (
             f"Garak probe {probe} (detector: {detector}) flagged a failure. "
-            f"Response snippet: {str(output_text)[:300]}"
+            f"Response snippet: {chat_response[:300]}"
         ),
-        "response_snippet": str(output_text)[:500],
+        "response_snippet": chat_response,
         "remediation": f"Review {owasp} controls. See OWASP Top 10 for LLM Applications.",
         "phase": "LLM Security (Garak)",
         "tool": f"garak.{probe}",
         "_finding_source": "garak",
         "_garak_probe": probe,
         "_garak_detector": detector,
+        "request": {
+            "method": "POST",
+            "url": endpoint,
+            "body": json.dumps({"message": str(prompt_text)[:200]}, ensure_ascii=False),
+        },
+        "response_summary": {
+            "status_code": 200,
+            "body": chat_response,
+        },
     }
 
 
@@ -246,19 +385,26 @@ async def run_garak(
 
     Returns an empty list if Garak is not installed or the run fails.
     """
+    print(f"  [GARAK] run_garak() called for {target_endpoint}")
     _cb = on_progress or (lambda *a, **k: None)
 
     if not is_garak_available():
+        print("  [GARAK] Garak not available, attempting auto-install...")
         if not _auto_install_garak(on_progress=_cb):
+            print("  [GARAK] Auto-install FAILED — skipping")
             logger.warning(
                 "Garak is not installed and auto-install failed — "
                 "skipping LLM probe battery"
             )
             _cb("garak_skip", {"reason": "install_failed"})
             return []
+        print("  [GARAK] Auto-install succeeded")
+    else:
+        print("  [GARAK] Garak is available")
 
     findings: list[dict] = []
     tmpdir = tempfile.mkdtemp(prefix="garak_run_")
+    print(f"  [GARAK] tmpdir: {tmpdir}")
 
     try:
         config_yaml = _generate_config(
@@ -268,9 +414,10 @@ async def run_garak(
         with open(config_path, "w") as f:
             f.write(config_yaml)
         print(f"  [GARAK] Config written to {config_path}")
-        print(f"  [GARAK] Has Cookie header: {'Cookie' in (headers or {})}")
+        print(f"  [GARAK] Has Cookie: {'Cookie' in (headers or {})}, Has Bearer: {'Authorization' in (headers or {})}")
         header_keys = list((headers or {}).keys())
         print(f"  [GARAK] Header keys: {header_keys}")
+        print(f"  [GARAK] Endpoint: {target_endpoint}")
         print(f"  [GARAK] Config preview:\n{config_yaml[:500]}")
 
         logger.info("Starting Garak run against %s (timeout=%ds)", target_endpoint, timeout)
@@ -280,12 +427,16 @@ async def run_garak(
         env["GARAK_RUN_DIR"] = tmpdir
 
         python = sys.executable
+        probes_csv = ",".join(probe_tags) if probe_tags else ",".join(_DEFAULT_PROBES)
         cmd = [
             python, "-m", "garak",
-            "--model_type", "rest.RestGenerator",
-            "--model_name", "target-llm",
+            "--target_type", "rest.RestGenerator",
+            "--target_name", "target-llm",
+            "--probes", probes_csv,
             "--config", config_path,
         ]
+        print(f"  [GARAK] Running {len(probes_csv.split(','))} probes")
+        print(f"  [GARAK] Cmd: {' '.join(cmd[:8])}...")
 
         proc = await asyncio.create_subprocess_exec(
             *cmd,
@@ -294,56 +445,98 @@ async def run_garak(
             cwd=tmpdir,
             env=env,
         )
+        print(f"  [GARAK] Process started, PID={proc.pid}, waiting (timeout={timeout}s)...")
 
+        timed_out = False
         try:
             stdout, stderr = await asyncio.wait_for(
                 proc.communicate(), timeout=timeout,
             )
         except asyncio.TimeoutError:
+            print(f"  [GARAK] TIMEOUT after {timeout}s — killing process")
             proc.kill()
             await proc.wait()
+            stdout, stderr = b"", b""
+            timed_out = True
             logger.warning("Garak timed out after %ds", timeout)
             _cb("garak_timeout", {"timeout": timeout})
+        except Exception as exc:
+            print(f"  [GARAK] communicate() exception: {type(exc).__name__}: {exc}")
             return []
 
         exit_code = proc.returncode
-        stdout_str = (stdout or b"").decode(errors="replace")[:2000]
-        stderr_str = (stderr or b"").decode(errors="replace")[:2000]
-        print(f"  [GARAK] Exit code: {exit_code}")
+        stdout_str = (stdout or b"").decode(errors="replace")[:5000]
+        stderr_str = (stderr or b"").decode(errors="replace")[:5000]
+        all_output = stdout_str + "\n" + stderr_str
+        print(f"  [GARAK] Exit code: {exit_code} (timed_out={timed_out})")
         if stdout_str.strip():
             print(f"  [GARAK] stdout: {stdout_str[:500]}")
         if stderr_str.strip():
-            print(f"  [GARAK] stderr: {stderr_str[:800]}")
-        if exit_code != 0:
+            print(f"  [GARAK] stderr (full): {stderr_str}")
+        if exit_code != 0 and not timed_out:
             logger.warning(
                 "Garak exited with code %d: %s",
                 exit_code, stderr_str[:500],
             )
 
-        # Parse results from JSONL report
-        report = _find_report_file(tmpdir)
-        if not report:
-            home_garak = Path.home() / ".local" / "share" / "garak"
-            report = _find_report_file(home_garak)
-
-        if report and report.exists():
-            _cb("garak_parsing", {"report": str(report)})
-            with open(report, "r") as f:
-                for line in f:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        entry = json.loads(line)
-                        finding = _normalise_finding(entry, target_endpoint)
-                        if finding:
-                            findings.append(finding)
-                    except json.JSONDecodeError:
-                        continue
-
-            logger.info("Garak produced %d findings from %s", len(findings), report)
+        # Extract report path from Garak's output (e.g. "reporting to /root/.../report.jsonl")
+        import re
+        _rpt_match = re.search(r"reporting to (/\S+\.report\.jsonl)", all_output)
+        if _rpt_match:
+            _explicit_report = Path(_rpt_match.group(1))
+            if _explicit_report.exists():
+                print(f"  [GARAK] Found report from stdout: {_explicit_report}")
+                _explicit_report_path = _explicit_report
+            else:
+                _explicit_report_path = None
+                print(f"  [GARAK] Report in stdout doesn't exist: {_explicit_report}")
         else:
-            logger.warning("No Garak report file found in %s", tmpdir)
+            _explicit_report_path = None
+            print(f"  [GARAK] No report path in stdout/stderr")
+
+        # Parse results from JSONL report
+        print(f"  [GARAK] Looking for report...")
+        try:
+            report = _explicit_report_path
+            if not report:
+                report = _find_report_file(tmpdir)
+            if not report:
+                home_garak = Path.home() / ".local" / "share" / "garak"
+                print(f"  [GARAK] Not in tmpdir/stdout, checking {home_garak}")
+                report = _find_report_file(home_garak)
+            print(f"  [GARAK] Report file: {report}")
+
+            if report and report.exists():
+                _cb("garak_parsing", {"report": str(report)})
+                total_attempts = 0
+                fail_count = 0
+                with open(report, "r") as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            entry = json.loads(line)
+                            if entry.get("entry_type") != "attempt":
+                                continue
+                            total_attempts += 1
+                            status = entry.get("status")
+                            if status in ("fail", 1):
+                                fail_count += 1
+                            finding = _normalise_finding(entry, target_endpoint)
+                            if finding:
+                                findings.append(finding)
+                        except json.JSONDecodeError:
+                            continue
+                        except Exception as _norm_err:
+                            print(f"  [GARAK] normalise error: {_norm_err}")
+                            continue
+                print(f"  [GARAK] Report: {total_attempts} attempts, {fail_count} fails, {len(findings)} normalised")
+                logger.info("Garak produced %d findings from %s", len(findings), report)
+            else:
+                print(f"  [GARAK] No report file found!")
+        except Exception as _report_err:
+            print(f"  [GARAK] Report parsing EXCEPTION: {type(_report_err).__name__}: {_report_err}")
 
         _cb("garak_done", {"findings_count": len(findings)})
 

@@ -1634,7 +1634,46 @@ async def _run_llm_security_phase(
         logger.info("No LLM endpoints discovered -- skipping LLM probes")
         return findings
 
-    endpoint = llm_endpoints[0]
+    # Infer chat endpoints from related API patterns.  Norton/Superparent's
+    # SPA loads /neoclaw-data/query and /tools/invoke during page init but
+    # the actual chat endpoint (/api/neoclaw-agent/chat) only fires when a
+    # user sends a message.  Synthesize it from observed neoclaw traffic.
+    _has_neoclaw = any("neoclaw" in ep.lower() for ep in llm_endpoints)
+    if _has_neoclaw:
+        from urllib.parse import urlparse
+        _sample = next(ep for ep in llm_endpoints if "neoclaw" in ep.lower())
+        _parsed = urlparse(_sample)
+        _inferred = f"{_parsed.scheme}://{_parsed.netloc}/api/neoclaw-agent/chat"
+        if _inferred not in llm_endpoints:
+            llm_endpoints.insert(0, _inferred)
+            print(f"  [LLM-SEC] Inferred neoclaw chat endpoint: {_inferred}")
+
+    # Prefer endpoints that look like actual chat/message endpoints.
+    # Filter out status/data/cron/events/health endpoints that aren't
+    # actual chat interfaces.  Then pick the best match by specificity.
+    _exclude = ["status", "health", "events", "cron", "scheduler",
+                "schema", "tables", "list", "config", "debug",
+                "client-events", "neoclaw-data/query"]
+    _chat_candidates = [
+        ep for ep in llm_endpoints
+        if not any(x in ep.lower() for x in _exclude)
+    ]
+    pool = _chat_candidates or llm_endpoints
+    _priority_keywords = ["neoclaw-agent/chat",
+                          "neoclaw-chat/message", "neoclaw-agent/message",
+                          "neoclaw-messages", "chat/message",
+                          "agent/message", "/message",
+                          "chat/send", "/send", "/completions",
+                          "/invoke", "/chat"]
+    endpoint = pool[0]
+    for kw in _priority_keywords:
+        for ep in pool:
+            if kw in ep.lower():
+                endpoint = ep
+                break
+        else:
+            continue
+        break
     print(f"  [LLM-SEC] Testing LLM endpoint: {endpoint}")
     _cb("llm_security_start", {"endpoint": endpoint, "total_probes": 37})
 
@@ -3004,35 +3043,90 @@ async def run_scan(
 
             # ── LLM Security Phase intercept (deterministic, no LLM agent) ──
             if phase.id == "web_llm_security":
-                # Just-in-time: if earlier re-detection missed LLM endpoints
-                # (e.g. sensitive path probe found /api/chat after re-detection),
-                # try to populate llm_endpoints from all crawled URLs now.
-                if not (app_info or {}).get("llm_endpoints"):
-                    from .llm_detect import match_llm_endpoints_from_urls
-                    _all_urls = list(metrics.get("pages_list", []))
-                    if hasattr(tools, "get_network_log_raw"):
-                        _all_urls.extend(e.get("url", "") for e in tools.get_network_log_raw())
-                    _matched = match_llm_endpoints_from_urls(_all_urls)
-                    if _matched:
-                        app_info = app_info or {}
-                        app_info["llm_endpoints"] = _matched
-                        app_info["has_llm_chat"] = True
-                        print(f"\n  [LLM-SEC] Late-discovered LLM endpoints: {_matched[:5]}")
-                    else:
-                        print(f"\n  [LLM-SEC] No LLM endpoints found in {len(_all_urls)} crawled URLs")
+                # Always re-scan all crawled URLs (including sensitive path
+                # probe discoveries) for LLM endpoints.  Network-traffic-only
+                # detection misses endpoints the SPA calls via JS but were
+                # never triggered during passive crawling.
+                from .llm_detect import match_llm_endpoints_from_urls
+                _all_urls = list(metrics.get("pages_list", []))
+                if hasattr(tools, "_crawled_urls"):
+                    _all_urls.extend(tools._crawled_urls)
+                if hasattr(tools, "get_network_log_raw"):
+                    _all_urls.extend(e.get("url", "") for e in tools.get_network_log_raw())
+                _existing = set((app_info or {}).get("llm_endpoints", []))
+                _matched = match_llm_endpoints_from_urls(_all_urls)
+                _new = [u for u in _matched if u not in _existing]
+                _all_endpoints = list(_existing) + _new
+                if _all_endpoints:
+                    app_info = app_info or {}
+                    app_info["llm_endpoints"] = _all_endpoints
+                    app_info["has_llm_chat"] = True
+                    print(f"\n  [LLM-SEC] All LLM endpoints ({len(_all_endpoints)}): {_all_endpoints[:8]}")
+                else:
+                    print(f"\n  [LLM-SEC] No LLM endpoints found in {len(_all_urls)} crawled URLs")
 
-                # Extract authenticated cookies from the browser session
-                # so Garak and baseline probes can reach auth-gated LLM endpoints.
+                # Extract authenticated cookies AND localStorage tokens from the
+                # browser session so Garak and baseline probes can reach
+                # auth-gated LLM endpoints.  SPAs often store JWTs in
+                # localStorage rather than cookies.
                 _llm_auth_headers: dict[str, str] = {}
                 if page is not None:
                     try:
                         _cookies = await page.context.cookies()
+                        _cookie_names = [c['name'] for c in _cookies]
+                        print(f"  [LLM-SEC] Browser cookies ({len(_cookies)}): {_cookie_names[:15]}")
                         if _cookies:
                             _cookie_str = "; ".join(
                                 f"{c['name']}={c['value']}" for c in _cookies
                             )
                             _llm_auth_headers["Cookie"] = _cookie_str
-                            print(f"  [LLM-SEC] Forwarding {len(_cookies)} auth cookies to LLM probes")
+
+                            # Extract JWT from cookies for Bearer auth header
+                            for c in _cookies:
+                                if c['name'] in ('auth_token', 'access_token', 'jwt', 'token'):
+                                    val = c['value']
+                                    if val.startswith('eyJ'):
+                                        _llm_auth_headers["Authorization"] = f"Bearer {val}"
+                                        print(f"  [LLM-SEC] Extracted JWT from cookie '{c['name']}' for Bearer auth")
+                                        break
+
+                        # Also check localStorage for JWT/bearer tokens
+                        try:
+                            _ls_token = await page.evaluate("""() => {
+                                const keys = Object.keys(localStorage);
+                                for (const k of keys) {
+                                    const v = localStorage.getItem(k);
+                                    if (v && (k.toLowerCase().includes('token') ||
+                                              k.toLowerCase().includes('auth') ||
+                                              k.toLowerCase().includes('jwt') ||
+                                              k.toLowerCase().includes('session') ||
+                                              k.toLowerCase().includes('access'))) {
+                                        return {key: k, value: v.substring(0, 200)};
+                                    }
+                                    if (v && v.startsWith('eyJ')) {
+                                        return {key: k, value: v.substring(0, 200)};
+                                    }
+                                }
+                                return null;
+                            }""")
+                            if _ls_token:
+                                print(f"  [LLM-SEC] Found localStorage token: {_ls_token['key']}")
+                                val = _ls_token['value']
+                                if val.startswith('eyJ') or 'bearer' in val.lower():
+                                    _llm_auth_headers["Authorization"] = f"Bearer {val}"
+                                else:
+                                    _llm_auth_headers["Authorization"] = f"Bearer {val}"
+                            else:
+                                # Dump all localStorage keys for debugging
+                                _ls_keys = await page.evaluate(
+                                    "() => Object.keys(localStorage)"
+                                )
+                                print(f"  [LLM-SEC] localStorage keys: {_ls_keys[:20]}")
+                        except Exception:
+                            pass
+
+                        _hdr_summary = {k: v[:30] + '...' for k, v in _llm_auth_headers.items()}
+                        print(f"  [LLM-SEC] Auth headers for LLM probes: {list(_hdr_summary.keys())}")
                     except Exception as _ce:
                         logger.debug("Cookie extraction failed (non-fatal): %s", _ce)
 
