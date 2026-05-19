@@ -162,7 +162,6 @@ def _generate_config(
             }
         },
         "run": {
-            "probe_tags": tags,
             "generations": 1,
         },
     }
@@ -268,6 +267,11 @@ async def run_garak(
         config_path = os.path.join(tmpdir, "garak_config.yaml")
         with open(config_path, "w") as f:
             f.write(config_yaml)
+        print(f"  [GARAK] Config written to {config_path}")
+        print(f"  [GARAK] Has Cookie header: {'Cookie' in (headers or {})}")
+        header_keys = list((headers or {}).keys())
+        print(f"  [GARAK] Header keys: {header_keys}")
+        print(f"  [GARAK] Config preview:\n{config_yaml[:500]}")
 
         logger.info("Starting Garak run against %s (timeout=%ds)", target_endpoint, timeout)
         _cb("garak_start", {"endpoint": target_endpoint, "timeout": timeout})
@@ -276,7 +280,12 @@ async def run_garak(
         env["GARAK_RUN_DIR"] = tmpdir
 
         python = sys.executable
-        cmd = [python, "-m", "garak", "--config", config_path]
+        cmd = [
+            python, "-m", "garak",
+            "--model_type", "rest.RestGenerator",
+            "--model_name", "target-llm",
+            "--config", config_path,
+        ]
 
         proc = await asyncio.create_subprocess_exec(
             *cmd,
@@ -298,10 +307,17 @@ async def run_garak(
             return []
 
         exit_code = proc.returncode
+        stdout_str = (stdout or b"").decode(errors="replace")[:2000]
+        stderr_str = (stderr or b"").decode(errors="replace")[:2000]
+        print(f"  [GARAK] Exit code: {exit_code}")
+        if stdout_str.strip():
+            print(f"  [GARAK] stdout: {stdout_str[:500]}")
+        if stderr_str.strip():
+            print(f"  [GARAK] stderr: {stderr_str[:800]}")
         if exit_code != 0:
             logger.warning(
                 "Garak exited with code %d: %s",
-                exit_code, (stderr or b"").decode(errors="replace")[:500],
+                exit_code, stderr_str[:500],
             )
 
         # Parse results from JSONL report
@@ -335,8 +351,11 @@ async def run_garak(
         logger.exception("Garak runner failed: %s", e)
         _cb("garak_error", {"error": str(e)[:300]})
     finally:
+        # Keep tmpdir for debugging; list contents
         try:
-            shutil.rmtree(tmpdir, ignore_errors=True)
+            import glob
+            all_files = glob.glob(os.path.join(tmpdir, "**"), recursive=True)
+            print(f"  [GARAK] Tmpdir contents ({len(all_files)} files): {[os.path.basename(f) for f in all_files[:20]]}")
         except Exception:
             pass
 
