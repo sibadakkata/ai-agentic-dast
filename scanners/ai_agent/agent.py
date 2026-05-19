@@ -3021,6 +3021,21 @@ async def run_scan(
                     else:
                         print(f"\n  [LLM-SEC] No LLM endpoints found in {len(_all_urls)} crawled URLs")
 
+                # Extract authenticated cookies from the browser session
+                # so Garak and baseline probes can reach auth-gated LLM endpoints.
+                _llm_auth_headers: dict[str, str] = {}
+                if page is not None:
+                    try:
+                        _cookies = await page.context.cookies()
+                        if _cookies:
+                            _cookie_str = "; ".join(
+                                f"{c['name']}={c['value']}" for c in _cookies
+                            )
+                            _llm_auth_headers["Cookie"] = _cookie_str
+                            print(f"  [LLM-SEC] Forwarding {len(_cookies)} auth cookies to LLM probes")
+                    except Exception as _ce:
+                        logger.debug("Cookie extraction failed (non-fatal): %s", _ce)
+
                 try:
                     llm_findings = await _run_llm_security_phase(
                         app_info=app_info or {},
@@ -3028,7 +3043,7 @@ async def run_scan(
                         page=page,
                         on_progress=_cb,
                         cancel_flag=cancel_flag,
-                        auth_headers={},
+                        auth_headers=_llm_auth_headers,
                     )
                     for f in llm_findings:
                         f.setdefault("phase", phase.name)

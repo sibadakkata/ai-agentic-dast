@@ -134,6 +134,16 @@ def _generate_config(
         "messages": [{"role": "user", "content": "$INPUT"}]
     }
 
+    merged_headers = {"Content-Type": "application/json"}
+    if headers:
+        merged_headers.update(headers)
+
+    has_cookies = "Cookie" in merged_headers
+    logger.info(
+        "Garak config: endpoint=%s, headers=%d (cookies=%s)",
+        endpoint, len(merged_headers), has_cookies,
+    )
+
     config: dict[str, Any] = {
         "plugins": {
             "generators": {
@@ -142,7 +152,7 @@ def _generate_config(
                         "name": "target-llm",
                         "uri": endpoint,
                         "method": "post",
-                        "headers": headers or {},
+                        "headers": merged_headers,
                         "req_template_json_object": req_template,
                         "response_json": True,
                         "response_json_field": "$.choices[0].message.content",
