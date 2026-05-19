@@ -1652,20 +1652,17 @@ async def _run_llm_security_phase(
     except Exception as e:
         logger.warning("LLM baseline probes failed: %s", e)
 
-    # 2. Run Garak if available
-    if is_garak_available():
-        try:
-            garak_findings = await run_garak(
-                target_endpoint=endpoint,
-                headers=auth_headers,
-                on_progress=_cb,
-            )
-            findings.extend(garak_findings)
-            print(f"  [LLM-SEC] Garak probes: {len(garak_findings)} findings")
-        except Exception as e:
-            logger.warning("Garak runner failed: %s", e)
-    else:
-        print("  [LLM-SEC] Garak not installed -- skipping (pip install garak)")
+    # 2. Run Garak (auto-installs on demand if not present)
+    try:
+        garak_findings = await run_garak(
+            target_endpoint=endpoint,
+            headers=auth_headers,
+            on_progress=_cb,
+        )
+        findings.extend(garak_findings)
+        print(f"  [LLM-SEC] Garak probes: {len(garak_findings)} findings")
+    except Exception as e:
+        logger.warning("Garak runner failed: %s", e)
 
     # Apply deterministic severity classification
     for f in findings:
