@@ -19,4 +19,3 @@ openpyxl>=3.1.0
 tldextract>=5.1.0
 sslyze>=6.0.0
 dnspython>=2.6.0
-garak>=0.15.0
