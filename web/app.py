@@ -17,6 +17,8 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 
+import httpx
+
 from fastapi import FastAPI, BackgroundTasks, Depends, HTTPException, Request, UploadFile, File, Form, WebSocket, WebSocketDisconnect, status
 from io import BytesIO
 
@@ -1897,6 +1899,39 @@ async def _run_scan_task(scan_id, target_url, username, password, model, scan_mo
                         "tool": data.get("tool", ""),
                         "phase": data.get("phase", ""),
                     })
+
+        # ── Pre-scan connectivity check ────────────────────────────────
+        # Abort early if the target is unreachable (DNS failure, timeout,
+        # connection refused) instead of burning LLM tokens on a dead target.
+        scan["progress"].append(f"Checking target reachability: {target_url}")
+        _save_scan(scan_id)
+        try:
+            async with httpx.AsyncClient(verify=False, timeout=20.0, follow_redirects=True) as _probe:
+                probe_resp = await _probe.get(target_url)
+            scan["progress"].append(
+                f"Target reachable (HTTP {probe_resp.status_code}) — proceeding with scan"
+            )
+        except httpx.TimeoutException:
+            scan["status"] = "error"
+            scan["error"] = f"Target unreachable — connection timed out after 20 s: {target_url}"
+            scan["progress"].append(scan["error"])
+            _save_scan(scan_id)
+            logger.error("Pre-scan connectivity check FAILED (timeout): %s", target_url)
+            return
+        except httpx.ConnectError as exc:
+            scan["status"] = "error"
+            scan["error"] = f"Target unreachable — connection refused or DNS failure: {target_url} ({exc})"
+            scan["progress"].append(scan["error"])
+            _save_scan(scan_id)
+            logger.error("Pre-scan connectivity check FAILED (connect): %s — %s", target_url, exc)
+            return
+        except Exception as exc:
+            scan["status"] = "error"
+            scan["error"] = f"Target unreachable — {type(exc).__name__}: {exc}"
+            scan["progress"].append(scan["error"])
+            _save_scan(scan_id)
+            logger.error("Pre-scan connectivity check FAILED: %s — %s", target_url, exc)
+            return
 
         router = LLMRouter(models=[model])
         scan["_router"] = router
