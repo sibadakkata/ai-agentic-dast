@@ -427,6 +427,29 @@ def _finding_key(f: dict) -> tuple | None:
     return (title, url, param)
 
 
+def _synthesize_rr(f: dict) -> list[dict]:
+    """Build a request_response array from flat request/response_summary fields.
+    Garak and LLM-Agent findings store these as flat dicts rather than the
+    request_response array that the UI expects."""
+    rr = f.get("request_response") or []
+    if rr:
+        return rr
+    req = f.get("request")
+    resp = f.get("response_summary")
+    if req and isinstance(req, dict):
+        entry = {
+            "tool": f.get("tool", ""),
+            "url": req.get("url", f.get("url", "")),
+            "method": req.get("method", "POST"),
+            "payload": f.get("payload", ""),
+            "status": str(resp.get("status_code", "")) if resp else "",
+            "request": req,
+            "response": {"body": resp.get("body", "") if resp else ""},
+        }
+        return [entry]
+    return []
+
+
 def _dedupe_findings(findings: list[dict]) -> tuple[list[dict], set]:
     """Return (deduped_list, seen_keys_set) preserving the first occurrence order."""
     out: list[dict] = []
@@ -676,7 +699,7 @@ def _ensure_triaged(sid: str, s: dict) -> list[dict]:
             "evidence": f.get("evidence", ""),
             "remediation": f.get("remediation", ""),
             "confidence": f.get("confidence", ""),
-            "request_response": f.get("request_response", []),
+            "request_response": _synthesize_rr(f),
             "cwe": t.get("cwe", ""),
             "cvss": t.get("cvss"),
             "cvss_rationale": t.get("cvss_rationale", ""),
@@ -2741,7 +2764,7 @@ async def _get_results_inner(scan_id: str):
             "evidence": f.get("evidence", ""),
             "confidence": f.get("confidence", ""),
             "remediation": f.get("remediation", ""),
-            "request_response": f.get("request_response", []),
+            "request_response": _synthesize_rr(f),
         })
         triaged = triage_classify(f, test_log, _index=_tl_index)
         final_sev = triaged.get("final_severity", "Info")
@@ -2760,7 +2783,7 @@ async def _get_results_inner(scan_id: str):
             "evidence": f.get("evidence", ""),
             "remediation": f.get("remediation", ""),
             "confidence": f.get("confidence", ""),
-            "request_response": f.get("request_response", []),
+            "request_response": _synthesize_rr(f),
             "cwe": triaged.get("cwe", ""),
             "cvss": triaged.get("cvss"),
             "cvss_rationale": triaged.get("cvss_rationale", ""),
@@ -2770,6 +2793,10 @@ async def _get_results_inner(scan_id: str):
             "verification_evidence": triaged.get("verification_evidence", ""),
             "exploitation_tier": triaged.get("exploitation_tier", ""),
             "triage_narrative": triaged.get("triage_narrative", {}),
+            "exploit_evidence": triaged.get("exploit_evidence", ""),
+            "detection_label": triaged.get("detection_label", ""),
+            "detection_method": triaged.get("detection_method", ""),
+            "curl_command": triaged.get("curl_command") or triaged.get("curl", ""),
         }
 
         key = f"{triaged.get('title', '')}||{triaged.get('url', '')}"

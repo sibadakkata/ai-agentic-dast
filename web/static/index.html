@@ -6177,6 +6177,17 @@ function showCompletedFindingDetail(idx) {
     </div>`;
   }
 
+  if (f.exploit_evidence) {
+    evidenceHtml += `<div class="fdm-section">
+      <div class="fdm-section-title">&#128165; Exploit Evidence (Payload + Response)</div>
+      <pre style="margin:0;padding:12px;background:var(--bg);border-radius:6px;font-size:12px;color:var(--text);white-space:pre-wrap;word-break:break-word;border:1px solid var(--border);line-height:1.7;">${esc(f.exploit_evidence)}</pre>
+    </div>`;
+  }
+
+  if (f.detection_label) {
+    evidenceHtml += `<div style="margin:8px 0;"><span style="display:inline-block;padding:3px 10px;border-radius:4px;font-size:11px;font-weight:700;letter-spacing:0.5px;background:${f.detection_label.includes('GARAK') ? 'rgba(139,92,246,0.1);color:#7c3aed;border:1px solid rgba(139,92,246,0.3)' : f.detection_label.includes('LLM-AGENT') ? 'rgba(59,130,246,0.1);color:#2563eb;border:1px solid rgba(59,130,246,0.3)' : 'rgba(107,114,128,0.1);color:#6b7280;border:1px solid rgba(107,114,128,0.3)'};">${esc(f.detection_label)}</span></div>`;
+  }
+
   let impactHtml2 = '';
   var _impText2 = _findingImpact(f);
   if (_impText2) {

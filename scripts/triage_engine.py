@@ -1016,8 +1016,8 @@ def _build_triage_narrative(finding, result, tests, statuses, bodies):
         triage_steps.append(f"Final verdict: {verdict} | Tier: {tier}")
 
         return {
-            "ai_tested": "\n".join(f"  - {s}" for s in ai_steps),
-            "triage_validated": "\n".join(f"  - {s}" for s in triage_steps),
+            "ai_tested": ai_steps,
+            "triage_validated": triage_steps,
         }
 
     if finding.get("_finding_source") == "llm_agent":
@@ -1044,8 +1044,8 @@ def _build_triage_narrative(finding, result, tests, statuses, bodies):
         triage_steps.append(f"Final verdict: {verdict} | Tier: {tier}")
 
         return {
-            "ai_tested": "\n".join(f"  - {s}" for s in ai_steps),
-            "triage_validated": "\n".join(f"  - {s}" for s in triage_steps),
+            "ai_tested": ai_steps,
+            "triage_validated": triage_steps,
         }
 
     if source == "passive_recon" or finding.get("finding_type") == "passive_recon":
