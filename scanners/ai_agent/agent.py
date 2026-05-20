@@ -1836,27 +1836,36 @@ async def _run_llm_generated_chatbot_probes(
             )
             body = resp.text[:2000]
 
-            # Parse SSE streaming responses (neoclaw-style)
+            # Parse SSE streaming responses (neoclaw-style).
+            # Norton SSE echoes the user message (role=user) first, then
+            # sends the assistant reply.  We must skip user echoes so our
+            # detectors only see what the chatbot actually said.
             chat_response = body
             if "event:" in body or "data:" in body:
-                _parts = []
+                _assistant_parts = []
                 for line in body.split("\n"):
-                    if line.startswith("data: "):
-                        try:
-                            d = _json.loads(line[6:])
-                            msg = d.get("message", {})
-                            if isinstance(msg, dict) and msg.get("role") == "assistant":
-                                c = msg.get("content", "")
-                                if isinstance(c, list):
-                                    for item in c:
-                                        if isinstance(item, dict) and item.get("type") == "text":
-                                            _parts.append(item.get("text", ""))
-                                elif isinstance(c, str):
-                                    _parts.append(c)
-                        except Exception:
-                            pass
-                if _parts:
-                    chat_response = " ".join(_parts)
+                    if not line.startswith("data: "):
+                        continue
+                    try:
+                        d = _json.loads(line[6:])
+                        msg = d.get("message", {})
+                        if not isinstance(msg, dict):
+                            continue
+                        if msg.get("role") == "user":
+                            continue  # skip echoed user message
+                        c = msg.get("content", "")
+                        if isinstance(c, list):
+                            for item in c:
+                                if isinstance(item, dict) and item.get("type") == "text":
+                                    t = item.get("text", "").strip()
+                                    if t:
+                                        _assistant_parts.append(t)
+                        elif isinstance(c, str) and c.strip():
+                            _assistant_parts.append(c.strip())
+                    except Exception:
+                        continue
+                if _assistant_parts:
+                    chat_response = " ".join(_assistant_parts)
 
             # Run detectors
             evidence_parts = []
