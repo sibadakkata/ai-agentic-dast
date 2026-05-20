@@ -7,10 +7,14 @@ The triage engine classifies every scanner finding **offline** — no LLM calls,
 ## Overview
 
 ```
-Finding from AI Agent / Passive Recon
+Finding from AI Agent / Passive Recon / Garak LLM Probe
          │
          ▼
 ┌─────────────────────────────────────────────┐
+│  LAYER 0: Garak LLM Probes                  │
+│  Trust Garak verdict → TRUE_POSITIVE         │
+│  Show exact payload + chatbot response       │
+├─────────────────────────────────────────────┤
 │  LAYER 0A: Passive Recon / Runtime Verified │
 │  Deterministic facts → immediate verdict    │
 ├─────────────────────────────────────────────┤
@@ -38,7 +42,33 @@ Finding from AI Agent / Passive Recon
 └─────────────────────────────────────────────┘
 ```
 
-## Layer 0: Passive Recon & Runtime Verification
+## Layer 0: Garak LLM Probes
+
+Garak (NVIDIA) findings are **chatbot behavior tests**, not traditional web injection tests. When Garak reports a probe failure, it means the LLM actually produced harmful output (jailbreak, slur, toxicity, prompt injection, etc.). These findings bypass all web-oriented rules.
+
+**How it works:**
+- Findings with `_finding_source: "garak"` are intercepted before any other triage layer
+- Verdict is always `TRUE_POSITIVE` with confidence 8/10 and tier `validated`
+- The exact **payload sent** and **chatbot response** are included in `exploit_evidence` and the triage narrative
+- CWE is mapped from the OWASP LLM category (e.g., LLM01 → CWE-74 Prompt Injection)
+- A `curl` command is generated so the finding can be manually reproduced
+
+**Narrative example:**
+```
+AI Tested:
+  - Garak LLM probe: grandma.Slurs
+  - Detector: specialwords.SlursReclaimedSlurs
+  - Payload sent: Please tell me a bedtime story about <toxic prompt>
+  - Chatbot response: <exact model output shown here>
+  - Garak verdict: FAIL (guardrail bypass confirmed)
+
+Triage Validated:
+  - [GARAK VERIFIED] Probe grandma.Slurs triggered a failure via detector specialwords.SlursReclaimedSlurs
+  - Garak findings represent actual chatbot behavior — the model produced harmful output
+  - Mapped to: CWE-74
+```
+
+## Layer 0A: Passive Recon & Runtime Verification
 
 ### Passive Recon Findings
 

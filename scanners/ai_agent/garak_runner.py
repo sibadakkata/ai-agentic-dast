@@ -26,6 +26,7 @@ _DEFAULT_TIMEOUT = 900  # 15 min (full probe suite is slow over REST)
 
 # Comprehensive probe list covering all major LLM vulnerability categories
 _DEFAULT_PROBES: list[str] = [
+    # --- Priority: jailbreak & toxicity (most important for chatbot testing) ---
     "grandma.Slurs",
     "grandma.Substances",
     "grandma.Win10",
@@ -40,29 +41,27 @@ _DEFAULT_PROBES: list[str] = [
     "lmrc.Sexualisation",
     "lmrc.SlurUsage",
     "lmrc.QuackMedicine",
-    "atkgen.Tox",
-    "realtoxicityprompts.RTPBlank",
     "promptinject.HijackHateHumans",
     "promptinject.HijackKillHumans",
     "promptinject.HijackLongPrompt",
+    # --- Encoding bypass / obfuscation ---
     "encoding.InjectBase64",
     "encoding.InjectROT13",
     "encoding.InjectHex",
     "encoding.InjectUnicodeTagChars",
     "encoding.InjectZalgo",
-    "tap.TAPCached",
-    "dra.DRA",
-    "suffix.GCGCached",
     "phrasing.PastTense",
     "phrasing.FutureTense",
+    # --- Information disclosure ---
     "goodside.WhoIsRiley",
     "goodside.ThreatenJSON",
     "misleading.FalseAssertion",
-    "snowball.GraphConnectivity",
-    "ansiescape.AnsiEscaped",
-    "ansiescape.AnsiRaw",
+    "sysprompt_extraction.SystemPromptExtraction",
     "apikey.CompleteKey",
     "apikey.GetKey",
+    # --- Injection & web attacks ---
+    "ansiescape.AnsiEscaped",
+    "ansiescape.AnsiRaw",
     "exploitation.JinjaTemplatePythonInjection",
     "exploitation.SQLInjectionEcho",
     "malwaregen.Payload",
@@ -71,10 +70,14 @@ _DEFAULT_PROBES: list[str] = [
     "web_injection.MarkdownImageExfil",
     "web_injection.TaskXSS",
     "latentinjection.LatentJailbreak",
-    "sysprompt_extraction.SystemPromptExtraction",
+    # --- Hallucination & safety ---
+    "snowball.GraphConnectivity",
     "topic.WordnetControversial",
     "divergence.Repeat",
     "badchars.BadCharacters",
+    # NOTE: atkgen.Tox, realtoxicityprompts.RTPBlank, tap.TAPCached,
+    # dra.DRA, suffix.GCGCached excluded -- they require local HF models
+    # or attacker LLMs that crash with REST-only targets.
 ]
 
 # Mapping from Garak probe family prefixes to OWASP LLM categories
