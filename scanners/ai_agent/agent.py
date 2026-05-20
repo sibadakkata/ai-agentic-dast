@@ -1620,10 +1620,13 @@ async def _run_llm_security_phase(
     on_progress=None,
     cancel_flag=None,
     auth_headers: dict | None = None,
+    scan_intensity: str = "deep",
 ) -> list[dict]:
     """Orchestrate deterministic LLM security probes.
 
     Runs ``llm_baseline`` (always) and ``garak_runner`` (when installed).
+    scan_intensity controls Garak depth: "deep" = full payloads (256/probe),
+    anything else = standard (15/probe).
     Returns normalised findings.
     """
     _cb = on_progress or (lambda *a, **k: None)
@@ -1692,11 +1695,13 @@ async def _run_llm_security_phase(
         logger.warning("LLM baseline probes failed: %s", e)
 
     # 2. Run Garak (auto-installs on demand if not present)
+    garak_deep = scan_intensity == "deep"
     try:
         garak_findings = await run_garak(
             target_endpoint=endpoint,
             headers=auth_headers,
             on_progress=_cb,
+            deep=garak_deep,
         )
         findings.extend(garak_findings)
         print(f"  [LLM-SEC] Garak probes: {len(garak_findings)} findings")
@@ -3138,6 +3143,7 @@ async def run_scan(
                         on_progress=_cb,
                         cancel_flag=cancel_flag,
                         auth_headers=_llm_auth_headers,
+                        scan_intensity=getattr(target, "scan_intensity", "deep"),
                     )
                     for f in llm_findings:
                         f.setdefault("phase", phase.name)

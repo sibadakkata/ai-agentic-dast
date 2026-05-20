@@ -198,6 +198,7 @@ def _generate_config(
     request_template: dict | None = None,
     headers: dict | None = None,
     probe_tags: list[str] | None = None,
+    deep: bool = False,
 ) -> str:
     """Generate a Garak YAML config string targeting a REST endpoint."""
     import yaml
@@ -260,6 +261,7 @@ def _generate_config(
         },
         "run": {
             "generations": 1,
+            "soft_probe_prompt_cap": 256 if deep else 15,
         },
     }
 
@@ -383,12 +385,18 @@ async def run_garak(
     probe_tags: list[str] | None = None,
     timeout: int = _DEFAULT_TIMEOUT,
     on_progress: Any | None = None,
+    deep: bool = False,
 ) -> list[dict]:
     """Run Garak against an LLM endpoint and return normalised findings.
 
+    Args:
+        deep: When True, uses full prompt set per probe (soft_probe_prompt_cap=256).
+              When False (default), caps at 15 prompts per probe for faster scans.
+
     Returns an empty list if Garak is not installed or the run fails.
     """
-    print(f"  [GARAK] run_garak() called for {target_endpoint}")
+    mode_label = "DEEP (full payloads)" if deep else "STANDARD (15/probe)"
+    print(f"  [GARAK] run_garak() called for {target_endpoint} [{mode_label}]")
     _cb = on_progress or (lambda *a, **k: None)
 
     if not is_garak_available():
@@ -412,6 +420,7 @@ async def run_garak(
     try:
         config_yaml = _generate_config(
             target_endpoint, request_template, headers, probe_tags,
+            deep=deep,
         )
         config_path = os.path.join(tmpdir, "garak_config.yaml")
         with open(config_path, "w") as f:
