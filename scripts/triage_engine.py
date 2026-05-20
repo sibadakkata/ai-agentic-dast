@@ -1128,6 +1128,11 @@ def classify(finding, test_log, _index=None):
     _assign_exploitation_tier(r, finding)
     r["triage_narrative"] = _build_triage_narrative(finding, r, tests, statuses, bodies)
 
+    # Propagate detection labels for report clarity
+    if finding.get("detection_label"):
+        r["detection_label"] = finding["detection_label"]
+        r["detection_method"] = finding.get("detection_method", "")
+
     return r
 
 
