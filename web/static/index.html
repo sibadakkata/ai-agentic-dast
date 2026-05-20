@@ -864,8 +864,16 @@ input:focus-visible, select:focus-visible, textarea:focus-visible { outline:none
           <button type="button" class="focus-chip" data-value="Upload" onclick="toggleFocusChip(this)">File Upload</button>
           <button type="button" class="focus-chip" data-value="Business Logic" onclick="toggleFocusChip(this)">Business Logic</button>
           <button type="button" class="focus-chip" data-value="GraphQL" onclick="toggleFocusChip(this)">GraphQL</button>
+          <button type="button" class="focus-chip" data-value="LLM" onclick="toggleFocusChip(this)">LLM / AI Security</button>
         </div>
         <input type="hidden" id="focus-areas" value="">
+      </div>
+      <div class="form-group full" id="llm-deep-group" style="display:none;">
+        <label style="display:flex;align-items:center;gap:10px;cursor:pointer;">
+          <input type="checkbox" id="llm-deep-scan" style="width:16px;height:16px;accent-color:var(--accent);cursor:pointer;">
+          <span>Deep LLM Scan</span>
+          <span style="font-weight:400;color:var(--text2);font-size:11px;">(all Garak payloads — 256/probe, ~30 min. Default: standard 15/probe, ~8 min)</span>
+        </label>
       </div>
 
       <div class="form-group full" id="focus-urls-group">
@@ -2211,6 +2219,7 @@ async function confirmPlan() {
     focus_urls: (p.focus_urls || []).filter(Boolean),
     focus_areas: (p.focus_areas || []).filter(Boolean),
     scan_intensity: p.scan_intensity || document.getElementById('scan-intensity').value || 'deep',
+    llm_scan_depth: document.getElementById('llm-deep-scan').checked ? 'deep' : 'standard',
     auth_type: p.auth_type || 'auto',
     scanner: 'ai',
     api_imports: _aiApiImports || {},
@@ -2345,6 +2354,12 @@ function _syncFocusAreas() {
   } else {
     sel.disabled = false;
     sel.title = '';
+  }
+  var llmDeepGroup = document.getElementById('llm-deep-group');
+  if (llmDeepGroup) {
+    var hasLLM = areas.includes('LLM') || areas.length === 0;
+    llmDeepGroup.style.display = hasLLM ? '' : 'none';
+    if (!hasLLM) document.getElementById('llm-deep-scan').checked = false;
   }
 }
 
@@ -2875,6 +2890,7 @@ async function startScan() {
     focus_urls: focusUrls,
     focus_areas: focusAreas,
     scan_intensity: document.getElementById('scan-intensity').value,
+    llm_scan_depth: document.getElementById('llm-deep-scan').checked ? 'deep' : 'standard',
     auth_type: document.getElementById('auth-type').value,
     scanner: 'ai',
     api_imports: api_imports,
@@ -4002,6 +4018,7 @@ function showErrorView(scanId, data) {
     stat((data.scan_scope || 'directory').replace('_', ' '), 'Scope'),
     stat((data.focus_areas || []).length ? data.focus_areas.join(', ') : 'Full Scan', 'Vuln Focus'),
     stat((data.scan_intensity || 'deep').charAt(0).toUpperCase() + (data.scan_intensity || 'deep').slice(1), 'Intensity'),
+    stat((data.llm_scan_depth || 'standard') === 'deep' ? 'Deep (256/probe)' : 'Standard (15/probe)', 'LLM Depth'),
     stat(_shortDate(data.started), 'Started'),
     stat(data.duration ? Math.round(data.duration) + 's' : '-', 'Duration'),
     stat(_shortPhase(data.current_phase) || '-', 'Last Phase'),

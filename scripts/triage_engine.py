@@ -1020,6 +1020,34 @@ def _build_triage_narrative(finding, result, tests, statuses, bodies):
             "triage_validated": "\n".join(f"  - {s}" for s in triage_steps),
         }
 
+    if finding.get("_finding_source") == "llm_agent":
+        probe_id = finding.get("_probe_id", "unknown")
+        chat_response = finding.get("response_snippet", "") or ""
+        resp_info = finding.get("response_summary", {})
+        if resp_info and isinstance(resp_info, dict):
+            chat_response = chat_response or str(resp_info.get("body", ""))[:500]
+
+        ai_steps.append(f"LLM-Agent adaptive probe: {probe_id}")
+        ai_steps.append(f"Target: {url[:120]}")
+        ai_steps.append(f"Payload sent: {payload[:300]}")
+        ai_steps.append(f"Chatbot response: {chat_response[:500]}")
+        ai_steps.append(f"Detection: chatbot did not adequately refuse the prompt")
+        ai_steps.append(f"AI classified as: {_safe_str(finding.get('severity', 'Info'))}")
+
+        triage_steps = [
+            f"[LLM-AGENT VERIFIED] Probe {probe_id} confirmed the chatbot responded without adequate guardrails.",
+            "LLM-Agent probes use adaptive payloads and deterministic detectors.",
+            f"Mapped to: {result.get('cwe', '')}",
+        ]
+        if result.get("cvss") and result["cvss"] > 0:
+            triage_steps.append(f"CVSS: {result['cvss']} ({result.get('cvss_vector', '')})")
+        triage_steps.append(f"Final verdict: {verdict} | Tier: {tier}")
+
+        return {
+            "ai_tested": "\n".join(f"  - {s}" for s in ai_steps),
+            "triage_validated": "\n".join(f"  - {s}" for s in triage_steps),
+        }
+
     if source == "passive_recon" or finding.get("finding_type") == "passive_recon":
         ai_steps.append(f"Passively analyzed JavaScript/HTML at: {url[:120]}")
         if evidence_str:
@@ -1236,6 +1264,61 @@ def _classify_inner(finding, test_log, _index=None):
                 f"-d '{req_info.get('body', '')}'"
             )
         _assign_exploitation_tier_garak(r, probe)
+        r["triage_narrative"] = _build_triage_narrative(finding, r, tests, statuses, bodies)
+        if finding.get("detection_label"):
+            r["detection_label"] = finding["detection_label"]
+            r["detection_method"] = finding.get("detection_method", "")
+        return r
+
+    # ==================================================================
+    # LAYER 0-LLM-AGENT: LLM-Agent generated probes
+    # These use adaptive payloads and deterministic detectors.
+    # Show exact payload sent and chatbot response in evidence.
+    # ==================================================================
+
+    if finding.get("_finding_source") == "llm_agent":
+        probe_id = finding.get("_probe_id", "unknown")
+        payload = finding.get("payload", "")
+        chat_response = finding.get("response_snippet", "") or ""
+        req_info = finding.get("request", {})
+        owasp_llm = finding.get("owasp_llm", "LLM01")
+        r.update(
+            verdict="TRUE_POSITIVE",
+            final_severity=severity,
+            owasp=f"OWASP LLM {owasp_llm}",
+            confidence=7,
+            confidence_score=7,
+            verification_method="llm_agent_probe",
+            reason=(
+                f"[LLM-AGENT] Probe {probe_id} detected the chatbot did not "
+                f"adequately refuse or guard against the crafted prompt."
+            ),
+            exploit_evidence=(
+                f"Payload sent: {payload[:300]}\n\n"
+                f"Chatbot response: {chat_response[:500]}"
+            ),
+            dev_action=(
+                f"Implement guardrails for {owasp_llm}. "
+                f"The chatbot should refuse or deflect this type of request."
+            ),
+            steps=(
+                f"1. LLM-Agent sent adaptive probe '{probe_id}' to {finding.get('url', 'chatbot endpoint')}\n"
+                f"2. Payload: {payload[:200]}\n"
+                f"3. Chatbot responded (HTTP {req_info.get('status_code', '200')})\n"
+                f"4. Detector flagged response as non-refusal or harmful content\n"
+                f"5. Response: {chat_response[:300]}"
+            ),
+            curl_command=(
+                f"curl -X POST '{finding.get('url', '')}' "
+                f"-H 'Content-Type: application/json' "
+                f"-d '{req_info.get('body', '')}'"
+            )
+        )
+        r["exploitation_tier"] = "validated"
+        r["triage_narrative"] = _build_triage_narrative(finding, r, tests, statuses, bodies)
+        if finding.get("detection_label"):
+            r["detection_label"] = finding["detection_label"]
+            r["detection_method"] = finding.get("detection_method", "")
         return r
 
     # ==================================================================
