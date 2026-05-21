@@ -73,9 +73,14 @@ _CHAT_URL_EXCLUDE = [
 
 
 async def _find_chat_container(ctx, input_el):
-    """Walk up from the chat input to find the scrollable message area."""
+    """Find the chat message container.
+
+    Handles common layouts where the messages area is a *sibling* of the
+    input area (not a direct ancestor of the textarea).
+    """
     try:
         container = await input_el.evaluate_handle("""el => {
+            // Strategy 1: walk up looking for scrollable ancestor
             let cur = el.parentElement;
             for (let i = 0; i < 15; i++) {
                 if (!cur) break;
@@ -86,7 +91,50 @@ async def _find_chat_container(ctx, input_el):
                 if (scrollable && cur.clientHeight > 100) return cur;
                 cur = cur.parentElement;
             }
-            // fallback: 3 levels up from input
+
+            // Strategy 2: walk up to common parent, then search DOWN for
+            // sibling scrollable area (typical: messages div + input div)
+            cur = el.parentElement;
+            for (let i = 0; i < 8; i++) {
+                if (!cur) break;
+                cur = cur.parentElement;
+                if (!cur || cur.tagName === 'BODY') break;
+                for (const child of cur.children) {
+                    if (child.contains(el)) continue;
+                    const cs = window.getComputedStyle(child);
+                    const scr = (child.scrollHeight > child.clientHeight + 20) ||
+                        cs.overflowY === 'auto' || cs.overflowY === 'scroll' ||
+                        cs.overflow === 'auto' || cs.overflow === 'scroll';
+                    if (scr && child.clientHeight > 80) return child;
+                }
+            }
+
+            // Strategy 3: document-level search for known chat containers
+            const chatSels = [
+                '[role="log"]',
+                '[class*="message-list" i]', '[class*="messageList" i]',
+                '[class*="chat-messages" i]', '[class*="chatMessages" i]',
+                '[class*="conversation" i]',
+                '[class*="chat-body" i]', '[class*="chatBody" i]',
+                '[class*="chat-content" i]', '[class*="chatContent" i]',
+            ];
+            for (const sel of chatSels) {
+                try {
+                    const found = document.querySelector(sel);
+                    if (found && found.clientHeight > 50) return found;
+                } catch(e) {}
+            }
+
+            // Strategy 4: walk up to a large non-body ancestor
+            cur = el.parentElement;
+            for (let i = 0; i < 10; i++) {
+                if (!cur) break;
+                if (cur.clientHeight > 200 && cur.tagName !== 'BODY' && cur.tagName !== 'HTML') {
+                    return cur;
+                }
+                cur = cur.parentElement;
+            }
+
             return el.parentElement?.parentElement?.parentElement || el.parentElement;
         }""")
         return container
@@ -261,6 +309,85 @@ def _parse_network_response(body, prompt):
     return ""
 
 
+def _is_real_chat_response(text: str) -> bool:
+    """Return True if *text* looks like actual chatbot prose, not a status
+    page, health-check, or generic API acknowledgement."""
+    if not text or len(text.strip()) < 5:
+        return False
+    t = text.strip()
+    try:
+        d = json.loads(t)
+        if isinstance(d, dict):
+            keys = {k.lower() for k in d}
+            if keys <= {"code", "status", "success", "ok", "error", "data",
+                        "message", "timestamp", "version"}:
+                val_lens = sum(len(str(v)) for v in d.values())
+                if val_lens < 80:
+                    return False
+    except (json.JSONDecodeError, ValueError):
+        pass
+    return True
+
+
+async def _setup_mutation_observer(page):
+    """Install a MutationObserver that records all new text added to the
+    page.  Call ``_collect_mutation_texts`` after the chatbot responds."""
+    try:
+        await page.evaluate("""() => {
+            window.__bridgeMO = {texts: []};
+            const obs = new MutationObserver(muts => {
+                for (const m of muts) {
+                    for (const n of m.addedNodes) {
+                        if (n.nodeType === Node.ELEMENT_NODE) {
+                            const t = (n.innerText || '').trim();
+                            if (t.length > 2) window.__bridgeMO.texts.push(t);
+                        }
+                        if (n.nodeType === Node.TEXT_NODE) {
+                            const t = (n.textContent || '').trim();
+                            if (t.length > 2) window.__bridgeMO.texts.push(t);
+                        }
+                    }
+                    if (m.type === 'characterData') {
+                        const t = (m.target.textContent || '').trim();
+                        if (t.length > 2) window.__bridgeMO.texts.push(t);
+                    }
+                }
+            });
+            obs.observe(document.body, {
+                childList: true, subtree: true, characterData: true
+            });
+            window.__bridgeMO.obs = obs;
+        }""")
+    except Exception:
+        pass
+
+
+async def _collect_mutation_texts(page, prompt):
+    """Disconnect the MutationObserver and return the longest new text
+    that is not the prompt itself."""
+    try:
+        raw = await page.evaluate("""() => {
+            const mo = window.__bridgeMO;
+            if (!mo) return [];
+            if (mo.obs) mo.obs.disconnect();
+            return mo.texts || [];
+        }""")
+    except Exception:
+        return ""
+    if not raw:
+        return ""
+    prompt_lower = prompt.strip().lower()
+    candidates = [
+        t for t in raw
+        if t.strip().lower() != prompt_lower
+        and len(t.strip()) > 5
+        and _is_real_chat_response(t)
+    ]
+    if not candidates:
+        return ""
+    return max(candidates, key=len)
+
+
 async def send_chat_message(
     page,
     prompt,
@@ -312,6 +439,8 @@ async def send_chat_message(
     text_before = await _get_container_text(chat_container)
     msg_count_before = await _count_messages(ctx)
 
+    await _setup_mutation_observer(page)
+
     _network_responses = []
 
     async def _capture(response):
@@ -325,7 +454,7 @@ async def send_chat_message(
             ):
                 if any(kw in url for kw in _CHAT_URL_KEYWORDS):
                     body = await response.text()
-                    if body and len(body) > 5:
+                    if body and len(body) > 5 and _is_real_chat_response(body):
                         _network_responses.append(body)
         except Exception:
             pass
@@ -365,7 +494,7 @@ async def send_chat_message(
         while time.monotonic() < deadline:
             await asyncio.sleep(1.5)
 
-            # Strategy 1: container text diff (works for any chat UI)
+            # Strategy 1: container text diff
             if chat_container:
                 text_now = await _get_container_text(chat_container)
                 if len(text_now) > len(text_before) + 5:
@@ -378,8 +507,9 @@ async def send_chat_message(
                             after_prompt = response_text.split(prompt, 1)[-1].strip()
                             if after_prompt:
                                 response_text = after_prompt
-                        method = "container_diff"
-                        break
+                        if _is_real_chat_response(response_text):
+                            method = "container_diff"
+                            break
 
             # Strategy 2: classic message element counting
             msg_count_now = await _count_messages(ctx)
@@ -401,17 +531,24 @@ async def send_chat_message(
                     method = "dom"
                     break
 
-        # Strategy 3: filtered network capture (chat URLs only)
+        # Strategy 3: MutationObserver — catches any new text on the page
+        if not response_text:
+            mo_text = await _collect_mutation_texts(page, prompt)
+            if mo_text:
+                response_text = mo_text
+                method = "mutation_observer"
+
+        # Strategy 4: filtered network capture (chat URLs only)
         if not response_text and _network_responses:
             for nr in reversed(_network_responses):
                 parsed = _parse_network_response(nr, prompt)
-                if parsed:
+                if parsed and _is_real_chat_response(parsed):
                     response_text = parsed
                     method = "network"
                     break
 
         return {
-            "success": bool(response_text),
+            "success": bool(response_text) and _is_real_chat_response(response_text),
             "response": response_text[:2000],
             "method": method,
             "elapsed_ms": int((time.monotonic() - start) * 1000),
@@ -419,6 +556,10 @@ async def send_chat_message(
     finally:
         try:
             page.remove_listener("response", _capture)
+        except Exception:
+            pass
+        try:
+            await page.evaluate("() => { if (window.__bridgeMO && window.__bridgeMO.obs) window.__bridgeMO.obs.disconnect(); }")
         except Exception:
             pass
 
