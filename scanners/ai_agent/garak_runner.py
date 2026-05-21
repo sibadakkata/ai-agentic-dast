@@ -27,14 +27,19 @@ _DEFAULT_TIMEOUT = 900  # 15 min (full probe suite is slow over REST)
 
 # Comprehensive probe list covering all major LLM vulnerability categories
 _DEFAULT_PROBES: list[str] = [
-    # --- Priority: jailbreak & toxicity (most important for chatbot testing) ---
+    # --- Priority 1: jailbreak (most important for chatbot testing) ---
+    "dan.DanInTheWild",
+    "dan.Ablation_Dan_11_0",
+    "dan.AutoDANCached",
     "grandma.Slurs",
     "grandma.Substances",
     "grandma.Win10",
     "grandma.Win11",
-    "dan.DanInTheWild",
-    "dan.Ablation_Dan_11_0",
-    "dan.AutoDANCached",
+    "promptinject.HijackHateHumans",
+    "promptinject.HijackKillHumans",
+    "promptinject.HijackLongPrompt",
+    "latentinjection.LatentJailbreak",
+    # --- Priority 2: toxicity & harmful content ---
     "continuation.ContinueSlursReclaimedSlurs",
     "lmrc.Bullying",
     "lmrc.Deadnaming",
@@ -42,10 +47,13 @@ _DEFAULT_PROBES: list[str] = [
     "lmrc.Sexualisation",
     "lmrc.SlurUsage",
     "lmrc.QuackMedicine",
-    "promptinject.HijackHateHumans",
-    "promptinject.HijackKillHumans",
-    "promptinject.HijackLongPrompt",
-    # --- Encoding bypass / obfuscation ---
+    # --- Priority 3: information disclosure ---
+    "goodside.WhoIsRiley",
+    "goodside.ThreatenJSON",
+    "sysprompt_extraction.SystemPromptExtraction",
+    "apikey.CompleteKey",
+    "apikey.GetKey",
+    # --- Priority 4: encoding bypass / obfuscation ---
     "encoding.InjectBase64",
     "encoding.InjectROT13",
     "encoding.InjectHex",
@@ -53,16 +61,7 @@ _DEFAULT_PROBES: list[str] = [
     "encoding.InjectZalgo",
     "phrasing.PastTense",
     "phrasing.FutureTense",
-    # --- Information disclosure ---
-    "goodside.WhoIsRiley",
-    "goodside.ThreatenJSON",
-    "misleading.FalseAssertion",
-    "sysprompt_extraction.SystemPromptExtraction",
-    "apikey.CompleteKey",
-    "apikey.GetKey",
-    # --- Injection & web attacks ---
-    "ansiescape.AnsiEscaped",
-    "ansiescape.AnsiRaw",
+    # --- Priority 5: web injection & exploitation ---
     "exploitation.JinjaTemplatePythonInjection",
     "exploitation.SQLInjectionEcho",
     "malwaregen.Payload",
@@ -70,12 +69,15 @@ _DEFAULT_PROBES: list[str] = [
     "web_injection.MarkdownXSS",
     "web_injection.MarkdownImageExfil",
     "web_injection.TaskXSS",
-    "latentinjection.LatentJailbreak",
-    # --- Hallucination & safety ---
+    "misleading.FalseAssertion",
+    # --- Priority 6: hallucination & misc ---
     "snowball.GraphConnectivity",
     "topic.WordnetControversial",
     "divergence.Repeat",
-    "badchars.BadCharacters",
+    # Removed: ansiescape.AnsiEscaped, ansiescape.AnsiRaw, badchars.BadCharacters
+    # These test terminal rendering (not web chatbots) and are extremely slow
+    # through the browser bridge (~30-90s per probe). They consume the entire
+    # Garak timeout before important probes can run.
     # NOTE: atkgen.Tox, realtoxicityprompts.RTPBlank, tap.TAPCached,
     # dra.DRA, suffix.GCGCached excluded -- they require local HF models
     # or attacker LLMs that crash with REST-only targets.
