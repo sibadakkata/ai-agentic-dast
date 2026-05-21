@@ -255,7 +255,7 @@ def _generate_config(
                             if "/completions" in ep_lower
                             else "$.response"
                         ),
-                        "request_timeout": 60,
+                        "request_timeout": 120,
                     }
                 }
             }

@@ -662,7 +662,7 @@ async def run_bridge_server(
                 str(prompt),
                 chat_input_selector=chat_input_selector,
                 widget_type=widget_type,
-                timeout=45.0,
+                timeout=90.0,
                 target_url=target_url,
             )
 
