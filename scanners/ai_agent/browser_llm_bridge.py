@@ -309,12 +309,23 @@ def _parse_network_response(body, prompt):
     return ""
 
 
+_LOADING_PATTERN = re.compile(
+    r'^(?:\d{1,2}:\d{2}\s*(?:AM|PM)?\s*\n)*\s*'
+    r'(?:Working|Loading|Thinking|Typing|Generating|Searching|Processing)'
+    r'(?:\s*\.{2,})?\s*'
+    r'(?:\n\d{1,2}:\d{2}\s*(?:AM|PM)?\s*)*$',
+    re.I | re.MULTILINE,
+)
+
+
 def _is_real_chat_response(text: str) -> bool:
     """Return True if *text* looks like actual chatbot prose, not a status
-    page, health-check, or generic API acknowledgement."""
+    page, health-check, loading indicator, or generic API acknowledgement."""
     if not text or len(text.strip()) < 5:
         return False
     t = text.strip()
+    if _LOADING_PATTERN.match(t):
+        return False
     try:
         d = json.loads(t)
         if isinstance(d, dict):
@@ -494,21 +505,41 @@ async def send_chat_message(
         _last_snapshot = ""
         _stable_since = 0.0
         _TIME_RE = re.compile(r'^\d{1,2}:\d{2}\s*(?:AM|PM)?\s*$', re.I)
+        _LOADING_RE = re.compile(
+            r'^(?:Working|Loading|Thinking|Typing|Generating|Searching|Processing)'
+            r'(?:\s*\.{2,})?$', re.I,
+        )
 
-        def _meaningful_content(text: str) -> str:
-            """Strip timestamps and single-word status lines, return the
-            remaining meaningful content."""
+        def _meaningful_content(text: str, _prompt: str = prompt) -> str:
+            """Strip timestamps, loading indicators, and the user's own
+            prompt — return only genuine chatbot response content."""
+            prompt_lower = _prompt.strip().lower()
             lines = [ln.strip() for ln in text.strip().splitlines() if ln.strip()]
-            real = [ln for ln in lines if not _TIME_RE.match(ln) and len(ln) > 1]
+            real = []
+            for ln in lines:
+                if _TIME_RE.match(ln):
+                    continue
+                if _LOADING_RE.match(ln):
+                    continue
+                if len(ln) <= 1:
+                    continue
+                if ln.strip().lower() == prompt_lower:
+                    continue
+                real.append(ln)
             return "\n".join(real)
+
+        def _is_only_loading(text: str, _prompt: str = prompt) -> bool:
+            """True when text contains nothing beyond timestamps, loading
+            indicators, and the user's own prompt echo."""
+            return len(_meaningful_content(text, _prompt)) == 0
 
         while time.monotonic() < deadline:
             await asyncio.sleep(1.5)
 
             # Strategy 1: container text diff with stability + content check.
             # Wait for text to (a) stop changing for 3s AND (b) contain
-            # meaningful content (not just timestamps or one-word indicators).
-            # Works generically across any chatbot or language.
+            # meaningful content — not just timestamps, loading indicators
+            # like "Working...", or the user's own prompt echo.
             if chat_container:
                 text_now = await _get_container_text(chat_container)
                 new_text = text_now[len(text_before):].strip() if len(text_now) > len(text_before) + 5 else ""
@@ -517,16 +548,16 @@ async def send_chat_message(
                         _last_snapshot = new_text
                         _stable_since = time.monotonic()
                         continue
+                    # If text is only loading indicators, keep waiting
+                    # regardless of how long it's been stable.
+                    if _is_only_loading(new_text):
+                        continue
                     if time.monotonic() - _stable_since < 3.0:
                         continue
                     meat = _meaningful_content(new_text)
-                    if len(meat) < 15:
+                    if len(meat) < 5:
                         continue
-                    response_text = new_text
-                    if prompt in response_text:
-                        after_prompt = response_text.split(prompt, 1)[-1].strip()
-                        if after_prompt:
-                            response_text = after_prompt
+                    response_text = meat
                     if _is_real_chat_response(response_text):
                         method = "container_diff"
                         break
