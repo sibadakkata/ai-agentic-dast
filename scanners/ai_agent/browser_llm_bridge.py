@@ -492,12 +492,12 @@ async def send_chat_message(
         method = "timeout"
 
         _THINKING_PATTERNS = re.compile(
-            r'^(?:working|typing|thinking|loading|generating|processing)'
-            r'(?:\.{1,3})?$', re.IGNORECASE,
+            r'^(?:working|typing|thinking|loading|generating|processing|searching)'
+            r'[\.\u2026]{0,3}$', re.IGNORECASE,
         )
 
         def _is_still_thinking(text: str) -> bool:
-            """True if *text* is only a timestamp and/or loading indicator."""
+            """True if *text* is only timestamps and/or loading indicators."""
             lines = [ln.strip() for ln in text.strip().splitlines() if ln.strip()]
             real = [ln for ln in lines
                     if not _THINKING_PATTERNS.match(ln)
