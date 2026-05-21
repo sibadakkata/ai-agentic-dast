@@ -491,6 +491,19 @@ async def send_chat_message(
         deadline = time.monotonic() + timeout
         method = "timeout"
 
+        _THINKING_PATTERNS = re.compile(
+            r'^(?:working|typing|thinking|loading|generating|processing)'
+            r'(?:\.{1,3})?$', re.IGNORECASE,
+        )
+
+        def _is_still_thinking(text: str) -> bool:
+            """True if *text* is only a timestamp and/or loading indicator."""
+            lines = [ln.strip() for ln in text.strip().splitlines() if ln.strip()]
+            real = [ln for ln in lines
+                    if not _THINKING_PATTERNS.match(ln)
+                    and not re.match(r'^\d{1,2}:\d{2}\s*(?:AM|PM)?$', ln, re.I)]
+            return len(real) == 0
+
         while time.monotonic() < deadline:
             await asyncio.sleep(1.5)
 
@@ -500,9 +513,13 @@ async def send_chat_message(
                 if len(text_now) > len(text_before) + 5:
                     new_text = text_now[len(text_before):].strip()
                     if new_text and new_text != prompt and len(new_text) > 3:
-                        await asyncio.sleep(2.0)
+                        if _is_still_thinking(new_text):
+                            continue
+                        await asyncio.sleep(3.0)
                         text_final = await _get_container_text(chat_container)
                         response_text = text_final[len(text_before):].strip()
+                        if _is_still_thinking(response_text):
+                            continue
                         if prompt in response_text:
                             after_prompt = response_text.split(prompt, 1)[-1].strip()
                             if after_prompt:
@@ -642,7 +659,7 @@ async def run_bridge_server(
                 str(prompt),
                 chat_input_selector=chat_input_selector,
                 widget_type=widget_type,
-                timeout=30.0,
+                timeout=45.0,
                 target_url=target_url,
             )
 
@@ -678,7 +695,7 @@ async def run_bridge_server(
         page, "Hello",
         chat_input_selector=chat_input_selector,
         widget_type=widget_type,
-        timeout=45.0,
+        timeout=60.0,
         target_url=target_url,
     )
     pf_ok = preflight["success"] and preflight["method"] != "no_input_found"
