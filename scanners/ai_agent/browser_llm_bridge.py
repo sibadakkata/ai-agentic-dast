@@ -491,42 +491,33 @@ async def send_chat_message(
         deadline = time.monotonic() + timeout
         method = "timeout"
 
-        _THINKING_PATTERNS = re.compile(
-            r'^(?:working|typing|thinking|loading|generating|processing|searching)'
-            r'[\.\u2026]{0,3}$', re.IGNORECASE,
-        )
-
-        def _is_still_thinking(text: str) -> bool:
-            """True if *text* is only timestamps and/or loading indicators."""
-            lines = [ln.strip() for ln in text.strip().splitlines() if ln.strip()]
-            real = [ln for ln in lines
-                    if not _THINKING_PATTERNS.match(ln)
-                    and not re.match(r'^\d{1,2}:\d{2}\s*(?:AM|PM)?$', ln, re.I)]
-            return len(real) == 0
+        _last_snapshot = ""
+        _stable_since = 0.0
 
         while time.monotonic() < deadline:
             await asyncio.sleep(1.5)
 
-            # Strategy 1: container text diff
+            # Strategy 1: container text diff with stability detection.
+            # Wait until the text STOPS CHANGING for 3s -- handles any
+            # loading indicator / streaming in any chatbot or language.
             if chat_container:
                 text_now = await _get_container_text(chat_container)
-                if len(text_now) > len(text_before) + 5:
-                    new_text = text_now[len(text_before):].strip()
-                    if new_text and new_text != prompt and len(new_text) > 3:
-                        if _is_still_thinking(new_text):
-                            continue
-                        await asyncio.sleep(3.0)
-                        text_final = await _get_container_text(chat_container)
-                        response_text = text_final[len(text_before):].strip()
-                        if _is_still_thinking(response_text):
-                            continue
-                        if prompt in response_text:
-                            after_prompt = response_text.split(prompt, 1)[-1].strip()
-                            if after_prompt:
-                                response_text = after_prompt
-                        if _is_real_chat_response(response_text):
-                            method = "container_diff"
-                            break
+                new_text = text_now[len(text_before):].strip() if len(text_now) > len(text_before) + 5 else ""
+                if new_text and new_text != prompt and len(new_text) > 3:
+                    if new_text != _last_snapshot:
+                        _last_snapshot = new_text
+                        _stable_since = time.monotonic()
+                        continue
+                    if time.monotonic() - _stable_since < 3.0:
+                        continue
+                    response_text = new_text
+                    if prompt in response_text:
+                        after_prompt = response_text.split(prompt, 1)[-1].strip()
+                        if after_prompt:
+                            response_text = after_prompt
+                    if _is_real_chat_response(response_text):
+                        method = "container_diff"
+                        break
 
             # Strategy 2: classic message element counting
             msg_count_now = await _count_messages(ctx)
