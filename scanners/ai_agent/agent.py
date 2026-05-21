@@ -1791,12 +1791,19 @@ async def _run_llm_generated_chatbot_probes(
     auth_headers: dict | None = None,
     on_progress=None,
     cancel_flag=None,
+    page=None,
+    chat_input_selector: str | None = None,
+    widget_type: str | None = None,
 ) -> list[dict]:
     """Send LLM-agent-crafted adaptive payloads to a chatbot endpoint.
 
     Unlike Garak (static probe library), these payloads are context-aware
     and designed for multi-turn attack patterns. Findings go through
     normal triage (not bypassed like Garak).
+
+    When ``page`` is provided, uses headless browser interaction to type
+    prompts into the chatbot UI directly -- bypassing API auth requirements.
+    Falls back to direct HTTP when browser interaction is unavailable.
     """
     import json as _json
 
@@ -1823,56 +1830,80 @@ async def _run_llm_generated_chatbot_probes(
         def _build_body(prompt):
             return _json.dumps({"message": prompt})
 
+    _use_browser = page is not None
+    if _use_browser:
+        from .browser_llm_bridge import send_chat_message as _browser_send
+        print(f"  [LLM-AGENT] Using BROWSER mode (headless chatbot interaction)")
+    else:
+        print(f"  [LLM-AGENT] Using HTTP mode (direct API calls)")
+
     for i, probe in enumerate(_LLM_CHATBOT_ATTACK_PROMPTS):
         if cancel_flag and cancel_flag.is_set():
             break
 
         try:
-            resp = await http_client.post(
-                endpoint,
-                headers=headers,
-                content=_build_body(probe["prompt"]),
-                timeout=30.0,
-            )
-            body = resp.text[:2000]
+            resp_status = 200
+            chat_response = ""
 
-            # Parse SSE streaming responses (neoclaw-style).
-            # Norton SSE echoes the user message (role=user) first, then
-            # sends the assistant reply.  We must skip user echoes so our
-            # detectors only see what the chatbot actually said.
-            chat_response = body
-            if "event:" in body or "data:" in body:
-                _assistant_parts = []
-                for line in body.split("\n"):
-                    if not line.startswith("data: "):
-                        continue
-                    try:
-                        d = _json.loads(line[6:])
-                        msg = d.get("message", {})
-                        if not isinstance(msg, dict):
+            if _use_browser:
+                # Browser mode: type into chatbot UI directly
+                br_result = await _browser_send(
+                    page,
+                    probe["prompt"],
+                    chat_input_selector=chat_input_selector,
+                    widget_type=widget_type,
+                    timeout=30.0,
+                )
+                chat_response = br_result.get("response", "")
+                if not br_result.get("success"):
+                    _cb("llm_agent_probe_done", {
+                        "probe": probe["id"], "index": i + 1,
+                        "skipped": br_result.get("method", "browser_fail"),
+                    })
+                    await asyncio.sleep(0.5)
+                    continue
+            else:
+                # HTTP mode: direct API call (fallback)
+                resp = await http_client.post(
+                    endpoint,
+                    headers=headers,
+                    content=_build_body(probe["prompt"]),
+                    timeout=30.0,
+                )
+                resp_status = resp.status_code
+                body = resp.text[:2000]
+
+                chat_response = body
+                if "event:" in body or "data:" in body:
+                    _assistant_parts = []
+                    for line in body.split("\n"):
+                        if not line.startswith("data: "):
                             continue
-                        if msg.get("role") == "user":
-                            continue  # skip echoed user message
-                        c = msg.get("content", "")
-                        if isinstance(c, list):
-                            for item in c:
-                                if isinstance(item, dict) and item.get("type") == "text":
-                                    t = item.get("text", "").strip()
-                                    if t:
-                                        _assistant_parts.append(t)
-                        elif isinstance(c, str) and c.strip():
-                            _assistant_parts.append(c.strip())
-                    except Exception:
-                        continue
-                if _assistant_parts:
-                    chat_response = " ".join(_assistant_parts)
+                        try:
+                            d = _json.loads(line[6:])
+                            msg = d.get("message", {})
+                            if not isinstance(msg, dict):
+                                continue
+                            if msg.get("role") == "user":
+                                continue
+                            c = msg.get("content", "")
+                            if isinstance(c, list):
+                                for item in c:
+                                    if isinstance(item, dict) and item.get("type") == "text":
+                                        t = item.get("text", "").strip()
+                                        if t:
+                                            _assistant_parts.append(t)
+                            elif isinstance(c, str) and c.strip():
+                                _assistant_parts.append(c.strip())
+                        except Exception:
+                            continue
+                    if _assistant_parts:
+                        chat_response = " ".join(_assistant_parts)
 
-            # HTTP 401/403 means the endpoint requires auth and the
-            # chatbot was never reached — not a finding.
-            if resp.status_code in (401, 403, 407):
-                _cb("llm_agent_probe_done", {"probe": probe["id"], "index": i + 1, "skipped": "auth_required"})
-                await asyncio.sleep(0.5)
-                continue
+                if resp_status in (401, 403, 407):
+                    _cb("llm_agent_probe_done", {"probe": probe["id"], "index": i + 1, "skipped": "auth_required"})
+                    await asyncio.sleep(0.5)
+                    continue
 
             # Run detectors
             evidence_parts = []
@@ -1930,12 +1961,12 @@ async def _run_llm_generated_chatbot_probes(
                     "_finding_source": "llm_agent",
                     "_probe_id": probe["id"],
                     "request": {
-                        "method": "POST",
+                        "method": "BROWSER" if _use_browser else "POST",
                         "url": endpoint,
-                        "body": _build_body(probe["prompt"])[:300],
+                        "body": probe["prompt"][:300] if _use_browser else _build_body(probe["prompt"])[:300],
                     },
                     "response_summary": {
-                        "status_code": resp.status_code,
+                        "status_code": resp_status,
                         "body": chat_response[:500],
                     },
                 })
@@ -1971,6 +2002,12 @@ async def _run_llm_security_phase(
     """
     _cb = on_progress or (lambda *a, **k: None)
     findings: list[dict] = []
+
+    _chat_input_sel = app_info.get("chat_input_selector")
+    _widget_type = app_info.get("chat_widget_type", "none")
+    _has_browser = page is not None
+    if _has_browser:
+        print(f"  [LLM-SEC] Browser mode available (input={_chat_input_sel}, widget={_widget_type})")
 
     llm_endpoints = app_info.get("llm_endpoints", [])
     if not llm_endpoints:
@@ -2079,6 +2116,9 @@ async def _run_llm_security_phase(
             headers=auth_headers,
             on_progress=_cb,
             deep=garak_deep,
+            page=page if _has_browser else None,
+            chat_input_selector=_chat_input_sel,
+            widget_type=_widget_type,
         )
         findings.extend(garak_findings)
         print(f"  [LLM-SEC] Garak probes: {len(garak_findings)} findings")
@@ -2093,6 +2133,9 @@ async def _run_llm_security_phase(
             auth_headers=auth_headers,
             on_progress=_cb,
             cancel_flag=cancel_flag,
+            page=page if _has_browser else None,
+            chat_input_selector=_chat_input_sel,
+            widget_type=_widget_type,
         )
         findings.extend(llm_gen_findings)
         print(f"  [LLM-SEC] LLM-generated probes: {len(llm_gen_findings)} findings")

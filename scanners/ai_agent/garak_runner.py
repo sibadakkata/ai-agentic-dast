@@ -421,16 +421,24 @@ async def run_garak(
     timeout: int = _DEFAULT_TIMEOUT,
     on_progress: Any | None = None,
     deep: bool = False,
+    page: Any | None = None,
+    chat_input_selector: str | None = None,
+    widget_type: str | None = None,
 ) -> list[dict]:
     """Run Garak against an LLM endpoint and return normalised findings.
 
     Args:
         deep: When True, uses full prompt set per probe (soft_probe_prompt_cap=256).
               When False (default), caps at 15 prompts per probe for faster scans.
+        page: Playwright page for browser-based chatbot interaction.
+              When provided, starts a local HTTP bridge server so Garak
+              can interact with the chatbot through the browser session.
 
     Returns an empty list if Garak is not installed or the run fails.
     """
     mode_label = "DEEP (full payloads)" if deep else "STANDARD (15/probe)"
+    _bridge_mode = page is not None
+    mode_label += " + BROWSER BRIDGE" if _bridge_mode else ""
     print(f"  [GARAK] run_garak() called for {target_endpoint} [{mode_label}]")
     _cb = on_progress or (lambda *a, **k: None)
 
@@ -452,9 +460,34 @@ async def run_garak(
     tmpdir = tempfile.mkdtemp(prefix="garak_run_")
     print(f"  [GARAK] tmpdir: {tmpdir}")
 
+    _bridge_runner = None
+    _actual_endpoint = target_endpoint
+    _actual_headers = headers
+    _actual_template = request_template
+
+    if _bridge_mode:
+        try:
+            from .browser_llm_bridge import run_bridge_server
+            _bridge_runner, bridge_url = await run_bridge_server(
+                page,
+                chat_input_selector=chat_input_selector,
+                widget_type=widget_type,
+                target_url=target_endpoint,
+            )
+            _actual_endpoint = bridge_url
+            _actual_headers = None  # bridge handles auth via browser
+            _actual_template = {"prompt": "$INPUT"}
+            print(f"  [GARAK] Browser bridge active: Garak -> {bridge_url} -> browser chatbot")
+        except Exception as e:
+            print(f"  [GARAK] Bridge startup failed ({e}), falling back to direct HTTP")
+            _bridge_mode = False
+
     try:
         config_yaml = _generate_config(
-            target_endpoint, request_template, headers, probe_tags,
+            _actual_endpoint,
+            _actual_template,
+            _actual_headers,
+            probe_tags,
             deep=deep,
         )
         config_path = os.path.join(tmpdir, "garak_config.yaml")
@@ -591,7 +624,12 @@ async def run_garak(
         logger.exception("Garak runner failed: %s", e)
         _cb("garak_error", {"error": str(e)[:300]})
     finally:
-        # Keep tmpdir for debugging; list contents
+        if _bridge_runner:
+            try:
+                await _bridge_runner.cleanup()
+                print("  [GARAK] Browser bridge stopped")
+            except Exception:
+                pass
         try:
             import glob
             all_files = glob.glob(os.path.join(tmpdir, "**"), recursive=True)
