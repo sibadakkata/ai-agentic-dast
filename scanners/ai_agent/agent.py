@@ -2009,6 +2009,53 @@ async def _run_llm_security_phase(
     if _has_browser:
         print(f"  [LLM-SEC] Browser mode available (input={_chat_input_sel}, widget={_widget_type})")
 
+    # If browser is available but no chat input was found on the landing
+    # page, try navigating to pages that look like chat interfaces.
+    if _has_browser and not _chat_input_sel:
+        from .browser_llm_bridge import _find_chat_input, _CHAT_INPUT_SELECTORS
+        from urllib.parse import urlparse
+
+        _target_base = app_info.get("target_url", "")
+        if not _target_base and page:
+            _target_base = page.url
+
+        _chat_page_hints = []
+        for url in app_info.get("crawled_urls", []):
+            _lower = url.lower()
+            if any(kw in _lower for kw in [
+                "/chat", "/ask", "/assistant", "/copilot",
+                "/message", "/converse", "/ai", "/bot",
+                "/superparent", "/neoclaw",
+            ]):
+                _chat_page_hints.append(url)
+
+        if not _chat_page_hints and _target_base:
+            _p = urlparse(_target_base)
+            _chat_page_hints = [
+                f"{_p.scheme}://{_p.netloc}/chat",
+                f"{_p.scheme}://{_p.netloc}/",
+                _target_base,
+            ]
+
+        print(f"  [LLM-SEC] No chat input on current page, trying {len(_chat_page_hints)} chat page hints...")
+        for hint_url in _chat_page_hints[:5]:
+            try:
+                await page.goto(hint_url, wait_until="domcontentloaded", timeout=15000)
+                await asyncio.sleep(3)
+                _el, _sel = await _find_chat_input(page)
+                if _el:
+                    _chat_input_sel = _sel
+                    print(f"  [LLM-SEC] Found chat input on {hint_url}: {_sel}")
+                    break
+                else:
+                    print(f"  [LLM-SEC] No chat input on {hint_url}")
+            except Exception as e:
+                logger.debug("Chat page nav to %s failed: %s", hint_url, e)
+                continue
+
+        if not _chat_input_sel:
+            print("  [LLM-SEC] Could not find chat input on any page - browser probes will use network fallback")
+
     llm_endpoints = app_info.get("llm_endpoints", [])
     if not llm_endpoints:
         logger.info("No LLM endpoints discovered -- skipping LLM probes")
@@ -2057,11 +2104,12 @@ async def _run_llm_security_phase(
     # Pre-flight: verify the chosen endpoint is reachable (not 401/403).
     # If it's behind auth, fall back to the inferred neoclaw endpoint or
     # other candidates.
+    import json as _pf_json
     try:
         _pf = await http_client.post(
             endpoint,
             headers={"Content-Type": "application/json", **(auth_headers or {})},
-            content=_json.dumps({"message": "hello"}),
+            content=_pf_json.dumps({"message": "hello"}),
             timeout=10.0,
         )
         if _pf.status_code in (401, 403, 407):
@@ -2074,7 +2122,7 @@ async def _run_llm_security_phase(
                     _pf2 = await http_client.post(
                         _alt,
                         headers={"Content-Type": "application/json", **(auth_headers or {})},
-                        content=_json.dumps({"message": "hello"}),
+                        content=_pf_json.dumps({"message": "hello"}),
                         timeout=10.0,
                     )
                     if _pf2.status_code not in (401, 403, 407):
