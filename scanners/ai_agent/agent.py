@@ -1834,7 +1834,6 @@ async def _run_llm_generated_chatbot_probes(
     if _use_browser:
         from .browser_llm_bridge import send_chat_message as _browser_send
         print(f"  [LLM-AGENT] Using BROWSER mode (headless chatbot interaction)")
-        # Preflight: verify chatbot responds before running all probes
         print(f"  [LLM-AGENT] Preflight: testing chatbot with 'Hello'...")
         _pf = await _browser_send(
             page, "Hello",
@@ -1844,15 +1843,42 @@ async def _run_llm_generated_chatbot_probes(
         )
         _pf_ok = _pf["success"] and _pf["method"] != "no_input_found"
         print(
-            f"  [LLM-AGENT] Preflight: success={_pf['success']} "
+            f"  [LLM-AGENT] Browser preflight: success={_pf['success']} "
             f"method={_pf['method']} elapsed={_pf['elapsed_ms']}ms "
             f"resp={_pf['response'][:150]!r}"
         )
         if not _pf_ok:
-            print(f"  [LLM-AGENT] Preflight FAILED — chatbot not responding. Skipping browser probes.")
-            return findings
-    else:
+            print(f"  [LLM-AGENT] Browser preflight FAILED — falling back to HTTP mode")
+            _use_browser = False
+    if not _use_browser:
         print(f"  [LLM-AGENT] Using HTTP mode (direct API calls)")
+        print(f"  [LLM-AGENT] HTTP preflight: sending 'Hello' to {endpoint}...")
+        try:
+            _http_pf = await http_client.post(
+                endpoint,
+                headers=headers,
+                content=_build_body("Hello"),
+                timeout=30.0,
+            )
+            _http_body = _http_pf.text[:500]
+            _is_chat_resp = (
+                _http_pf.status_code == 200
+                and len(_http_body) > 20
+                and _http_body not in ('{"code":200,"status":"OK"}', '{"status":"OK"}')
+                and "unauthorized" not in _http_body.lower()
+            )
+            print(
+                f"  [LLM-AGENT] HTTP preflight: status={_http_pf.status_code} "
+                f"len={len(_http_body)} is_chat={_is_chat_resp} "
+                f"resp={_http_body[:150]!r}"
+            )
+            if not _is_chat_resp:
+                print(f"  [LLM-AGENT] HTTP preflight FAILED — no real chat response. Skipping LLM probes.")
+                return findings
+        except Exception as _http_pf_err:
+            print(f"  [LLM-AGENT] HTTP preflight FAILED — {_http_pf_err}. Skipping LLM probes.")
+            return findings
+        print(f"  [LLM-AGENT] HTTP preflight OK — endpoint returns real chat responses.")
 
     for i, probe in enumerate(_LLM_CHATBOT_ATTACK_PROMPTS):
         if cancel_flag and cancel_flag.is_set():

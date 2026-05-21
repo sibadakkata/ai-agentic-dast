@@ -476,7 +476,7 @@ async def run_garak(
                 target_url=None,  # don't navigate -- page is already on chat UI
             )
             if _bridge_runner is None or bridge_url is None:
-                print("  [GARAK] Bridge preflight failed — chatbot not responding, falling back to direct HTTP")
+                print("  [GARAK] Bridge preflight failed — falling back to direct HTTP")
                 _bridge_mode = False
             else:
                 _actual_endpoint = bridge_url
@@ -486,6 +486,37 @@ async def run_garak(
         except Exception as e:
             print(f"  [GARAK] Bridge startup failed ({e}), falling back to direct HTTP")
             _bridge_mode = False
+
+    # If bridge failed, verify direct HTTP returns a real chat response
+    if not _bridge_mode:
+        import httpx as _hx
+        print(f"  [GARAK] HTTP preflight: testing {target_endpoint} with 'Hello'...")
+        try:
+            _pf_hdrs = {"Content-Type": "application/json"}
+            if headers:
+                _pf_hdrs.update(headers)
+            async with _hx.AsyncClient(verify=False) as _pfc:
+                _pf_resp = await _pfc.post(
+                    target_endpoint, headers=_pf_hdrs,
+                    content=json.dumps({"message": "Hello"}),
+                    timeout=30.0,
+                )
+            _pf_body = _pf_resp.text[:500]
+            _pf_chat = (
+                _pf_resp.status_code == 200
+                and len(_pf_body) > 20
+                and "unauthorized" not in _pf_body.lower()
+            )
+            print(f"  [GARAK] HTTP preflight: status={_pf_resp.status_code} is_chat={_pf_chat} resp={_pf_body[:150]!r}")
+            if not _pf_chat:
+                print(f"  [GARAK] HTTP preflight FAILED — no real chat response. Skipping Garak probes.")
+                _cb("garak_skip", {"reason": "preflight_failed"})
+                return []
+            print(f"  [GARAK] HTTP preflight OK — proceeding with direct REST probes.")
+        except Exception as _pf_err:
+            print(f"  [GARAK] HTTP preflight FAILED — {_pf_err}. Skipping Garak probes.")
+            _cb("garak_skip", {"reason": "preflight_failed"})
+            return []
 
     try:
         config_yaml = _generate_config(
