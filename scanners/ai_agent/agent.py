@@ -1834,6 +1834,23 @@ async def _run_llm_generated_chatbot_probes(
     if _use_browser:
         from .browser_llm_bridge import send_chat_message as _browser_send
         print(f"  [LLM-AGENT] Using BROWSER mode (headless chatbot interaction)")
+        # Preflight: verify chatbot responds before running all probes
+        print(f"  [LLM-AGENT] Preflight: testing chatbot with 'Hello'...")
+        _pf = await _browser_send(
+            page, "Hello",
+            chat_input_selector=chat_input_selector,
+            widget_type=widget_type,
+            timeout=45.0,
+        )
+        _pf_ok = _pf["success"] and _pf["method"] != "no_input_found"
+        print(
+            f"  [LLM-AGENT] Preflight: success={_pf['success']} "
+            f"method={_pf['method']} elapsed={_pf['elapsed_ms']}ms "
+            f"resp={_pf['response'][:150]!r}"
+        )
+        if not _pf_ok:
+            print(f"  [LLM-AGENT] Preflight FAILED — chatbot not responding. Skipping browser probes.")
+            return findings
     else:
         print(f"  [LLM-AGENT] Using HTTP mode (direct API calls)")
 
@@ -2010,51 +2027,129 @@ async def _run_llm_security_phase(
         print(f"  [LLM-SEC] Browser mode available (input={_chat_input_sel}, widget={_widget_type})")
 
     # If browser is available but no chat input was found on the landing
-    # page, try navigating to pages that look like chat interfaces.
+    # page, try clicking sidebar/nav links that open a chat view, then
+    # fall back to direct URL navigation.
     if _has_browser and not _chat_input_sel:
-        from .browser_llm_bridge import _find_chat_input, _CHAT_INPUT_SELECTORS
+        from .browser_llm_bridge import _find_chat_input
         from urllib.parse import urlparse
 
         _target_base = app_info.get("target_url", "")
         if not _target_base and page:
             _target_base = page.url
 
-        _chat_page_hints = []
-        for url in app_info.get("crawled_urls", []):
-            _lower = url.lower()
-            if any(kw in _lower for kw in [
-                "/chat", "/ask", "/assistant", "/copilot",
-                "/message", "/converse", "/ai", "/bot",
-                "/superparent", "/neoclaw",
-            ]):
-                _chat_page_hints.append(url)
+        # Strategy 1: Click sidebar/nav links containing chat keywords.
+        # Many SPAs (like Norton Superparent) have "Chat with..." links
+        # in the sidebar that open the chatbot without a page navigation.
+        _CHAT_LINK_KEYWORDS = [
+            "chat", "Chat", "message", "Message", "ask", "Ask",
+            "assistant", "Assistant", "copilot", "Copilot",
+            "superparent", "Superparent",
+        ]
+        print("  [LLM-SEC] No chat input on current page, trying sidebar/nav clicks...")
+        try:
+            # First navigate to the app's main page (authenticated)
+            if _target_base:
+                _p = urlparse(_target_base)
+                _app_url = f"{_p.scheme}://{_p.netloc}/app"
+                try:
+                    await page.goto(_app_url, wait_until="domcontentloaded", timeout=15000)
+                    await asyncio.sleep(3)
+                except Exception:
+                    await page.goto(_target_base, wait_until="domcontentloaded", timeout=15000)
+                    await asyncio.sleep(3)
 
-        if not _chat_page_hints and _target_base:
-            _p = urlparse(_target_base)
-            _chat_page_hints = [
-                f"{_p.scheme}://{_p.netloc}/chat",
-                f"{_p.scheme}://{_p.netloc}/",
-                _target_base,
+            # Look for clickable links/buttons with chat-related text
+            _nav_selectors = [
+                "a", "button", "[role='button']", "[role='link']",
+                "nav a", "aside a", "[class*='sidebar'] a",
+                "[class*='nav'] a", "[class*='menu'] a",
             ]
+            for _nav_sel in _nav_selectors:
+                try:
+                    _links = await page.query_selector_all(_nav_sel)
+                    for _link in _links:
+                        try:
+                            _text = await _link.inner_text()
+                            if not _text:
+                                continue
+                            _text_lower = _text.strip().lower()
+                            if any(kw.lower() in _text_lower for kw in _CHAT_LINK_KEYWORDS):
+                                if not await _link.is_visible():
+                                    continue
+                                print(f"  [LLM-SEC] Clicking nav link: '{_text.strip()}'")
+                                await _link.click()
+                                await asyncio.sleep(4)
+                                _el, _sel = await _find_chat_input(page)
+                                if _el:
+                                    _chat_input_sel = _sel
+                                    print(f"  [LLM-SEC] Found chat input after clicking '{_text.strip()}': {_sel}")
+                                    break
+                        except Exception:
+                            continue
+                    if _chat_input_sel:
+                        break
+                except Exception:
+                    continue
+        except Exception as e:
+            logger.debug("Sidebar chat click failed: %s", e)
 
-        print(f"  [LLM-SEC] No chat input on current page, trying {len(_chat_page_hints)} chat page hints...")
-        for hint_url in _chat_page_hints[:5]:
-            try:
-                await page.goto(hint_url, wait_until="domcontentloaded", timeout=15000)
-                await asyncio.sleep(3)
-                _el, _sel = await _find_chat_input(page)
-                if _el:
-                    _chat_input_sel = _sel
-                    print(f"  [LLM-SEC] Found chat input on {hint_url}: {_sel}")
-                    break
-                else:
-                    print(f"  [LLM-SEC] No chat input on {hint_url}")
-            except Exception as e:
-                logger.debug("Chat page nav to %s failed: %s", hint_url, e)
-                continue
-
+        # Strategy 2: Also try the "Chat with Superparent" button (top-right)
         if not _chat_input_sel:
-            print("  [LLM-SEC] Could not find chat input on any page - browser probes will use network fallback")
+            for _btn_sel in [
+                "button:has-text('Chat')",
+                "[class*='chat' i]",
+                "button[class*='chat' i]",
+                "a[href*='chat' i]",
+            ]:
+                try:
+                    _btn = await page.query_selector(_btn_sel)
+                    if _btn and await _btn.is_visible():
+                        _btn_text = await _btn.inner_text()
+                        print(f"  [LLM-SEC] Clicking button: '{_btn_text.strip()}'")
+                        await _btn.click()
+                        await asyncio.sleep(4)
+                        _el, _sel = await _find_chat_input(page)
+                        if _el:
+                            _chat_input_sel = _sel
+                            print(f"  [LLM-SEC] Found chat input after button click: {_sel}")
+                            break
+                except Exception:
+                    continue
+
+        # Strategy 3: Direct URL navigation as fallback
+        if not _chat_input_sel:
+            _chat_page_hints = []
+            for url in app_info.get("crawled_urls", []):
+                _lower = url.lower()
+                if any(kw in _lower for kw in [
+                    "/chat", "/ask", "/assistant", "/copilot",
+                    "/message", "/converse", "/ai", "/bot",
+                ]):
+                    _chat_page_hints.append(url)
+
+            if not _chat_page_hints and _target_base:
+                _p2 = urlparse(_target_base)
+                _chat_page_hints = [
+                    f"{_p2.scheme}://{_p2.netloc}/chat",
+                    f"{_p2.scheme}://{_p2.netloc}/app",
+                ]
+
+            for hint_url in _chat_page_hints[:5]:
+                try:
+                    await page.goto(hint_url, wait_until="domcontentloaded", timeout=15000)
+                    await asyncio.sleep(3)
+                    _el, _sel = await _find_chat_input(page)
+                    if _el:
+                        _chat_input_sel = _sel
+                        print(f"  [LLM-SEC] Found chat input on {hint_url}: {_sel}")
+                        break
+                except Exception:
+                    continue
+
+        if _chat_input_sel:
+            print(f"  [LLM-SEC] Chat input ready: {_chat_input_sel}")
+        else:
+            print("  [LLM-SEC] Could not find chat input - browser probes will use network fallback")
 
     llm_endpoints = app_info.get("llm_endpoints", [])
     if not llm_endpoints:

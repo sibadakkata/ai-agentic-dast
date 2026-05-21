@@ -61,6 +61,49 @@ _CHAT_INPUT_SELECTORS = [
     "[contenteditable='true']",
 ]
 
+_CHAT_URL_KEYWORDS = [
+    "chat", "message", "send", "agent", "ask", "converse",
+    "completions", "generate", "neoclaw",
+]
+_CHAT_URL_EXCLUDE = [
+    "status", "health", "events", "cron", "scheduler", "config",
+    "refresh", "files/list", "query", "schema", "client-events",
+    "invoke", "jobs",
+]
+
+
+async def _find_chat_container(ctx, input_el):
+    """Walk up from the chat input to find the scrollable message area."""
+    try:
+        container = await input_el.evaluate_handle("""el => {
+            let cur = el.parentElement;
+            for (let i = 0; i < 15; i++) {
+                if (!cur) break;
+                const s = window.getComputedStyle(cur);
+                const scrollable = (cur.scrollHeight > cur.clientHeight + 20) ||
+                    s.overflowY === 'auto' || s.overflowY === 'scroll' ||
+                    s.overflow === 'auto' || s.overflow === 'scroll';
+                if (scrollable && cur.clientHeight > 100) return cur;
+                cur = cur.parentElement;
+            }
+            // fallback: 3 levels up from input
+            return el.parentElement?.parentElement?.parentElement || el.parentElement;
+        }""")
+        return container
+    except Exception:
+        return None
+
+
+async def _get_container_text(container):
+    """Get the visible text content from a container element."""
+    if not container:
+        return ""
+    try:
+        return await container.evaluate("el => el.innerText || ''")
+    except Exception:
+        return ""
+
+
 _WIDGET_IFRAME_SELECTORS = {
     "intercom": "iframe[name='intercom-messenger-frame']",
     "drift": "#drift-frame-controller iframe",
@@ -236,6 +279,28 @@ async def send_chat_message(
 
     input_el, used_sel = await _find_chat_input(ctx, chat_input_selector)
     if not input_el:
+        for _retry in range(3):
+            await asyncio.sleep(1.5)
+            try:
+                for _chat_btn_sel in [
+                    "button:has-text('Chat')", "a:has-text('Chat')",
+                    "[class*='chat' i]", "button:has-text('Superparent')",
+                    "a:has-text('Superparent')",
+                ]:
+                    btn = await page.query_selector(_chat_btn_sel)
+                    if btn and await btn.is_visible():
+                        await btn.click()
+                        await asyncio.sleep(2)
+                        break
+            except Exception:
+                pass
+            ctx = await _enter_iframe_if_widget(page, widget_type)
+            input_el, used_sel = await _find_chat_input(ctx, chat_input_selector)
+            if input_el:
+                break
+    if not input_el:
+        logger.warning("No chat input found (selector=%s, url=%s)", chat_input_selector, page.url)
+        print(f"  [BRIDGE] No chat input found on {page.url} (selector={chat_input_selector})")
         return {
             "success": False,
             "response": "",
@@ -243,19 +308,25 @@ async def send_chat_message(
             "elapsed_ms": int((time.monotonic() - start) * 1000),
         }
 
+    chat_container = await _find_chat_container(ctx, input_el)
+    text_before = await _get_container_text(chat_container)
     msg_count_before = await _count_messages(ctx)
 
     _network_responses = []
 
     async def _capture(response):
         try:
+            url = response.url.lower()
+            if any(ex in url for ex in _CHAT_URL_EXCLUDE):
+                return
             ct = response.headers.get("content-type", "")
             if response.request.method == "POST" and (
                 "json" in ct or "event-stream" in ct or "text/plain" in ct
             ):
-                body = await response.text()
-                if body and len(body) > 5:
-                    _network_responses.append(body)
+                if any(kw in url for kw in _CHAT_URL_KEYWORDS):
+                    body = await response.text()
+                    if body and len(body) > 5:
+                        _network_responses.append(body)
         except Exception:
             pass
 
@@ -292,9 +363,26 @@ async def send_chat_message(
         method = "timeout"
 
         while time.monotonic() < deadline:
-            await asyncio.sleep(1.0)
-            msg_count_now = await _count_messages(ctx)
+            await asyncio.sleep(1.5)
 
+            # Strategy 1: container text diff (works for any chat UI)
+            if chat_container:
+                text_now = await _get_container_text(chat_container)
+                if len(text_now) > len(text_before) + 5:
+                    new_text = text_now[len(text_before):].strip()
+                    if new_text and new_text != prompt and len(new_text) > 3:
+                        await asyncio.sleep(2.0)
+                        text_final = await _get_container_text(chat_container)
+                        response_text = text_final[len(text_before):].strip()
+                        if prompt in response_text:
+                            after_prompt = response_text.split(prompt, 1)[-1].strip()
+                            if after_prompt:
+                                response_text = after_prompt
+                        method = "container_diff"
+                        break
+
+            # Strategy 2: classic message element counting
+            msg_count_now = await _count_messages(ctx)
             if msg_count_now > msg_count_before + 1:
                 candidate = await _get_last_message_text(ctx, msg_count_before)
                 if candidate and candidate != prompt:
@@ -303,7 +391,6 @@ async def send_chat_message(
                         ctx, msg_count_before)
                     method = "dom"
                     break
-
             if msg_count_now > msg_count_before:
                 candidate = await _get_last_message_text(
                     ctx, max(0, msg_count_before - 1))
@@ -314,6 +401,7 @@ async def send_chat_message(
                     method = "dom"
                     break
 
+        # Strategy 3: filtered network capture (chat URLs only)
         if not response_text and _network_responses:
             for nr in reversed(_network_responses):
                 parsed = _parse_network_response(nr, prompt)
@@ -417,9 +505,11 @@ async def run_bridge_server(
                 target_url=target_url,
             )
 
+        resp_text = result["response"] or "(no response)"
+        print(f"  [BRIDGE] prompt={str(prompt)[:80]!r} -> method={result['method']} elapsed={result['elapsed_ms']}ms resp={resp_text[:120]!r}")
         return web.Response(
-            text=result["response"] or "(no response)",
-            content_type="text/plain",
+            text=json.dumps({"response": resp_text}),
+            content_type="application/json",
         )
 
     async def handle_health(request):
@@ -439,5 +529,28 @@ async def run_bridge_server(
     endpoint = f"http://{host}:{port}/generate"
     logger.info("Browser LLM bridge listening on %s", endpoint)
     print(f"  [BRIDGE] Browser LLM bridge started on {endpoint}")
+
+    # Preflight: send a harmless test message to verify round-trip works.
+    # If the chatbot doesn't respond, there's no point running 600+ probes.
+    print("  [BRIDGE] Preflight: sending test message to verify chatbot responds...")
+    preflight = await send_chat_message(
+        page, "Hello",
+        chat_input_selector=chat_input_selector,
+        widget_type=widget_type,
+        timeout=45.0,
+        target_url=target_url,
+    )
+    pf_ok = preflight["success"] and preflight["method"] != "no_input_found"
+    print(
+        f"  [BRIDGE] Preflight result: success={preflight['success']} "
+        f"method={preflight['method']} elapsed={preflight['elapsed_ms']}ms "
+        f"resp={preflight['response'][:150]!r}"
+    )
+    if not pf_ok:
+        print("  [BRIDGE] Preflight FAILED — chatbot not responding. Skipping browser bridge.")
+        logger.warning("Bridge preflight failed: method=%s", preflight["method"])
+        await runner.cleanup()
+        return None, None
+    print("  [BRIDGE] Preflight OK — chatbot is responding. Proceeding with probes.")
 
     return runner, endpoint

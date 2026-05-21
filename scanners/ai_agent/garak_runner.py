@@ -14,6 +14,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -472,12 +473,16 @@ async def run_garak(
                 page,
                 chat_input_selector=chat_input_selector,
                 widget_type=widget_type,
-                target_url=target_endpoint,
+                target_url=None,  # don't navigate -- page is already on chat UI
             )
-            _actual_endpoint = bridge_url
-            _actual_headers = None  # bridge handles auth via browser
-            _actual_template = {"prompt": "$INPUT"}
-            print(f"  [GARAK] Browser bridge active: Garak -> {bridge_url} -> browser chatbot")
+            if _bridge_runner is None or bridge_url is None:
+                print("  [GARAK] Bridge preflight failed — chatbot not responding, falling back to direct HTTP")
+                _bridge_mode = False
+            else:
+                _actual_endpoint = bridge_url
+                _actual_headers = None  # bridge handles auth via browser
+                _actual_template = {"prompt": "$INPUT"}
+                print(f"  [GARAK] Browser bridge active: Garak -> {bridge_url} -> browser chatbot")
         except Exception as e:
             print(f"  [GARAK] Bridge startup failed ({e}), falling back to direct HTTP")
             _bridge_mode = False
@@ -497,7 +502,7 @@ async def run_garak(
         print(f"  [GARAK] Has Cookie: {'Cookie' in (headers or {})}, Has Bearer: {'Authorization' in (headers or {})}")
         header_keys = list((headers or {}).keys())
         print(f"  [GARAK] Header keys: {header_keys}")
-        print(f"  [GARAK] Endpoint: {target_endpoint}")
+        print(f"  [GARAK] Endpoint: {_actual_endpoint}" + (f" (bridge for {target_endpoint})" if _bridge_mode else ""))
         print(f"  [GARAK] Config preview:\n{config_yaml[:500]}")
 
         logger.info("Starting Garak run against %s (timeout=%ds)", target_endpoint, timeout)
