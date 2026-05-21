@@ -493,13 +493,22 @@ async def send_chat_message(
 
         _last_snapshot = ""
         _stable_since = 0.0
+        _TIME_RE = re.compile(r'^\d{1,2}:\d{2}\s*(?:AM|PM)?\s*$', re.I)
+
+        def _meaningful_content(text: str) -> str:
+            """Strip timestamps and single-word status lines, return the
+            remaining meaningful content."""
+            lines = [ln.strip() for ln in text.strip().splitlines() if ln.strip()]
+            real = [ln for ln in lines if not _TIME_RE.match(ln) and len(ln) > 1]
+            return "\n".join(real)
 
         while time.monotonic() < deadline:
             await asyncio.sleep(1.5)
 
-            # Strategy 1: container text diff with stability detection.
-            # Wait until the text STOPS CHANGING for 3s -- handles any
-            # loading indicator / streaming in any chatbot or language.
+            # Strategy 1: container text diff with stability + content check.
+            # Wait for text to (a) stop changing for 3s AND (b) contain
+            # meaningful content (not just timestamps or one-word indicators).
+            # Works generically across any chatbot or language.
             if chat_container:
                 text_now = await _get_container_text(chat_container)
                 new_text = text_now[len(text_before):].strip() if len(text_now) > len(text_before) + 5 else ""
@@ -509,6 +518,9 @@ async def send_chat_message(
                         _stable_since = time.monotonic()
                         continue
                     if time.monotonic() - _stable_since < 3.0:
+                        continue
+                    meat = _meaningful_content(new_text)
+                    if len(meat) < 15:
                         continue
                     response_text = new_text
                     if prompt in response_text:
