@@ -1867,6 +1867,13 @@ async def _run_llm_generated_chatbot_probes(
                 if _assistant_parts:
                     chat_response = " ".join(_assistant_parts)
 
+            # HTTP 401/403 means the endpoint requires auth and the
+            # chatbot was never reached — not a finding.
+            if resp.status_code in (401, 403, 407):
+                _cb("llm_agent_probe_done", {"probe": probe["id"], "index": i + 1, "skipped": "auth_required"})
+                await asyncio.sleep(0.5)
+                continue
+
             # Run detectors
             evidence_parts = []
             refused = bool(_REFUSAL_PATTERNS.search(chat_response))
@@ -2010,6 +2017,41 @@ async def _run_llm_security_phase(
         else:
             continue
         break
+    # Pre-flight: verify the chosen endpoint is reachable (not 401/403).
+    # If it's behind auth, fall back to the inferred neoclaw endpoint or
+    # other candidates.
+    try:
+        _pf = await http_client.post(
+            endpoint,
+            headers={"Content-Type": "application/json", **(auth_headers or {})},
+            content=_json.dumps({"message": "hello"}),
+            timeout=10.0,
+        )
+        if _pf.status_code in (401, 403, 407):
+            print(f"  [LLM-SEC] Endpoint {endpoint} returned {_pf.status_code}, trying alternatives...")
+            _found_alt = False
+            for _alt in pool:
+                if _alt == endpoint:
+                    continue
+                try:
+                    _pf2 = await http_client.post(
+                        _alt,
+                        headers={"Content-Type": "application/json", **(auth_headers or {})},
+                        content=_json.dumps({"message": "hello"}),
+                        timeout=10.0,
+                    )
+                    if _pf2.status_code not in (401, 403, 407):
+                        print(f"  [LLM-SEC] Switched to {_alt} (HTTP {_pf2.status_code})")
+                        endpoint = _alt
+                        _found_alt = True
+                        break
+                except Exception:
+                    continue
+            if not _found_alt:
+                print(f"  [LLM-SEC] All endpoints require auth — LLM probes will be limited")
+    except Exception as _pf_err:
+        print(f"  [LLM-SEC] Pre-flight check failed: {_pf_err}")
+
     print(f"  [LLM-SEC] Testing LLM endpoint: {endpoint}")
     _cb("llm_security_start", {"endpoint": endpoint, "total_probes": 37})
 
