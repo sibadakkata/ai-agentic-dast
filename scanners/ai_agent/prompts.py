@@ -227,6 +227,15 @@ WEB_PHASES: list[ScanPhase] = [
             "STEP 2 — CHECK STORAGE: Use get_local_storage to find:\n"
             "  - Tokens, passwords, PII, API keys in localStorage/sessionStorage\n"
             "  - JWT tokens — decode and check for sensitive claims\n\n"
+            "STEP 2B — VALIDATE ANY FOUND SECRETS (MANDATORY):\n"
+            "  If you find what looks like an API key, token, or secret:\n"
+            "  (a) CHECK ENTROPY: Is it random-looking (like 'sk_live_4eC39H...') or readable "
+            "(like '$$ROW_INTERNAL', '__REACT_DEVTOOLS')? Framework constants are NOT secrets.\n"
+            "  (b) TRY TO USE IT: Attempt to authenticate or call an API with the key. "
+            "Use api_request with 'Authorization: Bearer <key>' or as a query param.\n"
+            "  (c) Only report as a finding if: (1) entropy is high AND (2) the key works OR "
+            "the key format matches a known service (AWS, Stripe, Google, etc.).\n"
+            "  DO NOT report framework constants ($$, __, ng-, react-) as secrets.\n\n"
             "STEP 3 — CHECK HEADERS: Use api_request on the main page and check:\n"
             "  - Strict-Transport-Security (HSTS) header present?\n"
             "  - Content-Security-Policy (CSP) header present and strict?\n"
@@ -321,19 +330,32 @@ WEB_PHASES: list[ScanPhase] = [
         name="Cross-Site Scripting",
         prompt=(
             "Test for XSS systematically. Follow these steps:\n\n"
+            "STEP 0 — DISCOVER ALL PARAMETERS (DO THIS FIRST, BEFORE ANYTHING ELSE):\n"
+            "  - navigate() to the TARGET URL (the root page)\n"
+            "  - Call get_links() — this returns ALL <a> tags, buttons, and navigation on the page\n"
+            "  - For EACH link returned: call click() or navigate() to that link\n"
+            "  - After EACH click: examine the resulting URL — look for ANY query parameter "
+            "(e.g. ?id=, ?q=, ?search=, ?callback=, ?redirect=, ?name=, ?page=, ?token=)\n"
+            "  - Build a list of ALL discovered URL parameters — these are your XSS targets\n"
+            "  - ALSO use execute_js to extract all href attributes: "
+            "execute_js(\"return [...document.querySelectorAll('a[href]')].map(a=>a.href)\")\n"
+            "  - If the page has navigation/menu items, click EACH one and check for params\n"
+            "  - DO NOT SKIP THIS STEP. DO NOT jump to API testing before clicking all page links.\n\n"
             "STEP 1 — FIND ALL REFLECTION POINTS (MANDATORY): You MUST test each of these:\n"
-            "  a) SEARCH functionality: Navigate to the search page/bar. Use fuzz_parameter on "
+            "  a) ALL PARAMETERS DISCOVERED IN STEP 0: Test each one with a canary first (xss8q3k), "
+            "then with context-appropriate payloads.\n"
+            "  b) SEARCH functionality: Navigate to the search page/bar. Use fuzz_parameter on "
             "the search endpoint (e.g. /rest/products/search?q=, /search?q=, /#/search?q=).\n"
-            "  b) URL PARAMETERS on all pages: Check every route that accepts ?id=, ?q=, ?name=, "
+            "  c) URL PARAMETERS on all pages: Check every route that accepts ?id=, ?q=, ?name=, "
             "?order=, ?track= etc. Use api_request with a canary to find reflections.\n"
-            "  c) FORMS: Call get_forms on every page. Test each form input field.\n"
-            "  d) API ENDPOINTS: Use api_request to POST XSS payloads to API endpoints that "
+            "  d) FORMS: Call get_forms on every page. Test each form input field.\n"
+            "  e) API ENDPOINTS: Use api_request to POST XSS payloads to API endpoints that "
             "accept user data (user registration, product creation, feedback, comments). "
             "Then check if the data is rendered unescaped when retrieved.\n"
-            "  e) SPA ROUTES with params: For Angular/React/Vue, navigate to routes that display "
+            "  f) SPA ROUTES with params: For Angular/React/Vue, navigate to routes that display "
             "URL parameters: /#/track-result?id=PAYLOAD, /#/search?q=PAYLOAD, etc.\n"
-            "  f) ERROR PAGES: Request a non-existent path and check if the path is reflected.\n"
-            "  g) HTTP HEADERS: Test if User-Agent, Referer, or custom headers are stored and "
+            "  g) ERROR PAGES: Request a non-existent path and check if the path is reflected.\n"
+            "  h) HTTP HEADERS: Test if User-Agent, Referer, or custom headers are stored and "
             "reflected back (persisted XSS through headers).\n\n"
             "STEP 2 — DOM-BASED XSS (MANDATORY for SPAs):\n"
             "  - Navigate with XSS in URL fragment/hash:\n"
@@ -358,6 +380,8 @@ WEB_PHASES: list[ScanPhase] = [
             "  Event handlers: <input onfocus=alert(1) autofocus> , <details open ontoggle=alert(1)>\n"
             "  Attribute escape: \" onmouseover=alert(1) x=\" , ' onfocus=alert(1) autofocus='\n"
             "  JS context: ';alert(1)// , \";alert(1)// , </script><script>alert(1)//\n"
+            "  JS function-call breakout: x')-alert(1)-(' , x\")-alert(1)-(\" , x`)-alert(1)-(`\n"
+            "  JS assignment breakout: x';alert(1);var b=' , x\";alert(1);var b=\"\n"
             "  Encoded: %3Cscript%3Ealert(1)%3C/script%3E , &#x3c;script&#x3e;alert(1)\n"
             "  Polyglots: '\"><img src=x onerror=alert(1)>// , '\"><svg/onload=alert(1)>\n"
             "  Template injection: {{constructor.constructor('alert(1)')()}} , ${alert(1)}\n"
@@ -595,8 +619,11 @@ WEB_PHASES: list[ScanPhase] = [
             "  - JWT alg:none: set header to {\"alg\":\"none\"} and remove signature\n"
             "  - JWT key confusion: if RS256, try HS256 with public key as secret\n"
             "  CHECK: Server should return 401/403. If it returns 500 = broken error handling.\n\n"
-            "STEP 3 — BRUTE FORCE RESISTANCE: Use api_request to send 5 rapid login "
-            "attempts with wrong passwords. Is there a lockout or rate limit?\n\n"
+            "STEP 3 — BRUTE FORCE RESISTANCE: Use api_request to send 50 rapid login "
+            "attempts with WRONG passwords (use random strings). Count how many succeed "
+            "without any blocking (no 429, no CAPTCHA, no lockout message). "
+            "Only report 'No Rate Limiting' if ALL 50 attempts return the same non-blocking "
+            "response. Include exact count in evidence: 'N/50 attempts unblocked'.\n\n"
             "STEP 4 — SESSION FIXATION: Get session cookie BEFORE login, login, compare.\n"
             "  If the session cookie doesn't change = session fixation vulnerability.\n\n"
             "STEP 5 — CREDENTIAL TESTING (MANDATORY — always perform this step):\n"
@@ -663,8 +690,10 @@ WEB_PHASES: list[ScanPhase] = [
             "  - Internal file paths or server architecture details\n"
             "  - User data from other sessions\n"
             "  - API keys or credentials\n\n"
-            "STEP 3 — RATE LIMITING ON SECURITY EVENTS: Send 5+ failed logins.\n"
-            "  Check if the application blocks or rate-limits repeated failures.\n"
+            "STEP 3 — RATE LIMITING ON SECURITY EVENTS: Send 50 rapid failed logins "
+            "(use random passwords). Track the count of unblocked attempts.\n"
+            "  Only report 'No Rate Limiting' if ALL 50 return the same response "
+            "(no 429, no CAPTCHA, no lockout). Include count in evidence.\n"
             "  No rate limiting on auth = monitoring failure."
         ),
         applies_to="website",
@@ -1438,6 +1467,10 @@ _FOCUS_PHASE_MAP: dict[str, set[str]] = {
     "method override": {"api_method_override"},
     "chain": {"attack_chain_analysis"},
     "attack chain": {"attack_chain_analysis"},
+    "llm": {"web_llm_security"},
+    "llm security": {"web_llm_security"},
+    "chatbot": {"web_llm_security"},
+    "prompt injection": {"web_llm_security"},
 }
 
 _RECON_PHASE_IDS = {"web_recon", "api_recon"}
@@ -1602,6 +1635,24 @@ CRAWL_ONLY_PHASE = ScanPhase(
     applies_to="both",
 )
 
+# ---------------------------------------------------------------------------
+# LLM Application Security phase -- runs deterministic probes (llm_baseline)
+# and optionally Garak.  This phase does NOT use the normal LLM agent loop;
+# the orchestrator intercepts it by phase ID and calls the dedicated runner.
+# ---------------------------------------------------------------------------
+LLM_SECURITY_PHASE = ScanPhase(
+    id="web_llm_security",
+    name="LLM Application Security (OWASP LLM Top 10)",
+    prompt=(
+        "This phase tests LLM-powered features (chatbots, AI assistants) "
+        "for prompt injection, data leakage, excessive agency, and other "
+        "OWASP LLM Top 10 vulnerabilities using deterministic probe batteries."
+    ),
+    max_steps=1,
+    applies_to="website",
+    parallel_ok=False,
+)
+
 
 def get_phases(scan_mode: str, app_info: dict | None = None,
                scan_scope: str = "directory",
@@ -1628,7 +1679,7 @@ def get_phases(scan_mode: str, app_info: dict | None = None,
     phases: list[ScanPhase] = []
     has_websockets = app_info.get("has_websockets", True)
 
-    skip_recon = scan_scope == "url_only"
+    skip_recon = scan_scope == "url_only" and not focus_areas
     allowed_ids = _resolve_focus_phases(focus_areas or [])
 
     if scan_mode in ("website", "both"):
@@ -1648,6 +1699,13 @@ def get_phases(scan_mode: str, app_info: dict | None = None,
             if allowed_ids is not None and p.id not in allowed_ids:
                 continue
             phases.append(p)
+
+    # Conditionally add LLM security phase when LLM features are detected
+    # or when the user explicitly requests it via focus_areas.
+    _has_llm = app_info.get("has_llm_chat", False)
+    _llm_forced = allowed_ids is not None and "web_llm_security" in allowed_ids
+    if (_has_llm or _llm_forced) and scan_mode in ("website", "both"):
+        phases.append(LLM_SECURITY_PHASE)
 
     if phases and (allowed_ids is None or "attack_chain_analysis" in allowed_ids):
         phases.append(ATTACK_CHAIN_PHASE)
@@ -1760,7 +1818,7 @@ def build_system_prompt(
             "This is a quick reconnaissance-level scan. Be fast and efficient:\n"
             "- Per input/parameter: test 3-5 payloads maximum per vulnerability class\n"
             "- Use only the most common/effective payloads (top canonical examples)\n"
-            "- Skip edge cases, encoding variations, and WAF bypass techniques\n"
+            "- Skip edge cases and encoding variations (EXCEPT for XSS — always try WAF bypass payloads for XSS: case variation, event handlers, SVG/IMG tags, encoding tricks)\n"
             "- Max 15 actions per page/endpoint. Move on quickly if no obvious indicator\n"
             "- Prioritize breadth over depth — check more pages with fewer payloads each\n"
             "- Skip low-severity checks (info-level headers, verbose errors, etc.)"

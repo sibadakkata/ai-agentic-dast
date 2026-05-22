@@ -11,8 +11,16 @@ Finding from AI Agent / Passive Recon
          │
          ▼
 ┌─────────────────────────────────────────────┐
-│  LAYER 0: Passive Recon / Runtime Verified  │
+│  LAYER 0A: Passive Recon / Runtime Verified │
 │  Deterministic facts → immediate verdict    │
+├─────────────────────────────────────────────┤
+│  LAYER 0B: SPA Catch-All Detector           │
+│  Detects SPAs returning index.html for      │
+│  sensitive file paths → FALSE_POSITIVE      │
+├─────────────────────────────────────────────┤
+│  LAYER 0C: Hardcoded Secret Validation      │
+│  Shannon entropy + framework constant       │
+│  filter → rejects fake secrets              │
 ├─────────────────────────────────────────────┤
 │  LAYER 1: Evidence-Based Rules              │
 │  Pattern-match title + HTTP evidence        │
@@ -20,8 +28,13 @@ Finding from AI Agent / Passive Recon
 │  LAYER 2: Confidence Scoring (-10 to +10)   │
 │  Score from HTTP signals → verdict          │
 ├─────────────────────────────────────────────┤
+│  POST-CLASSIFICATION:                       │
+│  • Exploitation tier (validated/informal.)  │
+│  • Triage narrative (AI steps vs engine)    │
+│  • Deduplication by (host + CWE + param)    │
+├─────────────────────────────────────────────┤
 │  Output: Verdict + Severity + CWE/CVSS      │
-│          + Remediation + Evidence            │
+│          + Tier + Narrative + Remediation    │
 └─────────────────────────────────────────────┘
 ```
 
@@ -53,6 +66,31 @@ When runtime verification is inconclusive, 6 rules try to auto-resolve instead o
 | 4 | Runtime evidence has positive signals + moderate confidence | TRUE_POSITIVE (Low) — partial exploitation evidence |
 | 5 | Confidence ≤ -2 + zero positive indicators | FALSE_POSITIVE — insufficient evidence |
 | 6 | Confidence ≥ 1 + non-injection finding | TRUE_POSITIVE (Low) — likely valid low-severity finding |
+
+## Layer 0B: SPA Catch-All Detection
+
+Single-Page Applications (React, Angular, Vue) typically return their main `index.html` shell with HTTP 200 for **any** URL path — including sensitive file paths like `/.git/HEAD` or `/.env`. The AI sees "200 OK" and reports "Sensitive File Accessible," but the response is just the SPA shell.
+
+**Detection logic:**
+1. Finding claims a sensitive file is accessible (title or URL matches known patterns)
+2. HTTP response is 200
+3. Response body contains SPA markers (`<!doctype html>`, `<div id="root">`, `ng-version`, etc.)
+4. Response body does **NOT** contain real file content signatures (`ref: refs/heads/`, `DB_PASSWORD=`, `<?php`, etc.)
+
+**Also marks FALSE_POSITIVE when:** Sensitive file path returns 404/403/410 (file is blocked, not exposed).
+
+## Layer 0C: Hardcoded Secret Validation
+
+The AI's passive recon may detect patterns that look like secrets in JavaScript but are actually framework constants or low-entropy values.
+
+**Shannon entropy check:**
+- Real secrets (API keys, tokens) have high entropy (>4.0 bits/char)
+- Framework constants have low entropy (e.g., `$$ROW_INTERNAL` = 3.2 bits)
+
+**Framework constant database (38 patterns):**
+`$$ROW_INTERNAL`, `__react_devtools`, `ng-version`, `__VUE__`, `__NEXT_DATA__`, `_DATADOG_SYNTHETICS`, `changeme`, `password`, `example`, `test_key`, `sample_key`, etc.
+
+**Result:** Finding is marked FALSE_POSITIVE with explanation of the entropy score and constant match.
 
 ## Layer 1: Evidence-Based Rules
 
@@ -236,6 +274,53 @@ Consistent regardless of what the LLM originally reported:
 | Permissions-Policy Missing | CWE-16 | 2.1 |
 | Password Autocomplete | CWE-522 | 2.1 |
 
+## Exploitation Tiers
+
+After classification, every finding is assigned an **exploitation tier** indicating whether exploitation was actually proven:
+
+| Tier | Meaning | Assigned When |
+|------|---------|---------------|
+| **validated** | Exploitation proven | Runtime confirmed, payload reflected in body, SQL error strings returned, timing differential confirmed, SSRF internal data returned |
+| **informational** | Detected but not proven | Pattern match, missing header, config check, no active exploitation attempt succeeded |
+| **n/a** | Not applicable | FALSE_POSITIVE or NOT_A_FINDING verdicts |
+
+This follows a "proof over probability" methodology — separating findings that would hold up in a bug bounty submission (validated) from those that are observations requiring manual verification (informational).
+
+## Deduplication
+
+After triage, findings are deduplicated by a key of `(target_host, CWE, parameter)`. If no CWE is present, the key falls back to `(target_host, normalized_title, parameter)`.
+
+When duplicates are found, only the **highest severity** instance is kept. This reduces noise from:
+- Multiple scan phases testing the same endpoint
+- Passive recon + active scanning finding the same issue
+- Retry prompts re-discovering existing findings
+
+Typical reduction: **40-60%** fewer findings with zero information loss.
+
+## Triage Narrative
+
+Every finding includes a structured `triage_narrative` object with two sections:
+
+### "What the AI Scanner Tested" (`ai_tested`)
+Step-by-step list of what the AI agent did:
+1. Which endpoint was targeted
+2. What payload was injected (or pattern passively detected)
+3. How many HTTP requests were sent
+4. Whether runtime verification was attempted
+5. What severity the AI originally assigned
+
+### "How Triage Engine Validated" (`triage_validated`)
+Step-by-step list of how the engine independently verified:
+1. HTTP response codes checked
+2. Response bodies analyzed (with byte sizes)
+3. Specific validation logic applied (reflection check, SPA detection, entropy analysis, etc.)
+4. CWE mapping and CVSS scoring
+5. Whether severity was adjusted (and from/to)
+6. Final verdict + exploitation tier
+7. Detailed reasoning
+
+This separation makes it clear to end users exactly what happened during the scan vs what the triage engine concluded during post-processing.
+
 ## Examples
 
 ### SQL Injection — CONFIRMED
@@ -286,5 +371,69 @@ AI Agent reports: "Missing HSTS header"
 Triage:
   Layer 1: Title matches "hsts" + "missing"
   Verdict: TRUE_POSITIVE | Low | CWE-319 | CVSS 4.3
+  Tier: informational
   Dev Action: "Add HSTS header with max-age=31536000"
+```
+
+### SPA Catch-All — FALSE POSITIVE
+
+```
+AI Agent reports: "Sensitive File Accessible: .git/HEAD"
+  URL: https://myapp.com/.git/HEAD
+  Evidence: "HTTP 200 returned for /.git/HEAD"
+
+Triage:
+  Layer 0B: SPA catch-all detected
+    - HTTP 200, Content-Type: text/html
+    - Body contains: <!doctype html>, <div id="root">
+    - Body does NOT contain: ref: refs/heads/, [core], [remote
+  Verdict: FALSE_POSITIVE
+  Reason: "SPA catch-all: server returns the app shell (index.html)
+           for any URL path. HTTP 200 does not mean the file is
+           accessible — the response body is HTML, not file content."
+```
+
+### Fake Secret — FALSE POSITIVE (Entropy Filter)
+
+```
+AI Agent reports: "Hardcoded Master/Service Secret in JavaScript"
+  URL: https://support.ccleaner.com/EclairNG.js
+  Evidence: INTERNAL_KEY:"$$ROW_INTERNAL"
+
+Triage:
+  Layer 0C: Hardcoded secret validation
+    - Value: $$ROW_INTERNAL
+    - Shannon entropy: 3.2 bits (threshold: 4.0)
+    - Match: known framework constant (Salesforce/EclairNG)
+  Verdict: FALSE_POSITIVE
+  Reason: "Flagged value '$$ROW_INTERNAL' is a framework constant
+           or low-entropy string (Shannon entropy: 3.2), not a real
+           secret. Real API keys have high entropy (>4.0) and are
+           20+ random chars."
+```
+
+### Triage Narrative Example
+
+```json
+{
+  "triage_narrative": {
+    "ai_tested": [
+      "Targeted endpoint: https://example.com/search?q=test",
+      "Injected payload: <script>alert(1)</script>",
+      "Sent 1 HTTP request(s) and captured response(s)",
+      "AI classified as: High"
+    ],
+    "triage_validated": [
+      "Checked HTTP response codes: [200]",
+      "Analyzed 1 response body (38 bytes)",
+      "Confirmed: injected payload reflected in response body",
+      "Mapped to: CWE-79",
+      "CVSS scored: 6.1",
+      "Severity adjusted: High -> Medium",
+      "Verdict: TRUE POSITIVE",
+      "Exploitation tier: validated",
+      "Reasoning: XSS payload reflected in response body."
+    ]
+  }
+}
 ```

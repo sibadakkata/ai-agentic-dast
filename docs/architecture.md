@@ -22,7 +22,7 @@ The scanner is built around a **single LLM agent** that drives a real browser an
 │   └────┬─────┘  └────┬─────┘  └────┬─────┘  └──────┬───────┘  │
 │        │              │             │                │          │
 │   ┌────▼──────────────▼─────────────▼────────────────▼───────┐ │
-│   │                    TOOL LAYER (30 tools)                  │ │
+│   │                    TOOL LAYER (31 tools)                  │ │
 │   │  Browser: navigate, click, fill, screenshot               │ │
 │   │  Injection: inject_payload, fuzz_parameter                │ │
 │   │  Observation: get_page_source, get_cookies, get_network   │ │
@@ -101,7 +101,7 @@ The core scanning logic follows an **Observe-Think-Act-Analyze-Plan** cycle:
               │     │ - Try new param? │
               │     │ - Done?          │
               └─────└──────────────────┘
-                   (up to 25 steps per phase)
+                   (up to 50 steps per phase)
 ```
 
 ## Scan Phases
@@ -137,6 +137,20 @@ The core scanning logic follows an **Observe-Think-Act-Analyze-Plan** cycle:
 | 23 | `web_file_upload` | File Upload Testing | A04 | ✓ Extension bypass, polyglot |
 | 24 | `web_password_reset` | Password Reset Flow | A07 | ✓ Token predictability |
 | 25 | `web_session_mgmt` | Session Management | A07 | ✓ Fixation, rotation, concurrent sessions |
+
+### LLM Application Security Phase (conditional)
+
+When the scanner detects chatbot/AI-powered features (via `llm_detect.py` DOM + network heuristics), it auto-includes an LLM security phase. This phase is **deterministic** -- it does not use the LLM agent loop.
+
+| Phase ID | Name | Probes | Detection |
+|----------|------|--------|-----------|
+| `web_llm_security` | LLM Application Security (OWASP LLM Top 10) | 37 built-in + Garak (optional) | Pattern-matching/regex, $0 LLM cost |
+
+**Built-in probes (llm_baseline.py):** 10 prompt injection, 8 info disclosure, 5 output handling, 5 excessive agency, 6 prompt leakage, 3 unbounded consumption.
+
+**Garak (optional):** If installed (`pip install garak`), runs NVIDIA's 50+ probe battery via subprocess. Garak is NOT required -- the scanner works without it.
+
+Force LLM testing on any target with `focus_areas: ["LLM"]`.
 
 ### API Phases (15)
 
@@ -179,7 +193,7 @@ The core scanning logic follows an **Observe-Think-Act-Analyze-Plan** cycle:
 | Mechanism | File | Purpose |
 |-----------|------|---------|
 | **Evidence Buffer** | `agent.py` | Preserves compact test records that survive context trimming |
-| **Hybrid Smart Retry** | `agent.py` `_ACTIVE_RETRY_PHASES`, `_PHASE_CORE_KEYWORDS`, `_RETRY_PROMPTS` | Tool-enabled second pass with phase-tailored prompts for 15 high-impact phases, fired when the phase has 0 findings **or** when findings exist but the phase's core vulnerability class (e.g. credential crack for auth, IDOR for BAC) is missing. Other phases use a cheap evidence-summary pass |
+| **Hybrid Smart Retry** | `retry_prompts.py` `_ACTIVE_RETRY_PHASES`, `_PHASE_CORE_KEYWORDS`, `_RETRY_PROMPTS` | Tool-enabled second pass with phase-tailored prompts for 20 high-impact phases, fired when the phase has 0 findings **or** when findings exist but the phase's core vulnerability class (e.g. credential crack for auth, IDOR for BAC) is missing. Other phases use a cheap evidence-summary pass |
 | **Finding Deduplication** | `web/app.py` `_finding_key`, `_dedupe_findings` | Dedups findings by `(title, url, parameter)` when seeding continue/retry scans and when appending live findings — avoids double-counting passive recon across pre-auth/post-auth passes |
 | **Model ID Resolution** | `web/app.py` `_resolve_model_id` | Normalises display names / aliases / raw litellm ids at every scan-start endpoint — prevents "LLM Provider NOT provided" errors from the UI |
 | **Min Security Calls** | `agent.py` `_MIN_SECURITY_CALLS` | Forces LLM to make enough tool calls before concluding (22 phases) |
@@ -188,7 +202,7 @@ The core scanning logic follows an **Observe-Think-Act-Analyze-Plan** cycle:
 
 > Deep dive on these mechanisms: [Scanner Internals](scanner-internals.md)
 
-## Tool System (30 Tools)
+## Tool System (31 Tools)
 
 | Category | Tools | Purpose |
 |----------|-------|---------|
@@ -214,10 +228,10 @@ The auth module (`auth.py`) handles:
 
 ## Passive Reconnaissance
 
-Before any LLM calls, 24 deterministic check categories run at $0 cost:
+Before any LLM calls, 29+ deterministic check categories run at $0 cost:
 
 **Information Disclosure**
-- Exposed JavaScript source maps (`.js.map` files accessible in production)
+- Exposed JavaScript source maps (`.js.map` files accessible in production) — **plus deep scan: extracts hardcoded secrets and hidden API endpoints from map contents**
 - Hardcoded secrets/tokens in client-side JavaScript
 - Internal URLs/IPs leaked in source code
 - Sensitive files (`.git/`, `.env`, `wp-config.php`)
@@ -243,6 +257,7 @@ Before any LLM calls, 24 deterministic check categories run at $0 cost:
 - HSTS preload readiness (max-age, includeSubDomains)
 - Clickjacking (both X-Frame-Options and frame-ancestors missing)
 - Cache-Control on authenticated pages
+- **WAF/CDN fingerprinting** (15+ products: Cloudflare, Akamai, Fastly, Azure Front Door, Sucuri, Imperva, Kong, Envoy, Varnish, ModSecurity, FortiWeb, Barracuda, F5 BIG-IP — via headers + response body signatures)
 
 **Session & Token Security**
 - Cookie security audit (Secure, HttpOnly, SameSite flags)

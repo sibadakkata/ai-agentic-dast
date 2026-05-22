@@ -758,6 +758,7 @@ input:focus-visible, select:focus-visible, textarea:focus-visible { outline:none
         <label>Scan Profile</label>
         <select id="scan-profile" onchange="onScanProfileChange()">
           <option value="vulnerability_scan" selected>Vulnerability Scan — crawl + OWASP tests (default)</option>
+          <option value="multi_agent">Multi-Agent — parallel specialist agents, deeper coverage</option>
           <option value="crawl_only">Crawl Only — discover URLs/forms/APIs, no attack payloads</option>
         </select>
         <div id="scan-profile-hint" style="display:none;margin-top:6px;padding:10px 14px;border-radius:8px;background:rgba(59,130,246,0.08);border:1px solid rgba(59,130,246,0.25);font-size:12px;color:#1d4ed8;line-height:1.5;">
@@ -2438,6 +2439,8 @@ async function loadScans() {
       var modeColor = {web:'#0400F5',api:'#2563eb',both:'#059669',quick:'#d97706',standard:'#0400F5',deep:'#dc2626'}[mode] || '#6b7280';
       var crawlOnlyBadge = (s.scan_profile === 'crawl_only')
         ? '<span class="badge" style="background:rgba(59,130,246,0.1);color:#1d4ed8;font-size:10px;margin-left:4px;padding:1px 6px;border-radius:8px;font-weight:600;" title="Crawl-only scan (no vulnerability testing)">CRAWL</span>'
+        : (s.scan_profile === 'multi_agent')
+        ? '<span class="badge" style="background:rgba(168,85,247,0.1);color:#7c3aed;font-size:10px;margin-left:4px;padding:1px 6px;border-radius:8px;font-weight:600;" title="Multi-agent parallel scan">MULTI-AGENT</span>'
         : '';
       var started = s.started ? _fmtTime(s.started) : '-';
       var phaseInfo = s.current_phase ? '<div style="font-size:11px;color:var(--text2);margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:200px;" title="' + esc(s.current_phase) + '">' + esc(s.current_phase) + '</div>' : '';
@@ -3991,7 +3994,7 @@ function showErrorView(scanId, data) {
   const errShowAi = true;
   const errAiStatus = data.ai_status || '';
 
-  const _profileLabel = (data.scan_profile === 'crawl_only') ? 'Crawl Only' : 'Vuln Scan';
+  const _profileLabel = (data.scan_profile === 'crawl_only') ? 'Crawl Only' : (data.scan_profile === 'multi_agent') ? 'Multi-Agent' : 'Vuln Scan';
   let errStatsHtml = [
     stat(_shortModel(data.model_name || data.model), 'Model'),
     stat(data.scan_mode || '-', 'Scan Mode'),
@@ -4647,6 +4650,12 @@ var _FINDING_TYPE_RULES = [
   [/dns|subdomain/i, 'DNS & Subdomain'],
   [/deseriali[sz]/i, 'Deserialization'],
   [/timing|enumerat/i, 'Timing & Enumeration'],
+  [/prompt.?inject|llm01|jailbreak|dan.?attack/i, 'LLM: Prompt Injection'],
+  [/system.?prompt.?leak|prompt.?leakage|llm07/i, 'LLM: Prompt Leakage'],
+  [/sensitive.?information.*llm|llm02|llm.?info.?disclos/i, 'LLM: Info Disclosure'],
+  [/improper.?output|llm05|llm.?output/i, 'LLM: Output Handling'],
+  [/excessive.?agency|llm06/i, 'LLM: Excessive Agency'],
+  [/unbounded.?consumption|llm10|token.?stuff/i, 'LLM: Unbounded Consumption'],
 ];
 
 function _inferFindingType(f) {
@@ -4674,6 +4683,25 @@ var _OWASP_TITLES = {
   'A08': 'Software & Data Integrity',
   'A09': 'Logging & Monitoring',
   'A10': 'Server-Side Request Forgery',
+};
+
+var _OWASP_LLM_TITLES = {
+  'LLM01': 'Prompt Injection',
+  'LLM02': 'Sensitive Information Disclosure',
+  'LLM03': 'Supply Chain Vulnerabilities',
+  'LLM04': 'Data and Model Poisoning',
+  'LLM05': 'Improper Output Handling',
+  'LLM06': 'Excessive Agency',
+  'LLM07': 'System Prompt Leakage',
+  'LLM08': 'Vector and Embedding Weaknesses',
+  'LLM09': 'Misinformation',
+  'LLM10': 'Unbounded Consumption',
+};
+
+var _CAT_TO_OWASP_LLM = {
+  'LLM: Prompt Injection': 'LLM01', 'LLM: Info Disclosure': 'LLM02',
+  'LLM: Output Handling': 'LLM05', 'LLM: Excessive Agency': 'LLM06',
+  'LLM: Prompt Leakage': 'LLM07', 'LLM: Unbounded Consumption': 'LLM10',
 };
 
 var _PCI_DSS_TITLES = {
@@ -4761,7 +4789,7 @@ function setGroupBy(mode) {
 }
 
 function _grpButtonsHtml() {
-  var modes = [['category','Issue Category'],['owasp','OWASP'],['severity','Severity'],['pci_dss','PCI DSS'],['sans25','SANS 25']];
+  var modes = [['category','Issue Category'],['owasp','OWASP'],['owasp_llm','OWASP LLM'],['severity','Severity'],['pci_dss','PCI DSS'],['sans25','SANS 25']];
   var html = '<div style="display:inline-flex;align-items:center;gap:6px;"><span style="font-size:11px;font-weight:600;color:var(--text2);">Group by</span><div style="display:inline-flex;gap:2px;border:1px solid var(--border);border-radius:6px;overflow:hidden;">';
   modes.forEach(function(m) {
     var active = _groupByMode === m[0];
@@ -4834,6 +4862,13 @@ function _getGroupKey(f) {
     }
     return code;
   }
+  if (_groupByMode === 'owasp_llm') {
+    var raw = f.owasp_llm || f.owasp_category || '';
+    if (/^LLM\d{2}$/.test(raw)) return raw;
+    var cat = _inferFindingType(f);
+    var inferred = _CAT_TO_OWASP_LLM[cat];
+    return inferred || 'Other (Web)';
+  }
   if (_groupByMode === 'severity') {
     var s = (f.final_severity || f.severity || 'Info');
     s = s.charAt(0).toUpperCase() + s.slice(1).toLowerCase();
@@ -4859,6 +4894,9 @@ function _getGroupLabel(key) {
   if (_groupByMode === 'owasp' && key !== 'Other') {
     return '<span class="cat-id">' + key + '</span> ' + esc(_OWASP_TITLES[key] || key);
   }
+  if (_groupByMode === 'owasp_llm' && key !== 'Other (Web)') {
+    return '<span class="cat-id">' + key + '</span> ' + esc(_OWASP_LLM_TITLES[key] || key);
+  }
   if (_groupByMode === 'pci_dss' && key !== 'Other') {
     return '<span class="cat-id">Req ' + key + '</span> ' + esc(_PCI_DSS_TITLES[key] || key);
   }
@@ -4870,6 +4908,11 @@ function _getGroupLabel(key) {
 
 function _getGroupSorter() {
   if (_groupByMode === 'owasp') return _owaspSort;
+  if (_groupByMode === 'owasp_llm') return function(a, b) {
+    if (a === 'Other (Web)') return 1;
+    if (b === 'Other (Web)') return -1;
+    return a.localeCompare(b);
+  };
   if (_groupByMode === 'severity') return _sevSort;
   if (_groupByMode === 'pci_dss') return _pciSort;
   if (_groupByMode === 'sans25') return _sans25Sort;
@@ -6138,7 +6181,29 @@ function showCompletedFindingDetail(idx) {
   let rrHtml = _buildRrHtml(f.request_response || []);
 
   let triageHtml = '';
-  if (f.reason) {
+  const narrative = f.triage_narrative || {};
+  const aiSteps = narrative.ai_tested || [];
+  const triageSteps = narrative.triage_validated || [];
+  if (aiSteps.length || triageSteps.length) {
+    let nHtml = '<div class="fdm-section"><div class="fdm-section-title">&#128202; Triage Analysis</div>';
+    if (aiSteps.length) {
+      nHtml += '<div style="margin-bottom:14px;"><div style="font-size:11px;font-weight:700;color:#0ea5e9;margin-bottom:6px;text-transform:uppercase;letter-spacing:0.5px;">&#129302; What the AI Scanner Tested</div><ol style="margin:0;padding-left:20px;font-size:12px;color:var(--text);line-height:1.8;">';
+      aiSteps.forEach(s => { nHtml += `<li style="margin-bottom:2px;">${esc(s)}</li>`; });
+      nHtml += '</ol></div>';
+    }
+    if (triageSteps.length) {
+      nHtml += '<div style="border-top:1px solid var(--border);padding-top:10px;"><div style="font-size:11px;font-weight:700;color:#059669;margin-bottom:6px;text-transform:uppercase;letter-spacing:0.5px;">&#9989; How Triage Engine Validated</div><ol style="margin:0;padding-left:20px;font-size:12px;color:var(--text);line-height:1.8;">';
+      triageSteps.forEach(s => { nHtml += `<li style="margin-bottom:2px;">${esc(s)}</li>`; });
+      nHtml += '</ol></div>';
+    }
+    if (f.exploitation_tier && f.exploitation_tier !== 'n/a') {
+      const tierColor = f.exploitation_tier === 'validated' ? '#dc2626' : '#6b7280';
+      const tierLabel = f.exploitation_tier === 'validated' ? 'VALIDATED (Exploitation Proven)' : 'INFORMATIONAL (Detected, Not Proven)';
+      nHtml += `<div style="margin-top:10px;padding:8px 12px;border-radius:6px;background:${f.exploitation_tier==='validated'?'rgba(220,38,38,0.06)':'rgba(107,114,128,0.06)'};border:1px solid ${tierColor}33;"><span style="font-size:11px;font-weight:700;color:${tierColor};">&#127919; ${tierLabel}</span></div>`;
+    }
+    nHtml += '</div>';
+    triageHtml = nHtml;
+  } else if (f.reason) {
     triageHtml = `<div class="fdm-section">
       <div class="fdm-section-title">&#128202; Triage Analysis</div>
       <div class="fdm-evidence" style="color:var(--text2);font-size:12px;">${esc(f.reason)}</div>

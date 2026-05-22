@@ -1,23 +1,40 @@
 """MCP Server for the AI Agentic Web Scanner.
 
 Exposes the scanner's full capabilities as MCP tools that any MCP-compatible
-client (Cursor, Claude Desktop, etc.) can invoke.
+client (Cursor, Claude Desktop, Open Claw, etc.) can invoke.
 
-Two modes:
-  - Remote: Connects to a running scanner instance via REST API (default).
-  - Embedded: Imports scanner modules directly (for same-machine usage).
+Setup:
+  1. Set environment variables (or configure in .cursor/mcp.json):
+       SCANNER_URL  — Base URL of the running scanner (default: http://localhost:8080)
+       SCANNER_USER — HTTP Basic auth username (default: dast-admin)
+       SCANNER_PASS — HTTP Basic auth password (required)
 
-Usage:
-  # Remote mode (connects to scanner at SCANNER_URL)
-  SCANNER_URL=http://your-host:8080 SCANNER_USER=dast-admin SCANNER_PASS=secret python mcp_server.py
+  2. Run via stdio transport (Cursor / Claude Desktop / Open Claw):
+       python mcp_server.py
 
-  # Stdio transport (for Cursor / Claude Desktop)
-  SCANNER_URL=http://your-host:8080 python mcp_server.py --transport stdio
+  3. Or run as SSE server for remote clients:
+       python mcp_server.py --transport sse --port 3001
+
+Cursor integration (.cursor/mcp.json):
+  {
+    "mcpServers": {
+      "agentic-web-scanner": {
+        "command": "python",
+        "args": ["mcp_server.py"],
+        "env": {
+          "SCANNER_URL": "http://your-scanner-host:8080",
+          "SCANNER_USER": "dast-admin",
+          "SCANNER_PASS": "your-password"
+        }
+      }
+    }
+  }
 """
 from __future__ import annotations
 
 import json
 import os
+import sys
 import time
 from typing import Any
 
@@ -30,9 +47,18 @@ SCANNER_PASS = os.environ.get("SCANNER_PASS", "")
 
 mcp = FastMCP(
     "Agentic Web Scanner",
-    instructions="AI-powered security scanner for websites, APIs, and SPAs. "
-                 "Runs OWASP Top 10 + business logic tests using LLM agents.",
+    instructions=(
+        "AI-powered security scanner for websites, APIs, and SPAs. "
+        "Runs OWASP Top 10 + business logic tests using LLM agents. "
+        "Use health_check() first to verify connectivity, then start_scan() "
+        "to begin testing a target. Use query_findings() and get_scan_stats() "
+        "to analyze results across scans."
+    ),
 )
+
+
+class ScannerConnectionError(Exception):
+    """Raised when the scanner backend is unreachable."""
 
 
 def _client() -> httpx.Client:
@@ -41,10 +67,49 @@ def _client() -> httpx.Client:
 
 
 def _request(method: str, path: str, **kwargs) -> dict[str, Any]:
-    with _client() as c:
-        resp = c.request(method, path, **kwargs)
-        resp.raise_for_status()
-        return resp.json()
+    """Make an HTTP request to the scanner API with proper error handling."""
+    try:
+        with _client() as c:
+            resp = c.request(method, path, **kwargs)
+            resp.raise_for_status()
+            return resp.json()
+    except httpx.ConnectError:
+        return {
+            "error": "connection_failed",
+            "message": f"Cannot connect to scanner at {SCANNER_URL}. "
+                       f"Is the scanner running? Check SCANNER_URL env var.",
+            "scanner_url": SCANNER_URL,
+        }
+    except httpx.TimeoutException:
+        return {
+            "error": "timeout",
+            "message": f"Request to {SCANNER_URL}{path} timed out after 30s. "
+                       f"The scanner may be overloaded or unresponsive.",
+        }
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code == 401:
+            return {
+                "error": "authentication_failed",
+                "message": "Invalid credentials. Check SCANNER_USER and SCANNER_PASS env vars.",
+            }
+        if e.response.status_code == 404:
+            return {
+                "error": "not_found",
+                "message": f"Endpoint {path} not found. The scan ID may be invalid.",
+            }
+        try:
+            body = e.response.json()
+        except Exception:
+            body = e.response.text[:500]
+        return {
+            "error": f"http_{e.response.status_code}",
+            "message": str(body),
+        }
+    except Exception as e:
+        return {
+            "error": "unexpected",
+            "message": f"{type(e).__name__}: {e}",
+        }
 
 
 # ── Tools ─────────────────────────────────────────────────────────────
@@ -699,11 +764,27 @@ def scan_api(url: str, collection_file: str = "") -> str:
 
 
 if __name__ == "__main__":
-    import sys
     transport = "stdio"
-    for arg in sys.argv[1:]:
-        if arg.startswith("--transport="):
-            transport = arg.split("=", 1)[1]
-        elif arg == "--transport" and sys.argv.index(arg) + 1 < len(sys.argv):
-            transport = sys.argv[sys.argv.index(arg) + 1]
-    mcp.run(transport=transport)
+    port = 3001
+    args = sys.argv[1:]
+    i = 0
+    while i < len(args):
+        if args[i].startswith("--transport="):
+            transport = args[i].split("=", 1)[1]
+        elif args[i] == "--transport" and i + 1 < len(args):
+            i += 1
+            transport = args[i]
+        elif args[i].startswith("--port="):
+            port = int(args[i].split("=", 1)[1])
+        elif args[i] == "--port" and i + 1 < len(args):
+            i += 1
+            port = int(args[i])
+        i += 1
+
+    if not SCANNER_PASS and transport == "stdio":
+        print("WARNING: SCANNER_PASS not set. Auth will fail.", file=sys.stderr)
+
+    if transport == "sse":
+        mcp.run(transport="sse", port=port)
+    else:
+        mcp.run(transport="stdio")

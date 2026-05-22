@@ -25,7 +25,25 @@ from .auth import (
     can_use_http_only_auth,
     detect_app_type,
 )
-from .active_baseline import run_bare_root_sqli_probe
+from .active_baseline import (
+    run_bare_root_sqli_probe,
+    run_cache_poisoning_probe,
+    run_reflected_xss_probe,
+    run_dom_xss_probe,
+    run_ssrf_probe,
+    run_open_redirect_probe,
+    run_sensitive_path_probe,
+    run_salesforce_probe,
+    run_graphql_introspection_probe,
+    run_http_smuggling_probe,
+    run_oauth_oidc_probe,
+)
+from .subdomain_takeover import (
+    _resolve_cname,
+    _match_provider,
+    build_takeover_findings,
+    TakeoverResult,
+)
 from .llm_config import ContentFiltered, ContextWindowExceeded, MalformedMessages, LLMRouter
 from .passive_recon import (
     run_host_delta_passive_check,
@@ -41,6 +59,9 @@ from .prompts import (
 )
 from .severity import classify_severity
 from .tools import TOOL_DEFINITIONS, ScanTools
+from .llm_detect import detect_llm_features
+from .llm_baseline import run_all_probes as run_llm_baseline_probes
+from .garak_runner import run_garak, is_garak_available
 
 logger = logging.getLogger(__name__)
 
@@ -1166,6 +1187,8 @@ async def _run_phase_worker(
     worker_id: int,
     on_progress: callable | None = None,
     auth_headers: dict | None = None,
+    crawled_urls: list[str] | None = None,
+    shared_tested: set[str] | None = None,
 ) -> tuple[list[dict], dict]:
     """Run a single scan phase in an isolated browser context.
 
@@ -1197,6 +1220,8 @@ async def _run_phase_worker(
             exclude_urls=exclude_urls,
         )
         tools.set_findings_ref(findings)
+        if shared_tested is not None:
+            tools.set_shared_tested(shared_tested)
 
         phase_prompt = phase.prompt
         if phase.id.startswith("chain_") and prior_findings:
@@ -1213,6 +1238,58 @@ async def _run_phase_worker(
             ctx = _build_findings_context(prior_findings, phase.id)
             if ctx:
                 phase_prompt += "\n\n" + ctx
+
+        # Inject discovered URL parameters from registry into all injection-class phases
+        _PARAM_INJECTION_PHASES = {
+            "web_a03_xss": "XSS",
+            "web_a03_sqli": "SQL injection",
+            "web_a03_cmdi": "command injection",
+            "web_a03_ssti": "template injection (SSTI)",
+            "web_a03_path_traversal": "path traversal",
+            "web_a03_xxe": "XXE",
+            "web_a10": "SSRF",
+            "web_extras": "CRLF/CSRF injection",
+            "api_injection": "injection",
+            "api_ssrf": "SSRF",
+        }
+        if phase.id in _PARAM_INJECTION_PHASES and registry:
+            try:
+                param_urls = []
+                for ep in registry.get_all():
+                    qp = getattr(ep, "query_params", None) or {}
+                    url = getattr(ep, "url", "") or ""
+                    if qp:
+                        param_urls.append(f"  - {url} → params: {list(qp.keys())}")
+                    elif url:
+                        from urllib.parse import parse_qs as _pqs_w
+                        parsed = urlparse(url)
+                        if parsed.query:
+                            param_urls.append(
+                                f"  - {url} → params: {list(_pqs_w(parsed.query).keys())}"
+                            )
+                if param_urls:
+                    vuln_type = _PARAM_INJECTION_PHASES[phase.id]
+                    phase_prompt += (
+                        "\n\n*** PRE-DISCOVERED PARAMETERS (from recon) ***\n"
+                        "The following URLs with query parameters were discovered during recon.\n"
+                        f"You MUST test each parameter for {vuln_type} vulnerabilities:\n"
+                        + "\n".join(param_urls[:30])
+                        + "\nTest EVERY parameter listed above. Do NOT skip any."
+                    )
+                    print(f"  [{phase.id}] Injected {len(param_urls)} pre-discovered param URLs into prompt")
+            except Exception:
+                pass
+
+        if crawled_urls:
+            _urls_sample = crawled_urls[:40]
+            phase_prompt += (
+                "\n\n*** CRAWLED PAGES (from recon) ***\n"
+                "The following pages were discovered during crawling. "
+                "Navigate directly to relevant ones instead of re-exploring:\n"
+                + "\n".join(f"  - {u}" for u in _urls_sample)
+            )
+            if len(crawled_urls) > 40:
+                phase_prompt += f"\n  ... and {len(crawled_urls) - 40} more"
 
         messages: list[dict] = [
             {"role": "system", "content": system_prompt},
@@ -1440,6 +1517,7 @@ async def run_phases_parallel(
     on_progress: callable | None = None,
     max_workers: int = MAX_PARALLEL_WORKERS,
     auth_headers: dict | None = None,
+    crawled_urls: list[str] | None = None,
 ) -> tuple[list[dict], list[dict]]:
     """Run multiple scan phases concurrently with a semaphore cap.
 
@@ -1452,6 +1530,7 @@ async def run_phases_parallel(
     all_findings: list[dict] = []
     all_logs: list[dict] = []
     lock = asyncio.Lock()
+    shared_tested: set[str] = set()
 
     async def _guarded(idx: int, phase: ScanPhase):
         # Defensive: an exception inside _run_phase_worker (e.g. transient
@@ -1485,6 +1564,7 @@ async def run_phases_parallel(
                     worker_id=idx,
                     on_progress=on_progress,
                     auth_headers=auth_headers,
+                    shared_tested=shared_tested,
                 )
             except ScanCancelled:
                 # Cooperative cancellation: propagate so the orchestrator
@@ -1530,6 +1610,69 @@ async def run_phases_parallel(
         if isinstance(r, ScanCancelled):
             raise r
     return all_findings, all_logs
+
+
+async def _run_llm_security_phase(
+    *,
+    app_info: dict,
+    http_client,
+    page=None,
+    on_progress=None,
+    cancel_flag=None,
+    auth_headers: dict | None = None,
+) -> list[dict]:
+    """Orchestrate deterministic LLM security probes.
+
+    Runs ``llm_baseline`` (always) and ``garak_runner`` (when installed).
+    Returns normalised findings.
+    """
+    _cb = on_progress or (lambda *a, **k: None)
+    findings: list[dict] = []
+
+    llm_endpoints = app_info.get("llm_endpoints", [])
+    if not llm_endpoints:
+        logger.info("No LLM endpoints discovered -- skipping LLM probes")
+        return findings
+
+    endpoint = llm_endpoints[0]
+    print(f"  [LLM-SEC] Testing LLM endpoint: {endpoint}")
+    _cb("llm_security_start", {"endpoint": endpoint, "total_probes": 37})
+
+    # 1. Run built-in deterministic probes
+    try:
+        baseline_findings = await run_llm_baseline_probes(
+            http_client=http_client,
+            endpoint=endpoint,
+            headers=auth_headers,
+            on_progress=_cb,
+            cancel_flag=cancel_flag,
+        )
+        findings.extend(baseline_findings)
+        print(f"  [LLM-SEC] Baseline probes: {len(baseline_findings)} findings")
+    except Exception as e:
+        logger.warning("LLM baseline probes failed: %s", e)
+
+    # 2. Run Garak if available
+    if is_garak_available():
+        try:
+            garak_findings = await run_garak(
+                target_endpoint=endpoint,
+                headers=auth_headers,
+                on_progress=_cb,
+            )
+            findings.extend(garak_findings)
+            print(f"  [LLM-SEC] Garak probes: {len(garak_findings)} findings")
+        except Exception as e:
+            logger.warning("Garak runner failed: %s", e)
+    else:
+        print("  [LLM-SEC] Garak not installed -- skipping (pip install garak)")
+
+    # Apply deterministic severity classification
+    for f in findings:
+        classify_severity(f)
+
+    _cb("llm_security_done", {"findings_count": len(findings)})
+    return findings
 
 
 async def run_scan(
@@ -1880,11 +2023,82 @@ async def run_scan(
         user_b_auth_header = next((i["header"] for i in _extra_identities if i["label"] == "User B"), {})
         user_b_cookie_str = next((i["cookie"] for i in _extra_identities if i["label"] == "User B"), "")
 
-        # ── Navigate to target & wait for SPA readiness (generic) ────
-        # After OIDC/SSO auth the browser may still be on the login URL.
-        # We must land on the actual target host before passive recon can
-        # find SPA resources (iframes, CDN scripts, dynamic chunks).
+        # ── Pre-connect DNS takeover check ──────────────────────────
+        # Before trying HTTP, resolve the target's CNAME chain. If the
+        # target itself is a dangling subdomain (NXDOMAIN + CNAME to a
+        # claimable provider), emit the finding and short-circuit — there
+        # is no HTTP service to scan.
         target_host = urlparse(target.url).hostname or ""
+        _takeover_short_circuit = False
+        try:
+            cname_chain, is_nxdomain = await _resolve_cname(target_host)
+            if cname_chain or is_nxdomain:
+                matched_providers = _match_provider(cname_chain, target_host)
+                if matched_providers and is_nxdomain:
+                    for prov in matched_providers:
+                        tr = TakeoverResult(
+                            hostname=target_host,
+                            vulnerable=True,
+                            service=prov.service,
+                            evidence=(
+                                f"CNAME chain: {' -> '.join(cname_chain) or target_host} "
+                                f"resolves to NXDOMAIN. The CNAME target matches "
+                                f"{prov.service} which is claimable."
+                            ),
+                            cname_chain=cname_chain,
+                            severity=prov.severity,
+                            confidence="High",
+                        )
+                        for f in build_takeover_findings([tr]):
+                            findings.append(f)
+                            _cb("finding", {**f, "phase": "Pre-Connect DNS Check"})
+                    print(f"  [DNS] Subdomain takeover: {target_host} -> NXDOMAIN "
+                          f"(CNAME: {' -> '.join(cname_chain)}), "
+                          f"provider: {', '.join(p.service for p in matched_providers)}")
+                    _cb("progress_msg", {
+                        "message": f"Target {target_host} is a dangling subdomain "
+                                   f"(takeover possible via {matched_providers[0].service}). "
+                                   f"No HTTP service to scan."
+                    })
+                    _takeover_short_circuit = True
+                elif is_nxdomain and not cname_chain:
+                    tr = TakeoverResult(
+                        hostname=target_host,
+                        vulnerable=True,
+                        service="Unknown (dangling DNS)",
+                        evidence=(
+                            f"{target_host} resolves to NXDOMAIN with no CNAME. "
+                            f"The DNS record is orphaned — potential takeover if "
+                            f"the domain registration lapses or a wildcard is present."
+                        ),
+                        cname_chain=[],
+                        severity="Medium",
+                        confidence="Medium",
+                    )
+                    for f in build_takeover_findings([tr]):
+                        findings.append(f)
+                        _cb("finding", {**f, "phase": "Pre-Connect DNS Check"})
+                    print(f"  [DNS] {target_host} -> NXDOMAIN (no CNAME, orphaned record)")
+                elif cname_chain and not is_nxdomain and matched_providers:
+                    logger.info("CNAME chain for %s matches %s but host resolves — not dangling",
+                                target_host, [p.service for p in matched_providers])
+        except Exception as e:
+            logger.debug("Pre-connect DNS check failed (non-fatal): %s", e)
+
+        if _takeover_short_circuit:
+            metrics["phases_completed"] = 1
+            metrics["phase_log"].append({
+                "phase": 1, "name": "Pre-Connect DNS Takeover",
+                "findings": len(findings), "tool_calls": 0,
+                "skipped_reason": "target_is_dangling_subdomain",
+            })
+            if hasattr(http_client, "aclose"):
+                await http_client.aclose()
+            if browser:
+                await browser.close()
+            return findings, metrics
+
+        # ── Navigate to target & wait for SPA readiness (generic) ────
         landed_on_target = False
         if _use_fast_path:
             # No browser to navigate; treat as landed so downstream passive
@@ -1961,12 +2175,26 @@ async def run_scan(
 
         # Detect app type AFTER navigation (not on the login page)
         if _use_fast_path:
-            # Pure API scan — no SPA/framework detection needed.
+            # Pure API scan -- no SPA/framework detection needed.
             app_info = {"is_spa": False, "framework": "api_only", "has_websockets": False}
         else:
             app_info = await detect_app_type(page)
-        print(f"  [DETECT] SPA: {app_info.get('is_spa')}, Framework: {app_info.get('framework')}, WebSockets: {app_info.get('has_websockets')}")
-        _cb("detect", {"is_spa": app_info.get("is_spa"), "framework": app_info.get("framework")})
+
+        # Detect LLM-powered features (chatbot, AI assistant, etc.)
+        try:
+            _network_log = []
+            if hasattr(tools, "get_network_log_raw"):
+                _network_log = tools.get_network_log_raw()
+            llm_info = await detect_llm_features(
+                page=page, http_client=http_client,
+                network_log=_network_log,
+            )
+            app_info.update(llm_info)
+        except Exception as e:
+            logger.debug("LLM feature detection failed (non-fatal): %s", e)
+
+        print(f"  [DETECT] SPA: {app_info.get('is_spa')}, Framework: {app_info.get('framework')}, WebSockets: {app_info.get('has_websockets')}, LLM Chat: {app_info.get('has_llm_chat', False)}")
+        _cb("detect", {"is_spa": app_info.get("is_spa"), "framework": app_info.get("framework"), "has_llm_chat": app_info.get("has_llm_chat", False)})
 
         def _passive_progress(event, data):
             if event == "out_of_scope":
@@ -2091,6 +2319,131 @@ async def run_scan(
                 print(f"  [SPA] Failed (non-fatal): {e}")
                 logger.warning("SPA crawl failed: %s", e, exc_info=True)
 
+        # ── Extract <a href> URLs with query params from the live page ──
+        # The SPA crawl captures XHR/fetch traffic but misses regular HTML
+        # links. This programmatic extraction ensures URL parameters hidden
+        # in <a href> (e.g. ?key=, ?style=) are discovered regardless of
+        # whether the LLM clicks them during recon.
+        if page is not None:
+            try:
+                href_urls = await page.evaluate(
+                    "() => [...document.querySelectorAll('a[href]')]"
+                    ".map(a => a.href).filter(h => h.startsWith('http'))"
+                )
+                _href_added = 0
+                for href in (href_urls or []):
+                    if not _is_in_scope(href, allowed_domains):
+                        continue
+                    if href not in metrics["pages_list"]:
+                        metrics["pages_list"].append(href)
+                        metrics["pages_crawled"] += 1
+                        _cb("crawl", {"url": href, "type": "page",
+                                      "tool": "href_extract",
+                                      "count": metrics["pages_crawled"]})
+                        _href_added += 1
+                if _href_added:
+                    print(f"  [HREF] Extracted {_href_added} link URLs from page")
+            except Exception as e:
+                logger.debug("href extraction failed (non-fatal): %s", e)
+
+        # ── Post-crawl LLM re-detection ──────────────────────────────
+        # The initial detect_llm_features() only sees the landing page.
+        # SPAs like ai.norton.com hide chatbots behind sidebar navigation
+        # (e.g. "Chat with Superparent").  After the SPA crawl + href
+        # extraction we have a richer view of the app, so we re-check:
+        #   1. Network endpoints discovered during crawl
+        #   2. Crawled page URLs that hint at chat/AI features
+        #   3. Navigate to chat-like pages and re-run DOM detection
+        if page is not None and not app_info.get("has_llm_chat", False):
+            from .llm_detect import match_llm_endpoints_from_urls
+            _crawled = metrics.get("pages_list", [])
+            _chat_hints = [u for u in _crawled if any(
+                kw in u.lower() for kw in (
+                    "chat", "copilot", "assist", "ai/", "/ask",
+                    "converse", "superparent", "bot", "/llm",
+                    "/rag", "/generate", "/completions",
+                )
+            )]
+            _api_llm = match_llm_endpoints_from_urls(_crawled)
+
+            if _chat_hints or _api_llm:
+                print(f"  [LLM-REDETECT] Found chat hints in crawled URLs: {_chat_hints[:5]}")
+                if _api_llm:
+                    app_info.setdefault("llm_endpoints", []).extend(_api_llm)
+                    app_info["has_llm_chat"] = True
+                    app_info["confidence"] = max(app_info.get("confidence", 0), 0.7)
+                    print(f"  [LLM-REDETECT] LLM endpoints found: {_api_llm[:3]}")
+                for hint_url in _chat_hints[:3]:
+                    try:
+                        await page.goto(hint_url, wait_until="domcontentloaded", timeout=12000)
+                        await page.wait_for_timeout(2000)
+                        _network_log2 = []
+                        if hasattr(tools, "get_network_log_raw"):
+                            _network_log2 = tools.get_network_log_raw()
+                        llm_recheck = await detect_llm_features(
+                            page=page, http_client=http_client,
+                            network_log=_network_log2,
+                        )
+                        if llm_recheck.get("has_llm_chat"):
+                            app_info.update(llm_recheck)
+                            print(f"  [LLM-REDETECT] Chat UI detected on {hint_url}! "
+                                  f"(confidence={llm_recheck['confidence']:.2f})")
+                            break
+                    except Exception as e:
+                        logger.debug("LLM re-detect navigation to %s failed: %s", hint_url, e)
+                if app_info.get("has_llm_chat"):
+                    _cb("detect", {
+                        "is_spa": app_info.get("is_spa"),
+                        "framework": app_info.get("framework"),
+                        "has_llm_chat": True,
+                    })
+                    _cb("progress_msg", {
+                        "message": "LLM/chatbot features detected after SPA crawl — "
+                                   "LLM security phase will be added",
+                    })
+            else:
+                # Also check sidebar/nav links for chat-like entries
+                try:
+                    _nav_links = await page.evaluate("""() => {
+                        const links = [...document.querySelectorAll('a, button, [role="menuitem"], nav a')];
+                        return links
+                            .map(el => ({text: (el.textContent || '').trim().toLowerCase(),
+                                         href: el.href || ''}))
+                            .filter(l => ['chat', 'copilot', 'assistant', 'ai ', 'ask ', 'bot']
+                                .some(kw => l.text.includes(kw)));
+                    }""")
+                    if _nav_links:
+                        print(f"  [LLM-REDETECT] Found {len(_nav_links)} chat-like nav elements: "
+                              f"{[l['text'][:30] for l in _nav_links[:3]]}")
+                        for link in _nav_links[:2]:
+                            link_href = link.get("href", "")
+                            if link_href and link_href.startswith("http"):
+                                try:
+                                    await page.goto(link_href, wait_until="domcontentloaded", timeout=12000)
+                                    await page.wait_for_timeout(2000)
+                                    _net = tools.get_network_log_raw() if hasattr(tools, "get_network_log_raw") else []
+                                    llm_recheck = await detect_llm_features(
+                                        page=page, http_client=http_client,
+                                        network_log=_net,
+                                    )
+                                    if llm_recheck.get("has_llm_chat"):
+                                        app_info.update(llm_recheck)
+                                        print(f"  [LLM-REDETECT] Chat UI confirmed via nav link!")
+                                        _cb("detect", {
+                                            "is_spa": app_info.get("is_spa"),
+                                            "framework": app_info.get("framework"),
+                                            "has_llm_chat": True,
+                                        })
+                                        _cb("progress_msg", {
+                                            "message": "LLM/chatbot features detected via navigation — "
+                                                       "LLM security phase will be added",
+                                        })
+                                        break
+                                except Exception as e:
+                                    logger.debug("LLM re-detect nav click to %s failed: %s", link_href, e)
+                except Exception as e:
+                    logger.debug("LLM nav-link detection failed (non-fatal): %s", e)
+
         # ── Baseline Execution (happy path, no LLM) ──
         baseline_context = ""
         api_endpoints = registry.get_all()
@@ -2178,13 +2531,17 @@ async def run_scan(
                                 "request": {"fields": data["fields_count"], "mode": data["mode"]},
                                 "response": {},
                             })
-                    fuzz_results, ep_llm_findings = await fuzz_body(
-                        http_client, br.method, br.url, br.request_body,
-                        headers=br.request_headers, on_progress=_fuzz_progress,
-                        llm_router=router, llm_model=model,
-                    )
-                    all_fuzz_results.extend(fuzz_results)
-                    all_llm_findings.extend(ep_llm_findings)
+                    try:
+                        fuzz_results, ep_llm_findings = await fuzz_body(
+                            http_client, br.method, br.url, br.request_body,
+                            headers=br.request_headers, on_progress=_fuzz_progress,
+                            llm_router=router, llm_model=model,
+                        )
+                        all_fuzz_results.extend(fuzz_results)
+                        all_llm_findings.extend(ep_llm_findings)
+                    except Exception as fuzz_err:
+                        logger.warning("Body fuzzing failed for %s %s: %s", br.method, br.url, fuzz_err)
+                        print(f"  [BODY-FUZZ] Skipping {br.method} {br.url}: {fuzz_err}")
                 body_fuzz_context = fmt_fuzz(all_fuzz_results, all_llm_findings)
                 anomalies = sum(1 for r in all_fuzz_results if r.anomaly)
                 llm_issues = len(all_llm_findings)
@@ -2266,7 +2623,8 @@ async def run_scan(
                     ab_findings = await run_bare_root_sqli_probe(
                         http_client,
                         sorted(ab_hosts),
-                        on_finding=lambda f: _cb("finding", {**f, "phase": "Active Baseline (Bare-Root SQLi)"}),
+                        crawled_urls=metrics.get("pages_list") or [],
+                        on_finding=lambda f: _cb("finding", {**f, "phase": "Active Baseline (SQLi)"}),
                         on_progress=_ab_progress,
                         cancel_flag=cancel_flag,
                     )
@@ -2288,6 +2646,173 @@ async def run_scan(
                             f"  [ACTIVE-BASELINE] Bare-root SQLi: "
                             f"no hits across {len(ab_hosts)} hosts"
                         )
+
+                    # ── Cache Poisoning probe ────────────────────────
+                    p = _next_phase()
+                    _cb("phase_start", {"phase": p, "total": 0, "name": "Active Baseline (Cache Poisoning)", "id": "active_baseline_cache"})
+                    cp_findings = await run_cache_poisoning_probe(
+                        http_client,
+                        sorted(ab_hosts),
+                        crawled_urls=metrics.get("pages_list") or [],
+                        on_finding=lambda f: _cb("finding", {**f, "phase": "Active Baseline (Cache Poisoning)"}),
+                        on_progress=_ab_progress,
+                        cancel_flag=cancel_flag,
+                    )
+                    findings.extend(cp_findings)
+                    _cb("phase_end", {"phase": p, "name": "Active Baseline (Cache Poisoning)",
+                                      "tool_calls": len(ab_hosts) * 7, "findings": len(cp_findings)})
+                    if cp_findings:
+                        print(f"  [ACTIVE-BASELINE] Cache Poisoning: {len(cp_findings)} finding(s)")
+
+                    # ── Reflected XSS probe ──────────────────────────
+                    p = _next_phase()
+                    _cb("phase_start", {"phase": p, "total": 0, "name": "Active Baseline (Reflected XSS)", "id": "active_baseline_xss"})
+                    xss_findings = await run_reflected_xss_probe(
+                        http_client,
+                        sorted(ab_hosts),
+                        crawled_urls=metrics.get("pages_list") or [],
+                        on_finding=lambda f: _cb("finding", {**f, "phase": "Active Baseline (Reflected XSS)"}),
+                        on_progress=_ab_progress,
+                        cancel_flag=cancel_flag,
+                    )
+                    findings.extend(xss_findings)
+                    _cb("phase_end", {"phase": p, "name": "Active Baseline (Reflected XSS)",
+                                      "tool_calls": len(ab_hosts) * 8, "findings": len(xss_findings)})
+                    if xss_findings:
+                        print(f"  [ACTIVE-BASELINE] Reflected XSS: {len(xss_findings)} finding(s)")
+
+                    # ── DOM XSS probe (Playwright) ─────────────────
+                    if browser is not None:
+                        p = _next_phase()
+                        _cb("phase_start", {"phase": p, "total": 0, "name": "Active Baseline (DOM XSS)", "id": "active_baseline_dom_xss"})
+                        dom_xss_findings = await run_dom_xss_probe(
+                            browser,
+                            sorted(ab_hosts),
+                            crawled_urls=metrics.get("pages_list") or [],
+                            on_finding=lambda f: _cb("finding", {**f, "phase": "Active Baseline (DOM XSS)"}),
+                            on_progress=_ab_progress,
+                            cancel_flag=cancel_flag,
+                        )
+                        findings.extend(dom_xss_findings)
+                        _cb("phase_end", {"phase": p, "name": "Active Baseline (DOM XSS)",
+                                          "tool_calls": len(ab_hosts) * 10, "findings": len(dom_xss_findings)})
+                        if dom_xss_findings:
+                            print(f"  [ACTIVE-BASELINE] DOM XSS: {len(dom_xss_findings)} finding(s)")
+
+                    # ── SSRF Bypass probe ────────────────────────────
+                    p = _next_phase()
+                    _cb("phase_start", {"phase": p, "total": 0, "name": "Active Baseline (SSRF Bypass)", "id": "active_baseline_ssrf"})
+                    ssrf_findings = await run_ssrf_probe(
+                        http_client,
+                        sorted(ab_hosts),
+                        crawled_urls=metrics.get("pages_list") or [],
+                        on_finding=lambda f: _cb("finding", {**f, "phase": "Active Baseline (SSRF Bypass)"}),
+                        on_progress=_ab_progress,
+                        cancel_flag=cancel_flag,
+                    )
+                    findings.extend(ssrf_findings)
+                    _cb("phase_end", {"phase": p, "name": "Active Baseline (SSRF Bypass)",
+                                      "tool_calls": len(ab_hosts) * 10, "findings": len(ssrf_findings)})
+                    if ssrf_findings:
+                        print(f"  [ACTIVE-BASELINE] SSRF Bypass: {len(ssrf_findings)} finding(s)")
+
+                    # ── Open Redirect probe ───────────────────────────
+                    p = _next_phase()
+                    _cb("phase_start", {"phase": p, "total": 0, "name": "Active Baseline (Open Redirect)", "id": "active_baseline_redirect"})
+                    redirect_findings = await run_open_redirect_probe(
+                        http_client,
+                        sorted(ab_hosts),
+                        crawled_urls=metrics.get("pages_list") or [],
+                        on_finding=lambda f: _cb("finding", {**f, "phase": "Active Baseline (Open Redirect)"}),
+                        on_progress=_ab_progress,
+                        cancel_flag=cancel_flag,
+                    )
+                    findings.extend(redirect_findings)
+                    _cb("phase_end", {"phase": p, "name": "Active Baseline (Open Redirect)",
+                                      "tool_calls": len(ab_hosts) * 6, "findings": len(redirect_findings)})
+                    if redirect_findings:
+                        print(f"  [ACTIVE-BASELINE] Open Redirect: {len(redirect_findings)} finding(s)")
+
+                    # ── Sensitive Path probe ──────────────────────────
+                    p = _next_phase()
+                    _cb("phase_start", {"phase": p, "total": 0, "name": "Active Baseline (Sensitive Paths)", "id": "active_baseline_paths"})
+                    path_findings = await run_sensitive_path_probe(
+                        http_client,
+                        sorted(ab_hosts),
+                        on_finding=lambda f: _cb("finding", {**f, "phase": "Active Baseline (Sensitive Paths)"}),
+                        on_progress=_ab_progress,
+                        cancel_flag=cancel_flag,
+                    )
+                    findings.extend(path_findings)
+                    _cb("phase_end", {"phase": p, "name": "Active Baseline (Sensitive Paths)",
+                                      "tool_calls": len(ab_hosts) * 20, "findings": len(path_findings)})
+                    if path_findings:
+                        print(f"  [ACTIVE-BASELINE] Sensitive Paths: {len(path_findings)} finding(s)")
+
+                    # ── Salesforce Misconfig probe ────────────────────
+                    p = _next_phase()
+                    _cb("phase_start", {"phase": p, "total": 0, "name": "Active Baseline (Salesforce)", "id": "active_baseline_salesforce"})
+                    sf_findings = await run_salesforce_probe(
+                        http_client,
+                        sorted(ab_hosts),
+                        on_finding=lambda f: _cb("finding", {**f, "phase": "Active Baseline (Salesforce)"}),
+                        on_progress=_ab_progress,
+                        cancel_flag=cancel_flag,
+                    )
+                    findings.extend(sf_findings)
+                    _cb("phase_end", {"phase": p, "name": "Active Baseline (Salesforce)",
+                                      "tool_calls": len(ab_hosts) * 5, "findings": len(sf_findings)})
+                    if sf_findings:
+                        print(f"  [ACTIVE-BASELINE] Salesforce: {len(sf_findings)} finding(s)")
+
+                    # ── GraphQL Introspection probe ──────────────────
+                    p = _next_phase()
+                    _cb("phase_start", {"phase": p, "total": 0, "name": "Active Baseline (GraphQL)", "id": "active_baseline_graphql"})
+                    gql_findings = await run_graphql_introspection_probe(
+                        http_client,
+                        sorted(ab_hosts),
+                        on_finding=lambda f: _cb("finding", {**f, "phase": "Active Baseline (GraphQL)"}),
+                        on_progress=_ab_progress,
+                        cancel_flag=cancel_flag,
+                    )
+                    findings.extend(gql_findings)
+                    _cb("phase_end", {"phase": p, "name": "Active Baseline (GraphQL)",
+                                      "tool_calls": len(ab_hosts) * 8, "findings": len(gql_findings)})
+                    if gql_findings:
+                        print(f"  [ACTIVE-BASELINE] GraphQL Introspection: {len(gql_findings)} finding(s)")
+
+                    # ── HTTP Smuggling probe ──────────────────────────
+                    p = _next_phase()
+                    _cb("phase_start", {"phase": p, "total": 0, "name": "Active Baseline (HTTP Smuggling)", "id": "active_baseline_smuggling"})
+                    smuggle_findings = await run_http_smuggling_probe(
+                        http_client,
+                        sorted(ab_hosts),
+                        on_finding=lambda f: _cb("finding", {**f, "phase": "Active Baseline (HTTP Smuggling)"}),
+                        on_progress=_ab_progress,
+                        cancel_flag=cancel_flag,
+                    )
+                    findings.extend(smuggle_findings)
+                    _cb("phase_end", {"phase": p, "name": "Active Baseline (HTTP Smuggling)",
+                                      "tool_calls": len(ab_hosts) * 3, "findings": len(smuggle_findings)})
+                    if smuggle_findings:
+                        print(f"  [ACTIVE-BASELINE] HTTP Smuggling: {len(smuggle_findings)} finding(s)")
+
+                    # ── OAuth/OIDC probe ──────────────────────────────
+                    p = _next_phase()
+                    _cb("phase_start", {"phase": p, "total": 0, "name": "Active Baseline (OAuth/OIDC)", "id": "active_baseline_oauth"})
+                    oauth_findings = await run_oauth_oidc_probe(
+                        http_client,
+                        sorted(ab_hosts),
+                        on_finding=lambda f: _cb("finding", {**f, "phase": "Active Baseline (OAuth/OIDC)"}),
+                        on_progress=_ab_progress,
+                        cancel_flag=cancel_flag,
+                    )
+                    findings.extend(oauth_findings)
+                    _cb("phase_end", {"phase": p, "name": "Active Baseline (OAuth/OIDC)",
+                                      "tool_calls": len(ab_hosts) * 4, "findings": len(oauth_findings)})
+                    if oauth_findings:
+                        print(f"  [ACTIVE-BASELINE] OAuth/OIDC: {len(oauth_findings)} finding(s)")
+
             except Exception as e:
                 print(f"  [ACTIVE-BASELINE] Failed (non-fatal): {e}")
                 logger.warning("Active baseline probe failed: %s", e, exc_info=True)
@@ -2345,6 +2870,91 @@ async def run_scan(
         has_body_fuzz = bool(body_fuzz_context)
         has_workflow = workflow_replayed or bool(getattr(target, "business_flow", None))
 
+        # ── MULTI-AGENT MODE ──────────────────────────────────────────
+        # When scan_profile == "multi_agent", skip the normal sequential/
+        # parallel phase pipeline and run specialist agents instead.
+        _scan_profile = getattr(target, "scan_profile", "vulnerability_scan")
+        if _scan_profile == "multi_agent":
+            from .orchestrator import run_multi_agent_scan
+            from .multi_agent_context import SharedScanContext
+
+            print("  [MULTI-AGENT] Multi-agent mode activated — specialist agents in parallel")
+            _cb("progress_msg", {"message": "[MULTI-AGENT] Running specialist agents in parallel..."})
+
+            ma_context = SharedScanContext(
+                target_url=target.url,
+                hosts=list(ab_hosts) if 'ab_hosts' in dir() else [urlparse(target.url).hostname or ""],
+                scan_id=getattr(target, "scan_id", ""),
+                crawled_urls=metrics.get("pages_list") or [],
+                auth_token=str(getattr(auth_session, "token", "")) if auth_session else "",
+            )
+
+            _ma_agent_idx = [0]
+            _ma_total_agents = [15]
+
+            def _ma_progress(event, data):
+                if event == "multi_agent_start":
+                    agents = data.get("agents", [])
+                    _ma_total_agents[0] = len(agents)
+                    _cb("scan_start", {"total_phases": len(agents)})
+                    _cb("progress_msg", {"message": f"[MULTI-AGENT] Starting {len(agents)} specialist agents..."})
+                elif event == "agent_start":
+                    _ma_agent_idx[0] += 1
+                    _cb("phase_start", {
+                        "phase": _ma_agent_idx[0],
+                        "total": _ma_total_agents[0],
+                        "name": f"Multi-Agent ({data.get('name', data.get('agent', '?'))})",
+                    })
+                elif event == "agent_end":
+                    _cb("phase_end", {
+                        "phase": _ma_agent_idx[0],
+                        "name": f"Multi-Agent ({data.get('agent', '?')})",
+                        "tool_calls": data.get("tool_calls", 0),
+                        "findings": data.get("findings", 0),
+                    })
+                elif event == "agent_step":
+                    _cb("progress_msg", {
+                        "message": f"[MULTI-AGENT] agent={data.get('agent','?')} step={data.get('step',0)} tool_calls={data.get('tool_calls',0)} findings={data.get('findings',0)}",
+                    })
+                elif event == "multi_agent_end":
+                    _cb("progress_msg", {
+                        "message": f"[MULTI-AGENT] Complete: {data.get('total_findings',0)} findings from {data.get('agents_run',0)} agents in {data.get('elapsed_s',0):.0f}s",
+                    })
+                else:
+                    _cb("progress_msg", {"message": f"[MULTI-AGENT] {event}: {data}"})
+
+            _auth_cookies = []
+            if browser:
+                try:
+                    _ctx = page.context if page else None
+                    if _ctx:
+                        _auth_cookies = await _ctx.cookies()
+                except Exception:
+                    pass
+
+            ma_findings = await run_multi_agent_scan(
+                context=ma_context,
+                model=model,
+                router=router,
+                tools=tools,
+                tool_definitions=TOOL_DEFINITIONS,
+                browser=browser,
+                auth_cookies=_auth_cookies,
+                registry=registry,
+                allowed_domains=allowed_domains,
+                auth_session=auth_session,
+                exclude_urls=getattr(target, "exclude_urls", None) or [],
+                on_finding=lambda f: _cb("finding", f),
+                on_progress=_ma_progress,
+                cancel_flag=cancel_flag,
+            )
+            findings.extend(ma_findings)
+            print(f"  [MULTI-AGENT] Complete: {len(ma_findings)} findings from specialist agents")
+
+            _cb("progress_msg", {"message": f"[MULTI-AGENT] {len(ma_findings)} findings from {len(ma_context.agent_metrics)} agents"})
+
+            return findings, metrics
+
         # ── Split phases into sequential (recon) vs parallel (vuln testing) ──
         # Recon phases (parallel_ok=False) MUST run first sequentially.
         # Vuln testing phases (parallel_ok=True) can run concurrently.
@@ -2390,6 +3000,39 @@ async def run_scan(
             phase_findings_before = len(findings)
             print(f"  [{phase_num}/{total_phases}] Phase: {phase.name} ({phase.id})...", end="", flush=True)
             _cb("phase_start", {"phase": phase_num, "total": total_phases, "name": phase.name, "id": phase.id})
+
+            # ── LLM Security Phase intercept (deterministic, no LLM agent) ──
+            if phase.id == "web_llm_security":
+                try:
+                    llm_findings = await _run_llm_security_phase(
+                        app_info=app_info or {},
+                        http_client=http_client,
+                        page=page,
+                        on_progress=_cb,
+                        cancel_flag=cancel_flag,
+                        auth_headers={},
+                    )
+                    for f in llm_findings:
+                        f.setdefault("phase", phase.name)
+                        _cb("finding", f)
+                    findings.extend(llm_findings)
+                    print(f" {len(llm_findings)} findings")
+                except ScanCancelled:
+                    raise
+                except Exception as e:
+                    logger.warning("LLM security phase failed (non-fatal): %s", e)
+                    print(f" ERROR: {e}")
+
+                metrics["phases_completed"] += 1
+                metrics["phase_log"].append({
+                    "phase": phase.id, "name": phase.name,
+                    "tool_calls": 0,
+                    "findings_count": len(llm_findings) if 'llm_findings' in dir() else 0,
+                })
+                _cb("phase_end", {"phase": phase_num, "name": phase.name,
+                                  "tool_calls": 0,
+                                  "findings": len(findings) - phase_findings_before})
+                continue
 
             phase_prompt = phase.prompt
 
@@ -3656,9 +4299,140 @@ async def run_scan(
                 except Exception as e:
                     logger.warning("Post-auth passive recon failed (non-fatal): %s", e)
 
+                # ── GAP 2+6: Re-extract <a href> and <form action> URLs after LLM recon ──
+                # The LLM navigated/interacted with the SPA during recon, which may
+                # have revealed new links and forms (lazy-loaded content, post-auth
+                # pages). Re-scrape the DOM now to capture everything the LLM uncovered.
+                if page is not None:
+                    try:
+                        post_recon_urls = await page.evaluate("""() => {
+                            const urls = new Set();
+                            document.querySelectorAll('a[href]').forEach(a => {
+                                if (a.href && a.href.startsWith('http')) urls.add(a.href);
+                            });
+                            document.querySelectorAll('form[action]').forEach(f => {
+                                try {
+                                    const u = new URL(f.action, location.href);
+                                    if (u.protocol.startsWith('http')) urls.add(u.href);
+                                } catch {}
+                            });
+                            return [...urls];
+                        }""")
+                        _post_added = 0
+                        for href in (post_recon_urls or []):
+                            if not _is_in_scope(href, allowed_domains):
+                                continue
+                            if href not in metrics["pages_list"]:
+                                metrics["pages_list"].append(href)
+                                metrics["pages_crawled"] += 1
+                                _cb("crawl", {"url": href, "type": "page",
+                                              "tool": "post_recon_extract",
+                                              "count": metrics["pages_crawled"]})
+                                _post_added += 1
+                        if _post_added:
+                            print(f"  [POST-RECON] Extracted {_post_added} new URLs (hrefs+forms) after LLM recon")
+                    except Exception as e:
+                        logger.debug("Post-recon URL extraction failed (non-fatal): %s", e)
+
+        # ── Post-auth SPA re-crawl (smaller budget) ─────────────────
+        if (page is not None
+            and target.scan_mode in ("website", "both")
+            and auth_success
+            and not _use_fast_path):
+            try:
+                from .spa_crawler import run_spa_crawl
+                print("  [SPA-2] Re-crawling SPA post-authentication...")
+                p_spa2 = _next_phase()
+                _cb("phase_start", {"phase": p_spa2, "total": 0,
+                                    "name": "SPA Crawl (post-auth)", "id": "spa_crawl_post_auth"})
+
+                def _spa2_progress(event, data):
+                    _cb("progress_msg", {"message": f"[SPA-2] {event}: {data}"})
+
+                spa2_endpoints, spa2_oos = await run_spa_crawl(
+                    page=page,
+                    target_url=target.url,
+                    target_host=(urlparse(target.url).hostname or "").lower(),
+                    allowed_hosts=allowed_domains,
+                    max_duration_s=30,
+                    max_clicks=30,
+                    on_progress=_spa2_progress,
+                )
+                _spa2_added = 0
+                for ep in spa2_endpoints:
+                    if _is_in_scope(ep.url, allowed_domains):
+                        if ep.url not in metrics["pages_list"]:
+                            metrics["pages_list"].append(ep.url)
+                            metrics["pages_crawled"] += 1
+                            _cb("crawl", {"url": ep.url, "type": "api",
+                                          "tool": "spa_crawl_post_auth",
+                                          "count": metrics["pages_crawled"]})
+                            _spa2_added += 1
+                        registry.add([ep])
+                print(f"  [SPA-2] Post-auth crawl: +{_spa2_added} new endpoints")
+                _cb("phase_end", {"phase": p_spa2, "name": "SPA Crawl (post-auth)",
+                                  "tool_calls": 0, "findings": 0})
+            except Exception as e:
+                logger.debug("Post-auth SPA re-crawl failed (non-fatal): %s", e)
+
+        # ── Crawl coverage metric ────────────────────────────────────
+        _crawled_total = metrics.get("pages_crawled", 0)
+        _crawled_list = metrics.get("pages_list", [])
+        _unique_paths: set[str] = set()
+        for _cu in _crawled_list:
+            try:
+                _unique_paths.add(urlparse(_cu).path)
+            except Exception:
+                pass
+        _coverage = {
+            "total_urls": len(_crawled_list),
+            "unique_paths": len(_unique_paths),
+            "pages_crawled": _crawled_total,
+        }
+        _cb("progress_msg", {"message": f"[CRAWL-COVERAGE] {_coverage}"})
+        if _crawled_total < 5:
+            print(f"  [CRAWL-COVERAGE] Warning: only {_crawled_total} pages crawled. "
+                  f"Coverage may be limited. Consider adding authentication or "
+                  f"increasing crawl budget.")
+
         # ── Parallel Vuln-Testing Fan-Out ─────────────────────────────
         if run_in_parallel:
             _check_cancel()
+            # Inject crawled URLs with query params into registry so parallel
+            # workers (especially XSS) know about discovered parameters.
+            from urllib.parse import parse_qs as _pqs
+            _pages = metrics.get("pages_list", [])
+            _injected = 0
+            print(f"  [PARAM-INJECT] pages_list has {len(_pages)} URLs")
+            for page_url in _pages:
+                try:
+                    parsed = urlparse(page_url)
+                    if not (parsed.query and parsed.scheme in ("http", "https")):
+                        continue
+                    qp = {k: v[0] if v else ""
+                          for k, v in _pqs(parsed.query, keep_blank_values=True).items()}
+                    if not qp:
+                        continue
+                    from scanners.ai_agent.api_import import APIEndpoint
+                    registry.add([APIEndpoint(
+                        method="GET",
+                        url=page_url,
+                        path=parsed.path or "/",
+                        headers={},
+                        query_params=qp,
+                        body=None,
+                        body_type="none",
+                        auth_type="none",
+                        auth_value=None,
+                        tags=["crawled"],
+                        variables={},
+                        original_name=f"crawled:{parsed.path}",
+                    )])
+                    _injected += 1
+                except Exception:
+                    pass
+            if _injected:
+                print(f"  [PARAM-INJECT] Injected {_injected} URLs with query params into registry")
             print(f"  [PARALLEL] Launching {len(run_in_parallel)} vuln phases concurrently...")
             _cb("parallel_start", {
                 "phases": [p.id for p in run_in_parallel],

@@ -78,6 +78,21 @@ _ERROR_INDICATORS = [
     "internal server error", "traceback", "fatal",
 ]
 
+_WAF_SIGNATURES = [
+    "access denied", "request blocked", "web application firewall",
+    "cloudflare", "sucuri", "modsecurity", "fortiweb", "barracuda",
+    "incapsula", "imperva", "f5 big-ip", "wallarm", "akamai ghost",
+    "blocked by security", "your request has been blocked",
+    "this request was blocked by the security rules",
+]
+
+
+def _detect_waf_block(status_code: int, body: str) -> bool:
+    if status_code in (403, 406, 429, 503):
+        body_lower = body[:5000].lower()
+        return any(sig in body_lower for sig in _WAF_SIGNATURES)
+    return False
+
 
 def _extract_vuln_signals(body: str, status_code: int, payload: str = "") -> dict:
     """Extract vulnerability signals from an HTTP response body.
@@ -206,6 +221,20 @@ class ScanTools:
         # sibling hosts (e.g., SPA XHRs to *.example.com that only surface
         # post-authentication). Hostnames only; no scheme/port.
         self._discovered_hosts: set[str] = set()
+        self._shared_tested: set[str] | None = None
+
+    def set_shared_tested(self, shared: set[str]) -> None:
+        """Bind a shared tested-endpoint set for cross-worker dedup."""
+        self._shared_tested = shared
+
+    def _already_tested(self, method: str, url: str, param: str) -> bool:
+        if self._shared_tested is None:
+            return False
+        key = f"{method.upper()}|{url.split('?')[0]}|{param}"
+        if key in self._shared_tested:
+            return True
+        self._shared_tested.add(key)
+        return False
 
     def set_findings_ref(self, findings: list[dict]) -> None:
         """Bind the shared findings list so tools can read it."""
@@ -796,11 +825,13 @@ class ScanTools:
             except Exception:
                 pass
 
+            waf_likely = _detect_waf_block(status_code, content)
             result = {
                 "status": status_code,
                 "url": self._page.url,
                 "body_snippet": body_snippet,
                 "reflected": reflected,
+                "waf_likely": waf_likely,
             }
 
             signals = _extract_vuln_signals(content, status_code, payload=payload)
@@ -1210,6 +1241,9 @@ class ScanTools:
             return {"error": f"EXCLUDED by user: {endpoint}", "skipped": True}
         if not self._url_in_scope(endpoint):
             return {"error": f"URL out of scope (not in target domain): {endpoint}", "skipped": True}
+        if self._already_tested(method, endpoint, param_name):
+            return {"skipped": True, "reason": "already tested by another worker",
+                    "endpoint": endpoint, "param": param_name}
         results = []
         hdrs = dict(headers) if headers else {}
         base_req_hdrs = dict(self._http_client.headers)
@@ -1252,13 +1286,15 @@ class ScanTools:
                 matched_indicators = [ind for ind in _ERROR_INDICATORS if ind in body_lower]
                 has_errors = bool(matched_indicators)
                 reflected = payload in body
-                anomaly = status_diff or has_errors or reflected or elapsed_ms > 3000
+                waf_likely = _detect_waf_block(resp.status_code, body)
+                anomaly = (status_diff or has_errors or reflected or elapsed_ms > 3000) and not waf_likely
                 result_entry = {
                     "payload": payload,
                     "status": resp.status_code,
                     "body_snippet": _truncate(body),
                     "anomaly": anomaly,
                     "reflected": reflected,
+                    "waf_likely": waf_likely,
                     "timing_ms": round(elapsed_ms, 1),
                     "http_exchange": _build_http_exchange(
                         method=method,
@@ -1288,9 +1324,11 @@ class ScanTools:
                     "timing_ms": 0,
                 })
         anomalous = [r for r in results if r.get("anomaly")]
+        waf_blocked = [r for r in results if r.get("waf_likely")]
         summary: dict = {
             "endpoint": endpoint, "param": param_name, "location": param_location,
             "total_tested": len(results), "anomalies_found": len(anomalous),
+            "waf_blocked": len(waf_blocked),
             "results": results,
         }
         if anomalous:
@@ -1952,6 +1990,47 @@ TOOL_DEFINITIONS = [
                     },
                 },
                 "required": ["chain_name", "steps"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "report_finding",
+            "description": (
+                "Report a security finding/vulnerability. Call this whenever you discover a vulnerability. "
+                "Provide a clear title, severity, description with evidence, and the affected URL."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "title": {
+                        "type": "string",
+                        "description": "Short descriptive title (e.g. 'Reflected XSS in search parameter')",
+                    },
+                    "severity": {
+                        "type": "string",
+                        "enum": ["Critical", "High", "Medium", "Low", "Info"],
+                        "description": "Severity rating",
+                    },
+                    "description": {
+                        "type": "string",
+                        "description": "Detailed description including what was found, how to reproduce, and impact",
+                    },
+                    "url": {
+                        "type": "string",
+                        "description": "The affected URL or endpoint",
+                    },
+                    "evidence": {
+                        "type": "string",
+                        "description": "Raw evidence: HTTP request/response snippets, error messages, payload that triggered it",
+                    },
+                    "vuln_type": {
+                        "type": "string",
+                        "description": "Vulnerability class (e.g. 'XSS', 'SQLi', 'SSRF', 'IDOR', 'CSRF')",
+                    },
+                },
+                "required": ["title", "severity", "description", "url"],
             },
         },
     },

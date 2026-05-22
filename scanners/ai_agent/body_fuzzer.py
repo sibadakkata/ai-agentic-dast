@@ -820,6 +820,8 @@ async def fuzz_body(
     2. JSON schema validation probes
     3. JSON injection probes
     """
+    if not original_body or not original_body.strip():
+        return [], []
     try:
         body_data = json.loads(original_body)
     except (json.JSONDecodeError, TypeError):

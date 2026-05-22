@@ -17,6 +17,8 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 
+import httpx
+
 from fastapi import FastAPI, BackgroundTasks, Depends, HTTPException, Request, UploadFile, File, Form, WebSocket, WebSocketDisconnect, status
 from io import BytesIO
 
@@ -1143,6 +1145,7 @@ async def list_scans(
             "total_tokens": info.get("total_tokens") or info.get("live_tokens", 0),
             "findings_count": info.get("findings_count"),
             "scan_mode": info.get("scan_mode", ""),
+            "scan_profile": info.get("scan_profile", "vulnerability_scan"),
             "phases_completed": info.get("phases_completed", len(info.get("live_phases", []))),
         }
         if info.get("status") == "running":
@@ -1635,7 +1638,7 @@ async def start_scan(request: Request):
     if scan_scope not in ("url_only", "directory", "full_site"):
         scan_scope = "directory"
 
-    if scan_profile not in ("vulnerability_scan", "crawl_only"):
+    if scan_profile not in ("vulnerability_scan", "crawl_only", "multi_agent"):
         scan_profile = "vulnerability_scan"
     # Crawl-only is incompatible with focus_areas (focus_areas selects vuln
     # categories; crawl-only tests nothing). Silently drop focus_areas in
@@ -1897,6 +1900,39 @@ async def _run_scan_task(scan_id, target_url, username, password, model, scan_mo
                         "phase": data.get("phase", ""),
                     })
 
+        # ── Pre-scan connectivity check ────────────────────────────────
+        # Abort early if the target is unreachable (DNS failure, timeout,
+        # connection refused) instead of burning LLM tokens on a dead target.
+        scan["progress"].append(f"Checking target reachability: {target_url}")
+        _save_scan(scan_id)
+        try:
+            async with httpx.AsyncClient(verify=False, timeout=20.0, follow_redirects=True) as _probe:
+                probe_resp = await _probe.get(target_url)
+            scan["progress"].append(
+                f"Target reachable (HTTP {probe_resp.status_code}) — proceeding with scan"
+            )
+        except httpx.TimeoutException:
+            scan["status"] = "error"
+            scan["error"] = f"Target unreachable — connection timed out after 20 s: {target_url}"
+            scan["progress"].append(scan["error"])
+            _save_scan(scan_id)
+            logger.error("Pre-scan connectivity check FAILED (timeout): %s", target_url)
+            return
+        except httpx.ConnectError as exc:
+            scan["status"] = "error"
+            scan["error"] = f"Target unreachable — connection refused or DNS failure: {target_url} ({exc})"
+            scan["progress"].append(scan["error"])
+            _save_scan(scan_id)
+            logger.error("Pre-scan connectivity check FAILED (connect): %s — %s", target_url, exc)
+            return
+        except Exception as exc:
+            scan["status"] = "error"
+            scan["error"] = f"Target unreachable — {type(exc).__name__}: {exc}"
+            scan["progress"].append(scan["error"])
+            _save_scan(scan_id)
+            logger.error("Pre-scan connectivity check FAILED: %s — %s", target_url, exc)
+            return
+
         router = LLMRouter(models=[model])
         scan["_router"] = router
 
@@ -1993,8 +2029,8 @@ async def _run_scan_task(scan_id, target_url, username, password, model, scan_mo
         _cost = sum(c.get("cost_usd", 0) for c in cost_summary) if isinstance(cost_summary, list) else None
         phases_done = len(scan.get("live_phases", []))
         SCANS[scan_id].update({
-            "status": "cancelled",
-            "error": f"Scan stopped by user after {phases_done} phase(s). {len(partial_findings)} finding(s) preserved.",
+            "status": "completed",
+            "error": f"Scan stopped early by user after {phases_done} phase(s). {len(partial_findings)} finding(s) preserved.",
             "duration": round(duration, 1),
             "cost": _cost,
             "total_tokens": _tok,
@@ -2002,7 +2038,7 @@ async def _run_scan_task(scan_id, target_url, username, password, model, scan_mo
             "findings_count": len(partial_findings),
             "result_file": os.path.basename(filepath) if filepath else None,
             "phases_completed": phases_done,
-            "progress": SCANS[scan_id]["progress"] + ["Scan cancelled by user."],
+            "progress": SCANS[scan_id]["progress"] + ["Scan stopped early — results saved and triaged."],
         })
         SCANS[scan_id].pop("auth_challenge", None)
         SCANS[scan_id].pop("interactive_browser", None)
@@ -2184,7 +2220,7 @@ async def stop_scan(scan_id: str):
         pause.clear()
     s["status"] = "stopping"
     s["_stop_requested_at"] = time.time()
-    s["progress"] = s.get("progress", []) + ["Stop requested by user — cancelling..."]
+    s["progress"] = s.get("progress", []) + ["Stop requested by user — finishing up and saving results..."]
     _save_scan(scan_id)
     _schedule_force_cancel(scan_id)
     return {"scan_id": scan_id, "status": "stopping", "message": "Scan will stop within a few seconds."}
@@ -2721,6 +2757,8 @@ async def _get_results_inner(scan_id: str):
             "verified": f.get("verified", False),
             "verification_method": triaged.get("verification_method", "none"),
             "verification_evidence": triaged.get("verification_evidence", ""),
+            "exploitation_tier": triaged.get("exploitation_tier", ""),
+            "triage_narrative": triaged.get("triage_narrative", {}),
         }
 
         key = f"{triaged.get('title', '')}||{triaged.get('url', '')}"

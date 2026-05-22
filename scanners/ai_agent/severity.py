@@ -5,7 +5,7 @@ self-assigned severity drifts run-to-run and model-to-model. This module
 replaces the LLM severity with a deterministic CVSS-driven severity so
 two scans of the same target always land at the same severity bucket.
 
-Pipeline per finding (XBOW-style):
+Pipeline per finding (multi-agent):
   1. Match the title against an OWASP/CWE keyword map -> profile_key.
   2. Look up the base CVSS + vector + CWE in ``CWE_PROFILES``.
   3. Apply evidence-based adjustments (verification, body keywords,
@@ -193,6 +193,15 @@ _TITLE_TO_PROFILE: list[tuple[tuple[str, ...], str]] = [
     # Attack chain
     (("attack chain", "exploit chain", "multi-step exploit"),
      "attack_chain"),
+
+    # LLM-specific (OWASP Top 10 for LLM Applications)
+    (("prompt injection", "llm01"), "llm_prompt_injection"),
+    (("system prompt leakage", "prompt leakage", "llm07"), "llm_prompt_leakage"),
+    (("sensitive information disclosure via llm", "llm02"),
+     "llm_info_disclosure"),
+    (("improper output handling", "llm05"), "llm_output_handling"),
+    (("excessive agency", "llm06"), "llm_excessive_agency"),
+    (("unbounded consumption", "llm10"), "llm_unbounded_consumption"),
 
     # Generic input validation (lowest specificity, last)
     (("input validation",), "input_validation"),
