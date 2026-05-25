@@ -1794,6 +1794,7 @@ async def _run_llm_generated_chatbot_probes(
     page=None,
     chat_input_selector: str | None = None,
     widget_type: str | None = None,
+    auth_session: Any | None = None,
 ) -> list[dict]:
     """Send LLM-agent-crafted adaptive payloads to a chatbot endpoint.
 
@@ -1834,21 +1835,82 @@ async def _run_llm_generated_chatbot_probes(
     if _use_browser:
         from .browser_llm_bridge import send_chat_message as _browser_send
         print(f"  [LLM-AGENT] Using BROWSER mode (headless chatbot interaction)")
-        print(f"  [LLM-AGENT] Preflight: testing chatbot with 'Hello'...")
-        _pf = await _browser_send(
-            page, "Hello",
-            chat_input_selector=chat_input_selector,
-            widget_type=widget_type,
-            timeout=45.0,
-        )
-        _pf_ok = _pf["success"] and _pf["method"] != "no_input_found"
-        print(
-            f"  [LLM-AGENT] Browser preflight: success={_pf['success']} "
-            f"method={_pf['method']} elapsed={_pf['elapsed_ms']}ms "
-            f"resp={_pf['response'][:150]!r}"
-        )
+        # Resolve the optional re-auth callable from auth_session, mirroring
+        # the Garak bridge logic (session can age out between phases 1–5).
+        _reauth_fn = None
+        if auth_session is not None:
+            _reauth_fn = (
+                getattr(auth_session, "_refresh_fn", None)
+                or getattr(auth_session, "refresh_fn", None)
+            )
+        _MAX_PF = 3
+        _pf = None
+        _pf_ok = False
+        for _attempt in range(1, _MAX_PF + 1):
+            print(
+                f"  [LLM-AGENT] Preflight attempt {_attempt}/{_MAX_PF}: "
+                f"'Hello' (timeout=45s)..."
+            )
+            _pf = await _browser_send(
+                page, "Hello",
+                chat_input_selector=chat_input_selector,
+                widget_type=widget_type,
+                timeout=45.0,
+            )
+            _pf_ok = _pf["success"] and _pf["method"] != "no_input_found"
+            print(
+                f"  [LLM-AGENT] Browser preflight {_attempt}: "
+                f"success={_pf['success']} method={_pf['method']} "
+                f"elapsed={_pf['elapsed_ms']}ms resp={_pf['response'][:150]!r}"
+            )
+            if _pf_ok:
+                break
+            if _attempt < _MAX_PF:
+                if _reauth_fn is not None:
+                    try:
+                        print("  [LLM-AGENT] Attempting re-auth before next preflight...")
+                        await _reauth_fn()
+                        print("  [LLM-AGENT] Re-auth completed")
+                    except Exception as _reauth_err:
+                        print(
+                            f"  [LLM-AGENT] Re-auth FAILED "
+                            f"({type(_reauth_err).__name__}: {_reauth_err}) — continuing"
+                        )
+                _backoff = 3.0 * _attempt
+                print(f"  [LLM-AGENT] Backing off {_backoff:.0f}s before retry...")
+                await asyncio.sleep(_backoff)
         if not _pf_ok:
-            print(f"  [LLM-AGENT] Browser preflight FAILED — falling back to HTTP mode")
+            print("  [LLM-AGENT] " + "=" * 64)
+            print(f"  [LLM-AGENT] !!! Browser preflight FAILED after {_MAX_PF} attempts !!!")
+            print(f"  [LLM-AGENT] !!! Falling back to HTTP mode (may also fail) !!!")
+            print("  [LLM-AGENT] " + "=" * 64)
+            # Emit a visible scan-coverage finding so the user knows
+            # LLM01 browser probes were skipped.
+            findings.append({
+                "title": "LLM-Agent browser preflight failed — adaptive LLM01 probes incomplete",
+                "severity": "Info",
+                "category": "Scan Coverage",
+                "owasp_category": "LLM01",
+                "owasp_llm": "LLM01",
+                "cwe": "CWE-1059",
+                "url": endpoint,
+                "parameter": "(chat prompt)",
+                "payload": "(preflight 'Hello')",
+                "evidence": (
+                    f"Browser preflight failed after {_MAX_PF} attempts with "
+                    f"re-auth retry. Adaptive jailbreak probes were skipped "
+                    f"and the scanner fell back to direct HTTP (which may "
+                    f"also be unauthenticated). Last response: "
+                    f"{(_pf or {}).get('response', '')[:200]!r}"
+                ),
+                "remediation": (
+                    "Re-run the scan with a fresh authenticated session. "
+                    "Verify the chatbot UI is reachable from the scanner."
+                ),
+                "phase": "LLM Security",
+                "tool": "llm_agent.preflight",
+                "_finding_source": "llm_baseline",
+            })
             _use_browser = False
     if not _use_browser:
         print(f"  [LLM-AGENT] Using HTTP mode (direct API calls)")
@@ -2035,6 +2097,7 @@ async def _run_llm_security_phase(
     auth_headers: dict | None = None,
     scan_intensity: str = "deep",
     llm_scan_depth: str = "standard",
+    auth_session: Any | None = None,
 ) -> list[dict]:
     """Orchestrate deterministic LLM security probes.
 
@@ -2288,6 +2351,7 @@ async def _run_llm_security_phase(
             page=page if _has_browser else None,
             chat_input_selector=_chat_input_sel,
             widget_type=_widget_type,
+            auth_session=auth_session,
         )
         findings.extend(garak_findings)
         print(f"  [LLM-SEC] Garak probes: {len(garak_findings)} findings")
@@ -2305,6 +2369,7 @@ async def _run_llm_security_phase(
             page=page if _has_browser else None,
             chat_input_selector=_chat_input_sel,
             widget_type=_widget_type,
+            auth_session=auth_session,
         )
         findings.extend(llm_gen_findings)
         print(f"  [LLM-SEC] LLM-generated probes: {len(llm_gen_findings)} findings")
@@ -3000,108 +3065,6 @@ async def run_scan(
             except Exception as e:
                 logger.debug("href extraction failed (non-fatal): %s", e)
 
-        # ── Post-crawl LLM re-detection ──────────────────────────────
-        # The initial detect_llm_features() only sees the landing page.
-        # SPAs like ai.norton.com hide chatbots behind sidebar navigation
-        # (e.g. "Chat with Superparent").  After the SPA crawl + href
-        # extraction we have a richer view of the app, so we re-check:
-        #   1. Network endpoints discovered during crawl
-        #   2. Crawled page URLs that hint at chat/AI features
-        #   3. Navigate to chat-like pages and re-run DOM detection
-        if page is not None and not app_info.get("has_llm_chat", False):
-            from .llm_detect import match_llm_endpoints_from_urls
-            _crawled = list(metrics.get("pages_list", []))
-            if hasattr(tools, "_crawled_urls"):
-                _crawled.extend(tools._crawled_urls)
-            if hasattr(tools, "get_network_log_raw"):
-                _crawled.extend(e.get("url", "") for e in tools.get_network_log_raw())
-            _chat_hints = [u for u in _crawled if any(
-                kw in u.lower() for kw in (
-                    "chat", "copilot", "assist", "ai/", "/ask",
-                    "converse", "superparent", "bot", "/llm",
-                    "/rag", "/generate", "/completions",
-                )
-            )]
-            _api_llm = match_llm_endpoints_from_urls(_crawled)
-
-            if _chat_hints or _api_llm:
-                print(f"  [LLM-REDETECT] Found chat hints in crawled URLs: {_chat_hints[:5]}")
-                if _api_llm:
-                    app_info.setdefault("llm_endpoints", []).extend(_api_llm)
-                    app_info["has_llm_chat"] = True
-                    app_info["confidence"] = max(app_info.get("confidence", 0), 0.7)
-                    print(f"  [LLM-REDETECT] LLM endpoints found: {_api_llm[:3]}")
-                for hint_url in _chat_hints[:3]:
-                    try:
-                        await page.goto(hint_url, wait_until="domcontentloaded", timeout=12000)
-                        await page.wait_for_timeout(2000)
-                        _network_log2 = []
-                        if hasattr(tools, "get_network_log_raw"):
-                            _network_log2 = tools.get_network_log_raw()
-                        llm_recheck = await detect_llm_features(
-                            page=page, http_client=http_client,
-                            network_log=_network_log2,
-                        )
-                        if llm_recheck.get("has_llm_chat"):
-                            app_info.update(llm_recheck)
-                            print(f"  [LLM-REDETECT] Chat UI detected on {hint_url}! "
-                                  f"(confidence={llm_recheck['confidence']:.2f})")
-                            break
-                    except Exception as e:
-                        logger.debug("LLM re-detect navigation to %s failed: %s", hint_url, e)
-                if app_info.get("has_llm_chat"):
-                    _cb("detect", {
-                        "is_spa": app_info.get("is_spa"),
-                        "framework": app_info.get("framework"),
-                        "has_llm_chat": True,
-                    })
-                    _cb("progress_msg", {
-                        "message": "LLM/chatbot features detected after SPA crawl — "
-                                   "LLM security phase will be added",
-                    })
-            else:
-                # Also check sidebar/nav links for chat-like entries
-                try:
-                    _nav_links = await page.evaluate("""() => {
-                        const links = [...document.querySelectorAll('a, button, [role="menuitem"], nav a')];
-                        return links
-                            .map(el => ({text: (el.textContent || '').trim().toLowerCase(),
-                                         href: el.href || ''}))
-                            .filter(l => ['chat', 'copilot', 'assistant', 'ai ', 'ask ', 'bot']
-                                .some(kw => l.text.includes(kw)));
-                    }""")
-                    if _nav_links:
-                        print(f"  [LLM-REDETECT] Found {len(_nav_links)} chat-like nav elements: "
-                              f"{[l['text'][:30] for l in _nav_links[:3]]}")
-                        for link in _nav_links[:2]:
-                            link_href = link.get("href", "")
-                            if link_href and link_href.startswith("http"):
-                                try:
-                                    await page.goto(link_href, wait_until="domcontentloaded", timeout=12000)
-                                    await page.wait_for_timeout(2000)
-                                    _net = tools.get_network_log_raw() if hasattr(tools, "get_network_log_raw") else []
-                                    llm_recheck = await detect_llm_features(
-                                        page=page, http_client=http_client,
-                                        network_log=_net,
-                                    )
-                                    if llm_recheck.get("has_llm_chat"):
-                                        app_info.update(llm_recheck)
-                                        print(f"  [LLM-REDETECT] Chat UI confirmed via nav link!")
-                                        _cb("detect", {
-                                            "is_spa": app_info.get("is_spa"),
-                                            "framework": app_info.get("framework"),
-                                            "has_llm_chat": True,
-                                        })
-                                        _cb("progress_msg", {
-                                            "message": "LLM/chatbot features detected via navigation — "
-                                                       "LLM security phase will be added",
-                                        })
-                                        break
-                                except Exception as e:
-                                    logger.debug("LLM re-detect nav click to %s failed: %s", link_href, e)
-                except Exception as e:
-                    logger.debug("LLM nav-link detection failed (non-fatal): %s", e)
-
         # ── Baseline Execution (happy path, no LLM) ──
         baseline_context = ""
         api_endpoints = registry.get_all()
@@ -3661,103 +3624,26 @@ async def run_scan(
 
             # ── LLM Security Phase intercept (deterministic, no LLM agent) ──
             if phase.id == "web_llm_security":
-                # Always re-scan all crawled URLs (including sensitive path
-                # probe discoveries) for LLM endpoints.  Network-traffic-only
-                # detection misses endpoints the SPA calls via JS but were
-                # never triggered during passive crawling.
-                from .llm_detect import match_llm_endpoints_from_urls
-                _all_urls = list(metrics.get("pages_list", []))
-                if hasattr(tools, "_crawled_urls"):
-                    _all_urls.extend(tools._crawled_urls)
-                if hasattr(tools, "get_network_log_raw"):
-                    _all_urls.extend(e.get("url", "") for e in tools.get_network_log_raw())
-                _existing = set((app_info or {}).get("llm_endpoints", []))
-                _matched = match_llm_endpoints_from_urls(_all_urls)
-                _new = [u for u in _matched if u not in _existing]
-                _all_endpoints = list(_existing) + _new
-                if _all_endpoints:
-                    app_info = app_info or {}
-                    app_info["llm_endpoints"] = _all_endpoints
-                    app_info["has_llm_chat"] = True
-                    print(f"\n  [LLM-SEC] All LLM endpoints ({len(_all_endpoints)}): {_all_endpoints[:8]}")
-                else:
-                    print(f"\n  [LLM-SEC] No LLM endpoints found in {len(_all_urls)} crawled URLs")
-
-                # Extract authenticated cookies AND localStorage tokens from the
-                # browser session so Garak and baseline probes can reach
-                # auth-gated LLM endpoints.  SPAs often store JWTs in
-                # localStorage rather than cookies.
-                _llm_auth_headers: dict[str, str] = {}
-                if page is not None:
-                    try:
-                        _cookies = await page.context.cookies()
-                        _cookie_names = [c['name'] for c in _cookies]
-                        print(f"  [LLM-SEC] Browser cookies ({len(_cookies)}): {_cookie_names[:15]}")
-                        if _cookies:
-                            _cookie_str = "; ".join(
-                                f"{c['name']}={c['value']}" for c in _cookies
-                            )
-                            _llm_auth_headers["Cookie"] = _cookie_str
-
-                            # Extract JWT from cookies for Bearer auth header
-                            for c in _cookies:
-                                if c['name'] in ('auth_token', 'access_token', 'jwt', 'token'):
-                                    val = c['value']
-                                    if val.startswith('eyJ'):
-                                        _llm_auth_headers["Authorization"] = f"Bearer {val}"
-                                        print(f"  [LLM-SEC] Extracted JWT from cookie '{c['name']}' for Bearer auth")
-                                        break
-
-                        # Also check localStorage for JWT/bearer tokens
-                        try:
-                            _ls_token = await page.evaluate("""() => {
-                                const keys = Object.keys(localStorage);
-                                for (const k of keys) {
-                                    const v = localStorage.getItem(k);
-                                    if (v && (k.toLowerCase().includes('token') ||
-                                              k.toLowerCase().includes('auth') ||
-                                              k.toLowerCase().includes('jwt') ||
-                                              k.toLowerCase().includes('session') ||
-                                              k.toLowerCase().includes('access'))) {
-                                        return {key: k, value: v.substring(0, 200)};
-                                    }
-                                    if (v && v.startsWith('eyJ')) {
-                                        return {key: k, value: v.substring(0, 200)};
-                                    }
-                                }
-                                return null;
-                            }""")
-                            if _ls_token:
-                                print(f"  [LLM-SEC] Found localStorage token: {_ls_token['key']}")
-                                val = _ls_token['value']
-                                if val.startswith('eyJ') or 'bearer' in val.lower():
-                                    _llm_auth_headers["Authorization"] = f"Bearer {val}"
-                                else:
-                                    _llm_auth_headers["Authorization"] = f"Bearer {val}"
-                            else:
-                                # Dump all localStorage keys for debugging
-                                _ls_keys = await page.evaluate(
-                                    "() => Object.keys(localStorage)"
-                                )
-                                print(f"  [LLM-SEC] localStorage keys: {_ls_keys[:20]}")
-                        except Exception:
-                            pass
-
-                        _hdr_summary = {k: v[:30] + '...' for k, v in _llm_auth_headers.items()}
-                        print(f"  [LLM-SEC] Auth headers for LLM probes: {list(_hdr_summary.keys())}")
-                    except Exception as _ce:
-                        logger.debug("Cookie extraction failed (non-fatal): %s", _ce)
-
                 try:
+                    # Pass the real auth headers (was empty dict pre-fix — that
+                    # broke HTTP-mode probes whenever the browser bridge fell
+                    # through to direct HTTP, since the chatbot endpoint
+                    # requires Cookie/Bearer auth).  Also pass the session so
+                    # the bridge can re-auth if it ages out during phases 1–5.
+                    _llm_auth_hdrs = {}
+                    try:
+                        if auth_session is not None and hasattr(auth_session, "get_auth_header"):
+                            _llm_auth_hdrs = auth_session.get_auth_header() or {}
+                    except Exception:
+                        _llm_auth_hdrs = {}
                     llm_findings = await _run_llm_security_phase(
                         app_info=app_info or {},
                         http_client=http_client,
                         page=page,
                         on_progress=_cb,
                         cancel_flag=cancel_flag,
-                        auth_headers=_llm_auth_headers,
-                        scan_intensity=getattr(target, "scan_intensity", "deep"),
-                        llm_scan_depth=getattr(target, "llm_scan_depth", "standard"),
+                        auth_headers=_llm_auth_hdrs,
+                        auth_session=auth_session,
                     )
                     for f in llm_findings:
                         f.setdefault("phase", phase.name)

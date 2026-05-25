@@ -640,12 +640,32 @@ async def run_bridge_server(
     chat_input_selector=None,
     widget_type=None,
     target_url=None,
+    preflight_timeout=45.0,
+    preflight_retries=3,
+    reauth_fn=None,
+    on_progress=None,
 ):
     """Start the bridge HTTP server. Returns (runner, endpoint_url).
 
     Garak POSTs a prompt to this server; the server types it into the
     browser chatbot and returns the chatbot's response as plain text.
     Port is auto-detected to avoid conflicts.
+
+    Reliability knobs (added 2026-05 — Norton scan regression):
+        preflight_timeout: per-attempt timeout for the "Hello" preflight.
+            Defaults to 45s (Norton's chatbot replies in ~16s; previous
+            60s value was inside send_chat_message but no retries existed).
+        preflight_retries: how many times to retry the preflight if the
+            chatbot doesn't reply.  First failure is often a silently
+            dropped first message; a second attempt usually succeeds.
+        reauth_fn: optional async callable returning an AuthResult.  Called
+            between preflight attempts when the previous attempt failed
+            with no chat input found OR with a refusal/login-redirect —
+            handles the "browser session expired after 20min of phases 1-5"
+            case that silently broke LLM phase on Norton.
+        on_progress: optional callback ``(event_name, payload_dict)`` used
+            to emit a ``bridge_skip`` event when the preflight gives up
+            (so callers can record a visible "probes skipped" finding).
     """
     from aiohttp import web
 
@@ -722,27 +742,88 @@ async def run_bridge_server(
     logger.info("Browser LLM bridge listening on %s", endpoint)
     print(f"  [BRIDGE] Browser LLM bridge started on {endpoint}")
 
-    # Preflight: send a harmless test message to verify round-trip works.
-    # If the chatbot doesn't respond, there's no point running 600+ probes.
-    print("  [BRIDGE] Preflight: sending test message to verify chatbot responds...")
-    preflight = await send_chat_message(
-        page, "Hello",
-        chat_input_selector=chat_input_selector,
-        widget_type=widget_type,
-        timeout=60.0,
-        target_url=target_url,
-    )
-    pf_ok = preflight["success"] and preflight["method"] != "no_input_found"
-    print(
-        f"  [BRIDGE] Preflight result: success={preflight['success']} "
-        f"method={preflight['method']} elapsed={preflight['elapsed_ms']}ms "
-        f"resp={preflight['response'][:150]!r}"
-    )
+    # Preflight loop: retry up to preflight_retries times with optional
+    # re-auth between attempts.  Original implementation was a single shot
+    # that silently failed when the browser session had expired during
+    # the long-running phases 1–5 — that caused the Norton scan to skip
+    # all 3 LLM01 jailbreak findings on 25-May-2026.
+    _max_attempts = max(1, int(preflight_retries))
+    preflight = None
+    pf_ok = False
+    for attempt in range(1, _max_attempts + 1):
+        print(
+            f"  [BRIDGE] Preflight attempt {attempt}/{_max_attempts}: "
+            f"sending 'Hello' (timeout={preflight_timeout}s)..."
+        )
+        preflight = await send_chat_message(
+            page, "Hello",
+            chat_input_selector=chat_input_selector,
+            widget_type=widget_type,
+            timeout=preflight_timeout,
+            target_url=target_url,
+        )
+        pf_ok = bool(preflight.get("success")) and preflight.get("method") != "no_input_found"
+        print(
+            f"  [BRIDGE] Preflight attempt {attempt}: "
+            f"success={preflight.get('success')} "
+            f"method={preflight.get('method')} "
+            f"elapsed={preflight.get('elapsed_ms')}ms "
+            f"resp={(preflight.get('response') or '')[:150]!r}"
+        )
+        if pf_ok:
+            break
+
+        if attempt < _max_attempts:
+            # Try to re-authenticate if the failure looks like a session
+            # issue (no chat input found, or a refusal/login-redirect text
+            # in the response).  The bridge can't tell for sure but the
+            # cost of an unneeded refresh is < 30s, far cheaper than
+            # silently skipping the entire LLM phase.
+            if reauth_fn is not None:
+                try:
+                    print("  [BRIDGE] Attempting re-auth before next preflight...")
+                    if on_progress:
+                        on_progress("bridge_reauth", {"attempt": attempt})
+                    await reauth_fn()
+                    print("  [BRIDGE] Re-auth completed")
+                except Exception as _reauth_err:
+                    print(f"  [BRIDGE] Re-auth FAILED ({type(_reauth_err).__name__}: {_reauth_err}) — continuing anyway")
+
+            _backoff = 3.0 * attempt
+            print(f"  [BRIDGE] Backing off {_backoff:.0f}s before next attempt...")
+            await asyncio.sleep(_backoff)
+
     if not pf_ok:
-        print("  [BRIDGE] Preflight FAILED — chatbot not responding. Skipping browser bridge.")
-        logger.warning("Bridge preflight failed: method=%s", preflight["method"])
+        # Loud, multi-line banner so this never gets lost in the scan log
+        # and so users can see it in the captured output.  Also emits a
+        # progress event the caller can turn into a visible finding.
+        _final_method = (preflight or {}).get("method", "unknown")
+        _final_resp = (preflight or {}).get("response", "") or ""
+        skip_reason = (
+            f"preflight_failed_after_{_max_attempts}_attempts "
+            f"(last_method={_final_method})"
+        )
+        print("  [BRIDGE] " + "=" * 70)
+        print(f"  [BRIDGE] !!! LLM-AGENT BRIDGE PREFLIGHT FAILED !!!")
+        print(f"  [BRIDGE] !!! Attempts={_max_attempts} last_method={_final_method} !!!")
+        print(f"  [BRIDGE] !!! Last response: {_final_resp[:200]!r} !!!")
+        print(f"  [BRIDGE] !!! LLM01/Garak browser probes WILL BE SKIPPED !!!")
+        print(f"  [BRIDGE] !!! Findings list is INCOMPLETE — do NOT conclude !!!")
+        print(f"  [BRIDGE] !!! that LLM01 issues are fixed.                  !!!")
+        print("  [BRIDGE] " + "=" * 70)
+        logger.warning(
+            "Bridge preflight failed after %d attempts: method=%s",
+            _max_attempts, _final_method,
+        )
+        if on_progress:
+            on_progress("bridge_skip", {
+                "reason": skip_reason,
+                "attempts": _max_attempts,
+                "last_method": _final_method,
+                "last_response": _final_resp[:300],
+            })
         await runner.cleanup()
         return None, None
-    print("  [BRIDGE] Preflight OK — chatbot is responding. Proceeding with probes.")
 
+    print("  [BRIDGE] Preflight OK — chatbot is responding. Proceeding with probes.")
     return runner, endpoint
