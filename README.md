@@ -102,7 +102,8 @@ This loop runs up to 50 steps per phase (20–50 depending on phase complexity).
 | **SPA Crawling & Coverage** | **SPA route walker** extracts routes from Angular, React, Vue, Next.js, Nuxt, and Remix framework globals, then navigates each to capture XHRs via the network listener. **Post-auth SPA re-crawl** runs after authentication with reduced budget to discover auth-gated endpoints. **Crawl coverage metric** tracks total/unique paths and warns when coverage is low (<5 pages). Passively harvests in-scope HTTPS sub-domains from browser XHR/fetch/navigation traffic. After every phase, newly discovered hosts get a **passive re-audit** (TLS + security headers). **Parallel worker dedup** prevents redundant fuzz requests across concurrent workers via shared tested-endpoint set | `spa_crawler.py` route walker, `agent.py` post-auth re-crawl + coverage metric + parallel dedup |
 | **WAF-Aware Fuzzing** | `fuzz_parameter` and `inject_payload` return a `waf_likely` flag when responses match WAF block signatures (Cloudflare, Sucuri, ModSecurity, Imperva, F5, etc.). WAF-blocked responses are excluded from anomaly counts, reducing false positives from WAF interference | `tools.py` `_detect_waf_block`, `_WAF_SIGNATURES` |
 | **Triage Engine** | 3-layer evidence-based classification (TP/FP/Manual Review) with CWE/CVSS, exploitation tiers (validated/informational), entropy-based secret filtering, SPA catch-all detection, deduplication by (host + CWE + parameter), step-by-step triage narrative separating AI actions from engine validation, and **Garak LLM bypass** — Garak probe failures are trusted as TRUE_POSITIVE with the exact chatbot payload and response shown in the exploit evidence and narrative | [Triage Engine](docs/triage-engine.md) |
-| **Authentication** | Auto-detect form, SSO/OIDC, OAuth, API key, bearer — with session refresh. Multi-identity: User B, Admin, Tenant B (password, bearer, or API key) authenticated at scan start | Multi-step OIDC, self-healing sessions, fast-path static-token auth |
+| **Platform Authentication** | SAML 2.0 via Microsoft Entra ID, invite-based onboarding, `admin` / `user` RBAC. Local dev: `SSO_ENABLED=false` + `DAST_AUTH_USER` / `DAST_AUTH_PASS` | [SSO & RBAC Guide](docs/SSO_RBAC.md) |
+| **Scan Authentication** | Auto-detect form, SSO/OIDC, OAuth, API key, bearer — with session refresh. Multi-identity: User B, Admin, Tenant B (password, bearer, or API key) authenticated at scan start | Multi-step OIDC, self-healing sessions, fast-path static-token auth |
 | **Multi-Identity Testing** | Supply up to 3 extra identities (User B, Admin, Tenant B) via UI or API. All identities are authenticated at scan start; their credentials are injected into **all 8 authorization-class phases** (not just BOLA). Supports username/password, bearer tokens, and API keys — including fast-path static-token auth | Cross-user BOLA, cross-role BFLA, cross-tenant access, session/key revocation, license generation |
 | **Deterministic CVSS Severity** | AI Raw findings get a deterministic CVSS v3.1 score and severity bucket (`severity.py`) based on CWE profile + evidence keywords — independent of LLM mood. LLM's original severity preserved as `llm_severity` for comparison | Pre-triage classification, UI shows CVSS column + LLM-vs-deterministic tooltip |
 | **Impact Statements** | LLM-generated business impact for every finding, with passive recon fallback | Contextual risk descriptions in reports |
@@ -163,6 +164,12 @@ uvicorn web.app:app --host 0.0.0.0 --port 8080
 ```
 
 > Full deployment guide: [docs/deployment.md](docs/deployment.md)
+
+## Authentication
+
+Platform sign-in uses **SAML 2.0** (Microsoft Entra ID) with invite-based user onboarding and two roles (`admin`, `user`). For local development, set `SSO_ENABLED=false` and use `DAST_AUTH_USER` / `DAST_AUTH_PASS` on the login page.
+
+See **[docs/SSO_RBAC.md](docs/SSO_RBAC.md)** for Entra app registration, environment variables, bootstrapping the first admin, and troubleshooting.
 
 ## Choosing a Scan Profile
 
