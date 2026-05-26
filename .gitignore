@@ -1,8 +1,12 @@
 # Credentials & keys
 config/targets.env
+config/saml/
 *.env
 !*.env.example
 *.pem
+*.crt
+*.key
+!tests/fixtures/**
 
 # Results (generated at runtime)
 results/*.db
