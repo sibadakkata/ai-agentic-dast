@@ -554,6 +554,13 @@ input:focus-visible, select:focus-visible, textarea:focus-visible { outline:none
       <span>Cost Management</span>
     </a>
   </nav>
+  <div class="sidebar-section admin-only-nav" style="display:none;">SECURITY</div>
+  <nav class="admin-only-nav" style="display:none;">
+    <a class="nav-item" data-page="user-management" onclick="navigateTo('user-management')">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+      <span>User Management</span>
+    </a>
+  </nav>
   <div class="sidebar-section">SYSTEM</div>
   <nav>
     <a class="nav-item" data-page="settings" onclick="navigateTo('settings')">
@@ -988,7 +995,7 @@ input:focus-visible, select:focus-visible, textarea:focus-visible { outline:none
       <span class="sel-count"><span id="sel-count-num">0</span> selected</span>
       <button type="button" class="btn btn-sm btn-outline" onclick="exportScansToExcel()" style="color:var(--green);border-color:rgba(16,185,129,0.4);">Export Selected</button>
       <button type="button" class="btn btn-sm btn-outline" onclick="bulkRetry()" style="color:var(--accent);border-color:var(--accent);">↻ Retry Selected</button>
-      <button type="button" class="btn btn-sm btn-outline" onclick="bulkDelete()" style="color:var(--red);border-color:var(--red);">✕ Delete Selected</button>
+      <button type="button" class="btn btn-sm btn-outline admin-only-ui" onclick="bulkDelete()" style="color:var(--red);border-color:var(--red);display:none;">✕ Delete Selected</button>
       <button type="button" class="btn btn-sm btn-outline" onclick="clearSelection()" style="font-size:11px;">Deselect All</button>
     </div>
     <div id="scans-list"><div class="empty">No scans yet. Configure a target above and click Start Scan.</div></div>
@@ -1458,6 +1465,19 @@ input:focus-visible, select:focus-visible, textarea:focus-visible { outline:none
 </div>
 
 <!-- PAGE: Settings -->
+<div class="page" id="page-user-management" style="display:none;">
+  <div class="card">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:20px;flex-wrap:wrap;gap:12px;">
+      <h2 style="margin:0;"><span style="display:flex;align-items:center;gap:8px;">User Management</span></h2>
+      <button type="button" class="btn btn-primary btn-sm" onclick="openInviteModal()">+ Invite User</button>
+    </div>
+    <h3 style="font-size:14px;margin:0 0 12px;color:var(--text2);">Active Users</h3>
+    <div id="users-table-wrap" style="overflow-x:auto;margin-bottom:28px;">Loading users...</div>
+    <h3 style="font-size:14px;margin:0 0 12px;color:var(--text2);">Pending Invites</h3>
+    <div id="invites-table-wrap">Loading invites...</div>
+  </div>
+</div>
+
 <div class="page" id="page-settings" style="display:none;">
   <div style="display:grid;grid-template-columns:1fr;gap:20px;">
     <div class="card">
@@ -1597,6 +1617,28 @@ function _cvssLink(score, rationale, vector) {
 let currentScanId = null;
 let currentTriagedFindings = [];
 let currentPage = 'dashboard';
+let CURRENT_USER = null;
+
+function isAdmin() {
+  return CURRENT_USER && CURRENT_USER.role === 'admin';
+}
+
+function applyRoleGates() {
+  document.querySelectorAll('.admin-only-nav').forEach(function(el) {
+    el.style.display = isAdmin() ? '' : 'none';
+  });
+  document.querySelectorAll('.admin-only-ui').forEach(function(el) {
+    el.style.display = isAdmin() ? '' : 'none';
+  });
+}
+
+async function loadCurrentUser() {
+  try {
+    const r = await fetch('/api/me', { credentials: 'same-origin' });
+    if (r.ok) CURRENT_USER = await r.json();
+  } catch (e) { /* ignore */ }
+  applyRoleGates();
+}
 
 function navigateTo(page) {
   currentPage = page;
@@ -1608,12 +1650,12 @@ function navigateTo(page) {
   const active = document.querySelector('.nav-item[data-page="' + page + '"]');
   if (active) active.classList.add('active');
 
-  const titles = {dashboard:'Dashboard','new-scan':'New Scan',scans:'Scan History',reports:'Reports',insights:'Findings Insight','cost-management':'Cost Management',settings:'Settings'};
+  const titles = {dashboard:'Dashboard','new-scan':'New Scan',scans:'Scan History',reports:'Reports',insights:'Findings Insight','cost-management':'Cost Management',settings:'Settings','user-management':'User Management'};
   const titleEl = document.getElementById('page-title');
   if (titleEl) titleEl.textContent = titles[page] || page;
 
   const loader = document.getElementById('top-loader');
-  const needsLoad = ['dashboard','scans','reports','cost-management','settings'].includes(page);
+  const needsLoad = ['dashboard','scans','reports','cost-management','settings','user-management'].includes(page);
   if (needsLoad && loader) loader.classList.add('active');
 
   const done = () => { if (loader) loader.classList.remove('active'); };
@@ -1622,6 +1664,7 @@ function navigateTo(page) {
   else if (page === 'reports') { loadReportTargets(); loadReports().finally(done); }
   else if (page === 'cost-management') loadCostManagement().finally(done);
   else if (page === 'settings') loadSettings().finally(done);
+  else if (page === 'user-management') loadUserManagement().finally(done);
   else done();
 }
 
@@ -1913,10 +1956,10 @@ async function loadReports() {
           <div style="display:flex;gap:8px;align-items:center;">
             <span style="font-size:13px;font-weight:600;color:#dc2626;">${pdfs.length} PDF</span>
             <span style="font-size:13px;font-weight:600;color:#059669;">${xlsxs.length} Excel</span>
-            <button onclick="deleteTargetReports('${esc(deleteTargetParam)}')" class="btn btn-sm" style="padding:5px 12px;font-size:12px;background:rgba(220,38,38,0.08);color:#dc2626;border:1px solid rgba(220,38,38,0.25);border-radius:6px;cursor:pointer;" title="Delete all reports & scan data for this target">
+            ${isAdmin() ? `<button onclick="deleteTargetReports('${esc(deleteTargetParam)}')" class="btn btn-sm" style="padding:5px 12px;font-size:12px;background:rgba(220,38,38,0.08);color:#dc2626;border:1px solid rgba(220,38,38,0.25);border-radius:6px;cursor:pointer;" title="Delete all reports & scan data for this target">
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:-2px;margin-right:3px;"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
               Delete All
-            </button>
+            </button>` : ''}
           </div>
         </div>
         <div style="display:flex;flex-direction:column;gap:6px;">`;
@@ -2094,7 +2137,106 @@ async function _loadUiSettingsFromServer() {
   } catch (e) { /* ignore */ }
 }
 
+async function loadUserManagement() {
+  if (!isAdmin()) {
+    document.getElementById('users-table-wrap').innerHTML = '<div class="empty">Admin access required.</div>';
+    return;
+  }
+  try {
+    const [ur, ir] = await Promise.all([
+      fetch('/api/users', { credentials: 'same-origin' }),
+      fetch('/api/invites', { credentials: 'same-origin' }),
+    ]);
+    const users = ur.ok ? (await ur.json()).items || [] : [];
+    const invites = ir.ok ? (await ir.json()).items || [] : [];
+    var uh = '<table style="width:100%;border-collapse:collapse;font-size:13px;"><thead><tr style="text-align:left;border-bottom:1px solid var(--border);"><th style="padding:8px;">Email</th><th>Name</th><th>Role</th><th>Last login</th><th>Actions</th></tr></thead><tbody>';
+    users.forEach(function(u) {
+      uh += '<tr style="border-bottom:1px solid var(--border);"><td style="padding:8px;">' + esc(u.email) + '</td><td>' + esc(u.name || '') + '</td><td>' + esc(u.role) + '</td><td style="font-size:12px;color:var(--text2);">' + esc(u.last_login_at || '-') + '</td><td>';
+      if (u.id !== CURRENT_USER.id) {
+        uh += '<button class="btn btn-sm btn-outline" onclick="changeUserRole(\'' + esc(u.id) + '\',\'' + (u.role === 'admin' ? 'user' : 'admin') + '\')">' + (u.role === 'admin' ? 'Demote' : 'Make admin') + '</button> ';
+        uh += '<button class="btn btn-sm btn-outline" style="color:var(--red);" onclick="deactivateUser(\'' + esc(u.id) + '\')">Deactivate</button>';
+      } else {
+        uh += '<span style="font-size:11px;color:var(--text2);">You</span>';
+      }
+      uh += '</td></tr>';
+    });
+    uh += '</tbody></table>';
+    document.getElementById('users-table-wrap').innerHTML = uh;
+    var ih = invites.length ? '<table style="width:100%;border-collapse:collapse;font-size:13px;"><thead><tr style="text-align:left;border-bottom:1px solid var(--border);"><th style="padding:8px;">Email</th><th>Role</th><th>Expires</th><th></th></tr></thead><tbody>' : '<div class="empty">No pending invites.</div>';
+    if (invites.length) {
+      invites.forEach(function(inv) {
+        ih += '<tr style="border-bottom:1px solid var(--border);"><td style="padding:8px;">' + esc(inv.email) + '</td><td>' + esc(inv.role) + '</td><td style="font-size:12px;">' + esc(inv.expires_at) + (inv.is_expired ? ' <span style="color:var(--red);">(expired)</span>' : '') + '</td><td><button class="btn btn-sm btn-outline" style="color:var(--red);" onclick="revokeInvite(\'' + esc(inv.id) + '\')">Revoke</button></td></tr>';
+      });
+      ih += '</tbody></table>';
+    }
+    document.getElementById('invites-table-wrap').innerHTML = ih;
+  } catch (e) {
+    document.getElementById('users-table-wrap').innerHTML = '<div class="empty" style="color:var(--red);">Failed to load users</div>';
+  }
+}
+
+function openInviteModal() {
+  document.getElementById('invite-form-panel').style.display = 'block';
+  document.getElementById('invite-result-panel').style.display = 'none';
+  document.getElementById('invite-email').value = '';
+  document.getElementById('invite-role').value = 'user';
+  document.getElementById('invite-modal').classList.add('active');
+}
+
+function closeInviteModal() {
+  document.getElementById('invite-modal').classList.remove('active');
+}
+
+async function submitInvite() {
+  const email = document.getElementById('invite-email').value.trim();
+  const role = document.getElementById('invite-role').value;
+  if (!email) return;
+  try {
+    const r = await fetch('/api/users/invite', {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email: email, role: role }),
+    });
+    const d = await r.json();
+    if (!r.ok) { _apiError(d.detail || d.error || 'Invite failed', 'Invite'); return; }
+    document.getElementById('invite-form-panel').style.display = 'none';
+    document.getElementById('invite-result-panel').style.display = 'block';
+    document.getElementById('invite-url-field').value = d.invite_url || '';
+    loadUserManagement();
+  } catch (e) { _apiError(e.message, 'Invite'); }
+}
+
+function copyInviteUrl() {
+  const f = document.getElementById('invite-url-field');
+  f.select();
+  document.execCommand('copy');
+}
+
+async function revokeInvite(id) {
+  if (!await _showConfirm('Revoke Invite', 'Revoke this pending invite?', 'Revoke', 'btn-danger')) return;
+  await fetch('/api/invites/' + id, { method: 'DELETE', credentials: 'same-origin' });
+  loadUserManagement();
+}
+
+async function changeUserRole(userId, role) {
+  await fetch('/api/users/' + userId + '/role', {
+    method: 'POST',
+    credentials: 'same-origin',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ role: role }),
+  });
+  loadUserManagement();
+}
+
+async function deactivateUser(userId) {
+  if (!await _showConfirm('Deactivate User', 'Deactivate this user? They will not be able to sign in.', 'Deactivate', 'btn-danger')) return;
+  await fetch('/api/users/' + userId + '/deactivate', { method: 'POST', credentials: 'same-origin' });
+  loadUserManagement();
+}
+
 async function init() {
+  await loadCurrentUser();
   await _loadModelDropdowns();
   await _loadUiSettingsFromServer();
   _loadModelStatus();
@@ -2597,7 +2739,7 @@ async function loadScans() {
       if (st === 'stopping') actions += '<span style="font-size:11px;color:var(--yellow);font-weight:600;">Stopping...</span>';
       if (st === 'completed') actions += '<button class="btn btn-outline btn-sm" onclick="event.stopPropagation();rescanById(\'' + id + '\')" style="padding:4px 10px;font-size:11px;color:var(--accent);" title="Re-scan">&#8635;</button>';
       if (st === 'error' || st === 'cancelled') actions += '<button class="btn btn-outline btn-sm" onclick="event.stopPropagation();retryScanById(\'' + id + '\')" style="padding:4px 10px;font-size:11px;color:var(--accent);" title="' + ((s.phases_completed || 0) > 0 ? 'Continue' : 'Re-run') + '">&#8635;</button>';
-      actions += '<button class="btn btn-outline btn-sm" onclick="event.stopPropagation();deleteScan(\'' + id + '\')" style="padding:4px 10px;font-size:11px;color:var(--red);border-color:rgba(220,38,38,0.2);" title="Delete">&#10005;</button>';
+      if (isAdmin()) actions += '<button class="btn btn-outline btn-sm" onclick="event.stopPropagation();deleteScan(\'' + id + '\')" style="padding:4px 10px;font-size:11px;color:var(--red);border-color:rgba(220,38,38,0.2);" title="Delete">&#10005;</button>';
 
       var cells = '';
       cells += '<div onclick="event.stopPropagation()"><input type="checkbox" class="scan-check" data-id="' + id + '" onchange="updateToolbar()" style="width:15px;height:15px;accent-color:var(--accent);cursor:pointer;"></div>';
@@ -6586,6 +6728,40 @@ document.addEventListener('keydown', e => {
 #ib-canvas:focus { box-shadow:0 0 0 3px rgba(4,0,245,0.3),0 4px 20px rgba(0,0,0,0.3); }
 </style>
 
+
+<!-- Invite User Modal -->
+<div id="invite-modal" class="confirm-overlay" onclick="if(event.target===this)closeInviteModal()">
+  <div class="confirm-box" style="max-width:480px;text-align:left;" onclick="event.stopPropagation()">
+    <h4 id="invite-modal-title">Invite User</h4>
+    <div id="invite-form-panel">
+      <div class="form-group" style="margin-bottom:14px;">
+        <label style="font-size:12px;font-weight:600;display:block;margin-bottom:6px;">Email</label>
+        <input type="email" id="invite-email" placeholder="user@example.com" style="width:100%;padding:10px 12px;border:1px solid var(--border);border-radius:8px;font-size:14px;">
+      </div>
+      <div class="form-group" style="margin-bottom:18px;">
+        <label style="font-size:12px;font-weight:600;display:block;margin-bottom:6px;">Role</label>
+        <select id="invite-role" style="width:100%;padding:10px 12px;border:1px solid var(--border);border-radius:8px;font-size:14px;">
+          <option value="user">Member (user)</option>
+          <option value="admin">Red Team Admin</option>
+        </select>
+      </div>
+      <div class="confirm-actions" style="justify-content:flex-end;">
+        <button type="button" class="btn btn-sm btn-outline" onclick="closeInviteModal()">Cancel</button>
+        <button type="button" class="btn btn-sm btn-primary" onclick="submitInvite()">Create Invite</button>
+      </div>
+    </div>
+    <div id="invite-result-panel" style="display:none;">
+      <p style="font-size:13px;color:var(--text2);margin-bottom:10px;">Share this link with the invitee (expires in 7 days):</p>
+      <div style="display:flex;gap:8px;">
+        <input type="text" id="invite-url-field" readonly style="flex:1;padding:10px 12px;border:1px solid var(--border);border-radius:8px;font-size:12px;font-family:var(--font-mono);">
+        <button type="button" class="btn btn-sm btn-primary" onclick="copyInviteUrl()">Copy</button>
+      </div>
+      <div class="confirm-actions" style="justify-content:flex-end;margin-top:16px;">
+        <button type="button" class="btn btn-sm btn-outline" onclick="closeInviteModal()">Done</button>
+      </div>
+    </div>
+  </div>
+</div>
 
 <!-- Confirm/Alert Modal -->
 <div id="confirm-modal" class="confirm-overlay" onclick="if(event.target===this)this.classList.remove('active')">
