@@ -191,6 +191,10 @@ resource "aws_security_group" "lambda_backup" {
   tags = {
     Name = "dast-scanner-lambda-backup"
   }
+
+  lifecycle {
+    create_before_destroy = true
+  }
 }
 
 resource "aws_security_group_rule" "rds_ingress_from_lambda" {

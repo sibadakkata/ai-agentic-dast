@@ -93,3 +93,14 @@ PoC Report/__pycache__/
 PoC Report/slide_previews/
 PoC Report/backup/
 PoC Report/~$*.xlsx
+
+# Terraform local state / scratch (never commit)
+infra/terraform/.terraform/
+infra/terraform/*.tfstate
+infra/terraform/*.tfstate.*
+infra/terraform/tfplan*
+infra/terraform/plan_*
+infra/terraform/*.log
+infra/terraform/*.bak
+infra/terraform/terraform.tfvars
+infra/terraform/*.tmp

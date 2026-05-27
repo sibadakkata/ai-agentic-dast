@@ -12,4 +12,8 @@ resource "aws_secretsmanager_secret_version" "rds_master" {
     port     = aws_db_instance.main.port
     dbname   = var.db_name
   })
+
+  lifecycle {
+    ignore_changes = [secret_string] # populated manually during rename
+  }
 }

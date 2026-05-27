@@ -5,11 +5,16 @@ resource "random_password" "db_master" {
 }
 
 resource "aws_db_subnet_group" "main" {
-  name       = "dast-scanner"
+  # Name unchanged: Multi-AZ RDS cannot switch subnet groups in one modify (AWS limitation).
+  name       = "dast-scanner-poc"
   subnet_ids = data.aws_subnets.default.ids
 
   tags = {
     Name = "dast-scanner-db-subnets"
+  }
+
+  lifecycle {
+    create_before_destroy = true
   }
 }
 
@@ -35,6 +40,10 @@ resource "aws_security_group" "rds" {
 
   tags = {
     Name = "dast-scanner-rds"
+  }
+
+  lifecycle {
+    create_before_destroy = true
   }
 }
 
@@ -93,6 +102,9 @@ resource "aws_db_instance" "main" {
   }
 
   lifecycle {
-    ignore_changes = [final_snapshot_identifier]
+    ignore_changes = [
+      final_snapshot_identifier,
+      password, # imported/rotated out-of-band; never rotate via apply
+    ]
   }
 }
