@@ -15,7 +15,7 @@ terraform {
   # Uncomment in a later PR when S3 backend is provisioned:
   # backend "s3" {
   #   bucket         = "dast-scanner-terraform-state"
-  #   key            = "poc/terraform.tfstate"
+  #   key            = "dast/terraform.tfstate"
   #   region         = "us-east-2"
   #   encrypt        = true
   #   dynamodb_table = "dast-scanner-terraform-locks"

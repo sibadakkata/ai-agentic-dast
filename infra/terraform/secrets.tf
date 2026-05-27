@@ -1,6 +1,6 @@
 resource "aws_secretsmanager_secret" "rds_master" {
-  name        = "dast/poc/rds/master"
-  description = "DAST scanner POC RDS master credentials"
+  name        = "dast/rds/master"
+  description = "DAST scanner RDS master credentials"
 }
 
 resource "aws_secretsmanager_secret_version" "rds_master" {

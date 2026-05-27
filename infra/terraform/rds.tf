@@ -1,20 +1,21 @@
 resource "random_password" "db_master" {
-  length  = 32
-  special = true
+  length           = 32
+  special          = true
+  override_special = "!#$%&*()-_=+[]{}<>:?,."
 }
 
 resource "aws_db_subnet_group" "main" {
-  name       = "dast-scanner-poc"
+  name       = "dast-scanner"
   subnet_ids = data.aws_subnets.default.ids
 
   tags = {
-    Name = "dast-scanner-poc-db-subnets"
+    Name = "dast-scanner-db-subnets"
   }
 }
 
 resource "aws_security_group" "rds" {
-  name        = "dast-scanner-poc-rds"
-  description = "PostgreSQL for DAST scanner POC"
+  name        = "dast-scanner-rds"
+  description = "PostgreSQL for DAST scanner"
   vpc_id      = data.aws_vpc.default.id
 
   ingress {
@@ -33,12 +34,12 @@ resource "aws_security_group" "rds" {
   }
 
   tags = {
-    Name = "dast-scanner-poc-rds"
+    Name = "dast-scanner-rds"
   }
 }
 
 resource "aws_iam_role" "rds_monitoring" {
-  name = "dast-scanner-poc-rds-monitoring"
+  name = "dast-scanner-rds-monitoring"
 
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
@@ -58,28 +59,28 @@ resource "aws_iam_role_policy_attachment" "rds_monitoring" {
 }
 
 resource "aws_db_instance" "main" {
-  identifier     = "dast-scanner-poc"
+  identifier     = "dast-scanner"
   engine         = "postgres"
   engine_version = var.engine_version
   instance_class = var.db_instance_class
 
-  allocated_storage     = var.allocated_storage
-  storage_type          = "gp3"
-  storage_encrypted     = true
-  db_name               = var.db_name
-  username              = var.db_username
-  password              = random_password.db_master.result
-  port                  = 5432
+  allocated_storage = var.allocated_storage
+  storage_type      = "gp3"
+  storage_encrypted = true
+  db_name           = var.db_name
+  username          = var.db_username
+  password          = random_password.db_master.result
+  port              = 5432
 
   db_subnet_group_name   = aws_db_subnet_group.main.name
   vpc_security_group_ids = [aws_security_group.rds.id]
 
-  multi_az               = true
-  publicly_accessible    = false
-  backup_retention_period = var.backup_retention_period
-  deletion_protection    = true
-  skip_final_snapshot    = false
-  final_snapshot_identifier = "dast-scanner-poc-final-${formatdate("YYYYMMDDhhmm", timestamp())}"
+  multi_az                  = true
+  publicly_accessible       = false
+  backup_retention_period   = var.backup_retention_period
+  deletion_protection       = true
+  skip_final_snapshot       = false
+  final_snapshot_identifier = "dast-scanner-final-${formatdate("YYYYMMDDhhmm", timestamp())}"
 
   performance_insights_enabled = true
   monitoring_interval          = 60
@@ -88,7 +89,7 @@ resource "aws_db_instance" "main" {
   enabled_cloudwatch_logs_exports = ["postgresql", "upgrade"]
 
   tags = {
-    Name = "dast-scanner-poc"
+    Name = "dast-scanner"
   }
 
   lifecycle {

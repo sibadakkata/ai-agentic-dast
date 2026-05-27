@@ -6,7 +6,7 @@ provider "aws" {
     tags = {
       Project   = "dast-scanner"
       ManagedBy = "terraform"
-      Env       = "poc"
+      Env       = "prod"
     }
   }
 }

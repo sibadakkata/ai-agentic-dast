@@ -1,8 +1,8 @@
 resource "aws_wafv2_web_acl" "main" {
   count = var.enable_waf && var.enable_alb ? 1 : 0
 
-  name        = "dast-scanner-poc"
-  description = "WAF for DAST scanner POC ALB - public-facing, app-level SSO or local auth"
+  name        = "dast-scanner"
+  description = "WAF for DAST scanner ALB - public-facing, app-level SSO or local auth"
   scope       = "REGIONAL"
 
   default_action {
@@ -121,12 +121,12 @@ resource "aws_wafv2_web_acl" "main" {
 
   visibility_config {
     cloudwatch_metrics_enabled = true
-    metric_name                = "dastScannerPocWebAcl"
+    metric_name                = "dastScannerWebAcl"
     sampled_requests_enabled   = true
   }
 
   tags = {
-    Name = "dast-scanner-poc-waf"
+    Name = "dast-scanner-waf"
   }
 }
 
@@ -140,18 +140,18 @@ resource "aws_wafv2_web_acl_association" "alb" {
 resource "aws_cloudwatch_log_group" "waf" {
   count = var.enable_waf && var.enable_alb ? 1 : 0
 
-  name              = "aws-waf-logs-dast-scanner-poc"
+  name              = "aws-waf-logs-dast-scanner"
   retention_in_days = 30
 
   tags = {
-    Name = "dast-scanner-poc-waf-logs"
+    Name = "dast-scanner-waf-logs"
   }
 }
 
 resource "aws_cloudwatch_log_resource_policy" "waf" {
   count = var.enable_waf && var.enable_alb ? 1 : 0
 
-  policy_name = "waf-logs-dast-scanner-poc"
+  policy_name = "waf-logs-dast-scanner"
 
   policy_document = jsonencode({
     Version = "2012-10-17"

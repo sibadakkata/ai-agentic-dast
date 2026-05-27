@@ -1,10 +1,10 @@
 resource "aws_s3_bucket" "db_backups" {
   count = var.enable_backup_lambda ? 1 : 0
 
-  bucket = "dast-scanner-poc-db-backups-${data.aws_caller_identity.current.account_id}"
+  bucket = "dast-scanner-db-backups-${data.aws_caller_identity.current.account_id}"
 
   tags = {
-    Name = "dast-scanner-poc-db-backups"
+    Name = "dast-scanner-db-backups"
   }
 }
 
@@ -77,7 +77,7 @@ resource "aws_s3_bucket_lifecycle_configuration" "db_backups" {
 resource "aws_lambda_layer_version" "psycopg" {
   count = var.enable_backup_lambda ? 1 : 0
 
-  layer_name          = "dast-scanner-poc-psycopg"
+  layer_name          = "dast-scanner-psycopg"
   filename            = "${path.module}/lambda/psycopg_layer.zip"
   source_code_hash    = filebase64sha256("${path.module}/lambda/psycopg_layer.zip")
   compatible_runtimes = ["python3.12"]
@@ -86,7 +86,7 @@ resource "aws_lambda_layer_version" "psycopg" {
 resource "aws_iam_role" "lambda_backup" {
   count = var.enable_backup_lambda ? 1 : 0
 
-  name = "dast-scanner-poc-db-backup"
+  name = "dast-scanner-db-backup"
 
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
@@ -100,7 +100,7 @@ resource "aws_iam_role" "lambda_backup" {
   })
 
   tags = {
-    Name = "dast-scanner-poc-db-backup"
+    Name = "dast-scanner-db-backup"
   }
 }
 
@@ -160,7 +160,7 @@ resource "aws_iam_role_policy" "lambda_backup_secrets" {
 resource "aws_security_group" "lambda_backup" {
   count = var.enable_backup_lambda ? 1 : 0
 
-  name        = "dast-scanner-poc-lambda-backup"
+  name        = "dast-scanner-lambda-backup"
   description = "Weekly DB backup Lambda - RDS and AWS API egress"
   vpc_id      = data.aws_vpc.default.id
 
@@ -189,7 +189,7 @@ resource "aws_security_group" "lambda_backup" {
   }
 
   tags = {
-    Name = "dast-scanner-poc-lambda-backup"
+    Name = "dast-scanner-lambda-backup"
   }
 }
 
@@ -208,7 +208,7 @@ resource "aws_security_group_rule" "rds_ingress_from_lambda" {
 resource "aws_lambda_function" "db_backup" {
   count = var.enable_backup_lambda ? 1 : 0
 
-  function_name = "dast-scanner-poc-db-backup"
+  function_name = "dast-scanner-db-backup"
   role          = aws_iam_role.lambda_backup[0].arn
   handler       = "db_backup.handler"
   runtime       = "python3.12"
@@ -242,25 +242,25 @@ resource "aws_lambda_function" "db_backup" {
   ]
 
   tags = {
-    Name = "dast-scanner-poc-db-backup"
+    Name = "dast-scanner-db-backup"
   }
 }
 
 resource "aws_cloudwatch_log_group" "lambda_backup" {
   count = var.enable_backup_lambda ? 1 : 0
 
-  name              = "/aws/lambda/dast-scanner-poc-db-backup"
+  name              = "/aws/lambda/dast-scanner-db-backup"
   retention_in_days = 30
 
   tags = {
-    Name = "dast-scanner-poc-db-backup-logs"
+    Name = "dast-scanner-db-backup-logs"
   }
 }
 
 resource "aws_cloudwatch_event_rule" "weekly_backup" {
   count = var.enable_backup_lambda ? 1 : 0
 
-  name                = "dast-scanner-poc-weekly-db-backup"
+  name                = "dast-scanner-weekly-db-backup"
   description         = "Trigger weekly RDS CSV backup to S3 every Sunday 02:00 UTC"
   schedule_expression = "cron(0 2 ? * SUN *)"
 }

@@ -1,7 +1,7 @@
 resource "aws_security_group" "alb" {
   count = var.enable_alb ? 1 : 0
 
-  name        = "dast-scanner-poc-alb"
+  name        = "dast-scanner-alb"
   description = "ALB for DAST scanner UI"
   vpc_id      = data.aws_vpc.default.id
 
@@ -29,28 +29,28 @@ resource "aws_security_group" "alb" {
   }
 
   tags = {
-    Name = "dast-scanner-poc-alb"
+    Name = "dast-scanner-alb"
   }
 }
 
 resource "aws_lb" "main" {
   count = var.enable_alb ? 1 : 0
 
-  name               = "dast-scanner-poc"
+  name               = "dast-scanner"
   internal           = false
   load_balancer_type = "application"
   security_groups    = [aws_security_group.alb[0].id]
   subnets            = data.aws_subnets.default.ids
 
   tags = {
-    Name = "dast-scanner-poc-alb"
+    Name = "dast-scanner-alb"
   }
 }
 
 resource "aws_lb_target_group" "ui" {
   count = var.enable_alb ? 1 : 0
 
-  name        = "dast-scanner-poc-ui"
+  name        = "dast-scanner-ui"
   port        = var.app_port
   protocol    = "HTTP"
   vpc_id      = data.aws_vpc.default.id
@@ -67,7 +67,7 @@ resource "aws_lb_target_group" "ui" {
   }
 
   tags = {
-    Name = "dast-scanner-poc-ui"
+    Name = "dast-scanner-ui"
   }
 }
 
@@ -113,7 +113,7 @@ resource "aws_acm_certificate" "main" {
   }
 
   tags = {
-    Name = "dast-scanner-poc"
+    Name = "dast-scanner"
   }
 }
 

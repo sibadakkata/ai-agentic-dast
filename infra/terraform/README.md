@@ -1,11 +1,11 @@
-# DAST Scanner — Terraform (POC)
+# DAST Scanner — Terraform (Production)
 
 Provisions **RDS PostgreSQL 16** (Multi-AZ) and an optional **Application Load Balancer** in `us-east-2` for the scalable-scanner-platform rollout. See [scalable-scanner-platform-proposal.md](../../docs/architecture/scalable-scanner-platform-proposal.md).
 
 ## Prerequisites
 
 - Terraform >= 1.6
-- AWS CLI with profile `dast-poc` configured locally
+- AWS CLI with profile `dast-poc` configured locally (profile name is legacy; resources use `dast-scanner` naming)
 
 Verify credentials:
 
@@ -39,7 +39,7 @@ Optional: `domain_name` — when set, creates ACM cert + HTTPS listener and HTTP
 ## Outputs
 
 - `rds_endpoint` — connect string host
-- `rds_secret_arn` — Secrets Manager (`dast/poc/rds/master`) with username/password/host/port/dbname
+- `rds_secret_arn` — Secrets Manager (`dast/rds/master`) with username/password/host/port/dbname
 - `alb_dns_name` / `alb_zone_id` — when ALB enabled
 - `db_security_group_id`
 
@@ -69,7 +69,7 @@ When `enable_waf` and `enable_alb` are true (defaults), Terraform attaches a **r
 
 **Zscaler / trusted proxies:** Add corporate egress CIDRs to `trusted_cidrs` in `terraform.tfvars` (fetch ranges from [config.zscaler.com](https://config.zscaler.com)). The IPSet starts empty; priority-0 **ALLOW** matches only when the client IP is in that set.
 
-**Logging:** WAF logs go to CloudWatch log group `aws-waf-logs-dast-scanner-poc` (30-day retention). AWS requires the `aws-waf-logs-` prefix.
+**Logging:** WAF logs go to CloudWatch log group `aws-waf-logs-dast-scanner` (30-day retention). AWS requires the `aws-waf-logs-` prefix.
 
 **HTTPS:** WAF is on the ALB; HTTPS listener is still gated on `domain_name` / ACM cert.
 
@@ -78,10 +78,10 @@ When `enable_waf` and `enable_alb` are true (defaults), Terraform attaches a **r
 When `enable_backup_lambda` is true (default):
 
 - **Schedule:** EventBridge `cron(0 2 ? * SUN *)` — every Sunday 02:00 UTC
-- **Bucket:** `dast-scanner-poc-db-backups-<account_id>` (see output `db_backups_bucket_name`)
+- **Bucket:** `dast-scanner-db-backups-<account_id>` (see output `db_backups_bucket_name`)
 - **Lifecycle:** 90 days Standard → Glacier; delete current objects after 180 days; noncurrent versions after 30 days
 
-**Format:** Each run produces a **gzip’d tar** of per-table **CSV** files plus `manifest.json`. This is **not** `pg_dump` format.
+**Format:** Each run produces a **gzip'd tar** of per-table **CSV** files plus `manifest.json`. This is **not** `pg_dump` format.
 
 **Restore (manual):**
 
@@ -93,7 +93,7 @@ When `enable_backup_lambda` is true (default):
 **Manual invoke:**
 
 ```powershell
-aws lambda invoke --function-name dast-scanner-poc-db-backup --profile dast-poc out.json
+aws lambda invoke --function-name dast-scanner-db-backup --profile dast-poc out.json
 type out.json
 ```
 
