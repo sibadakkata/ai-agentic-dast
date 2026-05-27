@@ -1,8 +1,10 @@
-"""PostgreSQL dual-write adapter (Phase 0).
+"""PostgreSQL adapter (Phase 0 / Gate 6).
 
 Writes mirror ``web/db.py`` when ``DUAL_WRITE_PG=1`` and ``DATABASE_URL`` is set.
-Read path stays on SQLite.  All functions are best-effort: failures log WARNING
-and never propagate to callers.
+Write helpers are best-effort: failures log WARNING and never propagate.
+
+Reads are implemented for ``READ_FROM_PG=1`` (via ``web/db_router``); read helpers
+raise on failure so the router can fall back to SQLite.
 """
 from __future__ import annotations
 
@@ -532,3 +534,100 @@ def save_phase_log(
         )
 
     _retry_write(lambda: _with_conn(_do), op=f"save_phase_log({scan_id})")
+
+
+# ── Read path (Gate 6; used when READ_FROM_PG=1 via db_router) ─────────────
+
+
+def _with_read_conn(fn: Callable[[Any], Any]) -> Any:
+    """Run *fn(conn)* and return its result. Raises if PG is not configured."""
+    pool = _get_pool()
+    if pool is None:
+        raise RuntimeError("Postgres read: DATABASE_URL not configured or pool unavailable")
+    with pool.connection() as conn:
+        return fn(conn)
+
+
+def _row_data_to_dict(data: Any) -> dict:
+    if data is None:
+        return {}
+    if isinstance(data, dict):
+        return data
+    if isinstance(data, str):
+        try:
+            parsed = json.loads(data)
+            return parsed if isinstance(parsed, dict) else {}
+        except (json.JSONDecodeError, TypeError):
+            return {}
+    return {}
+
+
+def _payload_to_json_str(payload: Any) -> str | None:
+    if payload is None:
+        return None
+    if isinstance(payload, str):
+        return payload if payload else None
+    return json.dumps(payload, default=str)
+
+
+def load_all_scans() -> dict[str, dict]:
+    """Return ``{scan_id: info_dict}`` — same shape as ``web.db.load_all_scans``."""
+
+    def _do(conn):
+        rows = conn.execute("SELECT scan_id, data FROM scans").fetchall()
+        result: dict[str, dict] = {}
+        for scan_id, data in rows:
+            parsed = _row_data_to_dict(data)
+            if parsed:
+                result[scan_id] = parsed
+        return result
+
+    return _with_read_conn(_do)
+
+
+def scan_count() -> int:
+    def _do(conn):
+        row = conn.execute("SELECT COUNT(*) FROM scans").fetchone()
+        return int(row[0]) if row else 0
+
+    return _with_read_conn(_do)
+
+
+def get_scan_result(scan_id: str) -> str | None:
+    def _do(conn):
+        row = conn.execute(
+            "SELECT payload FROM scan_results WHERE scan_id = %s", (scan_id,)
+        ).fetchone()
+        if not row:
+            return None
+        return _payload_to_json_str(row[0])
+
+    return _with_read_conn(_do)
+
+
+def get_cost_ledger() -> dict:
+    def _do(conn):
+        row = conn.execute(
+            "SELECT all_time_cost, deleted_scans_cost, deleted_scans_count "
+            "FROM cost_ledger WHERE id = 1"
+        ).fetchone()
+        if row:
+            return {
+                "all_time_cost": row[0] or 0,
+                "deleted_scans_cost": row[1] or 0,
+                "deleted_scans_count": row[2] or 0,
+            }
+        return {"all_time_cost": 0, "deleted_scans_cost": 0, "deleted_scans_count": 0}
+
+    return _with_read_conn(_do)
+
+
+def app_kv_get(key: str) -> str | None:
+    def _do(conn):
+        row = conn.execute("SELECT v FROM app_kv WHERE k = %s", (key,)).fetchone()
+        if not row:
+            return None
+        val = row[0]
+        return str(val) if val is not None else None
+
+    return _with_read_conn(_do)

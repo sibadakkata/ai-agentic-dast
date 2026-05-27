@@ -192,6 +192,7 @@ REPORTS_DIR.mkdir(parents=True, exist_ok=True)
 
 from web import db as scandb
 from web import db_pg as pgdb
+from web import db_router as dbread
 
 scandb.init()
 
@@ -309,10 +310,10 @@ def _load_scans_from_disk():
     """
     _old_meta = BASE / "results" / "scans_meta.json"
     _old_ledger = BASE / "results" / "cost_ledger.json"
-    if scandb.scan_count() == 0 and _old_meta.exists():
+    if dbread.scan_count() == 0 and _old_meta.exists():
         scandb.migrate_from_json(_old_meta, _old_ledger)
 
-    data = scandb.load_all_scans()
+    data = dbread.load_all_scans()
     dirty = False
     for scan_id, info in data.items():
         if info.get("status") == "running":
@@ -323,7 +324,7 @@ def _load_scans_from_disk():
             info["progress"] = progress
             dirty = True
             try:
-                raw = scandb.get_scan_result(scan_id)
+                raw = dbread.get_scan_result(scan_id)
                 if raw:
                     partial = json.loads(raw)
                     fc = len(partial.get("findings", []))
@@ -365,7 +366,7 @@ def _load_scans_from_disk():
 
     _backfill_scan_results_from_disk()
 
-    if scandb.get_cost_ledger().get("all_time_cost", 0) == 0 and SCANS:
+    if dbread.get_cost_ledger().get("all_time_cost", 0) == 0 and SCANS:
         bootstrap_cost = sum(s.get("cost", 0) or 0 for s in SCANS.values())
         if bootstrap_cost > 0:
             scandb.set_cost_ledger(bootstrap_cost)
@@ -674,7 +675,7 @@ def _load_raw_result_dict(scan_id: str) -> dict | None:
     subsequent reads are fast. See
     tests/test_results_endpoint_resilience.py::TestPartialDbFallback.
     """
-    raw = scandb.get_scan_result(scan_id)
+    raw = dbread.get_scan_result(scan_id)
     cached: dict | None = None
     if raw:
         try:
@@ -715,7 +716,7 @@ def _backfill_scan_results_from_disk():
     meta_dirty = False
     for scan_id, info in list(SCANS.items()):
         try:
-            if scandb.get_scan_result(scan_id):
+            if dbread.get_scan_result(scan_id):
                 continue
             rf = info.get("result_file")
             if not rf:
@@ -1074,7 +1075,7 @@ async def _get_dashboard_inner(request: Request):
             "started": s.get("started", ""),
         })
 
-    ledger = scandb.get_cost_ledger()
+    ledger = dbread.get_cost_ledger()
     all_time_cost = ledger.get("all_time_cost", 0)
     deleted_cost = ledger.get("deleted_scans_cost", 0)
     deleted_count = ledger.get("deleted_scans_count", 0)
@@ -1310,7 +1311,7 @@ async def get_ui_settings(creds=Depends(_verify)):
     """Column visibility and triage table prefs (stored in SQLite, not browser storage)."""
     out: dict = {}
     for key in ("scanColVisibility", "triage_cols"):
-        raw = scandb.app_kv_get(key)
+        raw = dbread.app_kv_get(key)
         if not raw:
             continue
         try:
