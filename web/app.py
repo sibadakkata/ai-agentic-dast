@@ -191,7 +191,19 @@ RAW_DIR.mkdir(parents=True, exist_ok=True)
 REPORTS_DIR.mkdir(parents=True, exist_ok=True)
 
 from web import db as scandb
+from web import db_pg as pgdb
+
 scandb.init()
+
+
+def _mirror_to_pg(op: str, *args, **kwargs) -> None:
+    """Best-effort Postgres dual-write after SQLite (Phase 0)."""
+    try:
+        fn = getattr(pgdb, op, None)
+        if fn is not None:
+            fn(*args, **kwargs)
+    except Exception:
+        logger.warning("Postgres dual-write %s failed", op, exc_info=True)
 
 SCANS: dict[str, dict] = {}
 CANCEL_FLAGS: dict[str, threading.Event] = {}
@@ -357,6 +369,7 @@ def _load_scans_from_disk():
         bootstrap_cost = sum(s.get("cost", 0) or 0 for s in SCANS.values())
         if bootstrap_cost > 0:
             scandb.set_cost_ledger(bootstrap_cost)
+            _mirror_to_pg("set_cost_ledger", bootstrap_cost)
 
 _TRANSIENT_KEYS = frozenset({"live_tests", "live_findings", "live_phases", "live_crawled", "live_forms", "live_tool_calls", "live_out_of_scope", "live_tokens", "live_llm_calls", "live_cost", "live_cache_read", "live_cache_write", "live_phase_tools", "_router", "_findings_seen"})
 _SECRET_KEYS = frozenset({"_password"})
@@ -529,7 +542,9 @@ def _save_scan(scan_id: str):
     if not info:
         return
     try:
-        scandb.upsert_scan(scan_id, _clean_scan_for_db(info))
+        row = _clean_scan_for_db(info)
+        scandb.upsert_scan(scan_id, row)
+        _mirror_to_pg("upsert_scan", scan_id, row)
     except Exception:
         logger.exception("Failed to persist scan %s to SQLite", scan_id)
 
@@ -539,6 +554,7 @@ def _save_scans_to_disk():
     try:
         persist = {sid: _clean_scan_for_db(info) for sid, info in SCANS.items()}
         scandb.upsert_all(persist)
+        _mirror_to_pg("upsert_all", persist)
     except Exception:
         logger.exception("Failed to bulk-persist scans to SQLite")
 
@@ -573,6 +589,7 @@ def _autosave_loop():
                     batch[sid] = _clean_scan_for_db(info)
             if batch:
                 scandb.upsert_all(batch)
+                _mirror_to_pg("upsert_all", batch)
             for sid in to_flush:
                 info = SCANS.get(sid)
                 if info and info.get("live_findings"):
@@ -591,7 +608,9 @@ def _persist_scan_result(scan_id: str, data: dict):
     """Write full result JSON to SQLite (source of truth for API reads)."""
     _RESULTS_CACHE.pop(scan_id, None)
     try:
-        scandb.save_scan_result(scan_id, json.dumps(data, default=str))
+        payload = json.dumps(data, default=str)
+        scandb.save_scan_result(scan_id, payload)
+        _mirror_to_pg("save_scan_result", scan_id, payload)
     except Exception:
         logger.exception("Failed to persist scan_results for %s", scan_id)
 
@@ -612,7 +631,9 @@ def _persist_partial_findings(scan_id: str, scan: dict):
             },
             "summary": {"total_findings": len(findings)},
         }
-        scandb.save_scan_result(scan_id, json.dumps(partial, default=str))
+        payload = json.dumps(partial, default=str)
+        scandb.save_scan_result(scan_id, payload)
+        _mirror_to_pg("save_scan_result", scan_id, payload)
     except Exception:
         logger.debug("Partial findings checkpoint failed for %s", scan_id, exc_info=True)
 
@@ -902,9 +923,31 @@ threading.Thread(target=_schedule_model_discovery, daemon=True, name="model-disc
 
 @app.get("/health", tags=["System"])
 async def health_check():
-    """Health check endpoint (no auth) — useful for load balancers and monitoring."""
+    """Health check with light runtime stats (no auth)."""
     running = sum(1 for s in SCANS.values() if s.get("status") == "running")
     return {"status": "ok", "scans_running": running, "total_scans": len(SCANS)}
+
+
+@app.get("/healthz", tags=["System"], include_in_schema=False)
+async def healthz():
+    """ALB target health — 200 OK, no database access."""
+    return Response(status_code=200)
+
+
+@app.get("/api/admin/db-health", tags=["Admin"])
+async def admin_db_health(_admin=Depends(require_admin)):
+    """SQLite + Postgres dual-write health (admin only)."""
+    sqlite_status = "ok"
+    try:
+        scandb.scan_count()
+    except Exception as exc:
+        sqlite_status = f"degraded:{exc}"
+    pg = pgdb.health_check()
+    return {
+        "sqlite": sqlite_status,
+        "postgres": pg.get("status", "degraded"),
+        "postgres_error": pg.get("error") or None,
+    }
 
 
 @app.get("/login", include_in_schema=False)
@@ -1289,7 +1332,9 @@ async def put_ui_settings(request: Request, creds=Depends(require_admin)):
     for key in ("scanColVisibility", "triage_cols"):
         if key not in body:
             continue
-        scandb.app_kv_set(key, json.dumps(body[key], default=str))
+        val = json.dumps(body[key], default=str)
+        scandb.app_kv_set(key, val)
+        _mirror_to_pg("app_kv_set", key, val)
     return {"status": "ok"}
 
 
@@ -2101,6 +2146,7 @@ async def _run_scan_task(scan_id, target_url, username, password, model, scan_mo
         SCANS[scan_id].pop("auth_challenge", None)
         SCANS[scan_id].pop("interactive_browser", None)
         scandb.add_all_time_cost(final_cost)
+        _mirror_to_pg("add_all_time_cost", final_cost)
         _save_scan(scan_id)
     except ScanCancelled:
         duration = time.perf_counter() - start
@@ -2142,6 +2188,7 @@ async def _run_scan_task(scan_id, target_url, username, password, model, scan_mo
         SCANS[scan_id].pop("interactive_browser", None)
         if _cost:
             scandb.add_all_time_cost(_cost)
+            _mirror_to_pg("add_all_time_cost", _cost)
         _save_scan(scan_id)
     except Exception as e:
         try:
@@ -2196,6 +2243,7 @@ async def _run_scan_task(scan_id, target_url, username, password, model, scan_mo
         SCANS[scan_id].pop("interactive_browser", None)
         if err_cost:
             scandb.add_all_time_cost(err_cost)
+            _mirror_to_pg("add_all_time_cost", err_cost)
         _save_scan(scan_id)
 
 
@@ -2686,6 +2734,7 @@ async def delete_scan(scan_id: str, _admin=Depends(require_admin)):
         if scan_cost > 0:
             try:
                 scandb.add_deleted_cost(scan_cost)
+                _mirror_to_pg("add_deleted_cost", scan_cost)
             except Exception as e:
                 errors.append(f"cost ledger: {e}")
         result_file = SCANS[scan_id].get("result_file")
@@ -2693,6 +2742,7 @@ async def delete_scan(scan_id: str, _admin=Depends(require_admin)):
         _RESULTS_CACHE.pop(scan_id, None)
         try:
             scandb.delete_scan(scan_id)
+            _mirror_to_pg("delete_scan", scan_id)
         except Exception as e:
             errors.append(f"db delete: {e}")
         CANCEL_FLAGS.pop(scan_id, None)
@@ -2744,11 +2794,13 @@ async def delete_all_scans(_admin=Depends(require_admin)):
     bulk_count = len(SCANS)
     if bulk_cost > 0:
         scandb.add_deleted_cost(bulk_cost, bulk_count)
+        _mirror_to_pg("add_deleted_cost", bulk_cost, bulk_count)
     SCANS.clear()
     CANCEL_FLAGS.clear()
     PAUSE_FLAGS.clear()
     try:
         scandb.delete_all_scans()
+        _mirror_to_pg("delete_all_scans")
     except Exception as e:
         logger.warning("delete_all_scans DB cleanup: %s", e)
     count = 0
@@ -4005,11 +4057,13 @@ async def delete_reports_for_target(target: str = "", _admin=Depends(require_adm
         if target_del_cost > 0:
             try:
                 scandb.add_deleted_cost(target_del_cost, len(ids_to_delete))
+                _mirror_to_pg("add_deleted_cost", target_del_cost, len(ids_to_delete))
             except Exception:
                 pass
         if ids_to_delete:
             try:
                 scandb.delete_scans(ids_to_delete)
+                _mirror_to_pg("delete_scans", ids_to_delete)
             except Exception:
                 pass
 

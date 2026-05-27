@@ -15,9 +15,6 @@ from datetime import datetime
 from typing import Any, Callable
 logger = logging.getLogger(__name__)
 
-_DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
-_DUAL_WRITE = os.environ.get("DUAL_WRITE_PG", "0").strip() == "1"
-
 _pool = None
 _pool_lock = threading.Lock()
 _enabled: bool | None = None
@@ -32,18 +29,26 @@ _TRANSIENT_SQLSTATES = frozenset({
 })
 
 
+def _database_url() -> str:
+    return os.environ.get("DATABASE_URL", "").strip()
+
+
+def _dual_write_flag() -> bool:
+    return os.environ.get("DUAL_WRITE_PG", "0").strip() == "1"
+
+
 def dual_write_enabled() -> bool:
     """True when PG dual-write is configured and active."""
     global _enabled
     if _enabled is not None:
         return _enabled
-    _enabled = bool(_DUAL_WRITE and _DATABASE_URL)
+    _enabled = bool(_dual_write_flag() and _database_url())
     return _enabled
 
 
 def is_configured() -> bool:
     """True when DATABASE_URL is set (may still be disabled via DUAL_WRITE_PG)."""
-    return bool(_DATABASE_URL)
+    return bool(_database_url())
 
 
 def _parse_ts(value: Any) -> datetime | None:
@@ -98,7 +103,8 @@ def _get_pool():
     global _pool
     if _pool is not None:
         return _pool
-    if not _DATABASE_URL:
+    url = _database_url()
+    if not url:
         return None
     with _pool_lock:
         if _pool is not None:
@@ -108,7 +114,7 @@ def _get_pool():
         except ImportError:
             logger.warning("psycopg_pool not installed; Postgres dual-write disabled")
             return None
-        conninfo = _DATABASE_URL
+        conninfo = url
         if "connect_timeout=" not in conninfo:
             sep = "&" if "?" in conninfo else "?"
             conninfo = f"{conninfo}{sep}connect_timeout=3"
@@ -133,15 +139,19 @@ def _with_conn(fn: Callable):
 
 def health_check() -> dict[str, str]:
     """Return ``{status, error}`` for admin/ops (ok | disabled | degraded)."""
-    if not _DATABASE_URL:
+    url = _database_url()
+    if not url:
         return {"status": "disabled", "error": ""}
-    if not _DUAL_WRITE:
+    if not _dual_write_flag():
         return {"status": "disabled", "error": ""}
     try:
-        pool = _get_pool()
-        if pool is None:
-            return {"status": "degraded", "error": "pool unavailable"}
-        with pool.connection() as conn:
+        import psycopg
+
+        conninfo = url
+        if "connect_timeout=" not in conninfo:
+            sep = "&" if "?" in conninfo else "?"
+            conninfo = f"{conninfo}{sep}connect_timeout=3"
+        with psycopg.connect(conninfo) as conn:
             conn.execute("SELECT 1")
         return {"status": "ok", "error": ""}
     except Exception as exc:
