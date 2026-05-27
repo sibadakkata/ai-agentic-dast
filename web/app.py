@@ -1864,6 +1864,8 @@ async def _run_scan_task(scan_id, target_url, username, password, model, scan_mo
         seeded, _seen = _dedupe_findings(initial_findings or [])
         scan["live_findings"] = seeded
         scan["_findings_seen"] = _seen
+        for f in seeded:
+            _mirror_to_pg("save_finding", scan_id, f)
         scan["live_crawled"] = []
         scan["live_forms"] = 0
         scan["live_tool_calls"] = 0
@@ -1945,6 +1947,7 @@ async def _run_scan_task(scan_id, target_url, username, password, model, scan_mo
                 if key is not None:
                     seen.add(key)
                 scan["live_findings"].append(f)
+                _mirror_to_pg("save_finding", scan_id, f)
                 # Intra-phase checkpoint: persist every 5 new findings so a
                 # mid-phase crash doesn't lose findings discovered since the
                 # last phase_end. phase_end still persists on boundaries.

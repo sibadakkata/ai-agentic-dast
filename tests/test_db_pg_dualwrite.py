@@ -146,3 +146,50 @@ def test_health_check_degraded_bad_url(reset_pg, monkeypatch):
     h = pgdb.health_check()
     assert h["status"] == "degraded"
     assert h["error"]
+
+
+@pytest.mark.requires_postgres
+def test_save_finding_dual_write(pg_url, pg_schema, reset_pg, monkeypatch):
+    monkeypatch.setenv("DATABASE_URL", pg_url)
+    monkeypatch.setenv("DUAL_WRITE_PG", "1")
+    pgdb._enabled = None
+    pgdb._pool = None
+
+    scan_id = "s_findings"
+    pgdb.upsert_scan(scan_id, {"status": "running", "target_url": "http://example.com"})
+    finding = {
+        "id": "f-test-1",
+        "title": "SQL Injection",
+        "severity": "High",
+        "url": "http://example.com/api",
+        "parameter": "id",
+        "vulnerability": "SQLi",
+    }
+    pgdb.save_finding(scan_id, finding)
+
+    import psycopg
+
+    with psycopg.connect(pg_url, connect_timeout=3) as conn:
+        row = conn.execute(
+            """
+            SELECT title, severity::text, url, parameter
+            FROM findings WHERE scan_id = %s AND id = %s
+            """,
+            (scan_id, "f-test-1"),
+        ).fetchone()
+    assert row == ("SQL Injection", "high", "http://example.com/api", "id")
+
+
+def test_mirror_save_finding_swallows_pg_errors(reset_pg, monkeypatch):
+    from web.app import _mirror_to_pg
+
+    monkeypatch.setenv("DUAL_WRITE_PG", "1")
+    monkeypatch.setenv("DATABASE_URL", "postgresql://x@127.0.0.1:1/x")
+    pgdb._enabled = None
+
+    with mock.patch.object(pgdb, "save_finding", side_effect=RuntimeError("boom")):
+        _mirror_to_pg(
+            "save_finding",
+            "s5",
+            {"title": "x", "severity": "low", "url": "http://a", "parameter": "q"},
+        )
