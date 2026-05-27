@@ -1286,6 +1286,10 @@ async def list_scans(
     page = max(page, 1)
 
     visible = _scans_for_user(request)
+    if _use_external_scanner() and dbread.READ_FROM_PG:
+        for scan_id, info in list(visible.items()):
+            if info.get("status") in ("running", "queued") or info.get("worker_ref"):
+                _sync_scan_from_pg(scan_id)
     all_scans = []
     for scan_id, info in sorted(visible.items(), key=lambda x: x[1].get("started", ""), reverse=True):
         entry: dict = {
@@ -1813,6 +1817,31 @@ def _use_external_scanner() -> bool:
         "docker",
         "fargate",
     )
+
+
+def _sync_scan_from_pg(scan_id: str) -> bool:
+    """Refresh in-memory scan row from Postgres after an external worker updates it."""
+    info = SCANS.get(scan_id)
+    if not info or not dbread.READ_FROM_PG:
+        return False
+    if not info.get("worker_ref") and not (
+        _use_external_scanner() and info.get("status") in ("running", "queued")
+    ):
+        return False
+    try:
+        fresh = pgdb.get_scan_info(scan_id)
+    except Exception:
+        logger.debug("PG sync failed for %s", scan_id, exc_info=True)
+        return False
+    if not fresh:
+        return False
+    for key in _TRANSIENT_KEYS:
+        if key in info:
+            fresh[key] = info[key]
+    if info.get("worker_ref") and "worker_ref" not in fresh:
+        fresh["worker_ref"] = info["worker_ref"]
+    SCANS[scan_id].update(fresh)
+    return True
 
 
 @app.post("/api/scan", tags=["Scans"])
@@ -2460,6 +2489,7 @@ async def stream_scan_events(scan_id: str, request: Request):
 @app.get("/api/scan/{scan_id}", tags=["Scans"])
 async def get_scan_status(scan_id: str):
     if scan_id in SCANS:
+        _sync_scan_from_pg(scan_id)
         s = SCANS[scan_id]
         return {
             "scan_id": scan_id,

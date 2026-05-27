@@ -632,16 +632,79 @@ def _payload_to_json_str(payload: Any) -> str | None:
     return json.dumps(payload, default=str)
 
 
+def _merge_scan_row(scan_id: str, row: tuple) -> dict:
+    """Merge canonical SQL columns over the ``data`` JSON blob."""
+    (
+        status,
+        target_url,
+        model,
+        model_name,
+        scan_mode,
+        started,
+        duration,
+        cost,
+        findings_count,
+        result_file,
+        error,
+        data,
+    ) = row
+    info = _row_data_to_dict(data)
+    for key, val in (
+        ("status", status),
+        ("target_url", target_url),
+        ("model", model),
+        ("model_name", model_name),
+        ("scan_mode", scan_mode),
+        ("started", started),
+        ("duration", duration),
+        ("cost", cost),
+        ("findings_count", findings_count),
+        ("result_file", result_file),
+        ("error", error),
+    ):
+        if val is not None:
+            info[key] = val
+    if started is not None and hasattr(started, "isoformat"):
+        info["started"] = started.isoformat()
+    info.setdefault("scan_id", scan_id)
+    return info
+
+
+_SCAN_ROW_SQL = """
+    SELECT status, target_url, model, model_name, scan_mode,
+           started, duration, cost, findings_count, result_file, error, data
+    FROM scans WHERE scan_id = %s
+"""
+
+
+def get_scan_info(scan_id: str) -> dict | None:
+    """Return merged scan metadata for *scan_id*, or None if missing."""
+
+    def _do(conn):
+        row = conn.execute(_SCAN_ROW_SQL, (scan_id,)).fetchone()
+        if not row:
+            return None
+        return _merge_scan_row(scan_id, row)
+
+    return _with_read_conn(_do)
+
+
 def load_all_scans() -> dict[str, dict]:
     """Return ``{scan_id: info_dict}`` — same shape as ``web.db.load_all_scans``."""
 
     def _do(conn):
-        rows = conn.execute("SELECT scan_id, data FROM scans").fetchall()
+        rows = conn.execute(
+            """
+            SELECT scan_id, status, target_url, model, model_name, scan_mode,
+                   started, duration, cost, findings_count, result_file, error, data
+            FROM scans
+            """
+        ).fetchall()
         result: dict[str, dict] = {}
-        for scan_id, data in rows:
-            parsed = _row_data_to_dict(data)
-            if parsed:
-                result[scan_id] = parsed
+        for scan_id, *cols in rows:
+            info = _merge_scan_row(scan_id, tuple(cols))
+            if info:
+                result[scan_id] = info
         return result
 
     return _with_read_conn(_do)
