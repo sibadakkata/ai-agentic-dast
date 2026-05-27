@@ -29,7 +29,7 @@ import time
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
 
-SCANNER_URL = os.environ.get("SCANNER_URL", "http://localhost:8080")
+SCANNER_URL = os.environ.get("SCANNER_URL", "http://localhost:80")
 SCANNER_USER = os.environ.get("SCANNER_USER", "dast-admin")
 SCANNER_PASS = os.environ.get("SCANNER_PASS", "changeme")
 

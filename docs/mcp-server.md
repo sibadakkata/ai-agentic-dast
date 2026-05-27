@@ -21,7 +21,7 @@ pip install mcp
       "command": "python",
       "args": ["mcp_server.py"],
       "env": {
-        "SCANNER_URL": "http://YOUR-EC2-HOST:8080",
+        "SCANNER_URL": "http://YOUR-EC2-HOST",
         "SCANNER_USER": "dast-admin",
         "SCANNER_PASS": "YOUR_PASSWORD"
       }
@@ -59,5 +59,5 @@ pip install mcp
 Run the MCP server directly (e.g., for the MCP Inspector):
 
 ```bash
-SCANNER_URL=http://your-host:8080 SCANNER_PASS=secret python mcp_server.py --transport=streamable-http
+SCANNER_URL=http://your-host SCANNER_PASS=secret python mcp_server.py --transport=streamable-http
 ```

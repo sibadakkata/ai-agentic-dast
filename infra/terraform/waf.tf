@@ -1,48 +1,12 @@
-resource "aws_wafv2_ip_set" "trusted_proxies" {
-  count = var.enable_waf && var.enable_alb ? 1 : 0
-
-  name               = "dast-scanner-poc-trusted-proxies"
-  description        = "Trusted proxy CIDRs (e.g. Zscaler) — skip WAF enforcement"
-  scope              = "REGIONAL"
-  ip_address_version = "IPV4"
-  addresses          = var.trusted_cidrs
-
-  tags = {
-    Name = "dast-scanner-poc-trusted-proxies"
-  }
-}
-
 resource "aws_wafv2_web_acl" "main" {
   count = var.enable_waf && var.enable_alb ? 1 : 0
 
   name        = "dast-scanner-poc"
-  description = "WAF for DAST scanner POC ALB"
+  description = "WAF for DAST scanner POC ALB - public-facing, app-level SSO or local auth"
   scope       = "REGIONAL"
 
   default_action {
     allow {}
-  }
-
-  # Priority 0: trusted proxies bypass all rules below (ALLOW stops evaluation)
-  rule {
-    name     = "allow-trusted-proxies"
-    priority = 0
-
-    action {
-      allow {}
-    }
-
-    statement {
-      ip_set_reference_statement {
-        arn = aws_wafv2_ip_set.trusted_proxies[0].arn
-      }
-    }
-
-    visibility_config {
-      cloudwatch_metrics_enabled = true
-      metric_name                = "allowTrustedProxies"
-      sampled_requests_enabled   = true
-    }
   }
 
   rule {

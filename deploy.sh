@@ -6,7 +6,7 @@
 #   - Ubuntu 22.04+ (or Amazon Linux 2023)
 #   - Docker installed (Docker Compose optional but recommended)
 #   - At least 4 GB RAM, 50 GB disk
-#   - Port 8080 (web UI) open in Security Group
+#   - Port 80 (web UI) open in Security Group
 #
 # Usage:
 #   1. Copy this entire project folder to the EC2 instance:
@@ -96,7 +96,7 @@ fi
 # ─── Wait for services ──────────────────────────────────────────────
 echo "==> Waiting for dast-scanner to become healthy..."
 for i in $(seq 1 30); do
-    if curl -sf http://localhost:8080/health >/dev/null 2>&1; then
+    if curl -sf http://localhost:80/health >/dev/null 2>&1; then
         echo "    dast-scanner is up."
         break
     fi
@@ -109,7 +109,7 @@ echo ""
 echo "========================================================"
 echo "  AI DAST Scanner deployed successfully!"
 echo ""
-echo "  Web UI:    http://$(curl -sf ifconfig.me 2>/dev/null || echo '<this-ip>'):8080"
+echo "  Web UI:    http://$(curl -sf ifconfig.me 2>/dev/null || echo '<this-ip>'):80"
 echo ""
 echo "  Credentials: see .env (DAST_AUTH_USER / DAST_AUTH_PASS)"
 echo ""

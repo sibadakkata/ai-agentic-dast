@@ -5,7 +5,7 @@ client (Cursor, Claude Desktop, Open Claw, etc.) can invoke.
 
 Setup:
   1. Set environment variables (or configure in .cursor/mcp.json):
-       SCANNER_URL  — Base URL of the running scanner (default: http://localhost:8080)
+       SCANNER_URL  — Base URL of the running scanner (default: http://localhost:80)
        SCANNER_USER — HTTP Basic auth username (default: dast-admin)
        SCANNER_PASS — HTTP Basic auth password (required)
 
@@ -22,7 +22,7 @@ Cursor integration (.cursor/mcp.json):
         "command": "python",
         "args": ["mcp_server.py"],
         "env": {
-          "SCANNER_URL": "http://your-scanner-host:8080",
+          "SCANNER_URL": "http://your-scanner-host",
           "SCANNER_USER": "dast-admin",
           "SCANNER_PASS": "your-password"
         }
@@ -41,7 +41,7 @@ from typing import Any
 import httpx
 from mcp.server.fastmcp import FastMCP
 
-SCANNER_URL = os.environ.get("SCANNER_URL", "http://localhost:8080")
+SCANNER_URL = os.environ.get("SCANNER_URL", "http://localhost:80")
 SCANNER_USER = os.environ.get("SCANNER_USER", "dast-admin")
 SCANNER_PASS = os.environ.get("SCANNER_PASS", "")
 

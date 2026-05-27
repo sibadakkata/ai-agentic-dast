@@ -24,9 +24,9 @@ cd C:\Projects\Pen-Test\Acunetix\POC
 python openclaw-skill/test_skill.py list
 ```
 
-Default scanner URL: `http://localhost:8080`. Override with:
+Default scanner URL: `http://localhost:80`. Override with:
 ```powershell
-$env:SCANNER_URL = "http://your-scanner:8080"
+$env:SCANNER_URL = "http://your-scanner"
 $env:SCANNER_USER = "dast-admin"          # must match server DAST_AUTH_USER (or your SSO API user)
 $env:SCANNER_PASS = "your-secret"         # must match server DAST_AUTH_PASS
 ```
@@ -157,7 +157,7 @@ Model : Claude Haiku 4.5 (recommended)
 Cost  : $26.7496
 
 Generating PDF report...
-Report: http://localhost:8080/api/reports/scan_bedrock_us_anthropic_claude_haiku_4_5.pdf
+Report: http://localhost:80/api/reports/scan_bedrock_us_anthropic_claude_haiku_4_5.pdf
 ```
 
 ### 8. Check Status of a Specific Scan
@@ -216,7 +216,7 @@ python openclaw-skill/test_skill.py report scan_20260311_144535_99d6f9
 
 Output:
 ```
-Report: http://localhost:8080/api/reports/scan_bedrock_us_anthropic_claude_haiku_4_5.pdf
+Report: http://localhost:80/api/reports/scan_bedrock_us_anthropic_claude_haiku_4_5.pdf
 ```
 
 ### 11. Start a New Scan
@@ -248,7 +248,7 @@ python openclaw-skill/test_skill.py stop scan_20260312_082647_cbb4a2
 If you want team-wide access via Slack/Web UI:
 
 ```bash
-bash openclaw-skill/install.sh http://localhost:8080
+bash openclaw-skill/install.sh http://localhost:80
 ```
 
 Then chat naturally in OpenClaw:
@@ -261,7 +261,7 @@ Then chat naturally in OpenClaw:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `SCANNER_URL` | `http://localhost:8080` | Scanner backend URL |
+| `SCANNER_URL` | `http://localhost:80` | Scanner backend URL |
 | `SCANNER_USER` | `dast-admin` | Basic Auth username (align with server `DAST_AUTH_USER`) |
 | `SCANNER_PASS` | (set in env) | Basic Auth password (align with server `DAST_AUTH_PASS`) |
 

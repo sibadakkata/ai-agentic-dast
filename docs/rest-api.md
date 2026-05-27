@@ -4,14 +4,14 @@
 
 The scanner exposes a full REST API — the same one the Web UI uses. Any CI/CD pipeline, script, or external tool can invoke scans programmatically.
 
-- **Interactive docs**: `http://<host>:8080/docs` (Swagger UI) or `/redoc`
+- **Interactive docs**: `http://<host>/docs` (Swagger UI) or `/redoc`
 - **Auth**: HTTP Basic Auth on all `/api/*` endpoints
 - **Health check**: `GET /health` (no auth — for load balancers)
 
 ## Setup
 
 ```bash
-export DAST_URL="http://YOUR-EC2-HOST:8080"
+export DAST_URL="http://YOUR-EC2-HOST"
 export DAST_USER="dast-admin"
 export DAST_PASS="YourPassword"
 ```
@@ -200,7 +200,7 @@ curl -s "$DAST_URL/health" | jq .
 ```python
 import requests, time
 
-BASE = "http://YOUR-EC2-HOST:8080"
+BASE = "http://YOUR-EC2-HOST"
 AUTH = ("dast-admin", "YourPassword")
 
 # Start scan

@@ -11,7 +11,7 @@
 | **Instance** | t3.xlarge or larger (4 vCPU, 16 GB RAM) |
 | **OS** | Ubuntu 24.04 LTS (x86_64) — required for Playwright Chromium |
 | **Disk** | 100 GB |
-| **Security Group** | Inbound TCP port 8080 |
+| **Security Group** | Inbound TCP port 80 |
 | **IAM Role** | Bedrock invoke permissions (see below) |
 
 ### Quick Deploy
@@ -29,7 +29,7 @@ nano .env   # Add your credentials
 # 3. Deploy
 bash deploy.sh
 # → Builds Docker image, starts container
-# → Web UI at http://<EC2-IP>:8080
+# → Web UI at http://<EC2-IP>/
 ```
 
 ### Verify deployment (smoke + optional full scan)
@@ -38,13 +38,13 @@ From your laptop (same network as allowed to reach the instance):
 
 ```bash
 # Read-only HTTP checks
-export DAST_BASE_URL=http://YOUR_HOST:8080
+export DAST_BASE_URL=http://YOUR_HOST
 export DAST_AUTH_USER=dast-admin
 export DAST_AUTH_PASS=YourStrongPassword   # if ui-settings is protected
 python scripts/run_regression_ec2.py --pytest
 
 # Start a short scan against a public test app (OWASP Juice Shop demo by default)
-export DAST_BASE_URL=http://YOUR_HOST:8080
+export DAST_BASE_URL=http://YOUR_HOST
 python scripts/e2e_remote_scan.py --smoke    # health + POST /api/scan + running status
 python scripts/e2e_remote_scan.py            # wait until completed / error (needs LLM keys on server)
 ```
@@ -75,7 +75,7 @@ The `--restart unless-stopped` flag ensures auto-restart on crash or EC2 reboot.
 pip install -r requirements.txt
 playwright install chromium
 cp .env.example .env && nano .env
-uvicorn web.app:app --host 0.0.0.0 --port 8080
+uvicorn web.app:app --host 0.0.0.0 --port 80
 ```
 
 ## CLI Usage

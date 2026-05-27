@@ -151,7 +151,7 @@ nano .env   # AWS Bedrock creds; auth (see Authentication below)
 
 # 3. Deploy (Dockerfile installs xmlsec1 + libxmlsec for python3-saml / SSO)
 bash deploy.sh
-# Web UI at http://<EC2-IP>:8080
+# Web UI at http://<EC2-IP>/
 ```
 
 ### Local Development
@@ -160,7 +160,7 @@ bash deploy.sh
 pip install -r requirements.txt
 playwright install chromium
 cp .env.example .env && nano .env   # SSO_ENABLED=false, DAST_AUTH_USER, DAST_AUTH_PASS
-uvicorn web.app:app --host 0.0.0.0 --port 8080
+uvicorn web.app:app --host 0.0.0.0 --port 80
 ```
 
 > Full deployment guide: [docs/deployment.md](docs/deployment.md)

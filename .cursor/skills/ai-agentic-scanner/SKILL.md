@@ -683,7 +683,7 @@ Add to `.cursor/mcp.json`:
       "command": "python",
       "args": ["mcp_server.py"],
       "env": {
-        "SCANNER_URL": "http://your-scanner:8080",
+        "SCANNER_URL": "http://your-scanner",
         "SCANNER_USER": "dast-admin",
         "SCANNER_PASS": "your-password"
       }
@@ -701,7 +701,7 @@ Add to `.cursor/mcp.json`:
       "command": "python",
       "args": ["/path/to/mcp_server.py"],
       "env": {
-        "SCANNER_URL": "http://your-scanner:8080",
+        "SCANNER_URL": "http://your-scanner",
         "SCANNER_USER": "dast-admin",
         "SCANNER_PASS": "your-password"
       }
@@ -713,7 +713,7 @@ Add to `.cursor/mcp.json`:
 ### SSE Transport (for remote MCP clients)
 
 ```bash
-SCANNER_URL=http://your-scanner:8080 SCANNER_PASS=secret python mcp_server.py --transport sse --port 3001
+SCANNER_URL=http://your-scanner SCANNER_PASS=secret python mcp_server.py --transport sse --port 3001
 ```
 
 Then connect the client to `http://localhost:3001/sse`.

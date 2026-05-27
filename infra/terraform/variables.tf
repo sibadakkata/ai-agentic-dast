@@ -65,13 +65,7 @@ variable "enable_alb" {
 variable "app_port" {
   description = "Scanner UI port on EC2"
   type        = number
-  default     = 8080
-}
-
-variable "trusted_cidrs" {
-  description = "CIDRs allowed to skip WAF rules (e.g. Zscaler ranges from https://config.zscaler.com)"
-  type        = list(string)
-  default     = []
+  default     = 80
 }
 
 variable "waf_rate_limit" {

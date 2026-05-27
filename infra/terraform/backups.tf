@@ -161,7 +161,7 @@ resource "aws_security_group" "lambda_backup" {
   count = var.enable_backup_lambda ? 1 : 0
 
   name        = "dast-scanner-poc-lambda-backup"
-  description = "Weekly DB backup Lambda — RDS and AWS API egress"
+  description = "Weekly DB backup Lambda - RDS and AWS API egress"
   vpc_id      = data.aws_vpc.default.id
 
   egress {

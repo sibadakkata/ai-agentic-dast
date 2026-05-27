@@ -1,6 +1,6 @@
 #!/bin/bash
 SCAN_ID="scan_20260416_115114_0d39f1"
-curl -s "http://localhost:8080/api/scan/${SCAN_ID}/live" | python3 << 'PYEOF'
+curl -s "http://localhost:80/api/scan/${SCAN_ID}/live" | python3 << 'PYEOF'
 import sys, json
 try:
     d = json.load(sys.stdin)

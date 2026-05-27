@@ -3,6 +3,7 @@
 
 ec2_security_group_id = "sg-XXXXXXXX"
 ec2_private_ip        = "10.x.x.x"
+app_port              = 80
 
 # Optional — leave empty for HTTP-only ALB on port 80
 # domain_name = "scanner.example.com"
@@ -10,8 +11,7 @@ ec2_private_ip        = "10.x.x.x"
 # enable_alb = true
 # db_instance_class = "db.t4g.small"
 
-# WAF
-# trusted_cidrs = ["165.225.0.0/17", "185.46.212.0/22"]  # Zscaler — fetch from https://config.zscaler.com
+# WAF — public-facing ALB; app enforces SSO/local auth
 # waf_rate_limit = 10000
 # enable_waf = true
 

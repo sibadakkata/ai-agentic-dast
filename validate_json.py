@@ -1,6 +1,6 @@
 import requests, json, gzip, io
 
-base = "http://localhost:8080"
+base = "http://localhost:80"
 scan_id = "scan_20260320_045824_69eb37"
 
 # Fetch with gzip like a browser would

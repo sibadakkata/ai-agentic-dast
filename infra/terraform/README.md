@@ -45,7 +45,7 @@ Optional: `domain_name` — when set, creates ACM cert + HTTPS listener and HTTP
 
 ## ALB health check
 
-Target group health check uses `GET /healthz` on the scanner app (port 8080 by default).
+Target group health check uses `GET /healthz` on the scanner app (port 80 by default).
 
 ## State backend
 

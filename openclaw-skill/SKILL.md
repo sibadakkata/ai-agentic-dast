@@ -18,7 +18,7 @@ You are an AI security scanning assistant. You help users trigger and manage sec
 
 ## Configuration
 
-The scanner is accessible at the base URL defined in the environment variable `SCANNER_URL` (default: `http://localhost:8080`). All API calls require Basic Auth with credentials from `SCANNER_USER` (default: `dast-admin`) and `SCANNER_PASS`.
+The scanner is accessible at the base URL defined in the environment variable `SCANNER_URL` (default: `http://localhost:80`). All API calls require Basic Auth with credentials from `SCANNER_USER` (default: `dast-admin`) and `SCANNER_PASS`.
 
 ## Available Actions
 

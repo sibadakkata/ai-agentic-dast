@@ -23,7 +23,7 @@ import sys
 import urllib.request
 
 ACTIVE_STATUSES = ("running", "paused", "pausing", "starting")
-BASE_URL = "http://localhost:8080"
+BASE_URL = "http://localhost:80"
 
 # Defaults documented for operators; auth is only sent when both vars are in the environment.
 DAST_AUTH_USER = os.environ.get("DAST_AUTH_USER", "dast-admin")
@@ -71,7 +71,7 @@ def main():
     except Exception as e:
         print(f"ERROR: Cannot reach scanner API at {BASE_URL}")
         print(f"  {e}")
-        print("  Is the container running? Is the app listening on port 8080?")
+        print("  Is the container running? Is the app listening on port 80?")
         sys.exit(2)
 
     all_items = list(items)
