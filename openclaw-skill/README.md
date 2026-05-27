@@ -6,11 +6,11 @@ An [OpenClaw](https://github.com/openclaw/openclaw) skill that lets you trigger 
 
 ```
 YOUR MACHINE (local)                        EC2 (remote)
-â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”                     â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”
-â”‚  test_skill.py      â”‚    HTTP REST API    â”‚  AI Agentic Scanner â”‚
-â”‚  (or OpenClaw agent)â”‚ â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â–º â”‚  (already running)  â”‚
-â”‚                     â”‚ â—„â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ â”‚  Docker container   â”‚
-â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜    JSON responses   â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜
+┌─────────────────────┐                     ┌─────────────────────┐
+│  test_skill.py      │    HTTP REST API    │  AI Agentic Scanner │
+│  (or OpenClaw agent)│ ──────────────────► │  (already running)  │
+│                     │ ◄────────────────── │  Docker container   │
+└─────────────────────┘    JSON responses   └─────────────────────┘
 ```
 
 You do **not** need to run the scanner locally. The scanner stays on EC2. Only this skill/test script runs on your machine and talks to EC2 over HTTP.
@@ -269,8 +269,8 @@ Then chat naturally in OpenClaw:
 
 ```
 openclaw-skill/
-â”œâ”€â”€ SKILL.md          # OpenClaw skill definition
-â”œâ”€â”€ install.sh        # One-command installer for OpenClaw
-â”œâ”€â”€ test_skill.py     # Standalone CLI (no OpenClaw needed)
-â””â”€â”€ README.md         # This file
+├── SKILL.md          # OpenClaw skill definition
+├── install.sh        # One-command installer for OpenClaw
+├── test_skill.py     # Standalone CLI (no OpenClaw needed)
+└── README.md         # This file
 ```

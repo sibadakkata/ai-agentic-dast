@@ -14,6 +14,12 @@
 | **Security Group** | Inbound TCP port 8080 |
 | **IAM Role** | Bedrock invoke permissions (see below) |
 
+The Docker image installs **`xmlsec1`**, **`libxmlsec1-dev`**, **`pkg-config`**, **`libssl-dev`**, and **`libffi-dev`** (required by `python3-saml` for SSO). On a **bare-metal** host without Docker, install the same packages before `pip install`:
+
+```bash
+sudo apt-get install -y xmlsec1 libxmlsec1-dev pkg-config libssl-dev libffi-dev
+```
+
 ### Quick Deploy
 
 ```bash
@@ -51,16 +57,41 @@ python scripts/e2e_remote_scan.py            # wait until completed / error (nee
 
 Override target: `E2E_TARGET_URL=https://...` or `--target-url`. Use only sites you are authorized to test.
 
+### Pre-deploy scan check
+
+Before `docker cp` / `docker restart`, run `scripts/check_scan_active.py` inside the container. The script calls `GET /api/scans` with **HTTP Basic Auth** when **both** `DAST_AUTH_USER` and `DAST_AUTH_PASS` are set in the environment. If you run it from the host shell without exporting those vars, it falls back to unauthenticated requests and prints a **WARNING** (safe only on pre-RBAC images). Inside the container they are usually already set from `.env`.
+
+### Authentication
+
+Production uses **SAML 2.0** (Microsoft Entra ID) with invite-based onboarding and `admin` / `user` RBAC. Local dev and API scripts typically use **`SSO_ENABLED=false`** (default) plus `DAST_AUTH_USER` / `DAST_AUTH_PASS` for the login form and Basic Auth.
+
+**First-boot bootstrap (SSO on):** set `INITIAL_ADMIN_EMAILS` to a comma-separated list of admin emails in the deploy environment (not in git). On the **first** successful SAML login for a listed address, that user is created with role `admin`. Once **any** admin user exists in the database, `INITIAL_ADMIN_EMAILS` is ignored.
+
+Full Entra app registration, SAML certificate layout, invites, and troubleshooting: **[docs/SSO_RBAC.md](SSO_RBAC.md)** — do not duplicate that walkthrough here.
+
 ### Environment Variables
 
 ```bash
-# .env
+# .env — LLM / AWS
 AWS_ACCESS_KEY_ID=AKIA...         # For Bedrock models
 AWS_SECRET_ACCESS_KEY=...
 AWS_DEFAULT_REGION=us-east-1
-DAST_AUTH_USER=dast-admin          # Web UI login
-DAST_AUTH_PASS=YourStrongPassword
 ANTHROPIC_API_KEY=sk-ant-...       # Optional (if using Anthropic directly)
+
+# Platform auth (local admin / API Basic Auth — also used by scripts/check_scan_active.py)
+DAST_AUTH_USER=dast-admin
+DAST_AUTH_PASS=YourStrongPassword
+
+# SSO / RBAC (see docs/SSO_RBAC.md for Entra setup)
+SSO_ENABLED=false                  # true = SAML sign-in; false = local login (default)
+INITIAL_ADMIN_EMAILS=              # First SSO bootstrap only; comma-separated admin emails
+SAML_IDP_METADATA_URL=
+SAML_SP_ENTITY_ID=
+SAML_SP_ACS_URL=
+SAML_SP_CERT_PATH=                 # Optional PEM paths under config/saml/
+SAML_SP_KEY_PATH=
+DAST_SESSION_SECRET=               # Session cookie HMAC (set in production)
+PUBLIC_BASE_URL=                   # Base URL for invite links (e.g. https://scanner.example.com)
 ```
 
 ### Docker Compose
@@ -71,10 +102,13 @@ The `--restart unless-stopped` flag ensures auto-restart on crash or EC2 reboot.
 
 ## Local Development (No Docker)
 
+Install SAML system libraries first (same as the Dockerfile):
+
 ```bash
+sudo apt-get install -y xmlsec1 libxmlsec1-dev pkg-config libssl-dev libffi-dev
 pip install -r requirements.txt
 playwright install chromium
-cp .env.example .env && nano .env
+cp .env.example .env && nano .env   # SSO_ENABLED=false, DAST_AUTH_USER, DAST_AUTH_PASS
 uvicorn web.app:app --host 0.0.0.0 --port 8080
 ```
 
