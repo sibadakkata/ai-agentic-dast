@@ -51,6 +51,20 @@ def is_configured() -> bool:
     return bool(_database_url())
 
 
+def _sanitize_json_obj(value: Any) -> Any:
+    if isinstance(value, str):
+        return value.replace("\x00", "")
+    if isinstance(value, dict):
+        return {k: _sanitize_json_obj(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_sanitize_json_obj(v) for v in value]
+    return value
+
+
+def _json_dumps_safe(obj: Any) -> str:
+    return json.dumps(_sanitize_json_obj(obj), default=str)
+
+
 def _parse_ts(value: Any) -> datetime | None:
     if value is None or value == "":
         return None
@@ -124,6 +138,7 @@ def _get_pool():
             max_size=5,
             kwargs={"autocommit": False},
             timeout=5,
+            open=True,
         )
         return _pool
 
@@ -164,7 +179,7 @@ def _scan_row(scan_id: str, info: dict) -> dict:
     row["user_id"] = info.get("owner_user_id")
     row["started"] = _parse_ts(row.get("started"))
     data = dict(info)
-    row["data"] = json.dumps(data, default=str)
+    row["data"] = _json_dumps_safe(data)
     return row
 
 
@@ -444,7 +459,7 @@ def save_live_event(scan_id: str, event_type: str, payload: dict):
             INSERT INTO live_events (scan_id, event_type, payload)
             VALUES (%s, %s, %s::jsonb)
             """,
-            (scan_id, event_type, json.dumps(payload, default=str)),
+            (scan_id, event_type, _json_dumps_safe(payload)),
         )
 
     _retry_write(lambda: _with_conn(_do), op=f"save_live_event({scan_id})")
@@ -479,7 +494,7 @@ def save_finding(scan_id: str, finding: dict, *, finding_id: str | None = None):
                 finding.get("vulnerability") or finding.get("type"),
                 finding.get("url"),
                 finding.get("parameter"),
-                json.dumps(finding, default=str),
+                _json_dumps_safe(finding),
             ),
         )
 

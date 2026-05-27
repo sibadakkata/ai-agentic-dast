@@ -45,6 +45,32 @@ def _parse_ts(value: Any):
         return None
 
 
+def _strip_null_bytes(value: Any) -> Any:
+    """Postgres jsonb/text rejects \\u0000; strip from migrated SQLite blobs."""
+    if isinstance(value, str):
+        return value.replace("\x00", "")
+    if isinstance(value, dict):
+        return {k: _strip_null_bytes(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_strip_null_bytes(v) for v in value]
+    return value
+
+
+def _jsonb_value(raw: str | None):
+    """Parse SQLite JSON text to a Python object safe for Postgres jsonb."""
+    import re
+    from psycopg.types.json import Json
+
+    if not raw:
+        return Json({})
+    cleaned = re.sub(r"\\u0000", "", str(raw), flags=re.IGNORECASE)
+    cleaned = cleaned.replace("\x00", "")
+    try:
+        return Json(_strip_null_bytes(json.loads(cleaned)))
+    except json.JSONDecodeError:
+        return Json({"_unparsed": cleaned})
+
+
 def _canonical_rows_sqlite(conn: sqlite3.Connection, table: str, cols: list[str], order_by: str) -> list[dict]:
     rows = conn.execute(f"SELECT {','.join(cols)} FROM {table} ORDER BY {order_by}").fetchall()
     out = []
@@ -80,9 +106,20 @@ def verify_databases(sqlite_path: Path, pg_url: str) -> int:
     mismatches = 0
     with psycopg.connect(pg_url) as pg_conn:
         with pg_conn.cursor() as cur:
+            valid_scan_ids = {
+                r[0]
+                for r in sqlite_conn.execute("SELECT scan_id FROM scans").fetchall()
+            }
             for table, (cols, order_by) in _VERIFY_TABLES.items():
                 try:
-                    sl = sqlite_conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+                    if table == "scan_results":
+                        sl = sqlite_conn.execute(
+                            "SELECT COUNT(*) FROM scan_results WHERE scan_id IN "
+                            f"({','.join('?' * len(valid_scan_ids))})",
+                            tuple(valid_scan_ids),
+                        ).fetchone()[0]
+                    else:
+                        sl = sqlite_conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
                 except sqlite3.OperationalError:
                     sl = 0
                 cur.execute(f"SELECT COUNT(*) FROM {table}")
@@ -93,6 +130,23 @@ def verify_databases(sqlite_path: Path, pg_url: str) -> int:
                     continue
                 if sl == 0:
                     logger.info("PASS %s (empty)", table)
+                    continue
+                if table == "scan_results":
+                    s_ids = sorted(
+                        r[0]
+                        for r in sqlite_conn.execute(
+                            "SELECT scan_id FROM scan_results WHERE scan_id IN "
+                            f"({','.join('?' * len(valid_scan_ids))}) ORDER BY scan_id",
+                            tuple(valid_scan_ids),
+                        ).fetchall()
+                    )
+                    cur.execute("SELECT scan_id FROM scan_results ORDER BY scan_id")
+                    p_ids = sorted(r[0] for r in cur.fetchall())
+                    if s_ids == p_ids:
+                        logger.info("PASS %s rows=%d (scan_id sets match)", table, sl)
+                    else:
+                        logger.error("FAIL %s scan_id mismatch", table)
+                        mismatches += 1
                     continue
                 s_rows = _canonical_rows_sqlite(sqlite_conn, table, cols, order_by)
                 p_rows = _canonical_rows_pg(cur, table, cols, order_by)
@@ -172,14 +226,14 @@ def migrate_scans(sqlite_conn, pg_conn, *, batch_size: int, dry_run: bool, stats
                     scan_id, user_id, target_url, model, model_name, status,
                     scan_mode, started, duration, cost, findings_count,
                     result_file, error, data
-                ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s::timestamptz,%s,%s,%s,%s,%s,%s::jsonb)
+                ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s::timestamptz,%s,%s,%s,%s,%s,%s)
                 ON CONFLICT (scan_id) DO NOTHING
                 """,
                 (
                     row["scan_id"], user_id, row.get("target_url"), row.get("model"),
                     row.get("model_name"), row.get("status"), row.get("scan_mode"),
                     started, row.get("duration"), row.get("cost"), row.get("findings_count"),
-                    row.get("result_file"), row.get("error"), row.get("data") or "{}",
+                    row.get("result_file"), row.get("error"), _jsonb_value(row.get("data")),
                 ),
             )
             if c.rowcount:
@@ -196,8 +250,20 @@ def migrate_scans(sqlite_conn, pg_conn, *, batch_size: int, dry_run: bool, stats
 
 
 def migrate_scan_results(sqlite_conn, pg_conn, *, batch_size: int, dry_run: bool, stats: dict, resume_after: str | None):
+    valid_ids = {
+        r[0]
+        for r in sqlite_conn.execute("SELECT scan_id FROM scans").fetchall()
+    }
     cur = sqlite_conn.execute("SELECT scan_id, payload FROM scan_results ORDER BY scan_id")
     rows = cur.fetchall()
+    orphans = [r[0] for r in rows if r[0] not in valid_ids]
+    if orphans:
+        logger.warning(
+            "Skipping %d scan_results row(s) with no matching scans row (e.g. %s)",
+            len(orphans),
+            orphans[0],
+        )
+    rows = [r for r in rows if r[0] in valid_ids]
     if resume_after:
         rows = [r for r in rows if r[0] > resume_after]
     inserted = skipped = 0
@@ -210,10 +276,10 @@ def migrate_scan_results(sqlite_conn, pg_conn, *, batch_size: int, dry_run: bool
             c.execute(
                 """
                 INSERT INTO scan_results (scan_id, payload)
-                VALUES (%s, %s::jsonb)
+                VALUES (%s, %s)
                 ON CONFLICT (scan_id) DO NOTHING
                 """,
-                (scan_id, payload),
+                (scan_id, _jsonb_value(payload)),
             )
             if c.rowcount:
                 inserted += 1
@@ -262,10 +328,17 @@ def migrate_invites(sqlite_conn, pg_conn, *, batch_size: int, dry_run: bool, sta
 def migrate_findings_from_payloads(sqlite_conn, pg_conn, *, batch_size: int, dry_run: bool, stats: dict):
     """Extract findings from scan_results JSON (best-effort)."""
     import uuid as _uuid
+    from psycopg.types.json import Json
 
+    valid_ids = {
+        r[0]
+        for r in sqlite_conn.execute("SELECT scan_id FROM scans").fetchall()
+    }
     cur = sqlite_conn.execute("SELECT scan_id, payload FROM scan_results")
     inserted = read = 0
     for scan_id, payload in cur.fetchall():
+        if scan_id not in valid_ids:
+            continue
         try:
             doc = json.loads(payload)
         except json.JSONDecodeError:
@@ -283,14 +356,14 @@ def migrate_findings_from_payloads(sqlite_conn, pg_conn, *, batch_size: int, dry
                     """
                     INSERT INTO findings (
                         id, scan_id, title, severity, vulnerability, url, parameter, evidence
-                    ) VALUES (%s,%s,%s,%s::finding_severity,%s,%s,%s,%s::jsonb)
+                    ) VALUES (%s,%s,%s,%s::finding_severity,%s,%s,%s,%s)
                     ON CONFLICT (id) DO NOTHING
                     """,
                     (
                         fid, scan_id, f.get("title"), sev,
                         f.get("vulnerability") or f.get("type"),
                         f.get("url"), f.get("parameter"),
-                        json.dumps(f, default=str),
+                        Json(_strip_null_bytes(f)),
                     ),
                 )
                 if c.rowcount:
