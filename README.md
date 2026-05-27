@@ -97,29 +97,30 @@ This loop runs up to 50 steps per phase (20–50 depending on phase complexity).
 | **Multi-Agent Architecture** | 15 agents (13 specialists + recon + verifier) run in parallel, each with a deeply focused system prompt for its vulnerability class. Shared context bus enables inter-agent communication, dedup, and cross-agent findings. Verifier replays all findings and builds exploit chains. Covers **OWASP Web Top 10** (A01-A10), **API Top 10** (API1-API10), and **LLM Top 10** (LLM01-LLM10) — 32 OWASP categories. Agents: XSS, SQLi, Auth/IDOR, Injection (CMDI/SSTI/LFI/XXE/LDAP), API (GraphQL/WS/mass-assign), SSRF, Config/Crypto, CSRF, Business Logic/Race Conditions, Deserialization, LLM/AI Security, HTTP Smuggling, Supply Chain | `specialist_prompts.py`, `orchestrator.py`, `multi_agent_context.py` |
 | **Passive Reconnaissance** | 29 deterministic checks: source maps (**+ deep scan: extracts secrets & hidden API endpoints from `.js.map` contents**), DOM sinks, **hardcoded secret scanner** (17 TruffleHog-style patterns), headers, CSP analysis, CORS, JWT, cookies, telemetry leakage, mixed content, clickjacking, **TLS protocol/cipher audit** (via `sslyze` fallback), **hybrid vulnerable JS library detection** (49-library catalog + NVD/OSV.dev CVE enrichment), **subdomain takeover detection** (46-provider fingerprint DB), **email/DNS security** (SPF/DKIM/DMARC/MX), **WAF/CDN fingerprinting** (15+ products: Cloudflare, Akamai, Fastly, Azure Front Door, Sucuri, Imperva Incapsula, Kong, Envoy, Varnish, ModSecurity, FortiWeb, Barracuda, F5 BIG-IP — via headers + response body signatures). Post-auth passive pass also scans authenticated DOM HTML for secrets | Runs before LLM phases, $0 cost |
 | **Active Scanning** | 25 web phases + 15 API phases + LLM security phase + 10 deterministic active baseline probes: full OWASP Top 10 + context-aware checks (path traversal, XXE, race conditions, file upload, host header, session mgmt, HTTP smuggling, GraphQL introspection, OAuth/OIDC) | [Web Scanning](docs/web-scanning.md) · [API Scanning](docs/api-scanning.md) |
-| **LLM Application Security** | Auto-detects chatbot/AI-powered features via DOM heuristics and network traffic analysis. Runs 37 deterministic probes covering OWASP Top 10 for LLM Applications (LLM01 Prompt Injection, LLM02 Info Disclosure, LLM05 Output Handling, LLM06 Excessive Agency, LLM07 Prompt Leakage, LLM10 Unbounded Consumption). Optionally runs Garak (NVIDIA) probe battery for 50+ additional probe families. All detection is pattern-matching/regex -- zero LLM cost on detection side. Force with `focus_areas: ["LLM"]` | `llm_detect.py`, `llm_baseline.py`, `garak_runner.py`; Garak is optional (`pip install garak`) |
+| **LLM Application Security** | Auto-detects chatbot/AI-powered features via DOM heuristics and network traffic analysis. Three-layer LLM testing: **(1) Baseline** — 37 deterministic probes covering OWASP LLM Top 10 (LLM01–LLM10). **(2) Garak (NVIDIA)** — 41 probe families covering jailbreaks (`dan.DanInTheWild`, `grandma.*`), toxicity/slurs (`lmrc.Profanity`, `lmrc.SlurUsage`), prompt injection (`promptinject.*`), API key extraction, encoding attacks, and more — prioritised by security impact (jailbreak → toxicity → info disclosure). **(3) LLM-Agent** — adaptive, context-aware payloads crafted by the AI agent (jailbreak roleplay, data exfiltration, SSRF via chatbot, multi-turn escalation, encoding tricks). Each source is labeled `[GARAK]`, `[BASELINE]`, or `[LLM-AGENT]` in findings. **Browser Bridge for Authenticated Chatbot Testing:** Garak and LLM-Agent probes interact with UI-based chatbots through a Playwright browser bridge (`browser_llm_bridge.py`). The bridge logs into the target, navigates to the chat UI, types prompts into the real input field, and captures responses via **stability-based container text diff** — monitoring DOM changes until the chatbot finishes responding. **Preflight validation** sends a "Hello" test (45s timeout, up to 3 attempts with backoff, re-auth between attempts); on failure you get a loud skip warning plus a visible **Scan Coverage** finding when LLM01 probes cannot run (browser → HTTP → skip). Empty / `NO_REPLY` Garak hits are suppressed so noise does not flood triage. LLM phase passes real `auth_headers` from the scan session (not `{}`). Garak and LLM-Agent findings are trusted by the triage engine — the exact payload and chatbot response are shown in the finding narrative. **Deep LLM Scan** option: standard mode (15 payloads/probe, ~8 min) vs deep (256/probe, ~30 min) — controlled independently from general scan intensity via `llm_scan_depth` or the UI checkbox. Force LLM phase with `focus_areas: ["LLM"]` | `llm_detect.py`, `llm_baseline.py`, `garak_runner.py`, `browser_llm_bridge.py`; Garak is optional (`pip install garak`) |
 | **Crawl-Only Profile** | Acunetix-style crawl-only scan mode: discovers URLs, SPA routes, forms, APIs, and in-scope sub-domains **without** sending attack payloads. Still runs passive recon (TLS, headers, JS CVEs) and API baseline; **body fuzzing is now correctly skipped** (was previously leaking through). Use to verify coverage before a full scan | Dashboard "Scan Profile" dropdown, `scan_profile: "crawl_only"` via API |
 | **SPA Crawling & Coverage** | **SPA route walker** extracts routes from Angular, React, Vue, Next.js, Nuxt, and Remix framework globals, then navigates each to capture XHRs via the network listener. **Post-auth SPA re-crawl** runs after authentication with reduced budget to discover auth-gated endpoints. **Crawl coverage metric** tracks total/unique paths and warns when coverage is low (<5 pages). Passively harvests in-scope HTTPS sub-domains from browser XHR/fetch/navigation traffic. After every phase, newly discovered hosts get a **passive re-audit** (TLS + security headers). **Parallel worker dedup** prevents redundant fuzz requests across concurrent workers via shared tested-endpoint set | `spa_crawler.py` route walker, `agent.py` post-auth re-crawl + coverage metric + parallel dedup |
 | **WAF-Aware Fuzzing** | `fuzz_parameter` and `inject_payload` return a `waf_likely` flag when responses match WAF block signatures (Cloudflare, Sucuri, ModSecurity, Imperva, F5, etc.). WAF-blocked responses are excluded from anomaly counts, reducing false positives from WAF interference | `tools.py` `_detect_waf_block`, `_WAF_SIGNATURES` |
-| **Triage Engine** | 3-layer evidence-based classification (TP/FP/Manual Review) with CWE/CVSS, exploitation tiers (validated/informational), entropy-based secret filtering, SPA catch-all detection, deduplication by (host + CWE + parameter), and step-by-step triage narrative separating AI actions from engine validation | [Triage Engine](docs/triage-engine.md) |
-| **Authentication** | Auto-detect form, SSO/OIDC, OAuth, API key, bearer — with session refresh. Multi-identity: User B, Admin, Tenant B (password, bearer, or API key) authenticated at scan start | Multi-step OIDC, self-healing sessions, fast-path static-token auth |
+| **Triage Engine** | 3-layer evidence-based classification (TP/FP/Manual Review) with CWE/CVSS, exploitation tiers (validated/informational), entropy-based secret filtering, SPA catch-all detection, deduplication by (host + CWE + parameter), step-by-step triage narrative separating AI actions from engine validation, and **Garak LLM bypass** — Garak probe failures are trusted as TRUE_POSITIVE with the exact chatbot payload and response shown in the exploit evidence and narrative | [Triage Engine](docs/triage-engine.md) |
+| **Platform Authentication** | SAML 2.0 via Microsoft Entra ID, invite-based onboarding, `admin` / `user` RBAC. Local dev: `SSO_ENABLED=false` + `DAST_AUTH_USER` / `DAST_AUTH_PASS` | [SSO & RBAC Guide](docs/SSO_RBAC.md) |
+| **Scan Authentication** | Auto-detect form, SSO/OIDC, OAuth, API key, bearer — with session refresh. Multi-identity: User B, Admin, Tenant B (password, bearer, or API key) authenticated at scan start | Multi-step OIDC, self-healing sessions, fast-path static-token auth |
 | **Multi-Identity Testing** | Supply up to 3 extra identities (User B, Admin, Tenant B) via UI or API. All identities are authenticated at scan start; their credentials are injected into **all 8 authorization-class phases** (not just BOLA). Supports username/password, bearer tokens, and API keys — including fast-path static-token auth | Cross-user BOLA, cross-role BFLA, cross-tenant access, session/key revocation, license generation |
 | **Deterministic CVSS Severity** | AI Raw findings get a deterministic CVSS v3.1 score and severity bucket (`severity.py`) based on CWE profile + evidence keywords — independent of LLM mood. LLM's original severity preserved as `llm_severity` for comparison | Pre-triage classification, UI shows CVSS column + LLM-vs-deterministic tooltip |
 | **Impact Statements** | LLM-generated business impact for every finding, with passive recon fallback | Contextual risk descriptions in reports |
 | **Scan Targeting** | Exclude URLs, focus on specific pages/areas, control scan intensity (light/standard/deep) | Fine-grained scan scope control |
 | **API Import** | Postman (v2.0/v2.1), OpenAPI/Swagger (2.0, 3.0, 3.1) | Baseline execution + hybrid fuzzing |
 | **Logout Protection** | 6-layer protection: URL patterns, selector blocking, href inspection, post-click recovery, LLM prompt rules, link filtering | Never accidentally destroys the session |
-| **Web UI** | Real-time scan progress, AI vs Triage comparison, PDF reports, scan management | [Web UI Guide](docs/web-ui.md) |
+| **Web UI** | Real-time scan progress, AI vs Triage comparison, PDF reports, scan management. **Cost Management** (FINANCE nav): KPI cards, spend-by-status chart, top-25 cost-per-scan table (dashboard LLM cost card removed). **Roles reference:** permission matrix on User Management; **Your Access** card on Settings (all roles) | [Web UI Guide](docs/web-ui.md) |
 | **REST API** | Full API for CI/CD integration — start, stop, pause, resume, results, reports | [API Reference](docs/rest-api.md) |
 | **MCP Server** | Model Context Protocol integration for Cursor, Claude Desktop | [MCP Guide](docs/mcp-server.md) |
 | **Reports** | Four-stage evidence: AI Agent → Runtime Verification → CVSS Severity → Triage verdict | PDF, Excel, JSON export |
-| **Cost Control** | Pause/resume scans, stop early, per-scan cost tracking | Real-time cost display in UI |
+| **Cost Control** | Pause/resume scans, stop early, per-scan cost tracking | Cost Management page (FINANCE); ledger still in `cost_ledger` table |
 | **Multi-Step Exploit Chaining** | Combines individual findings into attack chains (e.g. XSS + cookie theft → session hijack, SSRF → internal API → data exfiltration) | Cross-phase context, `chain_exploit` tool |
 | **Findings Grouping** | Group findings by Issue Category, OWASP Top 10 code, OWASP LLM Top 10, Severity, PCI DSS requirement, or SANS/CWE Top 25 — with a "Group by" selector, collapsible sections, and per-group severity breakdown | All tabs: Live, Comparison, AI Raw Findings |
 | **Hybrid Smart Retry** | For 20 high-impact phases the agent runs a second, tool-enabled pass with a phase-tailored retry prompt whenever the phase either finds 0 vulnerabilities **or** misses its core vulnerability class. Retry prompts include: **SQLi** (ORDER BY/GROUP BY column-injection, date_trunc/period parameter injection, export/report endpoint injection), **Injection** (14-engine SSTI payload sweep, YAML/Pickle/Java/PHP/.NET deserialization content-type sweep, verbose-error/stack-trace harness), **Access Control** (SaaS business-logic surface probing — /api/licenses, /api/sessions, /api/invoices, etc.; state-mutation invariants — cross-user session/key revocation, cross-tenant license generation, role-validation absence, org-switch impersonation), **Auth** (multi-role credential discovery, parameter-name permutation), **XSS/SSRF/File Upload** (existing) | `_ACTIVE_RETRY_PHASES`, `_PHASE_CORE_KEYWORDS`, `_RETRY_PROMPTS` in `agent.py` |
 | **Finding Deduplication** | Three-tier dedup: (1) multi-agent orchestrator dedup by `(host, vuln_type, path)` or `(host, title)` removes cross-agent duplicates before verification; (2) runtime dedup by `(title, url, parameter)` prevents double-counting across passes; (3) triage-level dedup by `(host, CWE, parameter)` merges equivalent findings keeping highest severity — reduces noise by ~40% on typical scans | `_deduplicate_findings` in `orchestrator.py`; `_finding_key`, `_dedupe_findings` in `web/app.py`; `deduplicate()` in `scripts/triage_engine.py` |
 | **Model ID Resolution** | UI/API callers can pass a display name ("Claude Haiku 4.5 (recommended)"), a short alias ("haiku", "sonnet"), or the full litellm id — the backend normalises all three to a valid litellm model id, preventing "LLM Provider NOT provided" errors | `_resolve_model_id` in `web/app.py`, applied at `/api/scan`, `/api/scan/{id}/retry`, `/api/scan/{id}/rescan` |
-| **Deploy Safety** | Pre-deployment check detects active/paused scans and aborts `deploy.sh` before overwriting a running scanner | `scripts/check_scan_active.py`, integrated in `deploy.sh` |
+| **Deploy Safety** | Pre-deployment check detects active/paused scans and aborts `deploy.sh` before overwriting a running scanner. `check_scan_active.py` calls `/api/scans` with Basic Auth when `DAST_AUTH_USER` and `DAST_AUTH_PASS` are set in the container (falls back to unauthenticated for older images) | `scripts/check_scan_active.py`, integrated in `deploy.sh` |
 | **Parallel-Phase Failure Surfacing** | When phases run concurrently via `asyncio.gather`, worker exceptions used to be silently swallowed by `return_exceptions=True`, leaving missing phases with no trace. Now every worker is wrapped in a guard that logs the failure to `phase_log` with an `error` field and a `(FAILED)` suffix in the live UI, so a transient Bedrock 5xx, Playwright timeout, or LLM-context overflow no longer disappears a phase silently | `run_phases_parallel._guarded` in `agent.py`; UI shows `(FAILED)` + tooltip with error |
 | **LLM Transient-Error Retry** | `LLMRouter.complete` retries up to 5× with 2 / 4 / 8 / 16 / 32 s exponential back-off (~62 s total) on transient signatures: connection failures (`All connection attempts failed`), 502 / 503 / 504, read timeouts, throttling. Tunable at runtime via `LLM_RETRY_DELAYS` env var. Terminal errors (`ContextWindowExceeded`, `ContentFiltered`, `MalformedMessages`) bubble immediately so a single bad message doesn't burn 6× cost | `LLMRouter.complete` in `llm_config.py` |
 | **Partial-DB Cache Fallback** | The DB sometimes wrote a partial-checkpoint payload (`metadata.partial=True`) for a scan that later finished cleanly to disk, then served the stale partial blob to the API. The reader now prefers a complete on-disk result over a partial DB record and back-fills the DB on read so subsequent loads serve the full payload | `_load_raw_result_dict` in `web/app.py` |
@@ -127,10 +128,10 @@ This loop runs up to 50 steps per phase (20–50 depending on phase complexity).
 | **Subdomain Takeover Detection** | Detects dangling DNS records pointing to unclaimed third-party services. 46-provider fingerprint database covering AWS S3, CloudFront, Elastic Beanstalk, GitHub Pages, Heroku, Azure (Web Apps, Blob, Traffic Manager), Netlify, Shopify, Fastly, Vercel, Google Cloud Storage, Wix, Webflow, Render, Fly.io, and 30 more. Detection via: (1) DNS CNAME chain resolution with `dnspython`, (2) NXDOMAIN detection for abandoned service instances, (3) HTTP response fingerprint matching against known takeover strings, (4) Subdomain enumeration via Certificate Transparency (crt.sh) + 75-prefix DNS wordlist. Concurrent checking with configurable semaphore | `subdomain_takeover.py`, `subdomain_enum.py`, integrated in passive recon step 26 |
 | **Email/DNS Security** | Validates email authentication configuration for the target domain: SPF record presence and enforcement level (+all/~all/-all, lookup count, multiple records), DMARC policy analysis (none/quarantine/reject, subdomain policy, pct, reporting URIs), DKIM selector probing (22 common selectors including google, selector1/2, mandrill, amazonses, sendgrid), MX record security (null MX, IP-based MX). Only flags findings when the domain actually handles email (MX-aware). Generates actionable remediation guidance per finding | `dns_security.py`, integrated in passive recon step 27 |
 | **Active Baseline (10 Probes + DOM XSS)** | Deterministic active probes ($0 LLM cost): bare-root SQLi (time-based blind), cache poisoning (unkeyed header reflection), **reflected XSS** (dynamic param discovery + 4-layer detection: direct reflection, cross-endpoint fallback, propagation-aware multi-page test, HTML attribute context breakout), **Playwright DOM XSS probe** (browser-verified: injects payloads into URL params, navigates pages, clicks links, listens for `alert()` dialogs — replicates manual pentester workflow), SSRF bypass (cloud metadata + IP encoding), open redirect, sensitive path disclosure, Salesforce misconfiguration, **GraphQL introspection** (8 common paths, mutation exposure), **HTTP request smuggling** (CL-TE + TE-CL timing desync), **OAuth/OIDC** (PKCE enforcement, implicit flow, redirect_uri validation). All use realistic browser UA to bypass WAF | `active_baseline.py` |
-| **Exploitation Tiers** | Every finding is assigned `validated` (exploitation proven: runtime confirmed, payload reflected, SQL error returned) or `informational` (detected but not proven: pattern match, missing header, config check). Follows "proof over probability" methodology | `_assign_exploitation_tier()` in `triage_engine.py` |
+| **Exploitation Tiers** | Every finding is assigned `validated` (exploitation proven: runtime confirmed, payload reflected, SQL error returned, Garak/LLM-Agent probe with real chatbot response) or `informational` (detected but not proven: pattern match, missing header, config check). Garak and LLM-Agent findings are always `validated` — the chatbot's verbatim response is captured and shown. Follows "proof over probability" methodology | `_assign_exploitation_tier()`, `_assign_exploitation_tier_garak()` in `triage_engine.py` |
 | **Entropy-Based Secret Filtering** | Hardcoded "secrets" detected in JS are validated via Shannon entropy calculation + framework constant detection (38 known patterns: `$$ROW_INTERNAL`, `__react_devtools`, `ng-version`, etc.). Low-entropy or known-constant values are auto-classified as FALSE_POSITIVE | `_shannon_entropy()`, `_is_fake_secret()` in `triage_engine.py` |
 | **SPA Catch-All Detection** | Detects when SPAs (React/Angular/Vue) return the app shell for sensitive file paths (e.g., `/.git/HEAD` returns `index.html` with 200). Marks these as FALSE_POSITIVE instead of real file disclosure findings | Layer 0B in `triage_engine.py` |
-| **Triage Narrative** | Every triaged finding includes a structured step-by-step breakdown: "What the AI Scanner Tested" (payloads, requests, observations) vs "How Triage Engine Validated" (HTTP codes checked, body analysis, pattern matching, severity adjustment, final verdict) | `_build_triage_narrative()` in `triage_engine.py`, rendered in UI finding detail modal |
+| **Triage Narrative** | Every triaged finding includes a structured step-by-step breakdown: "What the AI Scanner Tested" (payloads, requests, observations) vs "How Triage Engine Validated" (HTTP codes checked, body analysis, pattern matching, severity adjustment, final verdict). **Garak and LLM-Agent findings** show the exact probe name, detector, payload sent, and the chatbot's verbatim response — making it clear what the LLM actually said | `_build_triage_narrative()` in `triage_engine.py`, rendered in UI finding detail modal |
 | **Brute Force Validation (50-request threshold)** | Rate limiting findings require 50 consecutive unblocked requests (up from 5) to be reported. Prevents false positives from CDN/WAF soft limits that only trigger after higher volumes | Configured in `prompts.py` BRUTE FORCE + RATE LIMITING phases |
 | **Secret Usage Validation** | When the AI discovers a potential API key/token, it must: (1) calculate entropy, (2) attempt to use the key for authentication, (3) only report if entropy is high AND key works or matches a known service pattern. Framework constants are explicitly excluded | `STEP 2B` in `prompts.py` |
 
@@ -146,9 +147,9 @@ scp -i key.pem -r ./POC ubuntu@<EC2-IP>:~/ai-dast-scanner
 ssh -i key.pem ubuntu@<EC2-IP>
 cd ~/ai-dast-scanner
 cp .env.example .env
-nano .env   # Add AWS Bedrock creds, auth password
+nano .env   # AWS Bedrock creds; auth (see Authentication below)
 
-# 3. Deploy
+# 3. Deploy (Dockerfile installs xmlsec1 + libxmlsec for python3-saml / SSO)
 bash deploy.sh
 # Web UI at http://<EC2-IP>:8080
 ```
@@ -158,11 +159,41 @@ bash deploy.sh
 ```bash
 pip install -r requirements.txt
 playwright install chromium
-cp .env.example .env && nano .env
+cp .env.example .env && nano .env   # SSO_ENABLED=false, DAST_AUTH_USER, DAST_AUTH_PASS
 uvicorn web.app:app --host 0.0.0.0 --port 8080
 ```
 
 > Full deployment guide: [docs/deployment.md](docs/deployment.md)
+
+## Authentication
+
+Platform sign-in uses **SAML 2.0** (Microsoft Entra ID) with invite-based user onboarding and two roles: **`admin`** (Red Team Admin) and **`user`** (Red Team Member). `SSO_ENABLED=false` (default) keeps the existing username/password login via `DAST_AUTH_USER` / `DAST_AUTH_PASS`. The REST API accepts the same Basic Auth credentials when SSO is enabled.
+
+See **[docs/SSO_RBAC.md](docs/SSO_RBAC.md)** for Entra app registration, full environment variable reference, bootstrapping the first admin (`INITIAL_ADMIN_EMAILS`), invites, and troubleshooting — do not duplicate that guide here.
+
+### Roles & permissions
+
+| Capability | admin | user |
+|------------|-------|------|
+| Start scans, view own scans/reports | Yes | Yes |
+| View all scans, delete scans/reports | Yes | No |
+| User management, write UI settings | Yes | No |
+| Settings (read), Cost Management, Insights | Yes | Yes |
+
+The in-app **Roles & Permissions** matrix on **User Management** and the **Your Access** card on **Settings** stay in sync with this table.
+
+### Environment variables (platform auth)
+
+| Variable | When | Purpose |
+|----------|------|---------|
+| `SSO_ENABLED` | Always | `true` = SAML; `false` = local login (default) |
+| `DAST_AUTH_USER` / `DAST_AUTH_PASS` | Local dev / API | Login and Basic Auth when SSO off (or API access with SSO on) |
+| `INITIAL_ADMIN_EMAILS` | First SSO bootstrap | Comma-separated emails granted `admin` on first SAML login (set in deploy env only, not git) |
+| `SAML_IDP_METADATA_URL`, `SAML_SP_ENTITY_ID`, `SAML_SP_ACS_URL` | SSO on | Entra ID SP configuration |
+| `SAML_SP_CERT_PATH`, `SAML_SP_KEY_PATH` | Optional | SP signing cert/key (PEM paths) |
+| `DAST_SESSION_SECRET`, `PUBLIC_BASE_URL` | Production | Session cookies; invite link base URL |
+
+All SAML and IdP variables are documented in [docs/SSO_RBAC.md](docs/SSO_RBAC.md).
 
 ## Choosing a Scan Profile
 
@@ -303,7 +334,7 @@ Select **"Multi-Agent"** in the Scan Profile dropdown or set `scan_profile: "mul
 │   ├── web-ui.md                #   Web UI features & configuration
 │   ├── mcp-server.md            #   MCP integration guide
 │   └── troubleshooting.md       #   Error handling & debugging
-├── scanners/ai_agent/           # Core scanner engine (24 modules)
+├── scanners/ai_agent/           # Core scanner engine (25 modules)
 │   ├── agent.py                 #   Agent loop, context mgmt, multi-identity, parallel phases
 │   ├── auth.py                  #   Authentication (form/SSO/OAuth) + multi-identity (User B/Admin/Tenant B)
 │   ├── severity.py              #   Deterministic CVSS v3.1 severity classifier
@@ -323,7 +354,8 @@ Select **"Multi-Agent"** in the Scan Profile dropdown or set `scan_profile: "mul
 │   ├── active_baseline.py       #   10 deterministic probes + Playwright DOM XSS: SQLi, reflected XSS (4-layer: direct/cross-endpoint/propagation/attribute), DOM XSS (browser-verified alert() detection), SSRF, cache poisoning, open redirect, sensitive paths, Salesforce, GraphQL, HTTP smuggling, OAuth/OIDC
 │   ├── llm_detect.py            #   LLM app detection: DOM/network heuristics for chatbot/AI features
 │   ├── llm_baseline.py          #   37 deterministic LLM security probes (OWASP LLM Top 10, $0 cost)
-│   ├── garak_runner.py          #   Garak (NVIDIA) orchestration: config gen, subprocess, JSONL parsing
+│   ├── garak_runner.py          #   Garak (NVIDIA) orchestration: config gen, subprocess, JSONL parsing, browser bridge integration
+│   ├── browser_llm_bridge.py    #   Browser-based LLM chatbot bridge: Playwright UI interaction, stability-based response capture, preflight validation, HTTP bridge server for Garak
 │   ├── api_import.py            #   Postman/OpenAPI/Burp XML parsers
 │   ├── baseline_executor.py     #   API baseline & variable chaining
 │   ├── body_fuzzer.py           #   Hybrid body fuzzer
@@ -336,7 +368,7 @@ Select **"Multi-Agent"** in the Scan Profile dropdown or set `scan_profile: "mul
 │   ├── cve_lookup.py            #   NVD + OSV.dev CVE lookup
 │   ├── report_generator.py      #   PDF report generator
 │   ├── excel_exporter.py        #   Excel report exporter
-│   └── check_scan_active.py     #   Pre-deploy scan-active safety check
+│   └── check_scan_active.py     #   Pre-deploy scan-active safety check (RBAC Basic Auth)
 ├── web/
 │   ├── app.py                   #   FastAPI backend
 │   ├── db.py                    #   SQLite persistence
@@ -363,8 +395,8 @@ Select **"Multi-Agent"** in the Scan Profile dropdown or set `scan_profile: "mul
 
 ```bash
 export DAST_BASE_URL=https://your-dast-host
-export DAST_AUTH_USER=dast-admin    # optional, if /api/ui-settings needs Basic auth
-export DAST_AUTH_PASS=your-secret
+export DAST_AUTH_USER=dast-admin    # required when RBAC protects /api/*
+export DAST_AUTH_PASS=your-secret   # same vars used by scripts/check_scan_active.py in-container
 python scripts/run_regression_ec2.py          # runs local regression + e2e smoke + API-only persistence checks
 python scripts/run_regression_ec2.py --pytest # same, plus pytest tests/
 ```
@@ -385,6 +417,7 @@ python scripts/run_regression_ec2.py --pytest # same, plus pytest tests/
 | [Web Scanning](docs/web-scanning.md) | Browser-based scanning, SPA handling, 25 OWASP + context-aware phases |
 | [REST API](docs/rest-api.md) | Full API reference with curl examples and Python SDK |
 | [Deployment](docs/deployment.md) | EC2 setup, Docker, Bedrock config, models, data persistence |
+| [SSO & RBAC](docs/SSO_RBAC.md) | Entra ID SAML, invites, roles, env vars, troubleshooting |
 | [Web UI](docs/web-ui.md) | UI features, scan configuration, AI planner |
 | [MCP Server](docs/mcp-server.md) | Cursor/Claude Desktop integration, available tools |
 | [Troubleshooting](docs/troubleshooting.md) | Every error type, auto-recovery, and fixes |

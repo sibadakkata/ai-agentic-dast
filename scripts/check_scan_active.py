@@ -8,26 +8,59 @@ Run inside the Docker container:
 Exit codes:
     0 = no active scans, safe to deploy
     1 = active scan(s) detected, DO NOT deploy
+    2 = API unreachable, parse error, auth failure, etc.
 
 The /api/scans endpoint returns a PAGINATED response:
     {"items": [...], "total": N, "page": 1, ...}
 Always access data["items"] — never iterate the top-level dict.
+
+Uses DAST_AUTH_USER / DAST_AUTH_PASS (container env) for RBAC when both are set.
 """
+import base64
 import json
+import os
 import sys
 import urllib.request
 
 ACTIVE_STATUSES = ("running", "paused", "pausing", "starting")
 BASE_URL = "http://localhost:8080"
 
+# Defaults documented for operators; auth is only sent when both vars are in the environment.
+DAST_AUTH_USER = os.environ.get("DAST_AUTH_USER", "dast-admin")
+DAST_AUTH_PASS = os.environ.get("DAST_AUTH_PASS", "changeme")
+_HAS_AUTH_USER = "DAST_AUTH_USER" in os.environ
+_HAS_AUTH_PASS = "DAST_AUTH_PASS" in os.environ
+_USE_BASIC_AUTH = _HAS_AUTH_USER and _HAS_AUTH_PASS
+
+if not _USE_BASIC_AUTH:
+    if _HAS_AUTH_USER or _HAS_AUTH_PASS:
+        print(
+            "WARNING: Only one of DAST_AUTH_USER / DAST_AUTH_PASS is set; "
+            "calling /api/scans without authentication."
+        )
+    else:
+        print(
+            "WARNING: DAST_AUTH_USER and DAST_AUTH_PASS not set; "
+            "calling /api/scans without authentication (pre-RBAC images only)."
+        )
+
+
+def _request(url):
+    req = urllib.request.Request(url)
+    if _USE_BASIC_AUTH:
+        creds = f"{DAST_AUTH_USER}:{DAST_AUTH_PASS}".encode("utf-8")
+        token = base64.b64encode(creds).decode("ascii")
+        req.add_header("Authorization", f"Basic {token}")
+    return urllib.request.urlopen(req)
+
 
 def get_scans(page=1, per_page=100):
     url = f"{BASE_URL}/api/scans?page={page}&per_page={per_page}"
-    data = json.load(urllib.request.urlopen(url))
+    data = json.load(_request(url))
     if not isinstance(data, dict) or "items" not in data:
         print(f"ERROR: Unexpected API response format: {type(data).__name__}")
         print(f"  Keys: {list(data.keys()) if isinstance(data, dict) else 'N/A'}")
-        print("  Expected: {{\"items\": [...], \"total\": N}}")
+        print('  Expected: {{"items": [...], "total": N}}')
         sys.exit(2)
     return data["items"], data.get("total", 0), data.get("total_pages", 1)
 
@@ -54,10 +87,9 @@ def main():
         if status in ACTIVE_STATUSES:
             active.append(s)
 
-    print(f"Total scans in database: {total}")
-    print(f"Active scans: {len(active)}")
-
     if active:
+        print(f"Total scans in database: {total}")
+        print(f"Active scans: {len(active)}")
         print()
         for s in active:
             sid = s.get("id", "?")
@@ -71,8 +103,7 @@ def main():
         print("Wait for completion or ask the user to stop the scan.")
         sys.exit(1)
     else:
-        print()
-        print("SAFE TO DEPLOY")
+        print(f"Total scans: {total} | Active scans: 0 | SAFE TO DEPLOY")
         sys.exit(0)
 
 

@@ -174,6 +174,36 @@ def _is_fake_secret(value: str) -> bool:
 
 
 # ══════════════════════════════════════════════════════════════════════
+# GARAK LLM — CWE + tier helpers
+# ══════════════════════════════════════════════════════════════════════
+
+_OWASP_CWE: dict[str, str] = {
+    "LLM01": "CWE-74",   # Prompt Injection
+    "LLM02": "CWE-200",  # Insecure Output Handling
+    "LLM05": "CWE-807",  # Supply Chain
+    "LLM06": "CWE-200",  # Sensitive Information Disclosure
+    "LLM09": "CWE-693",  # Overreliance
+}
+
+_HIGH_IMPACT_PROBES = {
+    "grandma.Slurs", "grandma.Substances", "grandma.Win10", "grandma.Win11",
+    "dan.DanInTheWild", "lmrc.Profanity", "lmrc.SlurUsage", "lmrc.Sexualised",
+    "lmrc.SexualContent", "lmrc.QuackMedicine", "lmrc.Bullying",
+    "promptinject.HijackKillHumansMini", "promptinject.HijackHateHumansMini",
+}
+
+
+def _assign_exploitation_tier_garak(result, probe):
+    """Assign exploitation tier for Garak findings.
+    Garak probes that trigger a failure ARE the exploit — the model
+    actually produced the harmful output."""
+    if probe in _HIGH_IMPACT_PROBES:
+        result["exploitation_tier"] = "validated"
+    else:
+        result["exploitation_tier"] = "validated"
+
+
+# ══════════════════════════════════════════════════════════════════════
 # EXPLOITATION TIER: classify proof level after triage verdict
 # ══════════════════════════════════════════════════════════════════════
 
@@ -960,6 +990,64 @@ def _build_triage_narrative(finding, result, tests, statuses, bodies):
     # --- Section 1: What the AI Agent Tested ---
     ai_steps = []
 
+    if finding.get("_finding_source") == "garak":
+        probe = finding.get("_garak_probe", "unknown")
+        detector = finding.get("_garak_detector", "unknown")
+        chat_response = finding.get("response_snippet", "") or ""
+        resp_info = finding.get("response_summary", {})
+        if resp_info and isinstance(resp_info, dict):
+            chat_response = chat_response or str(resp_info.get("body", ""))[:500]
+
+        ai_steps.append(f"Garak LLM probe: {probe}")
+        ai_steps.append(f"Detector: {detector}")
+        ai_steps.append(f"Target: {url[:120]}")
+        ai_steps.append(f"Payload sent: {payload[:300]}")
+        ai_steps.append(f"Chatbot response: {chat_response[:500]}")
+        ai_steps.append(f"Garak verdict: FAIL (guardrail bypass confirmed)")
+        ai_steps.append(f"AI classified as: {_safe_str(finding.get('severity', 'Info'))}")
+
+        triage_steps = [
+            f"[GARAK VERIFIED] Probe {probe} triggered a failure via detector {detector}.",
+            "Garak findings represent actual chatbot behavior — the model produced harmful output.",
+            f"Mapped to: {result.get('cwe', '')}",
+        ]
+        if result.get("cvss") and result["cvss"] > 0:
+            triage_steps.append(f"CVSS: {result['cvss']} ({result.get('cvss_vector', '')})")
+        triage_steps.append(f"Final verdict: {verdict} | Tier: {tier}")
+
+        return {
+            "ai_tested": ai_steps,
+            "triage_validated": triage_steps,
+        }
+
+    if finding.get("_finding_source") == "llm_agent":
+        probe_id = finding.get("_probe_id", "unknown")
+        chat_response = finding.get("response_snippet", "") or ""
+        resp_info = finding.get("response_summary", {})
+        if resp_info and isinstance(resp_info, dict):
+            chat_response = chat_response or str(resp_info.get("body", ""))[:500]
+
+        ai_steps.append(f"LLM-Agent adaptive probe: {probe_id}")
+        ai_steps.append(f"Target: {url[:120]}")
+        ai_steps.append(f"Payload sent: {payload[:300]}")
+        ai_steps.append(f"Chatbot response: {chat_response[:500]}")
+        ai_steps.append(f"Detection: chatbot did not adequately refuse the prompt")
+        ai_steps.append(f"AI classified as: {_safe_str(finding.get('severity', 'Info'))}")
+
+        triage_steps = [
+            f"[LLM-AGENT VERIFIED] Probe {probe_id} confirmed the chatbot responded without adequate guardrails.",
+            "LLM-Agent probes use adaptive payloads and deterministic detectors.",
+            f"Mapped to: {result.get('cwe', '')}",
+        ]
+        if result.get("cvss") and result["cvss"] > 0:
+            triage_steps.append(f"CVSS: {result['cvss']} ({result.get('cvss_vector', '')})")
+        triage_steps.append(f"Final verdict: {verdict} | Tier: {tier}")
+
+        return {
+            "ai_tested": ai_steps,
+            "triage_validated": triage_steps,
+        }
+
     if source == "passive_recon" or finding.get("finding_type") == "passive_recon":
         ai_steps.append(f"Passively analyzed JavaScript/HTML at: {url[:120]}")
         if evidence_str:
@@ -1068,6 +1156,11 @@ def classify(finding, test_log, _index=None):
     _assign_exploitation_tier(r, finding)
     r["triage_narrative"] = _build_triage_narrative(finding, r, tests, statuses, bodies)
 
+    # Propagate detection labels for report clarity
+    if finding.get("detection_label"):
+        r["detection_label"] = finding["detection_label"]
+        r["detection_method"] = finding.get("detection_method", "")
+
     return r
 
 
@@ -1120,6 +1213,113 @@ def _classify_inner(finding, test_log, _index=None):
     }
 
     _cwe_from_hint(r, finding)
+
+    # ==================================================================
+    # LAYER 0: GARAK LLM PROBES — trust Garak's own verdict
+    # Garak findings are chatbot behavior tests, not web injection tests.
+    # The evidence is the chatbot's actual response to a toxic/jailbreak prompt.
+    # ==================================================================
+
+    if finding.get("_finding_source") == "garak":
+        probe = finding.get("_garak_probe", "unknown")
+        detector = finding.get("_garak_detector", "unknown")
+        garak_payload = finding.get("payload", "")
+        chat_response = finding.get("response_snippet", "") or ""
+        owasp_llm = finding.get("owasp_llm", "LLM01")
+        req_info = finding.get("request", {})
+        resp_info = finding.get("response_summary", {})
+
+        r.update(
+            verdict="TRUE_POSITIVE",
+            final_severity=severity,
+            cwe=finding.get("cwe", "") or _OWASP_CWE.get(owasp_llm, "CWE-77"),
+            owasp=f"OWASP LLM {owasp_llm}",
+            confidence=8,
+            confidence_score=8,
+            verification_method="garak_probe",
+            reason=(
+                f"[GARAK VERIFIED] Probe {probe} (detector: {detector}) confirmed "
+                f"the chatbot responded to a harmful prompt without adequate guardrails."
+            ),
+            exploit_evidence=(
+                f"Payload sent: {garak_payload[:300]}\n\n"
+                f"Chatbot response: {chat_response[:500]}"
+            ),
+            dev_action=(
+                f"Review {owasp_llm} controls. The chatbot should refuse or "
+                f"deflect this type of request. See OWASP Top 10 for LLM Applications."
+            ),
+            steps=(
+                f"1. Garak sent probe '{probe}' to {finding.get('url', 'chatbot endpoint')}\n"
+                f"2. Payload: {garak_payload[:200]}\n"
+                f"3. Chatbot responded (200 OK)\n"
+                f"4. Detector '{detector}' flagged the response as a failure\n"
+                f"5. Response: {chat_response[:300]}"
+            ),
+        )
+        if req_info:
+            r["curl"] = (
+                f"curl -X {req_info.get('method', 'POST')} '{req_info.get('url', '')}' "
+                f"-H 'Content-Type: application/json' "
+                f"-d '{req_info.get('body', '')}'"
+            )
+        _assign_exploitation_tier_garak(r, probe)
+        r["triage_narrative"] = _build_triage_narrative(finding, r, tests, statuses, bodies)
+        if finding.get("detection_label"):
+            r["detection_label"] = finding["detection_label"]
+            r["detection_method"] = finding.get("detection_method", "")
+        return r
+
+    # ==================================================================
+    # LAYER 0-LLM-AGENT: LLM-Agent generated probes
+    # These use adaptive payloads and deterministic detectors.
+    # Show exact payload sent and chatbot response in evidence.
+    # ==================================================================
+
+    if finding.get("_finding_source") == "llm_agent":
+        probe_id = finding.get("_probe_id", "unknown")
+        payload = finding.get("payload", "")
+        chat_response = finding.get("response_snippet", "") or ""
+        req_info = finding.get("request", {})
+        owasp_llm = finding.get("owasp_llm", "LLM01")
+        r.update(
+            verdict="TRUE_POSITIVE",
+            final_severity=severity,
+            owasp=f"OWASP LLM {owasp_llm}",
+            confidence=7,
+            confidence_score=7,
+            verification_method="llm_agent_probe",
+            reason=(
+                f"[LLM-AGENT] Probe {probe_id} detected the chatbot did not "
+                f"adequately refuse or guard against the crafted prompt."
+            ),
+            exploit_evidence=(
+                f"Payload sent: {payload[:300]}\n\n"
+                f"Chatbot response: {chat_response[:500]}"
+            ),
+            dev_action=(
+                f"Implement guardrails for {owasp_llm}. "
+                f"The chatbot should refuse or deflect this type of request."
+            ),
+            steps=(
+                f"1. LLM-Agent sent adaptive probe '{probe_id}' to {finding.get('url', 'chatbot endpoint')}\n"
+                f"2. Payload: {payload[:200]}\n"
+                f"3. Chatbot responded (HTTP {req_info.get('status_code', '200')})\n"
+                f"4. Detector flagged response as non-refusal or harmful content\n"
+                f"5. Response: {chat_response[:300]}"
+            ),
+            curl_command=(
+                f"curl -X POST '{finding.get('url', '')}' "
+                f"-H 'Content-Type: application/json' "
+                f"-d '{req_info.get('body', '')}'"
+            )
+        )
+        r["exploitation_tier"] = "validated"
+        r["triage_narrative"] = _build_triage_narrative(finding, r, tests, statuses, bodies)
+        if finding.get("detection_label"):
+            r["detection_label"] = finding["detection_label"]
+            r["detection_method"] = finding.get("detection_method", "")
+        return r
 
     # ==================================================================
     # LAYER 0A: PASSIVE RECON — deterministic checks, high confidence

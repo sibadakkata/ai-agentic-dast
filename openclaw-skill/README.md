@@ -27,7 +27,11 @@ python openclaw-skill/test_skill.py list
 Default scanner URL: `http://localhost:8080`. Override with:
 ```powershell
 $env:SCANNER_URL = "http://your-scanner:8080"
+$env:SCANNER_USER = "dast-admin"          # must match server DAST_AUTH_USER (or your SSO API user)
+$env:SCANNER_PASS = "your-secret"         # must match server DAST_AUTH_PASS
 ```
+
+When the scanner runs with RBAC, all `/api/*` calls need Basic Auth — set `SCANNER_USER` / `SCANNER_PASS` to the same values as `DAST_AUTH_USER` / `DAST_AUTH_PASS` on the server. Browser SSO does not apply to this CLI; see [SSO & RBAC](../docs/SSO_RBAC.md).
 
 ---
 
@@ -258,8 +262,8 @@ Then chat naturally in OpenClaw:
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `SCANNER_URL` | `http://localhost:8080` | Scanner backend URL |
-| `SCANNER_USER` | `dast-admin` | Basic auth username |
-| `SCANNER_PASS` | (set in env) | Basic auth password |
+| `SCANNER_USER` | `dast-admin` | Basic Auth username (align with server `DAST_AUTH_USER`) |
+| `SCANNER_PASS` | (set in env) | Basic Auth password (align with server `DAST_AUTH_PASS`) |
 
 ## File Structure
 

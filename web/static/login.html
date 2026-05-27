@@ -175,7 +175,13 @@ body {
 
     <div class="error-msg" id="error-msg">Invalid username or password. Please try again.</div>
 
-    <form method="POST" action="/login" autocomplete="on">
+    <div id="sso-section" style="display:none;margin-bottom:20px;">
+      <a href="/sso/login" class="btn-login" style="display:block;text-align:center;text-decoration:none;line-height:1.2;">
+        Sign in with Microsoft
+      </a>
+      <p style="font-size:12px;color:var(--text2);text-align:center;margin-top:14px;">Use your Gen Digital corporate account</p>
+    </div>
+    <form id="local-login-form" method="POST" action="/login" autocomplete="on">
       <div class="form-group">
         <label for="username">Username</label>
         <input type="text" id="username" name="username" autocomplete="username" required autofocus placeholder="Enter username">
@@ -216,6 +222,15 @@ body {
 if (window.location.search.includes('error=1')) {
   document.getElementById('error-msg').classList.add('show');
 }
+fetch('/api/auth/config').then(function(r) { return r.json(); }).then(function(cfg) {
+  if (cfg && cfg.sso_enabled) {
+    document.getElementById('sso-section').style.display = 'block';
+    var form = document.getElementById('local-login-form');
+    if (form) form.style.display = 'none';
+    var cardP = document.querySelector('.card p');
+    if (cardP) cardP.textContent = 'Sign in with your corporate Microsoft account.';
+  }
+}).catch(function() {});
 </script>
 </body>
 </html>

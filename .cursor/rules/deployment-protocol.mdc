@@ -23,7 +23,7 @@ All of these require a fresh ask-first, even if the user already approved a prev
 
 Use a concrete question with the exact files and target, e.g.:
 
-> "I've fixed X in `web/app.py` and `scanners/ai_agent/agent.py` (committed as `<sha>`). Ready to deploy to `18.117.143.222` and restart the container. Deploy now?"
+> "I've fixed X in `web/app.py` and `scanners/ai_agent/agent.py` (committed as `<sha>`). Ready to deploy to `3.20.180.251` and restart the container. Deploy now?"
 
 Then WAIT for a yes. Do not proceed on:
 - Assumed consent from earlier in the session ("you said deploy earlier")
@@ -79,7 +79,7 @@ Before ANY deployment:
 
 ## Pre-Merge Test Gate
 
-**Every PR that touches `web/app.py`, `scanners/ai_agent/agent.py`, or `scanners/ai_agent/llm_config.py` MUST pass the regression suite below before being merged to `master`.**
+**Every PR that touches `web/app.py`, `scanners/ai_agent/agent.py`, `scanners/ai_agent/llm_config.py`, `scanners/auth/`, or `scanners/users/` MUST pass the regression suite below before being merged to `master`.**
 
 ```
 python -m pytest tests/ -q \
