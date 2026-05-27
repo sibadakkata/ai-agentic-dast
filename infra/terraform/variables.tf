@@ -19,7 +19,7 @@ variable "backup_retention_period" {
 variable "engine_version" {
   description = "PostgreSQL engine version"
   type        = string
-  default     = "16.3"
+  default     = "16.14"
 }
 
 variable "db_name" {
@@ -66,4 +66,28 @@ variable "app_port" {
   description = "Scanner UI port on EC2"
   type        = number
   default     = 8080
+}
+
+variable "trusted_cidrs" {
+  description = "CIDRs allowed to skip WAF rules (e.g. Zscaler ranges from https://config.zscaler.com)"
+  type        = list(string)
+  default     = []
+}
+
+variable "waf_rate_limit" {
+  description = "Rate limit per IP per 5 min for WAF (BLOCK above this)"
+  type        = number
+  default     = 10000
+}
+
+variable "enable_waf" {
+  description = "Enable WAF on the ALB"
+  type        = bool
+  default     = true
+}
+
+variable "enable_backup_lambda" {
+  description = "Enable weekly DB backup Lambda + S3 bucket"
+  type        = bool
+  default     = true
 }

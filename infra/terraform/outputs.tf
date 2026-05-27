@@ -27,3 +27,21 @@ output "acm_certificate_arn" {
   description = "ACM certificate ARN when domain_name is set"
   value       = var.domain_name != "" && var.enable_alb ? aws_acm_certificate.main[0].arn : null
 }
+
+output "waf_web_acl_arn" {
+  value       = var.enable_waf && var.enable_alb ? aws_wafv2_web_acl.main[0].arn : null
+  description = "WAF Web ACL ARN attached to the ALB"
+}
+
+output "db_backups_bucket_name" {
+  value       = var.enable_backup_lambda ? aws_s3_bucket.db_backups[0].id : null
+  description = "S3 bucket holding weekly DB backups"
+}
+
+output "db_backups_bucket_arn" {
+  value = var.enable_backup_lambda ? aws_s3_bucket.db_backups[0].arn : null
+}
+
+output "lambda_backup_function_name" {
+  value = var.enable_backup_lambda ? aws_lambda_function.db_backup[0].function_name : null
+}
