@@ -85,3 +85,27 @@ variable "enable_backup_lambda" {
   type        = bool
   default     = true
 }
+
+variable "enable_redis" {
+  description = "ElastiCache Redis for live scan events (~$12/mo)"
+  type        = bool
+  default     = true
+}
+
+variable "enable_ecs_runner" {
+  description = "ECS cluster + Fargate task definition for per-scan workers"
+  type        = bool
+  default     = true
+}
+
+variable "scanner_runner_image_tag" {
+  description = "ECR image tag for scanner runner task definition"
+  type        = string
+  default     = "latest"
+}
+
+variable "ec2_iam_role_name" {
+  description = "IAM role name attached to EC2 UI instance (for ecs:RunTask)"
+  type        = string
+  default     = ""
+}

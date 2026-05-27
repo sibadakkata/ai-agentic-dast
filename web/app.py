@@ -2384,28 +2384,71 @@ async def stream_scan_events(scan_id: str, request: Request):
     except (TypeError, ValueError):
         last_id = 0
 
-    from web.live_events import replay_events
+    from web import live_events
+
+    def _format_sse(ev: dict) -> str:
+        eid = ev.get("id", 0)
+        etype = ev.get("event_type", "message")
+        data = json.dumps(ev.get("payload") or {}, default=str)
+        return f"id: {eid}\nevent: {etype}\ndata: {data}\n\n"
+
+    def _terminal(ev: dict) -> bool:
+        return ev.get("event_type") in ("completed", "error", "cancelled")
 
     async def event_generator():
         cursor = last_id
+        # Replay missed events from PG (reconnect / Last-Event-ID)
+        for ev in live_events.replay_events(scan_id, after_id=cursor, limit=500):
+            yield _format_sse(ev)
+            eid = ev.get("id", 0)
+            cursor = max(cursor, int(eid) if eid else 0)
+            if _terminal(ev):
+                return
+
+        if live_events.LIVE_EVENTS_REDIS and os.environ.get("REDIS_URL", "").strip():
+            queue: asyncio.Queue = asyncio.Queue()
+            loop = asyncio.get_running_loop()
+
+            def _redis_worker():
+                try:
+                    for ev in live_events.subscribe_redis(scan_id):
+                        loop.call_soon_threadsafe(queue.put_nowait, ev)
+                except Exception:
+                    pass
+                finally:
+                    loop.call_soon_threadsafe(queue.put_nowait, None)
+
+            import threading
+            threading.Thread(target=_redis_worker, daemon=True).start()
+            while True:
+                try:
+                    ev = await asyncio.wait_for(queue.get(), timeout=30.0)
+                except asyncio.TimeoutError:
+                    yield ": keepalive\n\n"
+                    continue
+                if ev is None:
+                    break
+                eid = ev.get("id", 0)
+                if eid and int(eid) <= cursor:
+                    continue
+                yield _format_sse(ev)
+                cursor = max(cursor, int(eid) if eid else 0)
+                if _terminal(ev):
+                    break
+            return
+
         while True:
-            batch = replay_events(scan_id, after_id=cursor, limit=50)
+            batch = live_events.replay_events(scan_id, after_id=cursor, limit=50)
             if batch:
                 for ev in batch:
+                    yield _format_sse(ev)
                     eid = ev.get("id", 0)
-                    etype = ev.get("event_type", "message")
-                    data = json.dumps(ev.get("payload") or {}, default=str)
-                    yield f"id: {eid}\nevent: {etype}\ndata: {data}\n\n"
                     cursor = max(cursor, int(eid) if eid else 0)
+                if any(_terminal(ev) for ev in batch):
+                    break
             else:
                 yield ": keepalive\n\n"
                 await asyncio.sleep(1.5)
-            # Stop streaming when scan reaches terminal state in PG
-            if batch and any(
-                ev.get("event_type") in ("completed", "error", "cancelled")
-                for ev in batch
-            ):
-                break
 
     return StreamingResponse(
         event_generator(),
