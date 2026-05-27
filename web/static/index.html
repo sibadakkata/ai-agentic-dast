@@ -1464,8 +1464,9 @@ input:focus-visible, select:focus-visible, textarea:focus-visible { outline:none
   </div>
 </div>
 
-<!-- PAGE: Settings -->
+<!-- PAGE: User Management -->
 <div class="page" id="page-user-management" style="display:none;">
+  <div id="user-mgmt-rbac-matrix"></div>
   <div class="card">
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:20px;flex-wrap:wrap;gap:12px;">
       <h2 style="margin:0;"><span style="display:flex;align-items:center;gap:8px;">User Management</span></h2>
@@ -1479,6 +1480,7 @@ input:focus-visible, select:focus-visible, textarea:focus-visible { outline:none
 </div>
 
 <div class="page" id="page-settings" style="display:none;">
+  <div id="settings-your-access"></div>
   <div style="display:grid;grid-template-columns:1fr;gap:20px;">
     <div class="card">
       <h2>
@@ -1621,6 +1623,110 @@ let CURRENT_USER = null;
 
 function isAdmin() {
   return CURRENT_USER && CURRENT_USER.role === 'admin';
+}
+
+var RBAC_LAST_REVIEWED = '2026-05-27';
+
+const RBAC_MATRIX = [
+  { capability: 'Sign in (SSO / local auth)', admin: true, user: true },
+  { capability: 'View own profile', admin: true, user: true },
+  { capability: 'Dashboard / Insights / Cost Management', admin: true, user: true },
+  { capability: 'Start a new scan', admin: true, user: true },
+  { capability: 'View scans', admin: 'all', user: 'own only' },
+  { capability: 'View reports', admin: 'all', user: 'own only' },
+  { capability: 'Delete a single scan', admin: true, user: false },
+  { capability: 'Delete all scans', admin: true, user: false },
+  { capability: 'Delete a report file', admin: true, user: false },
+  { capability: 'Delete reports for a target', admin: true, user: false },
+  { capability: 'Change UI settings', admin: true, user: false },
+  { capability: 'List all users', admin: true, user: false },
+  { capability: 'Invite a user', admin: true, user: false },
+  { capability: "Change a user's role", admin: true, user: false },
+  { capability: 'Deactivate / delete a user', admin: true, user: false },
+  { capability: 'List / revoke pending invites', admin: true, user: false },
+];
+
+function _renderRbacCell(val) {
+  if (val === true) {
+    return '<span class="badge" style="background:rgba(5,150,105,0.12);color:var(--green);font-weight:700;min-width:28px;">&#10003;</span>';
+  }
+  if (val === false) {
+    return '<span class="badge" style="background:rgba(220,38,38,0.12);color:var(--red);font-weight:700;min-width:28px;">&#10007;</span>';
+  }
+  return '<span style="font-style:italic;color:var(--text2);">' + esc(String(val)) + '</span>';
+}
+
+function _renderRbacMatrix() {
+  var h = '<div class="card" style="margin-bottom:20px;">';
+  h += '<h3 style="margin:0 0 6px;font-size:16px;">Roles &amp; Permissions Reference</h3>';
+  h += '<p style="margin:0 0 16px;font-size:13px;color:var(--text2);">Server-enforced capabilities for Admin vs User roles.</p>';
+  h += '<div style="overflow-x:auto;"><table style="width:100%;border-collapse:collapse;font-size:13px;">';
+  h += '<thead><tr style="text-align:left;border-bottom:2px solid var(--border);background:var(--surface2);">';
+  h += '<th style="padding:10px 12px;font-weight:600;">Capability</th>';
+  h += '<th style="padding:10px 12px;font-weight:600;text-align:center;width:100px;">Admin</th>';
+  h += '<th style="padding:10px 12px;font-weight:600;text-align:center;width:100px;">User</th>';
+  h += '</tr></thead><tbody>';
+  RBAC_MATRIX.forEach(function(row) {
+    h += '<tr style="border-bottom:1px solid var(--border);">';
+    h += '<td style="padding:10px 12px;">' + esc(row.capability) + '</td>';
+    h += '<td style="padding:10px 12px;text-align:center;">' + _renderRbacCell(row.admin) + '</td>';
+    h += '<td style="padding:10px 12px;text-align:center;">' + _renderRbacCell(row.user) + '</td>';
+    h += '</tr>';
+  });
+  h += '</tbody></table></div>';
+  h += '<p style="margin:14px 0 0;font-size:11px;color:var(--text2);">Permission model is enforced server-side. Last reviewed: ' + RBAC_LAST_REVIEWED + '.</p>';
+  h += '</div>';
+  return h;
+}
+
+function _renderYourAccess(meData) {
+  if (!meData || !meData.role) {
+    return '<div class="card" style="margin-bottom:20px;">' +
+      '<h3 style="margin:0 0 6px;font-size:16px;">Your Access</h3>' +
+      '<p style="margin:0;font-size:13px;color:var(--red);">Unable to load access info</p></div>';
+  }
+  var role = meData.role === 'admin' ? 'admin' : 'user';
+  var roleLabel = role === 'admin' ? 'Admin' : 'User';
+  var badgeCls = role === 'admin' ? 'badge-completed' : 'badge-running';
+  var canList = [];
+  var cantList = [];
+  RBAC_MATRIX.forEach(function(row) {
+    var val = row[role];
+    if (val === true) {
+      canList.push(row.capability);
+    } else if (val === false) {
+      cantList.push(row.capability);
+    } else {
+      canList.push(row.capability + ' (' + val + ')');
+    }
+  });
+  var h = '<div class="card" style="margin-bottom:20px;">';
+  h += '<h3 style="margin:0 0 6px;font-size:16px;">Your Access</h3>';
+  h += '<p style="margin:0 0 16px;font-size:13px;color:var(--text2);">Your signed-in identity and effective permissions in this app.</p>';
+  h += '<div style="display:flex;flex-wrap:wrap;gap:24px;align-items:flex-end;margin-bottom:18px;padding-bottom:16px;border-bottom:1px solid var(--border);">';
+  h += '<div><div style="font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:0.4px;color:var(--text2);margin-bottom:4px;">Email</div>';
+  h += '<div style="font-size:15px;font-weight:600;color:var(--text);">' + esc(meData.email || '-') + '</div></div>';
+  h += '<div><div style="font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:0.4px;color:var(--text2);margin-bottom:4px;">Role</div>';
+  h += '<span class="badge ' + badgeCls + '" style="font-size:12px;padding:4px 10px;">' + esc(roleLabel) + '</span></div>';
+  h += '</div>';
+  h += '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:20px;">';
+  h += '<div><div style="font-size:13px;font-weight:600;color:var(--green);margin-bottom:8px;">What you can do</div>';
+  h += '<ul style="margin:0;padding-left:18px;font-size:13px;line-height:1.5;">';
+  canList.forEach(function(item) { h += '<li style="margin-bottom:4px;color:var(--text);">' + esc(item) + '</li>'; });
+  h += '</ul></div>';
+  h += '<div><div style="font-size:13px;font-weight:600;color:var(--red);margin-bottom:8px;">What you can\'t do</div>';
+  h += '<ul style="margin:0;padding-left:18px;font-size:13px;line-height:1.5;">';
+  if (cantList.length) {
+    cantList.forEach(function(item) { h += '<li style="margin-bottom:4px;color:var(--text2);">' + esc(item) + '</li>'; });
+  } else {
+    h += '<li style="color:var(--text2);font-style:italic;">No restrictions in this matrix.</li>';
+  }
+  h += '</ul></div></div>';
+  if (role !== 'admin') {
+    h += '<p style="margin:16px 0 0;font-size:13px;color:var(--text2);padding-top:12px;border-top:1px solid var(--border);">Need additional access? Contact your Red Team admin.</p>';
+  }
+  h += '</div>';
+  return h;
 }
 
 function applyRoleGates() {
@@ -2037,6 +2143,17 @@ async function deleteTargetReports(target) {
 }
 
 async function loadSettings() {
+  var accessEl = document.getElementById('settings-your-access');
+  var meData = null;
+  try {
+    var mr = await fetch('/api/me', { credentials: 'same-origin' });
+    if (mr.ok) meData = await mr.json();
+    else if (CURRENT_USER) meData = CURRENT_USER;
+  } catch (e) {
+    if (CURRENT_USER) meData = CURRENT_USER;
+  }
+  if (accessEl) accessEl.innerHTML = _renderYourAccess(meData);
+
   function settingRow(label, valueHtml) {
     return '<div style="display:flex;align-items:center;padding:12px 0;border-bottom:1px solid var(--border);">' +
       '<span style="min-width:140px;font-size:13px;font-weight:600;color:var(--text2);">' + label + '</span>' +
@@ -2138,6 +2255,9 @@ async function _loadUiSettingsFromServer() {
 }
 
 async function loadUserManagement() {
+  var rbacEl = document.getElementById('user-mgmt-rbac-matrix');
+  if (rbacEl) rbacEl.innerHTML = _renderRbacMatrix();
+
   if (!isAdmin()) {
     document.getElementById('users-table-wrap').innerHTML = '<div class="empty">Admin access required.</div>';
     return;
