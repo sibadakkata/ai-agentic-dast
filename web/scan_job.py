@@ -43,8 +43,9 @@ async def execute_scan_job(scan_id: str, config: dict) -> None:
 
     start = time.perf_counter()
     try:
-        findings, metrics = await run_scan(target, model, router, str(BASE / "config"), on_progress=on_progress,
-            scan_intensity=config.get("scan_intensity", "light"))
+        findings, metrics = await run_scan(
+            target, model, router, str(BASE / "config"), on_progress=on_progress
+        )
         duration = time.perf_counter() - start
         out = save_results(str(BASE / "results/raw" / f"runner_{scan_id}.json"), findings, router.get_cost_summary(), target, model, duration, metrics)
         pgdb.save_scan_result(scan_id, json.dumps(out, default=str))

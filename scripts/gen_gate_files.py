@@ -284,8 +284,9 @@ async def execute_scan_job(scan_id: str, config: dict) -> None:
 
     start = time.perf_counter()
     try:
-        findings, metrics = await run_scan(target, model, router, str(BASE / "config"), on_progress=on_progress,
-            scan_intensity=config.get("scan_intensity", "light"))
+        findings, metrics = await run_scan(
+            target, model, router, str(BASE / "config"), on_progress=on_progress
+        )
         duration = time.perf_counter() - start
         out = save_results(str(BASE / "results/raw" / f"runner_{scan_id}.json"), findings, router.get_cost_summary(), target, model, duration, metrics)
         pgdb.save_scan_result(scan_id, json.dumps(out, default=str))
@@ -389,6 +390,20 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+''',
+)
+
+w(
+    "scripts/check_scan_pg_status.py",
+    '''#!/usr/bin/env python3
+import os, sys, psycopg
+scan_id = sys.argv[1]
+with psycopg.connect(os.environ["DATABASE_URL"], connect_timeout=10) as conn:
+    row = conn.execute(
+        "SELECT status, error, findings_count FROM scans WHERE scan_id = %s", (scan_id,)
+    ).fetchone()
+    n = conn.execute("SELECT COUNT(1) FROM findings WHERE scan_id = %s", (scan_id,)).fetchone()[0]
+print(scan_id, row, "findings", n)
 ''',
 )
 
