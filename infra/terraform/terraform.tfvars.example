@@ -1,0 +1,11 @@
+# Copy to terraform.tfvars and fill in site-specific values.
+# Do NOT commit terraform.tfvars (gitignored).
+
+ec2_security_group_id = "sg-XXXXXXXX"
+ec2_private_ip        = "10.x.x.x"
+
+# Optional — leave empty for HTTP-only ALB on port 80
+# domain_name = "scanner.example.com"
+
+# enable_alb = true
+# db_instance_class = "db.t4g.small"
