@@ -15,6 +15,9 @@ services:
       net.ipv4.ip_unprivileged_port_start: 80
     env_file:
       - .env
+    environment:
+      - DUAL_WRITE_PG=${DUAL_WRITE_PG:-0}
+      - DATABASE_URL=${DATABASE_URL:-}
     volumes:
       # Persist scan results across container restarts
       - scanner-results:/app/results

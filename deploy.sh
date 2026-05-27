@@ -81,6 +81,7 @@ else
         --name "$CONTAINER_NAME" \
         --network host \
         --restart unless-stopped \
+        --env-file .env \
         -e "ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}" \
         -e "OPENAI_API_KEY=${OPENAI_API_KEY:-}" \
         -e "AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID:-}" \
@@ -88,6 +89,8 @@ else
         -e "AWS_DEFAULT_REGION=${AWS_DEFAULT_REGION:-us-east-1}" \
         -e "DAST_AUTH_USER=${DAST_AUTH_USER:-dast-admin}" \
         -e "DAST_AUTH_PASS=${DAST_AUTH_PASS:-changeme}" \
+        -e "DUAL_WRITE_PG=${DUAL_WRITE_PG:-0}" \
+        -e "DATABASE_URL=${DATABASE_URL:-}" \
         -v "$(pwd)/dast-data/results:/app/results" \
         -v "$(pwd)/dast-data/imports:/app/imports" \
         "$IMAGE_NAME"
