@@ -126,7 +126,13 @@ def launch_fargate(scan_id: str, config: dict[str, Any]) -> str:
             resp = client.run_task(
                 cluster=os.environ.get("ECS_CLUSTER", "dast-scanner"), taskDefinition=task_def, launchType="FARGATE",
                 networkConfiguration={"awsvpcConfiguration": {"subnets": subnets, "securityGroups": ECS_SECURITY_GROUPS, "assignPublicIp": "ENABLED"}},
-                overrides={"containerOverrides": [{"name": "scanner-runner", "environment": overrides}]},
+                overrides={
+                    "containerOverrides": [{
+                        "name": "scanner-runner",
+                        "command": ["--scan-id", scan_id],
+                        "environment": overrides,
+                    }],
+                },
             )
             if resp.get("failures"):
                 raise RuntimeError(resp["failures"])
