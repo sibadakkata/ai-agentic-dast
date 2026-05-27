@@ -193,6 +193,8 @@ REPORTS_DIR.mkdir(parents=True, exist_ok=True)
 from web import db as scandb
 from web import db_pg as pgdb
 from web import db_router as dbread
+from web import scan_launcher
+from web.live_events import publish_event
 
 scandb.init()
 
@@ -682,6 +684,27 @@ def _load_raw_result_dict(scan_id: str) -> dict | None:
             cached = json.loads(raw)
         except Exception:
             cached = None
+
+    if dbread.READ_FROM_PG:
+        try:
+            pg_findings = dbread.list_findings(scan_id)
+            if pg_findings:
+                if cached is None:
+                    cached = {
+                        "findings": pg_findings,
+                        "summary": {"total_findings": len(pg_findings)},
+                        "metadata": {},
+                    }
+                else:
+                    cached = dict(cached)
+                    cached["findings"] = pg_findings
+                    summary = cached.get("summary")
+                    if isinstance(summary, dict):
+                        summary = dict(summary)
+                        summary["total_findings"] = len(pg_findings)
+                        cached["summary"] = summary
+        except Exception:
+            logger.debug("PG list_findings failed for %s", scan_id, exc_info=True)
 
     cached_is_partial = bool(
         isinstance(cached, dict)
@@ -1733,6 +1756,65 @@ async def analyze_instruction(request: Request):
         return JSONResponse({"error": str(e)}, status_code=500)
 
 
+def _build_scan_job_config(
+    *,
+    target_url: str,
+    username: str,
+    password: str,
+    model: str,
+    scan_mode: str,
+    auth_type: str,
+    api_imports: dict,
+    extra_domains: list,
+    scan_scope: str,
+    focus_urls: list,
+    focus_areas: list,
+    exclude_urls: list,
+    scan_intensity: str,
+    llm_scan_depth: str,
+    scan_profile: str,
+    skip_passive_sibling_tls: bool,
+    username_b: str,
+    password_b: str,
+    credentials_admin: dict,
+    credentials_tenant_b: dict,
+    workflow_id: str | None,
+    business_flow: str | None,
+) -> dict:
+    return {
+        "target_url": target_url,
+        "username": username,
+        "password": password,
+        "model": model,
+        "scan_mode": scan_mode,
+        "auth_type": auth_type,
+        "api_imports": api_imports,
+        "extra_domains": extra_domains,
+        "scan_scope": scan_scope,
+        "focus_urls": focus_urls,
+        "focus_areas": focus_areas,
+        "exclude_urls": exclude_urls,
+        "scan_intensity": scan_intensity,
+        "llm_scan_depth": llm_scan_depth,
+        "scan_profile": scan_profile,
+        "skip_passive_sibling_tls": skip_passive_sibling_tls,
+        "username_b": username_b,
+        "password_b": password_b,
+        "credentials_admin": credentials_admin,
+        "credentials_tenant_b": credentials_tenant_b,
+        "workflow_id": workflow_id,
+        "business_flow": business_flow,
+    }
+
+
+def _use_external_scanner() -> bool:
+    return scan_launcher.SPAWN_SCANNER_CONTAINER or scan_launcher.SCAN_LAUNCHER in (
+        "local-docker",
+        "docker",
+        "fargate",
+    )
+
+
 @app.post("/api/scan", tags=["Scans"])
 async def start_scan(request: Request):
     owner = _request_user(request)
@@ -1830,6 +1912,47 @@ async def start_scan(request: Request):
         "_extra_domains": extra_domains,
     }
     _save_scan(scan_id)
+
+    if _use_external_scanner():
+        job_config = _build_scan_job_config(
+            target_url=target_url,
+            username=username,
+            password=password,
+            model=model,
+            scan_mode=scan_mode,
+            auth_type=auth_type,
+            api_imports=api_imports,
+            extra_domains=extra_domains,
+            scan_scope=scan_scope,
+            focus_urls=focus_urls,
+            focus_areas=focus_areas,
+            exclude_urls=exclude_urls,
+            scan_intensity=scan_intensity,
+            llm_scan_depth=llm_scan_depth,
+            scan_profile=scan_profile,
+            skip_passive_sibling_tls=skip_passive_sibling_tls,
+            username_b=username_b,
+            password_b=password_b,
+            credentials_admin=credentials_admin,
+            credentials_tenant_b=credentials_tenant_b,
+            workflow_id=workflow_id,
+            business_flow=business_flow,
+        )
+        SCANS[scan_id]["status"] = "queued"
+        _save_scan(scan_id)
+        try:
+            worker_ref = scan_launcher.launch_scan_worker(scan_id, job_config)
+            SCANS[scan_id]["worker_ref"] = worker_ref
+            SCANS[scan_id]["status"] = "running"
+            _save_scan(scan_id)
+            publish_event(scan_id, "queued", {"worker_ref": worker_ref})
+        except Exception as exc:
+            logger.exception("Failed to launch scanner worker for %s", scan_id)
+            SCANS[scan_id]["status"] = "error"
+            SCANS[scan_id]["error"] = str(exc)
+            _save_scan(scan_id)
+            return JSONResponse({"error": str(exc), "scan_id": scan_id}, status_code=500)
+        return {"scan_id": scan_id, "status": "queued", "worker_ref": worker_ref}
 
     thread = threading.Thread(
         target=_run_scan_in_thread,
@@ -2249,6 +2372,46 @@ async def _run_scan_task(scan_id, target_url, username, password, model, scan_mo
             scandb.add_all_time_cost(err_cost)
             _mirror_to_pg("add_all_time_cost", err_cost)
         _save_scan(scan_id)
+
+
+@app.get("/api/scans/{scan_id}/stream", tags=["Scans"])
+async def stream_scan_events(scan_id: str, request: Request):
+    """SSE stream of live scan events (Redis + PG replay)."""
+    last_id = 0
+    raw_last = request.headers.get("last-event-id") or request.headers.get("Last-Event-ID") or "0"
+    try:
+        last_id = int(raw_last)
+    except (TypeError, ValueError):
+        last_id = 0
+
+    from web.live_events import replay_events
+
+    async def event_generator():
+        cursor = last_id
+        while True:
+            batch = replay_events(scan_id, after_id=cursor, limit=50)
+            if batch:
+                for ev in batch:
+                    eid = ev.get("id", 0)
+                    etype = ev.get("event_type", "message")
+                    data = json.dumps(ev.get("payload") or {}, default=str)
+                    yield f"id: {eid}\nevent: {etype}\ndata: {data}\n\n"
+                    cursor = max(cursor, int(eid) if eid else 0)
+            else:
+                yield ": keepalive\n\n"
+                await asyncio.sleep(1.5)
+            # Stop streaming when scan reaches terminal state in PG
+            if batch and any(
+                ev.get("event_type") in ("completed", "error", "cancelled")
+                for ev in batch
+            ):
+                break
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 @app.get("/api/scan/{scan_id}", tags=["Scans"])

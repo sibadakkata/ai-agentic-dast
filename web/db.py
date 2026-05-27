@@ -376,6 +376,19 @@ def get_scan_result(scan_id: str) -> str | None:
     return None
 
 
+def list_findings(scan_id: str) -> list[dict]:
+    """Findings from scan_results JSON (pre-normalized PG rows)."""
+    raw = get_scan_result(scan_id)
+    if not raw:
+        return []
+    try:
+        data = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return []
+    findings = data.get("findings") if isinstance(data, dict) else None
+    return findings if isinstance(findings, list) else []
+
+
 # ── App-wide key/value (UI preferences, etc.) ───────────────────────────
 
 def app_kv_get(key: str) -> str | None:

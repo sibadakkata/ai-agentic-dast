@@ -22,6 +22,7 @@ _READ_OPS = frozenset({
     "get_scan_result",
     "get_cost_ledger",
     "app_kv_get",
+    "list_findings",
 })
 
 
@@ -57,3 +58,7 @@ def get_cost_ledger(*args, **kwargs):
 
 def app_kv_get(*args, **kwargs):
     return _route_read("app_kv_get", *args, **kwargs)
+
+
+def list_findings(*args, **kwargs):
+    return _route_read("list_findings", *args, **kwargs)
