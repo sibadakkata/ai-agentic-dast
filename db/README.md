@@ -16,9 +16,11 @@ The schema is applied automatically on first startup by `web/db.py` `init()`.
 | Table | Description |
 |-------|-------------|
 | `scans` | One row per scan — metadata, status, cost, and a `data` JSON blob with the full scan info dict |
-| `cost_ledger` | Singleton row tracking cumulative spend (including deleted scans) |
+| `cost_ledger` | Singleton row tracking cumulative spend (including deleted scans); surfaced in the UI **Cost Management** page |
 | `scan_results` | Full result JSON per scan — source of truth for the results API |
 | `app_kv` | Key/value store for UI preferences (column visibility, theme, etc.) |
+| `users` | Platform accounts (`email`, `role` = `admin` \| `user`, SAML/local login metadata) |
+| `invites` | Pending invite tokens for SSO onboarding (7-day expiry; see [SSO & RBAC](../docs/SSO_RBAC.md)) |
 
 ### `scans.data` — what's in the JSON blob
 
