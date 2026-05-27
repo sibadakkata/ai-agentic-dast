@@ -455,16 +455,78 @@ def invites_delete(invite_id: str):
 
 
 def save_live_event(scan_id: str, event_type: str, payload: dict):
+    save_live_event_returning_id(scan_id, event_type, payload)
+
+
+def save_live_event_returning_id(scan_id: str, event_type: str, payload: dict) -> int | None:
+    """Insert live event; return row id (for SSE / Redis). None if dual-write disabled."""
+
     def _do(conn):
-        conn.execute(
+        row = conn.execute(
             """
             INSERT INTO live_events (scan_id, event_type, payload)
             VALUES (%s, %s, %s::jsonb)
+            RETURNING id
             """,
             (scan_id, event_type, _json_dumps_safe(payload)),
-        )
+        ).fetchone()
+        return int(row[0]) if row else None
 
-    _retry_write(lambda: _with_conn(_do), op=f"save_live_event({scan_id})")
+    if not dual_write_enabled():
+        return None
+    try:
+        return _with_conn(_do)
+    except Exception as exc:
+        logger.warning("Postgres save_live_event failed for %s: %s", scan_id, exc)
+        return None
+
+
+def list_live_events(scan_id: str, *, after_id: int = 0, limit: int = 500) -> list[dict]:
+    def _do(conn):
+        rows = conn.execute(
+            """
+            SELECT id, event_type, payload, created_at
+            FROM live_events
+            WHERE scan_id = %s AND id > %s
+            ORDER BY id ASC
+            LIMIT %s
+            """,
+            (scan_id, after_id, limit),
+        ).fetchall()
+        out = []
+        for eid, etype, payload, created_at in rows:
+            pl = _row_data_to_dict(payload)
+            out.append({
+                "id": eid,
+                "event_type": etype,
+                "payload": pl,
+                "created_at": created_at.isoformat() if created_at else None,
+            })
+        return out
+
+    return _with_read_conn(_do)
+
+
+def list_findings(scan_id: str) -> list[dict]:
+    """Normalized findings for a scan; falls back to empty if none."""
+
+    def _do(conn):
+        rows = conn.execute(
+            """
+            SELECT evidence FROM findings
+            WHERE scan_id = %s
+            ORDER BY created_at ASC
+            """,
+            (scan_id,),
+        ).fetchall()
+        out = []
+        for (evidence,) in rows:
+            parsed = _row_data_to_dict(evidence)
+            if parsed:
+                out.append(parsed)
+        return out
+
+    return _with_read_conn(_do)
 
 
 def save_finding(scan_id: str, finding: dict, *, finding_id: str | None = None):
