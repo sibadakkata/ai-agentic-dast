@@ -1,0 +1,40 @@
+---
+description: Prevent UTF-16 null-byte corruption when writing source files on Windows
+alwaysApply: true
+---
+
+# File Encoding on Windows
+
+## Rule
+NEVER use the Cursor `Write` tool to create or overwrite `.py`, `.tf`, `.yml`, `.yaml`, `.json`, `.sh`, or `.ps1` files on Windows hosts. The tool can emit UTF-16 LE with a BOM, producing files that Python rejects with `SyntaxError: source code cannot contain null bytes`, that Terraform rejects with `Invalid character`, and that Docker layers preserve as corrupted.
+
+## Why
+This bug has caused at least 4 production incidents in this repo:
+- 27-May-2026: Lambda `db_backup.py` UTF-16 → `Runtime.UserCodeSyntaxError` blocking the weekly backup
+- 27-May-2026: `scripts/migrate_sqlite_to_pg.py` UTF-16 on first commit, fixed by rebuild
+- 27-May-2026: `deploy_bundle_ec2.py` UTF-16 → bypassed by uploading individual files
+- 27-May-2026: ECR runner image baked UTF-16 sources → Fargate tasks crashed at start with `SyntaxError`
+
+## Allowed alternatives (in priority order)
+
+1. **StrReplace on an existing file** — preferred. Always preserves the existing encoding.
+2. **EditNotebook** — for `.ipynb`.
+3. **PowerShell UTF-8 write** when you genuinely need to create a new source file:
+
+   `$content` is your file contents as a PowerShell string. Write it with:
+
+   `[System.IO.File]::WriteAllText("C:\path\to\file.py", $content, (New-Object System.Text.UTF8Encoding $false))`
+
+   The `$false` flag disables the BOM. Verify with:
+
+   `[System.IO.File]::ReadAllBytes("C:\path\to\file.py") | Where-Object {$_ -eq 0} | Measure-Object`
+
+   Expect `Count: 0`.
+
+4. **Generate via git** — `git checkout HEAD -- path/to/file` if you just need to restore.
+
+## Markdown and other text files
+`.md`, `.txt`, `.csv` are usually fine because Python doesn't import them. But for consistency, the same rule applies if the file will be parsed (e.g. `.csv` ingested by pandas).
+
+## When this rule must be enforced
+ALWAYS, on this Windows host. The Cursor team has acknowledged the bug; the workaround is permanent until fixed upstream.
