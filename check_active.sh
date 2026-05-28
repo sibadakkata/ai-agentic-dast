@@ -1,5 +1,5 @@
 #!/bin/bash
-curl -s http://localhost:8080/api/scans | python3 -c "
+curl -s http://localhost:80/api/scans | python3 -c "
 import sys, json
 data = json.load(sys.stdin)
 scans = data.get('items', [])

@@ -5,15 +5,15 @@ An [OpenClaw](https://github.com/openclaw/openclaw) skill that lets you trigger 
 ## Architecture
 
 ```
-YOUR MACHINE (local)                        EC2 (remote)
-┌─────────────────────┐                     ┌─────────────────────┐
-│  test_skill.py      │    HTTP REST API    │  AI Agentic Scanner │
-│  (or OpenClaw agent)│ ──────────────────► │  (already running)  │
-│                     │ ◄────────────────── │  Docker container   │
-└─────────────────────┘    JSON responses   └─────────────────────┘
+YOUR MACHINE (local)                   Production UI (EC2 + ALB)
+â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”                     â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”
+â”‚  test_skill.py      â”‚    HTTP REST API    â”‚  AI Agentic Scanner â”‚
+â”‚  (or OpenClaw agent)â”‚ â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â–º â”‚  (already running)  â”‚
+â”‚                     â”‚ â—„â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ â”‚  Docker container   â”‚
+â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜    JSON responses   â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜
 ```
 
-You do **not** need to run the scanner locally. The scanner stays on EC2. Only this skill/test script runs on your machine and talks to EC2 over HTTP.
+You do **not** need to run the scanner locally. The scanner runs in AWS (FastAPI UI on EC2; scan workers on Fargate when enabled). Only this skill/test script runs on your machine and calls the REST API over HTTPS.
 
 ## Quick Start (No OpenClaw Needed)
 
@@ -24,9 +24,15 @@ cd C:\Projects\Pen-Test\Acunetix\POC
 python openclaw-skill/test_skill.py list
 ```
 
-Default scanner URL: `http://localhost:8080`. Override with:
+Default scanner URL: `http://localhost:80`. Production:
+
 ```powershell
-$env:SCANNER_URL = "http://your-scanner:8080"
+$env:SCANNER_URL = "https://rt.ai.webscanner.gendigital.com"
+```
+
+Override for other hosts:
+```powershell
+$env:SCANNER_URL = "http://your-scanner"
 $env:SCANNER_USER = "dast-admin"          # must match server DAST_AUTH_USER (or your SSO API user)
 $env:SCANNER_PASS = "your-secret"         # must match server DAST_AUTH_PASS
 ```
@@ -157,7 +163,7 @@ Model : Claude Haiku 4.5 (recommended)
 Cost  : $26.7496
 
 Generating PDF report...
-Report: http://localhost:8080/api/reports/scan_bedrock_us_anthropic_claude_haiku_4_5.pdf
+Report: http://localhost:80/api/reports/scan_bedrock_us_anthropic_claude_haiku_4_5.pdf
 ```
 
 ### 8. Check Status of a Specific Scan
@@ -216,7 +222,7 @@ python openclaw-skill/test_skill.py report scan_20260311_144535_99d6f9
 
 Output:
 ```
-Report: http://localhost:8080/api/reports/scan_bedrock_us_anthropic_claude_haiku_4_5.pdf
+Report: http://localhost:80/api/reports/scan_bedrock_us_anthropic_claude_haiku_4_5.pdf
 ```
 
 ### 11. Start a New Scan
@@ -241,6 +247,22 @@ python openclaw-skill/test_skill.py scan --url https://testphp.vulnweb.com --wai
 python openclaw-skill/test_skill.py stop scan_20260312_082647_cbb4a2
 ```
 
+### 13. Launch with operator AI instructions
+
+The CLI does not expose a dedicated `--ai-instructions` flag yet; pass guidance via the HTTP API or MCP instead. See **[docs/api.md](../docs/api.md#operator-guidance-ai_instructions)** and **[docs/mcp.md](../docs/mcp.md#operator-guidance-ai_instructions)** for `ai_instructions` examples (8 KiB cap, fence stripping).
+
+```powershell
+python openclaw-skill/test_skill.py scan --url https://example.com --mode both
+```
+
+---
+
+## Related documentation
+
+- [HTTP API guide](../docs/api.md) — curl launch, polling, results
+- [MCP guide](../docs/mcp.md) — `mcp_server.py` for Cursor / Claude Desktop
+- [SKILL.md](SKILL.md) — OpenClaw skill definition (REST actions for chat agents)
+
 ---
 
 ## With OpenClaw (Team Chat)
@@ -248,7 +270,7 @@ python openclaw-skill/test_skill.py stop scan_20260312_082647_cbb4a2
 If you want team-wide access via Slack/Web UI:
 
 ```bash
-bash openclaw-skill/install.sh http://localhost:8080
+bash openclaw-skill/install.sh http://localhost:80
 ```
 
 Then chat naturally in OpenClaw:
@@ -261,7 +283,7 @@ Then chat naturally in OpenClaw:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `SCANNER_URL` | `http://localhost:8080` | Scanner backend URL |
+| `SCANNER_URL` | `http://localhost:80` | Scanner backend URL |
 | `SCANNER_USER` | `dast-admin` | Basic Auth username (align with server `DAST_AUTH_USER`) |
 | `SCANNER_PASS` | (set in env) | Basic Auth password (align with server `DAST_AUTH_PASS`) |
 
@@ -269,8 +291,8 @@ Then chat naturally in OpenClaw:
 
 ```
 openclaw-skill/
-├── SKILL.md          # OpenClaw skill definition
-├── install.sh        # One-command installer for OpenClaw
-├── test_skill.py     # Standalone CLI (no OpenClaw needed)
-└── README.md         # This file
+â”œâ”€â”€ SKILL.md          # OpenClaw skill definition
+â”œâ”€â”€ install.sh        # One-command installer for OpenClaw
+â”œâ”€â”€ test_skill.py     # Standalone CLI (no OpenClaw needed)
+â””â”€â”€ README.md         # This file
 ```

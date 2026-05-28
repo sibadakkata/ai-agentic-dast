@@ -1,0 +1,23 @@
+FROM mcr.microsoft.com/playwright/python:v1.49.0-noble
+
+WORKDIR /app
+
+COPY scanners/runner/requirements.txt /app/scanners/runner/requirements.txt
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    fonts-dejavu-core xmlsec1 libxmlsec1-dev pkg-config libssl-dev libffi-dev \
+    && rm -rf /var/lib/apt/lists/*
+RUN pip install --no-cache-dir -r scanners/runner/requirements.txt
+RUN playwright install chromium
+
+COPY scanners/ scanners/
+COPY scripts/ scripts/
+COPY web/ web/
+COPY config/scanner_config.yaml config/scanner_config.yaml
+COPY config/targets.env.example config/targets.env.example
+
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+ENV DUAL_WRITE_PG=1
+ENV RUNNER_PG_ONLY=1
+
+ENTRYPOINT ["python3", "-m", "scanners.runner.main"]

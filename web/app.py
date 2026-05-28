@@ -49,12 +49,20 @@ from scripts.triage_engine import classify as triage_classify
 from starlette.middleware.gzip import GZipMiddleware
 
 app = FastAPI(
-    title="AI Agentic Web Scanner",
-    description="LLM-powered Dynamic Application Security Testing API. "
-    "Start scans, poll status, download results and PDF reports programmatically.",
+    title="AI DAST Scanner API",
+    description=(
+        "LLM-powered Dynamic Application Security Testing (DAST) API. "
+        "Launch scans with the same options as the web UI, poll status, and fetch triaged results. "
+        "Architecture: https://confluence.corp.nortonlifelock.com/spaces/CIP/pages/954017481/Red+Team+AI+Web+Scanner"
+    ),
     version="1.0.0",
+    openapi_url="/openapi.json",
     docs_url="/docs",
     redoc_url="/redoc",
+    servers=[
+        {"url": "https://rt.ai.webscanner.gendigital.com", "description": "Production"},
+        {"url": "http://localhost:8080", "description": "Local dev"},
+    ],
 )
 
 app.add_middleware(GZipMiddleware, minimum_size=1000)
@@ -191,7 +199,29 @@ RAW_DIR.mkdir(parents=True, exist_ok=True)
 REPORTS_DIR.mkdir(parents=True, exist_ok=True)
 
 from web import db as scandb
+from web import db_pg as pgdb
+from web import db_router as dbread
+from web import scan_launcher
+from web.live_events import publish_event
+from web.scan_models import (
+    ScanLaunchRequest,
+    materialize_api_imports,
+    parse_scan_launch_dict,
+    request_to_launch_params,
+    validate_scan_launch_params,
+)
+
 scandb.init()
+
+
+def _mirror_to_pg(op: str, *args, **kwargs) -> None:
+    """Best-effort Postgres dual-write after SQLite (Phase 0)."""
+    try:
+        fn = getattr(pgdb, op, None)
+        if fn is not None:
+            fn(*args, **kwargs)
+    except Exception:
+        logger.warning("Postgres dual-write %s failed", op, exc_info=True)
 
 SCANS: dict[str, dict] = {}
 CANCEL_FLAGS: dict[str, threading.Event] = {}
@@ -297,10 +327,10 @@ def _load_scans_from_disk():
     """
     _old_meta = BASE / "results" / "scans_meta.json"
     _old_ledger = BASE / "results" / "cost_ledger.json"
-    if scandb.scan_count() == 0 and _old_meta.exists():
+    if dbread.scan_count() == 0 and _old_meta.exists():
         scandb.migrate_from_json(_old_meta, _old_ledger)
 
-    data = scandb.load_all_scans()
+    data = dbread.load_all_scans()
     dirty = False
     for scan_id, info in data.items():
         if info.get("status") == "running":
@@ -311,7 +341,7 @@ def _load_scans_from_disk():
             info["progress"] = progress
             dirty = True
             try:
-                raw = scandb.get_scan_result(scan_id)
+                raw = dbread.get_scan_result(scan_id)
                 if raw:
                     partial = json.loads(raw)
                     fc = len(partial.get("findings", []))
@@ -353,10 +383,11 @@ def _load_scans_from_disk():
 
     _backfill_scan_results_from_disk()
 
-    if scandb.get_cost_ledger().get("all_time_cost", 0) == 0 and SCANS:
+    if dbread.get_cost_ledger().get("all_time_cost", 0) == 0 and SCANS:
         bootstrap_cost = sum(s.get("cost", 0) or 0 for s in SCANS.values())
         if bootstrap_cost > 0:
             scandb.set_cost_ledger(bootstrap_cost)
+            _mirror_to_pg("set_cost_ledger", bootstrap_cost)
 
 _TRANSIENT_KEYS = frozenset({"live_tests", "live_findings", "live_phases", "live_crawled", "live_forms", "live_tool_calls", "live_out_of_scope", "live_tokens", "live_llm_calls", "live_cost", "live_cache_read", "live_cache_write", "live_phase_tools", "_router", "_findings_seen"})
 _SECRET_KEYS = frozenset({"_password"})
@@ -529,7 +560,9 @@ def _save_scan(scan_id: str):
     if not info:
         return
     try:
-        scandb.upsert_scan(scan_id, _clean_scan_for_db(info))
+        row = _clean_scan_for_db(info)
+        scandb.upsert_scan(scan_id, row)
+        _mirror_to_pg("upsert_scan", scan_id, row)
     except Exception:
         logger.exception("Failed to persist scan %s to SQLite", scan_id)
 
@@ -539,6 +572,7 @@ def _save_scans_to_disk():
     try:
         persist = {sid: _clean_scan_for_db(info) for sid, info in SCANS.items()}
         scandb.upsert_all(persist)
+        _mirror_to_pg("upsert_all", persist)
     except Exception:
         logger.exception("Failed to bulk-persist scans to SQLite")
 
@@ -573,6 +607,7 @@ def _autosave_loop():
                     batch[sid] = _clean_scan_for_db(info)
             if batch:
                 scandb.upsert_all(batch)
+                _mirror_to_pg("upsert_all", batch)
             for sid in to_flush:
                 info = SCANS.get(sid)
                 if info and info.get("live_findings"):
@@ -591,7 +626,9 @@ def _persist_scan_result(scan_id: str, data: dict):
     """Write full result JSON to SQLite (source of truth for API reads)."""
     _RESULTS_CACHE.pop(scan_id, None)
     try:
-        scandb.save_scan_result(scan_id, json.dumps(data, default=str))
+        payload = json.dumps(data, default=str)
+        scandb.save_scan_result(scan_id, payload)
+        _mirror_to_pg("save_scan_result", scan_id, payload)
     except Exception:
         logger.exception("Failed to persist scan_results for %s", scan_id)
 
@@ -612,7 +649,9 @@ def _persist_partial_findings(scan_id: str, scan: dict):
             },
             "summary": {"total_findings": len(findings)},
         }
-        scandb.save_scan_result(scan_id, json.dumps(partial, default=str))
+        payload = json.dumps(partial, default=str)
+        scandb.save_scan_result(scan_id, payload)
+        _mirror_to_pg("save_scan_result", scan_id, payload)
     except Exception:
         logger.debug("Partial findings checkpoint failed for %s", scan_id, exc_info=True)
 
@@ -653,13 +692,34 @@ def _load_raw_result_dict(scan_id: str) -> dict | None:
     subsequent reads are fast. See
     tests/test_results_endpoint_resilience.py::TestPartialDbFallback.
     """
-    raw = scandb.get_scan_result(scan_id)
+    raw = dbread.get_scan_result(scan_id)
     cached: dict | None = None
     if raw:
         try:
             cached = json.loads(raw)
         except Exception:
             cached = None
+
+    if dbread.READ_FROM_PG:
+        try:
+            pg_findings = dbread.list_findings(scan_id)
+            if pg_findings:
+                if cached is None:
+                    cached = {
+                        "findings": pg_findings,
+                        "summary": {"total_findings": len(pg_findings)},
+                        "metadata": {},
+                    }
+                else:
+                    cached = dict(cached)
+                    cached["findings"] = pg_findings
+                    summary = cached.get("summary")
+                    if isinstance(summary, dict):
+                        summary = dict(summary)
+                        summary["total_findings"] = len(pg_findings)
+                        cached["summary"] = summary
+        except Exception:
+            logger.debug("PG list_findings failed for %s", scan_id, exc_info=True)
 
     cached_is_partial = bool(
         isinstance(cached, dict)
@@ -694,7 +754,7 @@ def _backfill_scan_results_from_disk():
     meta_dirty = False
     for scan_id, info in list(SCANS.items()):
         try:
-            if scandb.get_scan_result(scan_id):
+            if dbread.get_scan_result(scan_id):
                 continue
             rf = info.get("result_file")
             if not rf:
@@ -902,9 +962,31 @@ threading.Thread(target=_schedule_model_discovery, daemon=True, name="model-disc
 
 @app.get("/health", tags=["System"])
 async def health_check():
-    """Health check endpoint (no auth) — useful for load balancers and monitoring."""
+    """Health check with light runtime stats (no auth)."""
     running = sum(1 for s in SCANS.values() if s.get("status") == "running")
     return {"status": "ok", "scans_running": running, "total_scans": len(SCANS)}
+
+
+@app.get("/healthz", tags=["System"], include_in_schema=False)
+async def healthz():
+    """ALB target health — 200 OK, no database access."""
+    return Response(status_code=200)
+
+
+@app.get("/api/admin/db-health", tags=["Admin"])
+async def admin_db_health(_admin=Depends(require_admin)):
+    """SQLite + Postgres dual-write health (admin only)."""
+    sqlite_status = "ok"
+    try:
+        scandb.scan_count()
+    except Exception as exc:
+        sqlite_status = f"degraded:{exc}"
+    pg = pgdb.health_check()
+    return {
+        "sqlite": sqlite_status,
+        "postgres": pg.get("status", "degraded"),
+        "postgres_error": pg.get("error") or None,
+    }
 
 
 @app.get("/login", include_in_schema=False)
@@ -1031,7 +1113,7 @@ async def _get_dashboard_inner(request: Request):
             "started": s.get("started", ""),
         })
 
-    ledger = scandb.get_cost_ledger()
+    ledger = dbread.get_cost_ledger()
     all_time_cost = ledger.get("all_time_cost", 0)
     deleted_cost = ledger.get("deleted_scans_cost", 0)
     deleted_count = ledger.get("deleted_scans_count", 0)
@@ -1219,6 +1301,10 @@ async def list_scans(
     page = max(page, 1)
 
     visible = _scans_for_user(request)
+    if _use_external_scanner() and dbread.READ_FROM_PG:
+        for scan_id, info in list(visible.items()):
+            if info.get("status") in ("running", "queued") or info.get("worker_ref"):
+                _sync_scan_from_pg(scan_id)
     all_scans = []
     for scan_id, info in sorted(visible.items(), key=lambda x: x[1].get("started", ""), reverse=True):
         entry: dict = {
@@ -1267,7 +1353,7 @@ async def get_ui_settings(creds=Depends(_verify)):
     """Column visibility and triage table prefs (stored in SQLite, not browser storage)."""
     out: dict = {}
     for key in ("scanColVisibility", "triage_cols"):
-        raw = scandb.app_kv_get(key)
+        raw = dbread.app_kv_get(key)
         if not raw:
             continue
         try:
@@ -1289,7 +1375,9 @@ async def put_ui_settings(request: Request, creds=Depends(require_admin)):
     for key in ("scanColVisibility", "triage_cols"):
         if key not in body:
             continue
-        scandb.app_kv_set(key, json.dumps(body[key], default=str))
+        val = json.dumps(body[key], default=str)
+        scandb.app_kv_set(key, val)
+        _mirror_to_pg("app_kv_set", key, val)
     return {"status": "ok"}
 
 
@@ -1687,63 +1775,109 @@ async def analyze_instruction(request: Request):
         return JSONResponse({"error": str(e)}, status_code=500)
 
 
-@app.post("/api/scan", tags=["Scans"])
-async def start_scan(request: Request):
-    owner = _request_user(request)
-    owner_id = owner.id if owner else None
+def _build_scan_job_config(
+    *,
+    target_url: str,
+    username: str,
+    password: str,
+    model: str,
+    scan_mode: str,
+    auth_type: str,
+    api_imports: dict,
+    extra_domains: list,
+    scan_scope: str,
+    focus_urls: list,
+    focus_areas: list,
+    exclude_urls: list,
+    scan_intensity: str,
+    llm_scan_depth: str,
+    scan_profile: str,
+    skip_passive_sibling_tls: bool,
+    username_b: str,
+    password_b: str,
+    credentials_admin: dict,
+    credentials_tenant_b: dict,
+    workflow_id: str | None,
+    business_flow: str | None,
+    ai_instructions: str | None = None,
+) -> dict:
+    return {
+        "target_url": target_url,
+        "username": username,
+        "password": password,
+        "model": model,
+        "scan_mode": scan_mode,
+        "auth_type": auth_type,
+        "api_imports": api_imports,
+        "extra_domains": extra_domains,
+        "scan_scope": scan_scope,
+        "focus_urls": focus_urls,
+        "focus_areas": focus_areas,
+        "exclude_urls": exclude_urls,
+        "scan_intensity": scan_intensity,
+        "llm_scan_depth": llm_scan_depth,
+        "scan_profile": scan_profile,
+        "skip_passive_sibling_tls": skip_passive_sibling_tls,
+        "username_b": username_b,
+        "password_b": password_b,
+        "credentials_admin": credentials_admin,
+        "credentials_tenant_b": credentials_tenant_b,
+        "workflow_id": workflow_id,
+        "business_flow": business_flow,
+        "ai_instructions": ai_instructions,
+    }
+
+
+def _use_external_scanner() -> bool:
+    return scan_launcher.SPAWN_SCANNER_CONTAINER or scan_launcher.SCAN_LAUNCHER in (
+        "local-docker",
+        "docker",
+        "fargate",
+    )
+
+
+def _sync_scan_from_pg(scan_id: str) -> bool:
+    """Refresh in-memory scan row from Postgres after an external worker updates it."""
+    info = SCANS.get(scan_id)
+    if not info or not dbread.READ_FROM_PG:
+        return False
+    if not info.get("worker_ref") and not (
+        _use_external_scanner() and info.get("status") in ("running", "queued")
+    ):
+        return False
     try:
-        body = await request.json()
+        fresh = pgdb.get_scan_info(scan_id)
     except Exception:
-        return JSONResponse({"error": "Invalid JSON body"}, status_code=400)
-    target_url = body.get("target_url", "").strip()
-    username = body.get("username", "").strip()
-    password = body.get("password", "").strip()
-    username_b = body.get("username_b", "").strip()
-    password_b = body.get("password_b", "").strip()
-    credentials_admin = body.get("credentials_admin") or {}
-    credentials_tenant_b = body.get("credentials_tenant_b") or {}
-    model = _resolve_model_id(body.get("model", ""))
-    scan_mode_raw = body.get("scan_mode", "both")
-    _MODE_MAP = {"standard": "both", "quick": "both", "deep": "both",
-                 "full": "both", "web": "website", "site": "website"}
-    scan_mode = _MODE_MAP.get(scan_mode_raw, scan_mode_raw)
-    if scan_mode not in ("website", "api", "both"):
-        scan_mode = "both"
+        logger.debug("PG sync failed for %s", scan_id, exc_info=True)
+        return False
+    if not fresh:
+        return False
+    for key in _TRANSIENT_KEYS:
+        if key in info:
+            fresh[key] = info[key]
+    if info.get("worker_ref") and "worker_ref" not in fresh:
+        fresh["worker_ref"] = info["worker_ref"]
+    SCANS[scan_id].update(fresh)
+    return True
 
-    auth_type = body.get("auth_type", "auto")
-    api_imports = body.get("api_imports", {}) or {}
-    extra_domains = body.get("extra_domains", []) or []
-    scan_scope = body.get("scan_scope", "directory")
-    focus_urls = body.get("focus_urls", []) or []
-    focus_areas = body.get("focus_areas", []) or []
-    exclude_urls = body.get("exclude_urls", []) or []
-    scan_intensity = body.get("scan_intensity", "deep")
-    llm_scan_depth = body.get("llm_scan_depth", "standard").strip().lower()
-    if llm_scan_depth not in ("standard", "deep"):
-        llm_scan_depth = "standard"
-    workflow_id = body.get("workflow_id", "").strip() or None
-    business_flow = body.get("business_flow", "").strip() or None
-    scan_profile = (body.get("scan_profile") or "vulnerability_scan").strip().lower()
-    skip_passive_sibling_tls = bool(body.get("skip_passive_sibling_tls"))
-    if scan_intensity not in ("light", "standard", "deep"):
-        scan_intensity = "deep"
-    if focus_areas:
-        scan_intensity = "deep"
 
-    if scan_scope not in ("url_only", "directory", "full_site"):
-        scan_scope = "directory"
+def _launch_scan_core(params, owner_id: str | None, *, postman_collection_b64: str | None = None, burp_export_b64: str | None = None):
+    """Create scan record and start in-process thread or external worker."""
+    err = validate_scan_launch_params(params)
+    if err:
+        return JSONResponse({"error": err}, status_code=400)
 
-    if scan_profile not in ("vulnerability_scan", "crawl_only", "multi_agent"):
-        scan_profile = "vulnerability_scan"
-    # Crawl-only is incompatible with focus_areas (focus_areas selects vuln
-    # categories; crawl-only tests nothing). Silently drop focus_areas in
-    # crawl-only mode rather than fail — the user's intent was "just crawl".
-    if scan_profile == "crawl_only":
-        focus_areas = []
+    try:
+        api_imports = materialize_api_imports(
+            params.api_imports,
+            IMPORTS_DIR,
+            postman_collection_b64=postman_collection_b64,
+            burp_export_b64=burp_export_b64,
+        )
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
 
-    if not target_url:
-        return JSONResponse({"error": "Target URL is required"}, status_code=400)
-
+    model = _resolve_model_id(params.model)
     scan_id = f"scan_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
     model_name = next((m.get("name", m.get("id", model)) for m in _get_models() if m.get("id") == model), model)
 
@@ -1755,53 +1889,153 @@ async def start_scan(request: Request):
     interactive_session = _create_interactive_session(scan_id)
 
     SCANS[scan_id] = {
-        "target_url": target_url,
+        "target_url": params.target_url,
         "owner_user_id": owner_id,
         "model": model,
         "model_name": model_name,
         "status": "running",
         "started": datetime.now().isoformat(),
         "progress": [],
-        "scan_mode": scan_mode,
-        "scan_scope": scan_scope,
-        "focus_urls": focus_urls,
-        "focus_areas": focus_areas,
-        "exclude_urls": exclude_urls,
-        "scan_intensity": scan_intensity,
-        "llm_scan_depth": llm_scan_depth,
-        "scan_profile": scan_profile,
-        "skip_passive_sibling_tls": skip_passive_sibling_tls,
-        "workflow_id": workflow_id,
-        "business_flow": business_flow,
-        "auth_type": auth_type,
-        "_username": username,
-        "_password": password,
-        "_username_b": username_b,
-        "_password_b": password_b,
-        "_credentials_admin": credentials_admin,
-        "_credentials_tenant_b": credentials_tenant_b,
+        "scan_mode": params.scan_mode,
+        "scan_scope": params.scan_scope,
+        "focus_urls": params.focus_urls,
+        "focus_areas": params.focus_areas,
+        "exclude_urls": params.exclude_urls,
+        "scan_intensity": params.scan_intensity,
+        "llm_scan_depth": params.llm_scan_depth,
+        "scan_profile": params.scan_profile,
+        "skip_passive_sibling_tls": params.skip_passive_sibling_tls,
+        "workflow_id": params.workflow_id,
+        "business_flow": params.business_flow,
+        "ai_instructions": params.ai_instructions,
+        "auth_type": params.auth_type,
+        "_username": params.username,
+        "_password": params.password,
+        "_username_b": params.username_b,
+        "_password_b": params.password_b,
+        "_credentials_admin": params.credentials_admin,
+        "_credentials_tenant_b": params.credentials_tenant_b,
         "_api_imports": api_imports,
-        "_extra_domains": extra_domains,
+        "_extra_domains": params.extra_domains,
+        "_custom_headers": params.custom_headers,
     }
     _save_scan(scan_id)
 
+    if _use_external_scanner():
+        job_config = _build_scan_job_config(
+            target_url=params.target_url,
+            username=params.username,
+            password=params.password,
+            model=model,
+            scan_mode=params.scan_mode,
+            auth_type=params.auth_type,
+            api_imports=api_imports,
+            extra_domains=params.extra_domains,
+            scan_scope=params.scan_scope,
+            focus_urls=params.focus_urls,
+            focus_areas=params.focus_areas,
+            exclude_urls=params.exclude_urls,
+            scan_intensity=params.scan_intensity,
+            llm_scan_depth=params.llm_scan_depth,
+            scan_profile=params.scan_profile,
+            skip_passive_sibling_tls=params.skip_passive_sibling_tls,
+            username_b=params.username_b,
+            password_b=params.password_b,
+            credentials_admin=params.credentials_admin,
+            credentials_tenant_b=params.credentials_tenant_b,
+            workflow_id=params.workflow_id,
+            business_flow=params.business_flow,
+            ai_instructions=params.ai_instructions,
+        )
+        SCANS[scan_id]["status"] = "queued"
+        _save_scan(scan_id)
+        try:
+            worker_ref = scan_launcher.launch_scan_worker(scan_id, job_config)
+            SCANS[scan_id]["worker_ref"] = worker_ref
+            SCANS[scan_id]["status"] = "running"
+            _save_scan(scan_id)
+            publish_event(scan_id, "queued", {"worker_ref": worker_ref})
+        except Exception as exc:
+            logger.exception("Failed to launch scanner worker for %s", scan_id)
+            SCANS[scan_id]["status"] = "error"
+            SCANS[scan_id]["error"] = str(exc)
+            _save_scan(scan_id)
+            return JSONResponse({"error": str(exc), "scan_id": scan_id}, status_code=500)
+        return {"scan_id": scan_id, "status": "queued", "worker_ref": worker_ref}
+
     thread = threading.Thread(
         target=_run_scan_in_thread,
-        args=(scan_id, target_url, username, password, model, scan_mode, auth_type, api_imports, extra_domains, cancel_flag, pause_flag),
-        kwargs={"scan_scope": scan_scope, "focus_urls": focus_urls, "focus_areas": focus_areas, "scan_intensity": scan_intensity, "llm_scan_depth": llm_scan_depth, "exclude_urls": exclude_urls, "username_b": username_b, "password_b": password_b, "credentials_admin": credentials_admin, "credentials_tenant_b": credentials_tenant_b, "interactive_session": interactive_session, "workflow_id": workflow_id, "business_flow": business_flow, "scan_profile": scan_profile, "skip_passive_sibling_tls": skip_passive_sibling_tls},
+        args=(
+            scan_id,
+            params.target_url,
+            params.username,
+            params.password,
+            model,
+            params.scan_mode,
+            params.auth_type,
+            api_imports,
+            params.extra_domains,
+            cancel_flag,
+            pause_flag,
+        ),
+        kwargs={
+            "scan_scope": params.scan_scope,
+            "focus_urls": params.focus_urls,
+            "focus_areas": params.focus_areas,
+            "scan_intensity": params.scan_intensity,
+            "llm_scan_depth": params.llm_scan_depth,
+            "exclude_urls": params.exclude_urls,
+            "username_b": params.username_b,
+            "password_b": params.password_b,
+            "credentials_admin": params.credentials_admin,
+            "credentials_tenant_b": params.credentials_tenant_b,
+            "interactive_session": interactive_session,
+            "workflow_id": params.workflow_id,
+            "business_flow": params.business_flow,
+            "scan_profile": params.scan_profile,
+            "skip_passive_sibling_tls": params.skip_passive_sibling_tls,
+            "ai_instructions": params.ai_instructions,
+        },
         daemon=True,
     )
     thread.start()
     return {"scan_id": scan_id, "status": "started"}
 
 
-def _run_scan_in_thread(scan_id, target_url, username, password, model, scan_mode, auth_type, api_imports=None, extra_domains=None, cancel_flag=None, pause_flag=None, start_from_phase=0, initial_findings=None, scan_scope="directory", focus_urls=None, focus_areas=None, scan_intensity="deep", llm_scan_depth="standard", exclude_urls=None, username_b="", password_b="", credentials_admin=None, credentials_tenant_b=None, interactive_session=None, workflow_id=None, business_flow=None, scan_profile="vulnerability_scan", skip_passive_sibling_tls=False):
+@app.post("/api/scan", tags=["Scans"])
+async def start_scan(request: Request):
+    """Start a scan (JSON body). Accepts the same fields as the web UI launch form."""
+    owner = _request_user(request)
+    owner_id = owner.id if owner else None
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "Invalid JSON body"}, status_code=400)
+    params = parse_scan_launch_dict(body)
+    return _launch_scan_core(params, owner_id)
+
+
+@app.post("/api/v1/scans", tags=["Scans"], response_model=None)
+async def start_scan_v1(body: ScanLaunchRequest, request: Request):
+    """Start a scan via typed JSON (OpenAPI-documented). Supports base64 file imports."""
+    owner = _request_user(request)
+    owner_id = owner.id if owner else None
+    params = request_to_launch_params(body)
+    return _launch_scan_core(
+        params,
+        owner_id,
+        postman_collection_b64=body.postman_collection_b64,
+        burp_export_b64=body.burp_export_b64,
+    )
+
+
+def _run_scan_in_thread(scan_id, target_url, username, password, model, scan_mode, auth_type, api_imports=None, extra_domains=None, cancel_flag=None, pause_flag=None, start_from_phase=0, initial_findings=None, scan_scope="directory", focus_urls=None, focus_areas=None, scan_intensity="deep", llm_scan_depth="standard", exclude_urls=None, username_b="", password_b="", credentials_admin=None, credentials_tenant_b=None, interactive_session=None, workflow_id=None, business_flow=None, scan_profile="vulnerability_scan", skip_passive_sibling_tls=False, ai_instructions=None):
     """Run scan in a separate thread with its own event loop so the main UI stays responsive."""
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     try:
         loop.run_until_complete(
-            _run_scan_task(scan_id, target_url, username, password, model, scan_mode, auth_type, api_imports, extra_domains, cancel_flag, pause_flag, start_from_phase, initial_findings, scan_scope=scan_scope, focus_urls=focus_urls, focus_areas=focus_areas, scan_intensity=scan_intensity, llm_scan_depth=llm_scan_depth, exclude_urls=exclude_urls, username_b=username_b, password_b=password_b, credentials_admin=credentials_admin, credentials_tenant_b=credentials_tenant_b, interactive_session=interactive_session, workflow_id=workflow_id, business_flow=business_flow, scan_profile=scan_profile, skip_passive_sibling_tls=skip_passive_sibling_tls)
+            _run_scan_task(scan_id, target_url, username, password, model, scan_mode, auth_type, api_imports, extra_domains, cancel_flag, pause_flag, start_from_phase, initial_findings, scan_scope=scan_scope, focus_urls=focus_urls, focus_areas=focus_areas, scan_intensity=scan_intensity, llm_scan_depth=llm_scan_depth, exclude_urls=exclude_urls, username_b=username_b, password_b=password_b, credentials_admin=credentials_admin, credentials_tenant_b=credentials_tenant_b, interactive_session=interactive_session, workflow_id=workflow_id, business_flow=business_flow, scan_profile=scan_profile, skip_passive_sibling_tls=skip_passive_sibling_tls, ai_instructions=ai_instructions)
         )
     finally:
         loop.close()
@@ -1810,7 +2044,7 @@ def _run_scan_in_thread(scan_id, target_url, username, password, model, scan_mod
         INTERACTIVE_BROWSERS.pop(scan_id, None)
 
 
-async def _run_scan_task(scan_id, target_url, username, password, model, scan_mode, auth_type, api_imports=None, extra_domains=None, cancel_flag=None, pause_flag=None, start_from_phase=0, initial_findings=None, scan_scope="directory", focus_urls=None, focus_areas=None, scan_intensity="deep", llm_scan_depth="standard", exclude_urls=None, username_b="", password_b="", credentials_admin=None, credentials_tenant_b=None, interactive_session=None, workflow_id=None, business_flow=None, scan_profile="vulnerability_scan", skip_passive_sibling_tls=False):
+async def _run_scan_task(scan_id, target_url, username, password, model, scan_mode, auth_type, api_imports=None, extra_domains=None, cancel_flag=None, pause_flag=None, start_from_phase=0, initial_findings=None, scan_scope="directory", focus_urls=None, focus_areas=None, scan_intensity="deep", llm_scan_depth="standard", exclude_urls=None, username_b="", password_b="", credentials_admin=None, credentials_tenant_b=None, interactive_session=None, workflow_id=None, business_flow=None, scan_profile="vulnerability_scan", skip_passive_sibling_tls=False, ai_instructions=None):
     try:
         scan = SCANS[scan_id]
         scan["progress"].append("Initializing LLM router...")
@@ -1819,6 +2053,8 @@ async def _run_scan_task(scan_id, target_url, username, password, model, scan_mo
         seeded, _seen = _dedupe_findings(initial_findings or [])
         scan["live_findings"] = seeded
         scan["_findings_seen"] = _seen
+        for f in seeded:
+            _mirror_to_pg("save_finding", scan_id, f)
         scan["live_crawled"] = []
         scan["live_forms"] = 0
         scan["live_tool_calls"] = 0
@@ -1900,6 +2136,7 @@ async def _run_scan_task(scan_id, target_url, username, password, model, scan_mo
                 if key is not None:
                     seen.add(key)
                 scan["live_findings"].append(f)
+                _mirror_to_pg("save_finding", scan_id, f)
                 # Intra-phase checkpoint: persist every 5 new findings so a
                 # mid-phase crash doesn't lose findings discovered since the
                 # last phase_end. phase_end still persists on boundaries.
@@ -2057,6 +2294,7 @@ async def _run_scan_task(scan_id, target_url, username, password, model, scan_mo
             "skip_passive_sibling_tls": skip_passive_sibling_tls,
             "workflow_id": workflow_id,
             "business_flow": business_flow,
+            "ai_instructions": ai_instructions or scan.get("ai_instructions"),
         }
         if username_b or password_b:
             target_dict["credentials_b"] = {"username": username_b, "password": password_b}
@@ -2101,6 +2339,7 @@ async def _run_scan_task(scan_id, target_url, username, password, model, scan_mo
         SCANS[scan_id].pop("auth_challenge", None)
         SCANS[scan_id].pop("interactive_browser", None)
         scandb.add_all_time_cost(final_cost)
+        _mirror_to_pg("add_all_time_cost", final_cost)
         _save_scan(scan_id)
     except ScanCancelled:
         duration = time.perf_counter() - start
@@ -2142,6 +2381,7 @@ async def _run_scan_task(scan_id, target_url, username, password, model, scan_mo
         SCANS[scan_id].pop("interactive_browser", None)
         if _cost:
             scandb.add_all_time_cost(_cost)
+            _mirror_to_pg("add_all_time_cost", _cost)
         _save_scan(scan_id)
     except Exception as e:
         try:
@@ -2196,12 +2436,97 @@ async def _run_scan_task(scan_id, target_url, username, password, model, scan_mo
         SCANS[scan_id].pop("interactive_browser", None)
         if err_cost:
             scandb.add_all_time_cost(err_cost)
+            _mirror_to_pg("add_all_time_cost", err_cost)
         _save_scan(scan_id)
+
+
+@app.get("/api/scans/{scan_id}/stream", tags=["Scans"])
+async def stream_scan_events(scan_id: str, request: Request):
+    """SSE stream of live scan events (Redis + PG replay)."""
+    last_id = 0
+    raw_last = request.headers.get("last-event-id") or request.headers.get("Last-Event-ID") or "0"
+    try:
+        last_id = int(raw_last)
+    except (TypeError, ValueError):
+        last_id = 0
+
+    from web import live_events
+
+    def _format_sse(ev: dict) -> str:
+        eid = ev.get("id", 0)
+        etype = ev.get("event_type", "message")
+        data = json.dumps(ev.get("payload") or {}, default=str)
+        return f"id: {eid}\nevent: {etype}\ndata: {data}\n\n"
+
+    def _terminal(ev: dict) -> bool:
+        return ev.get("event_type") in ("completed", "error", "cancelled")
+
+    async def event_generator():
+        cursor = last_id
+        # Replay missed events from PG (reconnect / Last-Event-ID)
+        for ev in live_events.replay_events(scan_id, after_id=cursor, limit=500):
+            yield _format_sse(ev)
+            eid = ev.get("id", 0)
+            cursor = max(cursor, int(eid) if eid else 0)
+            if _terminal(ev):
+                return
+
+        if live_events.LIVE_EVENTS_REDIS and os.environ.get("REDIS_URL", "").strip():
+            queue: asyncio.Queue = asyncio.Queue()
+            loop = asyncio.get_running_loop()
+
+            def _redis_worker():
+                try:
+                    for ev in live_events.subscribe_redis(scan_id):
+                        loop.call_soon_threadsafe(queue.put_nowait, ev)
+                except Exception:
+                    pass
+                finally:
+                    loop.call_soon_threadsafe(queue.put_nowait, None)
+
+            import threading
+            threading.Thread(target=_redis_worker, daemon=True).start()
+            while True:
+                try:
+                    ev = await asyncio.wait_for(queue.get(), timeout=30.0)
+                except asyncio.TimeoutError:
+                    yield ": keepalive\n\n"
+                    continue
+                if ev is None:
+                    break
+                eid = ev.get("id", 0)
+                if eid and int(eid) <= cursor:
+                    continue
+                yield _format_sse(ev)
+                cursor = max(cursor, int(eid) if eid else 0)
+                if _terminal(ev):
+                    break
+            return
+
+        while True:
+            batch = live_events.replay_events(scan_id, after_id=cursor, limit=50)
+            if batch:
+                for ev in batch:
+                    yield _format_sse(ev)
+                    eid = ev.get("id", 0)
+                    cursor = max(cursor, int(eid) if eid else 0)
+                if any(_terminal(ev) for ev in batch):
+                    break
+            else:
+                yield ": keepalive\n\n"
+                await asyncio.sleep(1.5)
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 @app.get("/api/scan/{scan_id}", tags=["Scans"])
 async def get_scan_status(scan_id: str):
     if scan_id in SCANS:
+        _sync_scan_from_pg(scan_id)
         s = SCANS[scan_id]
         return {
             "scan_id": scan_id,
@@ -2515,6 +2840,7 @@ def _extract_scan_params(old: dict, scan_id: str | None = None) -> dict:
         "llm_scan_depth": old.get("llm_scan_depth", "standard"),
         "scan_profile": old.get("scan_profile", "vulnerability_scan"),
         "skip_passive_sibling_tls": old.get("skip_passive_sibling_tls", False),
+        "ai_instructions": old.get("ai_instructions"),
     }
 
 
@@ -2581,7 +2907,7 @@ async def retry_scan(scan_id: str, request: Request):
         args=(scan_id, params["target_url"], params["username"], params["password"],
               model, scan_mode, params["auth_type"], params["api_imports"],
               params["extra_domains"], cancel_flag, pause_flag, start_from, prior_findings),
-        kwargs={"scan_scope": params["scan_scope"], "focus_urls": params["focus_urls"], "focus_areas": params["focus_areas"], "scan_intensity": params["scan_intensity"], "llm_scan_depth": params.get("llm_scan_depth", "standard"), "scan_profile": params.get("scan_profile", "vulnerability_scan"), "exclude_urls": params.get("exclude_urls", []), "username_b": params.get("username_b", ""), "password_b": params.get("password_b", ""), "credentials_admin": params.get("credentials_admin"), "credentials_tenant_b": params.get("credentials_tenant_b"), "interactive_session": interactive_session, "skip_passive_sibling_tls": params.get("skip_passive_sibling_tls", False)},
+        kwargs={"scan_scope": params["scan_scope"], "focus_urls": params["focus_urls"], "focus_areas": params["focus_areas"], "scan_intensity": params["scan_intensity"], "llm_scan_depth": params.get("llm_scan_depth", "standard"), "scan_profile": params.get("scan_profile", "vulnerability_scan"), "exclude_urls": params.get("exclude_urls", []), "username_b": params.get("username_b", ""), "password_b": params.get("password_b", ""), "credentials_admin": params.get("credentials_admin"), "credentials_tenant_b": params.get("credentials_tenant_b"), "interactive_session": interactive_session, "skip_passive_sibling_tls": params.get("skip_passive_sibling_tls", False), "ai_instructions": params.get("ai_instructions")},
         daemon=True,
     )
     thread.start()
@@ -2650,6 +2976,7 @@ async def rescan(scan_id: str, request: Request):
         "_credentials_tenant_b": params.get("credentials_tenant_b") or {},
         "_api_imports": params["api_imports"],
         "_extra_domains": params["extra_domains"],
+        "ai_instructions": params.get("ai_instructions"),
     }
     _save_scan(new_id)
 
@@ -2658,7 +2985,7 @@ async def rescan(scan_id: str, request: Request):
         args=(new_id, params["target_url"], params["username"], params["password"],
               model, scan_mode, params["auth_type"], params["api_imports"],
               params["extra_domains"], cancel_flag, pause_flag),
-        kwargs={"scan_scope": params["scan_scope"], "focus_urls": params["focus_urls"], "focus_areas": params["focus_areas"], "scan_intensity": params["scan_intensity"], "llm_scan_depth": params.get("llm_scan_depth", "standard"), "scan_profile": params.get("scan_profile", "vulnerability_scan"), "exclude_urls": params.get("exclude_urls", []), "username_b": params.get("username_b", ""), "password_b": params.get("password_b", ""), "credentials_admin": params.get("credentials_admin"), "credentials_tenant_b": params.get("credentials_tenant_b"), "interactive_session": interactive_session, "skip_passive_sibling_tls": params.get("skip_passive_sibling_tls", False)},
+        kwargs={"scan_scope": params["scan_scope"], "focus_urls": params["focus_urls"], "focus_areas": params["focus_areas"], "scan_intensity": params["scan_intensity"], "llm_scan_depth": params.get("llm_scan_depth", "standard"), "scan_profile": params.get("scan_profile", "vulnerability_scan"), "exclude_urls": params.get("exclude_urls", []), "username_b": params.get("username_b", ""), "password_b": params.get("password_b", ""), "credentials_admin": params.get("credentials_admin"), "credentials_tenant_b": params.get("credentials_tenant_b"), "interactive_session": interactive_session, "skip_passive_sibling_tls": params.get("skip_passive_sibling_tls", False), "ai_instructions": params.get("ai_instructions")},
         daemon=True,
     )
     thread.start()
@@ -2686,6 +3013,7 @@ async def delete_scan(scan_id: str, _admin=Depends(require_admin)):
         if scan_cost > 0:
             try:
                 scandb.add_deleted_cost(scan_cost)
+                _mirror_to_pg("add_deleted_cost", scan_cost)
             except Exception as e:
                 errors.append(f"cost ledger: {e}")
         result_file = SCANS[scan_id].get("result_file")
@@ -2693,6 +3021,7 @@ async def delete_scan(scan_id: str, _admin=Depends(require_admin)):
         _RESULTS_CACHE.pop(scan_id, None)
         try:
             scandb.delete_scan(scan_id)
+            _mirror_to_pg("delete_scan", scan_id)
         except Exception as e:
             errors.append(f"db delete: {e}")
         CANCEL_FLAGS.pop(scan_id, None)
@@ -2744,11 +3073,13 @@ async def delete_all_scans(_admin=Depends(require_admin)):
     bulk_count = len(SCANS)
     if bulk_cost > 0:
         scandb.add_deleted_cost(bulk_cost, bulk_count)
+        _mirror_to_pg("add_deleted_cost", bulk_cost, bulk_count)
     SCANS.clear()
     CANCEL_FLAGS.clear()
     PAUSE_FLAGS.clear()
     try:
         scandb.delete_all_scans()
+        _mirror_to_pg("delete_all_scans")
     except Exception as e:
         logger.warning("delete_all_scans DB cleanup: %s", e)
     count = 0
@@ -4005,11 +4336,13 @@ async def delete_reports_for_target(target: str = "", _admin=Depends(require_adm
         if target_del_cost > 0:
             try:
                 scandb.add_deleted_cost(target_del_cost, len(ids_to_delete))
+                _mirror_to_pg("add_deleted_cost", target_del_cost, len(ids_to_delete))
             except Exception:
                 pass
         if ids_to_delete:
             try:
                 scandb.delete_scans(ids_to_delete)
+                _mirror_to_pg("delete_scans", ids_to_delete)
             except Exception:
                 pass
 

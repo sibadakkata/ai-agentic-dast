@@ -7,8 +7,22 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
+import logging
+
 from scanners.users.models import Invite, User, UserRole
 from web import db as scandb
+from web import db_pg as pgdb
+
+logger = logging.getLogger(__name__)
+
+
+def _mirror_pg(op: str, *args, **kwargs) -> None:
+    try:
+        fn = getattr(pgdb, op, None)
+        if fn is not None:
+            fn(*args, **kwargs)
+    except Exception:
+        logger.warning("Postgres dual-write %s failed", op, exc_info=True)
 
 
 def _utc_now() -> datetime:
@@ -53,17 +67,17 @@ class UserRepository:
             raise ValueError(f"Invalid role: {role}")
         now = _iso(_utc_now())
         uid = user_id or str(uuid.uuid4())
-        scandb.users_insert(
-            {
-                "id": uid,
-                "email": email_n,
-                "name": name or email_n.split("@")[0],
-                "role": role,
-                "created_at": now,
-                "last_login_at": None,
-                "is_active": 1,
-            }
-        )
+        row = {
+            "id": uid,
+            "email": email_n,
+            "name": name or email_n.split("@")[0],
+            "role": role,
+            "created_at": now,
+            "last_login_at": None,
+            "is_active": 1,
+        }
+        scandb.users_insert(row)
+        _mirror_pg("users_insert", row)
         user = self.get_user_by_id(uid)
         assert user is not None
         return user
@@ -79,6 +93,7 @@ class UserRepository:
             if role is not None:
                 updates["role"] = role
             scandb.users_update(existing.id, updates)
+            _mirror_pg("users_update", existing.id, updates)
             return self.get_user_by_id(existing.id)  # type: ignore[return-value]
         return self.create_user(email_n, name=name, role=role or UserRole.USER.value)
 
@@ -86,14 +101,19 @@ class UserRepository:
         if role not in (UserRole.ADMIN.value, UserRole.USER.value):
             raise ValueError(f"Invalid role: {role}")
         scandb.users_update(user_id, {"role": role})
+        _mirror_pg("users_update", user_id, {"role": role})
         return self.get_user_by_id(user_id)
 
     def deactivate_user(self, user_id: str) -> Optional[User]:
         scandb.users_update(user_id, {"is_active": 0})
+        _mirror_pg("users_update", user_id, {"is_active": 0})
         return self.get_user_by_id(user_id)
 
     def delete_user(self, user_id: str) -> bool:
-        return scandb.users_delete(user_id)
+        ok = scandb.users_delete(user_id)
+        if ok:
+            _mirror_pg("users_delete", user_id)
+        return ok
 
     def get_first_admin_id(self) -> Optional[str]:
         for u in self.list_users():
@@ -130,6 +150,7 @@ class UserRepository:
             "used_by_user_id": None,
         }
         scandb.invites_insert(row)
+        _mirror_pg("invites_insert", row)
         inv = self.get_invite_by_id(invite_id)
         assert inv is not None
         return inv
@@ -147,17 +168,19 @@ class UserRepository:
         return [self._row_to_invite(r) for r in rows]
 
     def revoke_invite(self, invite_id: str) -> bool:
-        return scandb.invites_delete(invite_id)
+        ok = scandb.invites_delete(invite_id)
+        if ok:
+            _mirror_pg("invites_delete", invite_id)
+        return ok
 
     def accept_invite(self, email: str, user_id: str) -> Optional[Invite]:
         inv = self.get_pending_invite_by_email(email)
         if not inv:
             return None
         now = _iso(_utc_now())
-        scandb.invites_update(
-            inv.id,
-            {"used_at": now, "used_by_user_id": user_id},
-        )
+        updates = {"used_at": now, "used_by_user_id": user_id}
+        scandb.invites_update(inv.id, updates)
+        _mirror_pg("invites_update", inv.id, updates)
         return self.get_invite_by_id(inv.id)
 
     def is_invite_valid(self, invite: Invite) -> bool:

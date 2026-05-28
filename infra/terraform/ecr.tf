@@ -1,0 +1,40 @@
+resource "aws_ecr_repository" "scanner_runner" {
+  count = var.enable_ecs_runner ? 1 : 0
+
+  name                 = "dast-scanner-runner"
+  image_tag_mutability = "MUTABLE"
+  force_delete         = false
+
+  image_scanning_configuration {
+    scan_on_push = true
+  }
+
+  tags = {
+    Name = "dast-scanner-runner"
+  }
+}
+
+resource "aws_ecr_lifecycle_policy" "scanner_runner" {
+  count = var.enable_ecs_runner ? 1 : 0
+
+  repository = aws_ecr_repository.scanner_runner[0].name
+
+  policy = jsonencode({
+    rules = [{
+      rulePriority = 1
+      description  = "Keep last 20 tagged runner images"
+      selection = {
+        tagStatus     = "tagged"
+        tagPrefixList = ["v0-"]
+        countType     = "imageCountMoreThan"
+        countNumber   = 20
+      }
+      action = { type = "expire" }
+    }]
+  })
+}
+
+output "ecr_scanner_runner_url" {
+  value       = var.enable_ecs_runner ? aws_ecr_repository.scanner_runner[0].repository_url : null
+  description = "ECR URL for scanner runner image"
+}

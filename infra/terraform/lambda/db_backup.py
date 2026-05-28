@@ -1,0 +1,125 @@
+"""
+Weekly DB backup Lambda for dast-scanner-poc.
+
+Dumps each user table from the RDS Postgres instance to CSV format,
+concatenates with metadata headers, gzips, and uploads to S3.
+
+NOTE: This is NOT a pg_dump-compatible dump. To restore:
+  1. Download the .tar.gz from S3.
+  2. Extract; each .csv corresponds to one table.
+  3. CREATE TABLE with the schema (use migrations/0001_init.sql).
+  4. COPY tablename FROM 'file.csv' WITH (FORMAT csv, HEADER true);
+
+For a true pg_dump-compatible backup, replace this Lambda with one that
+runs the pg_dump binary (requires a Lambda layer with postgresql-client).
+"""
+import gzip
+import io
+import json
+import os
+import tarfile
+from datetime import datetime, timezone
+
+import boto3
+import psycopg
+
+SECRET_ARN = os.environ["SECRET_ARN"]
+S3_BUCKET = os.environ["S3_BUCKET"]
+DB_NAME = os.environ["DB_NAME"]
+DB_HOST = os.environ["DB_HOST"]
+
+# Tables to back up (FK order: parents first)
+TABLES = ["users", "targets", "scans", "findings", "phase_logs", "live_events", "sessions"]
+
+
+def get_db_password() -> str:
+    sm = boto3.client("secretsmanager")
+    resp = sm.get_secret_value(SecretId=SECRET_ARN)
+    payload = json.loads(resp["SecretString"])
+    return payload["password"]
+
+
+def dump_table_csv(conn, table: str) -> bytes:
+    buf = io.BytesIO()
+    with conn.cursor() as cur:
+        # quote ident to avoid SQL injection on table name (TABLES list is hardcoded but defense in depth)
+        with cur.copy(f"COPY {psycopg.sql.Identifier(table).as_string(conn)} TO STDOUT WITH (FORMAT csv, HEADER true)") as copy:
+            for chunk in copy:
+                buf.write(chunk)
+    return buf.getvalue()
+
+
+def handler(event, context):
+    now = datetime.now(timezone.utc)
+    backup_key = f"backups/{now:%Y}/{now:%m}/{now:%d}/dast_scanner-{now:%Y-%m-%dT%H-%M-%SZ}.tar.gz"
+
+    try:
+        password = get_db_password()
+        conninfo = f"host={DB_HOST} port=5432 dbname={DB_NAME} user=dast_admin password={password} sslmode=require"
+        log("connecting", host=DB_HOST, dbname=DB_NAME)
+
+        manifest = {
+            "backup_timestamp": now.isoformat(),
+            "db_host": DB_HOST,
+            "db_name": DB_NAME,
+            "tables": {},
+        }
+
+        tar_buf = io.BytesIO()
+        with gzip.GzipFile(fileobj=tar_buf, mode="wb", mtime=int(now.timestamp())) as gz:
+            with tarfile.open(fileobj=gz, mode="w|") as tar:
+                with psycopg.connect(conninfo, connect_timeout=30) as conn:
+                    for table in TABLES:
+                        try:
+                            csv_bytes = dump_table_csv(conn, table)
+                            row_count = csv_bytes.count(b"\n") - 1  # minus header
+                            manifest["tables"][table] = {"row_count": row_count, "bytes": len(csv_bytes)}
+                            info = tarfile.TarInfo(name=f"{table}.csv")
+                            info.size = len(csv_bytes)
+                            info.mtime = int(now.timestamp())
+                            tar.addfile(info, io.BytesIO(csv_bytes))
+                            log("dumped_table", table=table, rows=row_count, bytes=len(csv_bytes))
+                        except psycopg.errors.UndefinedTable:
+                            log("skipped_missing_table", table=table)
+                            manifest["tables"][table] = {"skipped": "table_does_not_exist"}
+
+                manifest_bytes = json.dumps(manifest, indent=2).encode()
+                info = tarfile.TarInfo(name="manifest.json")
+                info.size = len(manifest_bytes)
+                info.mtime = int(now.timestamp())
+                tar.addfile(info, io.BytesIO(manifest_bytes))
+
+        tar_buf.seek(0)
+        size = len(tar_buf.getvalue())
+
+        s3 = boto3.client("s3")
+        s3.put_object(
+            Bucket=S3_BUCKET,
+            Key=backup_key,
+            Body=tar_buf.getvalue(),
+            ContentType="application/gzip",
+            Metadata={
+                "backup-timestamp": now.isoformat(),
+                "db-host": DB_HOST[:200],
+                "format": "csv-tar-gz",
+            },
+            ServerSideEncryption="AES256",
+        )
+
+        log("uploaded", bucket=S3_BUCKET, key=backup_key, size_bytes=size)
+
+        return {
+            "statusCode": 200,
+            "body": json.dumps({"bucket": S3_BUCKET, "key": backup_key, "size_bytes": size, "manifest": manifest}),
+        }
+    except Exception as e:
+        log("error", error=str(e), error_type=type(e).__name__)
+        raise
+
+
+def log(event_type: str, **fields) -> None:
+    print(json.dumps({"event": event_type, **fields}))
+
+
+if __name__ == "__main__":
+    print(handler({}, None))

@@ -89,6 +89,7 @@ class ScanTarget:
     # still get TLS when observed in browser traffic (host-delta after each
     # phase). Use for "TLS on sibling only after crawl" workflows.
     skip_passive_sibling_tls: bool = False
+    ai_instructions: str | None = None  # operator guidance injected into agent system prompt
 
 
 def _resolve_env_vars(obj: Any) -> Any:
@@ -1267,6 +1268,7 @@ def load_targets_from_dict(t: dict) -> ScanTarget:
         business_flow=t.get("business_flow") or None,
         scan_profile=(t.get("scan_profile") or "vulnerability_scan"),
         skip_passive_sibling_tls=bool(t.get("skip_passive_sibling_tls")),
+        ai_instructions=t.get("ai_instructions") or None,
     )
 
 

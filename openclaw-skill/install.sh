@@ -3,7 +3,7 @@
 # Usage: bash install.sh [SCANNER_URL]
 set -euo pipefail
 
-SCANNER_URL="${1:-http://localhost:8080}"
+SCANNER_URL="${1:-http://localhost:80}"
 SKILL_DIR="$HOME/.openclaw/workspace/skills/ai-agentic-scanner"
 
 echo "=== AI Agentic Scanner - OpenClaw Skill Installer ==="

@@ -1,0 +1,17 @@
+litellm>=1.40.0
+playwright>=1.44.0
+playwright-stealth>=1.0.6
+python-dotenv>=1.0.0
+httpx>=0.27.0
+pyyaml>=6.0
+lxml>=5.0.0
+pyotp>=2.9.0
+websockets>=12.0
+requests>=2.31.0
+boto3>=1.34.0
+mcp>=1.26.0
+tldextract>=5.1.0
+sslyze>=6.0.0
+dnspython>=2.6.0
+psycopg[binary,pool]>=3.1
+redis>=5.0.0

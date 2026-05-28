@@ -1,0 +1,48 @@
+# Attach ECS RunTask permissions to the existing EC2 instance role (UI host).
+
+data "aws_iam_role" "ec2_ui" {
+  count = var.ec2_iam_role_name != "" ? 1 : 0
+  name  = var.ec2_iam_role_name
+}
+
+resource "aws_iam_policy" "ec2_scan_launcher" {
+  count = var.enable_ecs_runner && var.ec2_iam_role_name != "" ? 1 : 0
+
+  name        = "dast-scanner-ec2-scan-launcher"
+  description = "Allow EC2 UI to launch Fargate scanner tasks"
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "ecs:RunTask",
+          "ecs:DescribeTasks",
+          "ecs:StopTask",
+        ]
+        Resource = "*"
+        Condition = {
+          ArnEquals = {
+            "ecs:cluster" = aws_ecs_cluster.scanner[0].arn
+          }
+        }
+      },
+      {
+        Effect   = "Allow"
+        Action   = ["iam:PassRole"]
+        Resource = [
+          aws_iam_role.ecs_execution[0].arn,
+          aws_iam_role.ecs_task[0].arn,
+        ]
+      },
+    ]
+  })
+}
+
+resource "aws_iam_role_policy_attachment" "ec2_scan_launcher" {
+  count = var.enable_ecs_runner && var.ec2_iam_role_name != "" ? 1 : 0
+
+  role       = data.aws_iam_role.ec2_ui[0].name
+  policy_arn = aws_iam_policy.ec2_scan_launcher[0].arn
+}

@@ -5,7 +5,7 @@ client (Cursor, Claude Desktop, Open Claw, etc.) can invoke.
 
 Setup:
   1. Set environment variables (or configure in .cursor/mcp.json):
-       SCANNER_URL  — Base URL of the running scanner (default: http://localhost:8080)
+       SCANNER_URL  — Base URL of the running scanner (default: http://localhost:80)
        SCANNER_USER — HTTP Basic auth username (default: dast-admin)
        SCANNER_PASS — HTTP Basic auth password (required)
 
@@ -22,7 +22,7 @@ Cursor integration (.cursor/mcp.json):
         "command": "python",
         "args": ["mcp_server.py"],
         "env": {
-          "SCANNER_URL": "http://your-scanner-host:8080",
+          "SCANNER_URL": "http://your-scanner-host",
           "SCANNER_USER": "dast-admin",
           "SCANNER_PASS": "your-password"
         }
@@ -41,7 +41,7 @@ from typing import Any
 import httpx
 from mcp.server.fastmcp import FastMCP
 
-SCANNER_URL = os.environ.get("SCANNER_URL", "http://localhost:8080")
+SCANNER_URL = os.environ.get("SCANNER_URL", "http://localhost:80")
 SCANNER_USER = os.environ.get("SCANNER_USER", "dast-admin")
 SCANNER_PASS = os.environ.get("SCANNER_PASS", "")
 
@@ -144,6 +144,7 @@ def start_scan(
     auth_type: str = "auto",
     extra_domains: str = "",
     postman_file: str = "",
+    ai_instructions: str = "",
 ) -> dict:
     """Start a new security scan against a target.
 
@@ -156,6 +157,8 @@ def start_scan(
         auth_type: 'auto', 'form', 'sso', 'oauth', 'api_key', or 'bearer'.
         extra_domains: Comma-separated additional domains to include in scope.
         postman_file: Filename of previously uploaded Postman collection.
+        ai_instructions: Operator guidance for the LLM agent (e.g. focus on auth/IDOR,
+            exclude paths, credential usage). Forwarded to POST /api/scan unchanged.
 
     Returns:
         scan_id and status. Use get_scan_status() to poll progress.
@@ -175,7 +178,35 @@ def start_scan(
         body["extra_domains"] = extra_domains
     if postman_file:
         body["api_imports"] = {"postman": postman_file}
+    if ai_instructions:
+        body["ai_instructions"] = ai_instructions
     return _request("POST", "/api/scan", json=body)
+
+
+@mcp.tool()
+def launch_scan(
+    target_url: str,
+    model: str = "",
+    scan_mode: str = "both",
+    username: str = "",
+    password: str = "",
+    auth_type: str = "auto",
+    extra_domains: str = "",
+    postman_file: str = "",
+    ai_instructions: str = "",
+) -> dict:
+    """Alias for start_scan — launch a DAST scan with optional operator AI instructions."""
+    return start_scan(
+        target_url=target_url,
+        model=model,
+        scan_mode=scan_mode,
+        username=username,
+        password=password,
+        auth_type=auth_type,
+        extra_domains=extra_domains,
+        postman_file=postman_file,
+        ai_instructions=ai_instructions,
+    )
 
 
 @mcp.tool()

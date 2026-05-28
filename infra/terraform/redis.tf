@@ -1,0 +1,87 @@
+resource "aws_security_group" "redis" {
+  count = var.enable_redis ? 1 : 0
+
+  name        = "dast-scanner-redis"
+  description = "ElastiCache Redis for live scan events"
+  vpc_id      = data.aws_vpc.default.id
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  tags = {
+    Name = "dast-scanner-redis"
+  }
+
+  lifecycle {
+    create_before_destroy = true
+  }
+}
+
+resource "aws_security_group_rule" "redis_ingress_ec2" {
+  count = var.enable_redis ? 1 : 0
+
+  type                     = "ingress"
+  from_port                = 6379
+  to_port                  = 6379
+  protocol                 = "tcp"
+  security_group_id        = aws_security_group.redis[0].id
+  source_security_group_id = var.ec2_security_group_id
+  description              = "Redis from EC2 UI"
+}
+
+resource "aws_security_group_rule" "redis_ingress_lambda" {
+  count = var.enable_redis && var.enable_backup_lambda ? 1 : 0
+
+  type                     = "ingress"
+  from_port                = 6379
+  to_port                  = 6379
+  protocol                 = "tcp"
+  security_group_id        = aws_security_group.redis[0].id
+  source_security_group_id = aws_security_group.lambda_backup[0].id
+  description              = "Redis from backup Lambda"
+}
+
+resource "aws_security_group_rule" "redis_ingress_ecs" {
+  count = var.enable_redis && var.enable_ecs_runner ? 1 : 0
+
+  type                     = "ingress"
+  from_port                = 6379
+  to_port                  = 6379
+  protocol                 = "tcp"
+  security_group_id        = aws_security_group.redis[0].id
+  source_security_group_id = aws_security_group.ecs_runner[0].id
+  description              = "Redis from Fargate scanner tasks"
+}
+
+resource "aws_elasticache_subnet_group" "redis" {
+  count = var.enable_redis ? 1 : 0
+
+  name       = "dast-scanner-redis"
+  subnet_ids = data.aws_subnets.default.ids
+}
+
+resource "aws_elasticache_cluster" "redis" {
+  count = var.enable_redis ? 1 : 0
+
+  cluster_id           = "dast-scanner-redis"
+  engine               = "redis"
+  node_type            = "cache.t4g.micro"
+  num_cache_nodes      = 1
+  parameter_group_name = "default.redis7"
+  port                 = 6379
+  subnet_group_name    = aws_elasticache_subnet_group.redis[0].name
+  security_group_ids   = [aws_security_group.redis[0].id]
+
+  tags = {
+    Name = "dast-scanner-redis"
+  }
+}
+
+output "redis_endpoint" {
+  value       = var.enable_redis ? aws_elasticache_cluster.redis[0].cache_nodes[0].address : null
+  description = "Redis hostname for LIVE_EVENTS_REDIS / REDIS_URL"
+}

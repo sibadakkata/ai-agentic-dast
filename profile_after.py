@@ -1,6 +1,6 @@
 import requests, time
 
-base = "http://localhost:8080"
+base = "http://localhost:80"
 scan_id = "scan_20260320_045824_69eb37"
 
 # First load (cold - no cache)

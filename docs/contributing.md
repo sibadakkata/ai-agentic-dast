@@ -130,7 +130,7 @@ _FOCUS_PHASE_MAP = {
 # Run a focused scan on just your new phase
 # In the UI: set Focus Areas to "nosql"
 # Or via API:
-curl -X POST http://localhost:8080/api/scan \
+curl -X POST http://localhost:80/api/scan \
   -H "Content-Type: application/json" \
   -d '{
     "target_url": "http://target:3000",
@@ -457,7 +457,7 @@ cp .env.example .env
 # Edit .env with your AWS Bedrock credentials
 
 # Run locally
-uvicorn web.app:app --host 0.0.0.0 --port 8080 --reload
+uvicorn web.app:app --host 0.0.0.0 --port 80 --reload
 
 # Test a specific change
 # 1. Edit prompts.py or tools.py
@@ -481,7 +481,7 @@ ssh -i $key $ec2 "docker cp ~/ai-dast-scanner/scanners/ai_agent/prompts.py dast-
 ssh -i $key $ec2 "docker restart dast-scanner"
 
 # 4. Verify health
-ssh -i $key $ec2 "curl -sf http://localhost:8080/health"
+ssh -i $key $ec2 "curl -sf http://localhost:80/health"
 ```
 
 ### Testing Against Known-Vulnerable Targets
@@ -491,7 +491,7 @@ ssh -i $key $ec2 "curl -sf http://localhost:8080/health"
 | **OWASP Juice Shop** | `http://<IP>:3000` | XSS, SQLi, auth bypass, IDOR, file upload |
 | **DVAPI (vAPI)** | `http://<IP>:8000/vapi/` | BOLA, injection, mass assignment, auth |
 | **DVWA** | `http://<IP>/dvwa` | Classic web vulns at configurable difficulty |
-| **WebGoat** | `http://<IP>:8080/WebGoat` | OWASP lesson-based vulnerabilities |
+| **WebGoat** | `http://<IP>/WebGoat` | OWASP lesson-based vulnerabilities |
 
 ### Comparing Scanner Results
 

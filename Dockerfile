@@ -16,9 +16,9 @@ COPY config/targets.env.example config/targets.env.example
 
 RUN mkdir -p results/raw results/reports results/cache imports
 
-EXPOSE 8080
+EXPOSE 80
 
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 
-CMD ["uvicorn", "web.app:app", "--host", "0.0.0.0", "--port", "8080"]
+CMD ["uvicorn", "web.app:app", "--host", "0.0.0.0", "--port", "80"]
