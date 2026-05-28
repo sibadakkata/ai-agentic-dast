@@ -1,3 +1,0 @@
-# Web
-
-See [README](../README.md#using-the-api).
