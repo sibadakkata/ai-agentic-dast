@@ -175,10 +175,84 @@ def health_check() -> dict[str, str]:
         return {"status": "degraded", "error": str(exc)}
 
 
+def users_get_id_by_email(email: str) -> str | None:
+    """Return PG user id for *email*, or None."""
+    email_n = email.strip().lower()
+    if not email_n:
+        return None
+
+    def _do(conn):
+        row = conn.execute("SELECT id FROM users WHERE email = %s", (email_n,)).fetchone()
+        return row[0] if row else None
+
+    try:
+        return _with_read_conn(_do)
+    except Exception:
+        return None
+
+
+def users_get_by_id(user_id: str) -> dict | None:
+    """Return a user row dict compatible with SQLite user shape."""
+
+    def _do(conn):
+        row = conn.execute(
+            """
+            SELECT id, email, name, role, created_at, last_login_at, is_active
+            FROM users WHERE id = %s
+            """,
+            (user_id,),
+        ).fetchone()
+        if not row:
+            return None
+        created_at, last_login_at = row[4], row[5]
+        if hasattr(created_at, "isoformat"):
+            created_at = created_at.isoformat()
+        if last_login_at is not None and hasattr(last_login_at, "isoformat"):
+            last_login_at = last_login_at.isoformat()
+        return {
+            "id": row[0],
+            "email": row[1],
+            "name": row[2] or "",
+            "role": row[3],
+            "created_at": created_at,
+            "last_login_at": last_login_at,
+            "is_active": 1 if row[6] else 0,
+        }
+
+    try:
+        return _with_read_conn(_do)
+    except Exception:
+        return None
+
+
+def _resolve_user_id_for_pg(owner_user_id: str | None) -> str | None:
+    """Map SQLite owner_user_id to a valid PG users.id (nullable)."""
+    if not owner_user_id:
+        return None
+    if users_get_by_id(owner_user_id):
+        return owner_user_id
+    try:
+        from web import db as scandb
+
+        su = scandb.users_get_by_id(owner_user_id)
+        email = (su or {}).get("email")
+        if not email:
+            return None
+        pg_id = users_get_id_by_email(email)
+        if pg_id:
+            return pg_id
+        if su:
+            users_insert(su)
+            return owner_user_id if users_get_by_id(owner_user_id) else None
+    except Exception:
+        logger.warning("Could not resolve owner_user_id %s for PG", owner_user_id, exc_info=True)
+    return None
+
+
 def _scan_row(scan_id: str, info: dict) -> dict:
     row = {k: info.get(k) for k in _COL_FIELDS}
     row["scan_id"] = scan_id
-    row["user_id"] = info.get("owner_user_id")
+    row["user_id"] = _resolve_user_id_for_pg(info.get("owner_user_id"))
     row["started"] = _parse_ts(row.get("started"))
     data = dict(info)
     row["data"] = _json_dumps_safe(data)

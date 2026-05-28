@@ -47,8 +47,20 @@ class UserRepository:
         return self._row_to_user(row) if row else None
 
     def get_user_by_email(self, email: str) -> Optional[User]:
-        row = scandb.users_get_by_email(_normalize_email(email))
-        return self._row_to_user(row) if row else None
+        email_n = _normalize_email(email)
+        pg_id = pgdb.users_get_id_by_email(email_n) if pgdb.dual_write_enabled() else None
+        row = scandb.users_get_by_email(email_n)
+        if pg_id:
+            if row and row["id"] == pg_id:
+                return self._row_to_user(row)
+            pg_row = pgdb.users_get_by_id(pg_id)
+            if pg_row:
+                return self._row_to_user(pg_row)
+        if row:
+            if pgdb.dual_write_enabled():
+                _mirror_pg("users_insert", row)
+            return self._row_to_user(row)
+        return None
 
     def list_users(self, include_inactive: bool = False) -> list[User]:
         rows = scandb.users_list_all(include_inactive=include_inactive)
