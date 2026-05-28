@@ -37,14 +37,15 @@ async def execute_scan_job(scan_id: str, config: dict) -> None:
         async with httpx.AsyncClient(verify=False, timeout=20.0, follow_redirects=True) as c:
             await c.get(target_url)
     except Exception as exc:
-        state.update({"status": "error", "error": str(exc)})
+        log.warning("Preflight GET failed for %s (continuing with browser): %s", target_url, exc)
+        state.setdefault("progress", []).append(f"Preflight warning: {exc}")
         pgdb.upsert_scan(scan_id, state)
-        return
+        publish_event(scan_id, "preflight_warning", {"error": str(exc)})
     router = LLMRouter(models=[model])
     td = {"id": scan_id.split("_")[-1], "url": target_url, "scan_mode": config.get("scan_mode", "both"),
           "auth": {"type": config.get("auth_type", "auto"), "username": config.get("username", ""), "password": config.get("password", "")},
           "scan_scope": config.get("scan_scope", "directory"), "scan_intensity": config.get("scan_intensity", "light"),
-          "scan_profile": config.get("scan_profile", "crawl_only")}
+          "scan_profile": config.get("scan_profile", state.get("scan_profile", "crawl_only"))}
     target = load_targets_from_dict(td)
     findings = []
 
