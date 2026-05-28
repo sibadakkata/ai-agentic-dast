@@ -249,28 +249,19 @@ python openclaw-skill/test_skill.py stop scan_20260312_082647_cbb4a2
 
 ### 13. Launch with operator AI instructions
 
-Pass free-form guidance to the scanning agent (focus areas, paths to skip, credential rules):
+The CLI does not expose a dedicated `--ai-instructions` flag yet; pass guidance via the HTTP API or MCP instead. See **[docs/api.md](../docs/api.md#operator-guidance-ai_instructions)** and **[docs/mcp.md](../docs/mcp.md#operator-guidance-ai_instructions)** for `ai_instructions` examples (8 KiB cap, fence stripping).
 
 ```powershell
 python openclaw-skill/test_skill.py scan --url https://example.com --mode both
 ```
 
-HTTP body field: `ai_instructions` on `POST /api/scan` or `POST /api/v1/scans`.
+---
 
-**MCP tool call** (`mcp_server.py` — tool name `launch_scan` or `start_scan`):
+## Related documentation
 
-```json
-{
-  "name": "launch_scan",
-  "arguments": {
-    "target_url": "https://example.com",
-    "scan_mode": "both",
-    "ai_instructions": "Focus on authentication and IDOR. Do not test /payments or /checkout."
-  }
-}
-```
-
-Production: set `SCANNER_URL=https://rt.ai.webscanner.gendigital.com` and Basic Auth env vars.
+- [HTTP API guide](../docs/api.md) — curl launch, polling, results
+- [MCP guide](../docs/mcp.md) — `mcp_server.py` for Cursor / Claude Desktop
+- [SKILL.md](SKILL.md) — OpenClaw skill definition (REST actions for chat agents)
 
 ---
 

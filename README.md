@@ -141,8 +141,8 @@ This loop runs up to 50 steps per phase (20–50 depending on phase complexity).
 | **API Import** | Postman (v2.0/v2.1), OpenAPI/Swagger (2.0, 3.0, 3.1) | Baseline execution + hybrid fuzzing |
 | **Logout Protection** | 6-layer protection: URL patterns, selector blocking, href inspection, post-click recovery, LLM prompt rules, link filtering | Never accidentally destroys the session |
 | **Web UI** | Real-time scan progress, AI vs Triage comparison, PDF reports, scan management. **Cost Management** (FINANCE nav): KPI cards, spend-by-status chart, top-25 cost-per-scan table (dashboard LLM cost card removed). **Roles reference:** permission matrix on User Management; **Your Access** card on Settings (all roles) | [Web UI Guide](docs/web-ui.md) |
-| **REST API** | Full API for CI/CD integration — start, stop, pause, resume, results, reports | [API Reference](docs/rest-api.md) |
-| **MCP Server** | Model Context Protocol integration for Cursor, Claude Desktop | [MCP Guide](docs/mcp-server.md) |
+| **REST API** | Full API for CI/CD integration — start, stop, pause, resume, results, reports | [HTTP API guide](docs/api.md) |
+| **MCP Server** | Model Context Protocol integration for Cursor, Claude Desktop | [MCP guide](docs/mcp.md) |
 | **Reports** | Four-stage evidence: AI Agent → Runtime Verification → CVSS Severity → Triage verdict | PDF, Excel, JSON export |
 | **Cost Control** | Pause/resume scans, stop early, per-scan cost tracking | Cost Management page (FINANCE); ledger still in `cost_ledger` table |
 | **Multi-Step Exploit Chaining** | Combines individual findings into attack chains (e.g. XSS + cookie theft → session hijack, SSRF → internal API → data exfiltration) | Cross-phase context, `chain_exploit` tool |
@@ -377,10 +377,12 @@ Select **"Multi-Agent"** in the Scan Profile dropdown or set `scan_profile: "mul
 │   ├── triage-engine.md         #   Triage engine deep dive
 │   ├── api-scanning.md          #   How API scanning works (walkthrough)
 │   ├── web-scanning.md          #   How website scanning works
-│   ├── rest-api.md              #   REST API reference
+│   ├── api.md                   #   HTTP API guide (curl, polling)
+│   ├── mcp.md                   #   MCP / OpenClaw client wiring
+│   ├── rest-api.md              #   Extended API reference (redirects to api.md)
 │   ├── deployment.md            #   Docker, EC2, models, Bedrock setup
 │   ├── web-ui.md                #   Web UI features & configuration
-│   ├── mcp-server.md            #   MCP integration guide
+│   ├── mcp-server.md            #   MCP guide (redirects to mcp.md)
 │   └── troubleshooting.md       #   Error handling & debugging
 ├── scanners/                    # Scanner packages (see scanners/README.md)
 │   ├── runner/                  # Fargate/local worker entrypoint (ECR image)
@@ -444,42 +446,19 @@ python scripts/run_regression_ec2.py --pytest # same, plus pytest tests/
 
 ## Using the API
 
-Interactive API docs (Swagger UI): [https://rt.ai.webscanner.gendigital.com/docs](https://rt.ai.webscanner.gendigital.com/docs)  
-OpenAPI JSON: [https://rt.ai.webscanner.gendigital.com/openapi.json](https://rt.ai.webscanner.gendigital.com/openapi.json)  
-ReDoc: `/redoc` on the same host. Local dev: `http://localhost:8080/docs`.
-
-Protected routes use HTTP Basic Auth (`DAST_AUTH_USER` / `DAST_AUTH_PASS` on the server). There is no API-key scheme in OpenAPI yet.
-
-**Launch a scan** (legacy JSON endpoint, same fields as the UI):
+The scanner exposes a REST API behind HTTP Basic Auth (production: `https://rt.ai.webscanner.gendigital.com`; local: `http://localhost:8080` or port 80 per Docker). Launch a scan, poll status, then fetch triaged results — same flow as the Web UI.
 
 ```bash
-curl -s -u "YOUR_API_KEY_OR_NONE:YOUR_SECRET" \
+curl -s -u "YOUR_USER:YOUR_SECRET" \
   -H "Content-Type: application/json" \
-  -X POST "https://rt.ai.webscanner.gendigital.com/api/scan" \
-  -d '{
-    "target_url": "https://example.com",
-    "scan_mode": "both",
-    "ai_instructions": "Focus on authentication and IDOR. Do not test /payments."
-  }'
+  -X POST "https://rt.ai.webscanner.gendigital.com/api/v1/scans" \
+  -d '{"target_url": "https://example.com", "scan_mode": "both"}'
 ```
 
-Typed launch (OpenAPI-documented, supports base64 Postman/Burp in JSON): `POST /api/v1/scans` — see Swagger for the full schema.
-
-**Poll status:**
-
-```bash
-curl -s -u "YOUR_API_KEY_OR_NONE:YOUR_SECRET" \
-  "https://rt.ai.webscanner.gendigital.com/api/scan/SCAN_ID"
-```
-
-**Fetch triaged results:**
-
-```bash
-curl -s -u "YOUR_API_KEY_OR_NONE:YOUR_SECRET" \
-  "https://rt.ai.webscanner.gendigital.com/api/results/SCAN_ID"
-```
-
-MCP integration: [openclaw-skill/README.md](openclaw-skill/README.md) and root [mcp_server.py](mcp_server.py) (`launch_scan` / `start_scan` tools).
+- **Full API reference:** [docs/api.md](docs/api.md) (endpoints, polling, `ai_instructions`, troubleshooting)
+- **Interactive docs:** Swagger at `/docs` on your scanner host ([production](https://rt.ai.webscanner.gendigital.com/docs))
+- **MCP / OpenClaw:** [docs/mcp.md](docs/mcp.md) and [openclaw-skill/README.md](openclaw-skill/README.md)
+- **Local dev:** see [Quick Start](#quick-start) above
 
 ## Documentation
 
@@ -495,9 +474,10 @@ MCP integration: [openclaw-skill/README.md](openclaw-skill/README.md) and root [
 | [Triage Engine](docs/triage-engine.md) | How TP/FP classification works, confidence scoring, CVSS adjustment |
 | [API Scanning](docs/api-scanning.md) | Step-by-step walkthrough with banking API example |
 | [Web Scanning](docs/web-scanning.md) | Browser-based scanning, SPA handling, 25 OWASP + context-aware phases |
-| [REST API](docs/rest-api.md) | Full API reference with curl examples and Python SDK |
+| [HTTP API](docs/api.md) | Launch, poll, results — curl examples and polling patterns |
+| [REST API (extended)](docs/rest-api.md) | Pause, retry, reports, crawl-only, and more endpoints |
 | [Deployment](docs/deployment.md) | EC2 setup, Docker, Bedrock config, models, data persistence |
 | [SSO & RBAC](docs/SSO_RBAC.md) | Entra ID SAML, invites, roles, env vars, troubleshooting |
 | [Web UI](docs/web-ui.md) | UI features, scan configuration, AI planner |
-| [MCP Server](docs/mcp-server.md) | Cursor/Claude Desktop integration, available tools |
+| [MCP / OpenClaw](docs/mcp.md) | Cursor/Claude Desktop MCP wiring and tool reference |
 | [Troubleshooting](docs/troubleshooting.md) | Every error type, auto-recovery, and fixes |

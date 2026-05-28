@@ -2,6 +2,8 @@
 
 [← Back to README](../README.md)
 
+> **Quick start:** For Cursor/Claude wiring, tool tables, and `ai_instructions`, see **[mcp.md](mcp.md)**. This page is kept for backward-compatible links.
+
 The scanner includes an MCP server that exposes all capabilities as tools for AI assistants like **Cursor**, **Claude Desktop**, or any MCP-compatible client.
 
 ## Setup for Cursor
