@@ -38,3 +38,14 @@ This bug has caused at least 4 production incidents in this repo:
 
 ## When this rule must be enforced
 ALWAYS, on this Windows host. The Cursor team has acknowledged the bug; the workaround is permanent until fixed upstream.
+
+## Enforcement (automated)
+
+| Layer | Mechanism |
+|-------|-----------|
+| **Local commit** | `.githooks/pre-commit` → `scripts/checks/check_no_null_bytes.py` on staged files. Install per clone: `powershell -File scripts/install_git_hooks.ps1` or `bash scripts/install_git_hooks.sh` |
+| **Pre-push** | `.githooks/pre-push` re-scans files in the push range |
+| **CI** | GitHub Actions workflow `Encoding check` (`.github/workflows/encoding-check.yml`) runs `python scripts/checks/check_no_null_bytes.py --all` on every PR and push to `master` / `main` |
+| **Docker build** | `RUN` gate after `COPY` in root `Dockerfile` and `scanners/runner/Dockerfile` — build fails if any `.py`/`.sh`/`.yaml`/`.yml`/`.json` under `/app` contains null bytes |
+
+Manual check: `python scripts/checks/check_no_null_bytes.py --all`

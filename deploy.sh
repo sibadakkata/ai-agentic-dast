@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 #
-# deploy.sh — Deploy AI DAST Scanner to a fresh EC2
+# deploy.sh — Deploy AI DAST Scanner (incremental by default, --full for greenfield)
+#
+# On an existing host with .last_deployed_sha, runs scripts/deploy/deploy.sh
+# (hot-patch by default; UI/runner rebuild only when classify_changes says so).
+# Use --full for first-time / dependency / Dockerfile rebuild (original behavior).
 #
 # Prerequisites on the EC2 instance:
 #   - Ubuntu 22.04+ (or Amazon Linux 2023)
@@ -21,6 +25,10 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
+
+if [ "${1:-}" != "--full" ] && [ -f "$SCRIPT_DIR/.last_deployed_sha" ] && [ -f "$SCRIPT_DIR/scripts/deploy/deploy.sh" ]; then
+    exec bash "$SCRIPT_DIR/scripts/deploy/deploy.sh"
+fi
 
 IMAGE_NAME="ai-dast-scanner"
 CONTAINER_NAME="dast-scanner"
@@ -106,6 +114,12 @@ for i in $(seq 1 30); do
     [ "$i" -eq 30 ] && echo "    WARNING: dast-scanner not responding after 30s"
     sleep 1
 done
+
+# ─── Record deploy SHA (incremental deploy baseline) ────────────────
+if command -v git >/dev/null 2>&1 && git rev-parse HEAD >/dev/null 2>&1; then
+    git rev-parse HEAD > "$SCRIPT_DIR/.last_deployed_sha"
+    echo "==> Recorded $(cat "$SCRIPT_DIR/.last_deployed_sha") in .last_deployed_sha"
+fi
 
 # ─── Summary ────────────────────────────────────────────────────────
 echo ""

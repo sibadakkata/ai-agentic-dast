@@ -4,6 +4,30 @@
 
 > **Day-to-day code deploys** (hot-patch `docker cp`, `tar` pipe, when to use `deploy.sh`, ECR runner push): see the README sections **[Install from scratch](../README.md#install-from-scratch)** and **[Day-to-day code deploys](../README.md#day-to-day-code-deploys)**. This file covers Bedrock, `.env`, SSO, verification scripts, and failure modes.
 
+## Smart deploy classification
+
+`scripts/deploy/classify_changes.py` maps a git diff to three flags. `deploy.sh` on EC2 (when `.last_deployed_sha` exists) delegates to `scripts/deploy/deploy.sh`, which runs only the needed steps and updates the marker.
+
+| Changed paths | UI hot-patch (`docker cp` + restart) | UI image rebuild (`deploy.sh --full`) | Runner image rebuild (ECR) |
+|---------------|--------------------------------------|---------------------------------------|----------------------------|
+| `web/**/*.py`, templates, `web/static/**` | Yes (default) | Only if deps/image definition changed | Yes — runner `COPY web/` |
+| `scanners/**/*.py` (not only runner entry) | Yes (into UI container) | — | Yes — runner `COPY scanners/` |
+| `scanners/runner/**` | — | — | Yes |
+| `scripts/**`, `config/**` | Yes (UI) | — | Yes (runner copies both) |
+| `requirements*.txt`, `pyproject.toml`, `Pipfile*` | — | Yes | Yes |
+| Root `Dockerfile`, `docker-compose*.yml` | — | Yes | — |
+| `scanners/runner/Dockerfile` | — | — | Yes |
+| `docs/**`, `README.md`, `.cursor/**`, `tests/**`, `infra/**` | — | — | — |
+
+Dry-run on your laptop:
+
+```bash
+python scripts/deploy/classify_changes.py HEAD~5..HEAD
+python scripts/deploy/classify_changes.py cbf8c61..HEAD --json
+```
+
+Runner ECR push is still manual / `scripts/ec2_build_push_runner.py` — incremental `deploy.sh` prints instructions when `needs_runner_rebuild` is true.
+
 ## EC2 Deployment (Recommended)
 
 ### Prerequisites
@@ -34,7 +58,7 @@ docker exec dast-scanner python3 /tmp/check_scan_active.py   # MANDATORY — mus
 bash deploy.sh
 ```
 
-**Existing host — typical code change:** README [Day-to-day code deploys](../README.md#day-to-day-code-deploys) pattern **A** or **B** (~10–30 s), not `deploy.sh`.
+**Existing host — typical code change:** `git pull` then `bash deploy.sh` (incremental; hot-patch by default). Manual pattern **A**/**B** in the README still works. Use `bash deploy.sh --full` only for dependency/Dockerfile changes.
 
 ### Verify deployment (smoke + optional full scan)
 

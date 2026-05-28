@@ -21,6 +21,12 @@ results/errors.log
 # Archive (POC-specific data)
 archive/
 
+# Deploy marker (EC2 host only; written by deploy.sh)
+.last_deployed_sha
+
+# Local encoding-gate tests
+.tmp-tests/
+
 # Build artifacts
 *.zip
 

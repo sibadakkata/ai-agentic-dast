@@ -296,6 +296,26 @@ Bump the image tag in the ECS task definition via Terraform or `aws ecs register
 
 **UI host:** `3.20.180.251` · **Container:** `dast-scanner` · **SSH key:** `C:\Projects\Pen-Test\Acunetix\siba-dast-agentic-poc.pem`
 
+### Canonical flow (EC2)
+
+On the host after `git pull` in `~/ai-dast-scanner`:
+
+```bash
+bash deploy.sh
+```
+
+`deploy.sh` compares `HEAD` to `.last_deployed_sha`, runs `scripts/deploy/classify_changes.py`, and **hot-patches** changed `web/` / `scanners/` / `scripts/` files by default. It rebuilds the **UI image** only when root `Dockerfile`, `requirements*.txt`, or compose files change. **Runner image rebuilds** happen only when `scanners/runner/**`, files under `scanners/` / `web/` / `scripts/` / `config/` (runner `COPY` tree), or shared dependency files change — then follow the ECR push steps below (or `scripts/ec2_build_push_runner.py build-host`).
+
+First-time / dependency rebuild: `bash deploy.sh --full`.
+
+**Encoding gates (local dev):** install git hooks once per clone:
+
+```powershell
+powershell -File scripts/install_git_hooks.ps1
+```
+
+CI runs `scripts/checks/check_no_null_bytes.py --all` on every PR (workflow **Encoding check**).
+
 **MANDATORY before any pattern that restarts the container:** `scripts/check_scan_active.py` must exit **0** (no active/paused scan). In-process scan state is lost on restart; pause-deploy-resume does **not** work. The script is usually already in the container at `/tmp/check_scan_active.py`; refresh if needed:
 
 ```powershell
@@ -351,10 +371,11 @@ Rebuild and push to ECR (Step 4 above). ECS picks up the new image on the next `
 
 | What changed | Deploy path | Typical time |
 |--------------|-------------|--------------|
-| One or a few `.py` / templates / static files under `web/` or `scanners/ai_agent/` | **A** — `scp` + `docker cp` + `docker restart` | ~30 s |
-| Many files or a directory | **B** — `tar` pipe into `docker exec … tar` | ~10 s |
-| `requirements.txt`, `Dockerfile`, Playwright/OS packages, compose image definition | **C** — `bash deploy.sh` on EC2 | 5–15 min |
-| `scanners/runner/` worker code | **D** — `docker build` + `docker push` to ECR | 3–10 min |
+| Routine code on EC2 after `git pull` | **`bash deploy.sh`** (auto hot-patch / rebuild) | ~10–60 s |
+| One or a few files from laptop | **A** — `scp` + `docker cp` + `docker restart` | ~30 s |
+| Many files or a directory from laptop | **B** — `tar` pipe into `docker exec … tar` | ~10 s |
+| `requirements.txt`, root `Dockerfile`, Playwright/OS packages | **`bash deploy.sh --full`** on EC2 | 5–15 min |
+| `scanners/runner/Dockerfile` or runner-only paths | **D** — `docker build` + `docker push` to ECR (see classify output) | 3–10 min |
 | `.env` / environment variables only | Edit `~/ai-dast-scanner/.env` on host, then `docker restart dast-scanner` (after scan check) | ~30 s |
 | RDS, ALB, WAF, ECS task definition, IAM, security groups, VPC, empty ECR repo, S3, Lambda | **Terraform** `plan` + `apply` | minutes |
 
