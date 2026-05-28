@@ -1881,6 +1881,11 @@ def _launch_scan_core(params, owner_id: str | None, *, postman_collection_b64: s
     scan_id = f"scan_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
     model_name = next((m.get("name", m.get("id", model)) for m in _get_models() if m.get("id") == model), model)
 
+    if owner_id and pgdb.dual_write_enabled():
+        canonical = pgdb.resolve_owner_user_id(owner_id)
+        if canonical:
+            owner_id = canonical
+
     cancel_flag = threading.Event()
     pause_flag = threading.Event()
     CANCEL_FLAGS[scan_id] = cancel_flag

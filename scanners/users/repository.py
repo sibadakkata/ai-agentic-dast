@@ -56,9 +56,19 @@ class UserRepository:
             pg_row = pgdb.users_get_by_id(pg_id)
             if pg_row:
                 return self._row_to_user(pg_row)
+            if row:
+                aligned = dict(row)
+                aligned["id"] = pg_id
+                return self._row_to_user(aligned)
+            return None
         if row:
             if pgdb.dual_write_enabled():
                 _mirror_pg("users_insert", row)
+                pg_id = pgdb.users_get_id_by_email(email_n)
+                if pg_id and row["id"] != pg_id:
+                    aligned = dict(row)
+                    aligned["id"] = pg_id
+                    return self._row_to_user(aligned)
             return self._row_to_user(row)
         return None
 

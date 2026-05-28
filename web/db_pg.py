@@ -226,33 +226,55 @@ def users_get_by_id(user_id: str) -> dict | None:
 
 
 def _resolve_user_id_for_pg(owner_user_id: str | None) -> str | None:
-    """Map SQLite owner_user_id to a valid PG users.id (nullable)."""
+    """Map owner_user_id to a PG ``users.id`` that exists, or None.
+
+  Never returns a SQLite-only UUID when PG already has the same email under
+  a different id (avoids ``scans_user_id_fkey`` on dual-write).
+    """
     if not owner_user_id:
         return None
     if users_get_by_id(owner_user_id):
         return owner_user_id
+    email: str | None = None
+    su: dict | None = None
     try:
         from web import db as scandb
 
         su = scandb.users_get_by_id(owner_user_id)
         email = (su or {}).get("email")
-        if not email:
-            return None
-        pg_id = users_get_id_by_email(email)
+    except Exception:
+        logger.warning(
+            "Could not load SQLite user %s for PG resolve", owner_user_id, exc_info=True
+        )
+    if not email:
+        return None
+    email_n = email.strip().lower()
+    pg_id = users_get_id_by_email(email_n)
+    if pg_id:
+        return pg_id
+    if su:
+        try:
+            users_insert(su)
+        except Exception:
+            logger.debug("users_insert during resolve failed for %s", email_n, exc_info=True)
+        pg_id = users_get_id_by_email(email_n)
         if pg_id:
             return pg_id
-        if su:
-            users_insert(su)
-            return owner_user_id if users_get_by_id(owner_user_id) else None
-    except Exception:
-        logger.warning("Could not resolve owner_user_id %s for PG", owner_user_id, exc_info=True)
     return None
+
+
+def resolve_owner_user_id(owner_user_id: str | None) -> str | None:
+    """Public wrapper for scan launch / dual-write owner normalization."""
+    return _resolve_user_id_for_pg(owner_user_id)
 
 
 def _scan_row(scan_id: str, info: dict) -> dict:
     row = {k: info.get(k) for k in _COL_FIELDS}
     row["scan_id"] = scan_id
-    row["user_id"] = _resolve_user_id_for_pg(info.get("owner_user_id"))
+    uid = _resolve_user_id_for_pg(info.get("owner_user_id"))
+    if uid and not users_get_by_id(uid):
+        uid = None
+    row["user_id"] = uid
     row["started"] = _parse_ts(row.get("started"))
     data = dict(info)
     row["data"] = _json_dumps_safe(data)
