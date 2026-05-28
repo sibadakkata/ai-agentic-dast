@@ -1,17 +1,36 @@
 # Database Schema
 
+[← Back to README](../README.md)
+
 ## Overview
 
-The scanner uses **SQLite** (`results/scanner.db`) for all persistent state.
-The schema is applied automatically on first startup by `web/db.py` `init()`.
+The scanner persists state in **SQLite** on the UI host (`results/scanner.db`) and, in production, **mirrors writes to Amazon RDS PostgreSQL** while reads gradually migrate behind a feature flag.
+
+| Store | Role | Code |
+|-------|------|------|
+| **SQLite** | Default **read** path; always created on UI host | `web/db.py`, `db/schema.sql` |
+| **PostgreSQL** | Dual-write target; optional read source | `web/db_pg.py`, `web/db_router.py`, `migrations/` |
+
+### Feature flags (UI / API container)
+
+| Variable | Default | Effect |
+|----------|---------|--------|
+| `DATABASE_URL` | unset | Postgres connection string (from Secrets Manager in prod) |
+| `DUAL_WRITE_PG` | `0` | When `1`, mirror writes to Postgres (`web/db_pg.py`) |
+| `READ_FROM_PG` | `0` | When `1`, prefer Postgres reads via `web/db_router.py`; fall back to SQLite on error |
+
+Fargate workers (`scanners/runner/`) set `DUAL_WRITE_PG=1` and `RUNNER_PG_ONLY=1` in the runner image Dockerfile.
+
+RDS is provisioned by [infra/terraform](../infra/terraform/README.md) (PostgreSQL 16, Multi-AZ, encrypted). Credentials live in Secrets Manager **`dast/rds/master`**.
 
 ## Files
 
 | File | Purpose |
 |------|---------|
-| `schema.sql` | Canonical DDL — keep in sync with `web/db.py` `init()` |
+| `schema.sql` | Canonical SQLite DDL — keep in sync with `web/db.py` `init()` |
+| `../migrations/0001_init.sql` | PostgreSQL schema (normalized tables + `live_events` for SSE) |
 
-## Tables
+## Tables (SQLite / mirrored to PG)
 
 | Table | Description |
 |-------|-------------|
@@ -35,9 +54,9 @@ Beyond the explicit columns (`target_url`, `model`, `status`, `cost`, `findings_
 | `out_of_scope_urls` | promoted from `live_out_of_scope` | blocked third-party URLs |
 | `progress` | in-memory append-only | user-facing log lines |
 
-Persistence logic lives in `_snapshot_live_metrics` → `_clean_scan_for_db` in `web/app.py` and runs on every `_save_scan` call (every 10 tool calls, every 5 findings, each phase boundary, and a 30 s autosave tick).
+Persistence logic lives in `_snapshot_live_metrics` → `_clean_scan_for_db` in `web/app.py` and runs on every `_save_scan` call.
 
-The `live_tests` detailed tool-call log (up to ~20 MB) is **not** included here — it is written to `scan_results.payload.summary.test_log` only on graceful completion/error/stop.
+The `live_tests` detailed tool-call log (up to ~20 MB) is **not** in `scans.data` during the run — it is written to `scan_results.payload.summary.test_log` on graceful completion/error.
 
 ## Runtime directory layout
 
@@ -49,8 +68,13 @@ results/
 └── cache/              # Temporary cache files
 ```
 
+## Backups
+
+Weekly Lambda ([`infra/terraform/lambda/db_backup.py`](../infra/terraform/lambda/db_backup.py)) exports RDS tables to S3. Restore procedure: [infra/terraform/README.md](../infra/terraform/README.md#weekly-db-backup-to-s3).
+
 ## Fresh EC2 deployment
 
-1. Build and start the container — the DB is created automatically on first request.
-2. No manual SQL migration needed; `web/db.py` `init()` runs `CREATE TABLE IF NOT EXISTS` for all tables.
-3. If migrating from an older JSON-based install, place `scans_meta.json` and/or `cost_ledger.json` in `results/` — they will be auto-migrated into SQLite on startup and renamed to `.bak`.
+1. Build and start the UI container — SQLite is created automatically on first request.
+2. No manual SQL migration needed for SQLite; `web/db.py` `init()` runs `CREATE TABLE IF NOT EXISTS` for all tables.
+3. For Postgres, apply `migrations/0001_init.sql` to RDS once (or via your migration process).
+4. Legacy JSON installs: place `scans_meta.json` and/or `cost_ledger.json` in `results/` — auto-migrated into SQLite on startup and renamed to `.bak`.

@@ -1,6 +1,23 @@
 # DAST Scanner — Terraform (Production)
 
-Provisions **RDS PostgreSQL 16** (Multi-AZ) and an optional **Application Load Balancer** in `us-east-2` for the scalable-scanner-platform rollout. See [scalable-scanner-platform-proposal.md](../../docs/architecture/scalable-scanner-platform-proposal.md).
+AWS infrastructure for the AI DAST scanner in **`us-east-2`**: RDS PostgreSQL, ALB + WAFv2, ECS Fargate scan workers, ECR, ElastiCache Redis, weekly DB backups to S3, and VPC endpoints for private-subnet workloads.
+
+Parent overview: [README.md](../../README.md) · Design: [scalable-scanner-platform-proposal.md](../../docs/architecture/scalable-scanner-platform-proposal.md) · Confluence: [Red Team AI Web Scanner](https://confluence.corp.nortonlifelock.com/spaces/CIP/pages/954017481/Red+Team+AI+Web+Scanner)
+
+## What this stack provisions
+
+| Resource | Terraform | Purpose |
+|----------|-----------|---------|
+| **RDS** | `rds.tf` | PostgreSQL 16, `db.t4g.small`, Multi-AZ, encrypted, deletion protection |
+| **ALB** | `alb.tf` | HTTPS (when `domain_name` set) → EC2 UI on port 80; health `GET /healthz` |
+| **WAFv2** | `waf.tf` | Regional Web ACL on ALB (managed rules + rate limit + trusted CIDR allowlist) |
+| **ECS / Fargate** | `ecs.tf` | Cluster `dast-scanner`, task definition for **one scan per task** |
+| **ECR** | `ecr.tf` | Repository `dast-scanner-runner` (built from `scanners/runner/`) |
+| **Redis** | `redis.tf` | ElastiCache for live scan events (SSE bridge on UI) |
+| **Secrets** | `secrets.tf` | Secrets Manager `dast/rds/master` (master DB credentials) |
+| **Backups** | `backups.tf` | Weekly Lambda → S3 `dast-scanner-db-backups-<account_id>` |
+| **VPC endpoints** | `vpc_endpoints.tf`, `vpc_endpoints_ecs.tf` | Secrets Manager, S3 gateway, ECR API/DKR, CloudWatch Logs |
+| **EC2 IAM** | `ec2_iam.tf` | Instance role for UI host (Bedrock, Secrets Manager, ECS RunTask) |
 
 ## Prerequisites
 
@@ -22,10 +39,14 @@ Copy-Item terraform.tfvars.example terraform.tfvars
 terraform init
 terraform fmt -recursive
 terraform validate
-terraform plan -var-file=terraform.tfvars
+terraform plan -var-file=terraform.tfvars -out=tfplan
+terraform apply tfplan
 ```
 
-**Do NOT run `terraform apply` without explicit approval.** Review the plan first; applying creates billable AWS resources.
+- **Profile:** `dast-poc` (see `providers.tf`)
+- **Region:** `us-east-2`
+
+**Do NOT run `terraform apply` without explicit approval.** Review the plan first; applying creates billable AWS resources. Application code deploys to EC2 separately (`deploy.sh`) — not via Terraform.
 
 ## Variables you must supply
 
@@ -39,7 +60,8 @@ Optional: `domain_name` — when set, creates ACM cert + HTTPS listener and HTTP
 ## Outputs
 
 - `rds_endpoint` — connect string host
-- `rds_secret_arn` — Secrets Manager (`dast/rds/master`) with username/password/host/port/dbname
+- `rds_secret_arn` — Secrets Manager secret **`dast/rds/master`** (username, password, host, port, dbname)
+- `ecr_scanner_runner_url` — push target for `scanners/runner` image (when ECS enabled)
 - `alb_dns_name` / `alb_zone_id` — when ALB enabled
 - `db_security_group_id`
 

@@ -5,7 +5,7 @@ An [OpenClaw](https://github.com/openclaw/openclaw) skill that lets you trigger 
 ## Architecture
 
 ```
-YOUR MACHINE (local)                        EC2 (remote)
+YOUR MACHINE (local)                   Production UI (EC2 + ALB)
 â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”                     â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”
 â”‚  test_skill.py      â”‚    HTTP REST API    â”‚  AI Agentic Scanner â”‚
 â”‚  (or OpenClaw agent)â”‚ â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â–º â”‚  (already running)  â”‚
@@ -13,7 +13,7 @@ YOUR MACHINE (local)                        EC2 (remote)
 â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜    JSON responses   â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜
 ```
 
-You do **not** need to run the scanner locally. The scanner stays on EC2. Only this skill/test script runs on your machine and talks to EC2 over HTTP.
+You do **not** need to run the scanner locally. The scanner runs in AWS (FastAPI UI on EC2; scan workers on Fargate when enabled). Only this skill/test script runs on your machine and calls the REST API over HTTPS.
 
 ## Quick Start (No OpenClaw Needed)
 
@@ -24,7 +24,13 @@ cd C:\Projects\Pen-Test\Acunetix\POC
 python openclaw-skill/test_skill.py list
 ```
 
-Default scanner URL: `http://localhost:80`. Override with:
+Default scanner URL: `http://localhost:80`. Production:
+
+```powershell
+$env:SCANNER_URL = "https://rt.ai.webscanner.gendigital.com"
+```
+
+Override for other hosts:
 ```powershell
 $env:SCANNER_URL = "http://your-scanner"
 $env:SCANNER_USER = "dast-admin"          # must match server DAST_AUTH_USER (or your SSO API user)

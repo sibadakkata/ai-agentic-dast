@@ -4,7 +4,37 @@ LLM-powered Dynamic Application Security Testing (DAST) scanner that works again
 
 A **multi-agent architecture** deploys 13 specialist agents in parallel — each an expert in its vulnerability class — coordinated by an orchestrator with shared context, inter-agent messaging, and an independent verifier that confirms findings and builds exploit chains. Covers the full **OWASP Web Top 10 (2021)**, **OWASP API Top 10 (2023)**, and **OWASP LLM Top 10 (2025)** — 32 OWASP categories total. Each agent drives a real Chromium browser and HTTP client, crafting context-aware payloads, interpreting responses, and reporting findings autonomously.
 
-## Architecture
+**Production architecture:** [Red Team AI Web Scanner (Confluence)](https://confluence.corp.nortonlifelock.com/spaces/CIP/pages/954017481/Red+Team+AI+Web+Scanner) · [Terraform / AWS](infra/terraform/README.md) · [Scalable platform design](docs/architecture/scalable-scanner-platform-proposal.md)
+
+## Production platform
+
+Production runs a **control plane** (FastAPI UI on EC2) and **scan workers** (Fargate tasks), with durable state migrating to PostgreSQL while SQLite remains the default read path during rollout.
+
+```text
+Users ──► rt.ai.webscanner.gendigital.com (CNAME)
+            └── ALB + WAFv2 (us-east-2)
+                    └── EC2 3.20.180.251 : Docker dast-scanner :80 (FastAPI UI + API)
+                            ├── SCAN_LAUNCHER=fargate ──► ECS Fargate (1 task / scan)
+                            │         └── ECR dast-scanner-runner (scanners/runner/)
+                            ├── RDS PostgreSQL 16 Multi-AZ (dual-write via web/db_pg.py)
+                            └── ElastiCache Redis (live scan events → SSE in UI)
+```
+
+| Layer | Details |
+|-------|---------|
+| **Public URL** | `https://rt.ai.webscanner.gendigital.com` — TLS on ALB; WAFv2 regional Web ACL (see [infra/terraform/README.md](infra/terraform/README.md)) |
+| **UI host** | EC2 `3.20.180.251`, container `dast-scanner`, app port **80**, health check `GET /healthz` |
+| **Database** | **RDS** PostgreSQL 16, `db.t4g.small`, Multi-AZ, encrypted, deletion protection. **SQLite** (`results/scanner.db`) is still the default **read** source; set `DUAL_WRITE_PG=1` + `DATABASE_URL` to mirror writes to Postgres (`web/db_pg.py`). Set `READ_FROM_PG=1` to serve reads from Postgres via `web/db_router.py` (falls back to SQLite on error). |
+| **Scan workers** | Standalone image under `scanners/runner/`, pushed to **ECR** `dast-scanner-runner`. Production: `SCAN_LAUNCHER=fargate` (one Fargate task per scan). Dev: `docker compose` or `SCAN_LAUNCHER=local-docker`. |
+| **Live progress** | **SSE** in the UI; with `LIVE_EVENTS_REDIS=1` and `REDIS_URL`, Fargate workers publish via Redis pub/sub (`web/live_events.py`). Polling fallback when Redis is off. |
+| **Secrets** | RDS credentials in Secrets Manager **`dast/rds/master`**; EC2 and Fargate tasks read via IAM role. |
+| **Backups** | Weekly Lambda (`infra/terraform/lambda/db_backup.py`) dumps RDS tables to S3 bucket `dast-scanner-db-backups-<account_id>`; lifecycle: Glacier at 90 days, delete at 180 days. |
+| **Network** | VPC interface endpoints (Secrets Manager, ECR API/DKR, CloudWatch Logs) plus S3 gateway endpoint so Lambda/Fargate in private subnets avoid public egress for AWS APIs. |
+| **IaC** | `infra/terraform/` — profile **`dast-poc`**, region **`us-east-2`**. Plan/apply only with explicit approval (see [Deployment protocol](.cursor/rules/deployment-protocol.mdc)). |
+
+**Deploying application code to EC2** still uses `deploy.sh` / `docker cp` + `docker restart` on the UI host. Run `scripts/check_scan_active.py` first — **never restart while a scan is running** (in-process state is lost). Every deploy requires explicit operator approval; see `.cursor/rules/deployment-protocol.mdc`.
+
+## Architecture (scanner engine)
 
 ### Multi-Agent Mode — `scan_profile: "multi_agent"`
 
@@ -137,33 +167,50 @@ This loop runs up to 50 steps per phase (20–50 depending on phase complexity).
 
 ## Quick Start
 
-### EC2 Deployment (Recommended)
+### Production UI
 
-```bash
-# 1. Upload to EC2
-scp -i key.pem -r ./POC ubuntu@<EC2-IP>:~/ai-dast-scanner
+The hosted scanner is at **`https://rt.ai.webscanner.gendigital.com`** (ALB + WAF in front of the EC2 UI container). Use your platform credentials (SAML or local Basic Auth per environment).
 
-# 2. Configure
-ssh -i key.pem ubuntu@<EC2-IP>
-cd ~/ai-dast-scanner
-cp .env.example .env
-nano .env   # AWS Bedrock creds; auth (see Authentication below)
-
-# 3. Deploy (Dockerfile installs xmlsec1 + libxmlsec for python3-saml / SSO)
-bash deploy.sh
-# Web UI at http://<EC2-IP>/
-```
-
-### Local Development
+### Local development
 
 ```bash
 pip install -r requirements.txt
 playwright install chromium
 cp .env.example .env && nano .env   # SSO_ENABLED=false, DAST_AUTH_USER, DAST_AUTH_PASS
 uvicorn web.app:app --host 0.0.0.0 --port 80
+# Or: docker compose up --build
 ```
 
-> Full deployment guide: [docs/deployment.md](docs/deployment.md)
+Optional Postgres dual-write locally: set `DATABASE_URL`, `DUAL_WRITE_PG=1` in `.env` (see [db/README.md](db/README.md)).
+
+### EC2 UI deployment (operators)
+
+Application deploys to the **UI host only** (`3.20.180.251`, container `dast-scanner`). Fargate worker images are built/pushed to ECR separately (see [scanners/runner/README.md](scanners/runner/README.md)).
+
+```bash
+# 1. Upload changed files (or full tree) to EC2
+scp -i key.pem -r ./POC ubuntu@3.20.180.251:~/ai-dast-scanner
+
+# 2. On host: check no scan is running, then deploy
+ssh -i key.pem ubuntu@3.20.180.251
+docker exec dast-scanner python3 /tmp/check_scan_active.py   # must exit 0
+bash deploy.sh
+```
+
+Do **not** restart the UI container during an active scan. See [docs/deployment.md](docs/deployment.md) and `.cursor/rules/deployment-protocol.mdc`.
+
+### AWS infrastructure (Terraform)
+
+RDS, ALB, WAF, ECS, ECR, Redis, Lambda backups, and VPC endpoints are managed under `infra/terraform/`. This is separate from day-to-day app deploys:
+
+```powershell
+cd infra/terraform
+terraform plan -var-file=terraform.tfvars -out=tfplan
+# Review plan — apply only with explicit approval:
+terraform apply tfplan
+```
+
+> Full deployment guide: [docs/deployment.md](docs/deployment.md) · Terraform: [infra/terraform/README.md](infra/terraform/README.md)
 
 ## Authentication
 
@@ -320,8 +367,9 @@ Select **"Multi-Agent"** in the Scan Profile dropdown or set `scan_profile: "mul
 
 ```
 ├── README.md                    # This file
-├── docs/                        # Detailed documentation
+├── docs/                        # Detailed documentation (see docs/README.md)
 │   ├── architecture.md          #   AI agent architecture & design
+│   ├── architecture/            #   Platform rollout (Fargate, PG, Redis)
 │   ├── system-prompt-guide.md   #   ★ How the LLM system prompt & phases work
 │   ├── scanner-internals.md     #   ★ E2E scan flow, evidence, retries, context mgmt
 │   ├── contributing.md          #   ★ How to add phases, tools, optimize detection
@@ -334,45 +382,33 @@ Select **"Multi-Agent"** in the Scan Profile dropdown or set `scan_profile: "mul
 │   ├── web-ui.md                #   Web UI features & configuration
 │   ├── mcp-server.md            #   MCP integration guide
 │   └── troubleshooting.md       #   Error handling & debugging
-├── scanners/ai_agent/           # Core scanner engine (25 modules)
-│   ├── agent.py                 #   Agent loop, context mgmt, multi-identity, parallel phases
-│   ├── auth.py                  #   Authentication (form/SSO/OAuth) + multi-identity (User B/Admin/Tenant B)
-│   ├── severity.py              #   Deterministic CVSS v3.1 severity classifier
-│   ├── passive_recon.py         #   Deterministic passive checks + hardcoded secret scanner + hybrid JS lib detection
-│   ├── retry_prompts.py         #   Hybrid Smart Retry — phase-tailored re-prompt constants for 20 phases
-│   ├── subdomain_takeover.py    #   Subdomain takeover detection (46-provider fingerprint DB + CNAME + HTTP matching)
-│   ├── subdomain_enum.py        #   Subdomain enumeration (Certificate Transparency + DNS wordlist)
-│   ├── dns_security.py          #   Email/DNS security checks (SPF/DKIM/DMARC/MX validation)
-│   ├── js_registry.py           #   Global JS URL registry (auth + SPA + network listeners → unified set for CVE audit)
-│   ├── spa_crawler.py           #   SPA-aware crawling (framework route walker + XHR capture + post-auth re-crawl)
-│   ├── llm_config.py            #   LLM routing, prompt caching, cost tracking, transient retry (5× backoff)
-│   ├── prompts.py               #   System + phase prompts (multi-identity placeholders)
-│   ├── tools.py                 #   31 tools (browser, API, WebSocket, chaining) + WAF detection + parallel dedup
-│   ├── specialist_prompts.py    #   Multi-agent: 15 specialist agent definitions (13 + recon + verifier) covering OWASP Web/API/LLM Top 10
-│   ├── orchestrator.py          #   Multi-agent: orchestrator (recon -> parallel specialists -> verifier)
-│   ├── multi_agent_context.py   #   Multi-agent: shared context bus (endpoints, params, findings, messages, dedup)
-│   ├── active_baseline.py       #   10 deterministic probes + Playwright DOM XSS: SQLi, reflected XSS (4-layer: direct/cross-endpoint/propagation/attribute), DOM XSS (browser-verified alert() detection), SSRF, cache poisoning, open redirect, sensitive paths, Salesforce, GraphQL, HTTP smuggling, OAuth/OIDC
-│   ├── llm_detect.py            #   LLM app detection: DOM/network heuristics for chatbot/AI features
-│   ├── llm_baseline.py          #   37 deterministic LLM security probes (OWASP LLM Top 10, $0 cost)
-│   ├── garak_runner.py          #   Garak (NVIDIA) orchestration: config gen, subprocess, JSONL parsing, browser bridge integration
-│   ├── browser_llm_bridge.py    #   Browser-based LLM chatbot bridge: Playwright UI interaction, stability-based response capture, preflight validation, HTTP bridge server for Garak
-│   ├── api_import.py            #   Postman/OpenAPI/Burp XML parsers
-│   ├── baseline_executor.py     #   API baseline & variable chaining
-│   ├── body_fuzzer.py           #   Hybrid body fuzzer
-│   ├── model_discovery.py       #   Bedrock model listing & alias resolution
-│   ├── oob.py                   #   Out-of-band interaction helpers (SSRF/XXE callbacks)
-│   ├── scan_state.py            #   Scan state persistence & crash recovery
-│   └── workflow.py              #   Multi-step workflow / business-flow scanning
-├── scripts/
+├── scanners/                    # Scanner packages (see scanners/README.md)
+│   ├── runner/                  # Fargate/local worker entrypoint (ECR image)
+│   ├── auth/                    # Platform SAML helpers
+│   ├── users/                   # User/invite models
+│   └── ai_agent/                # Core scanner engine (25+ modules)
+│       ├── agent.py             #   Agent loop, context mgmt, multi-identity, parallel phases
+│       ├── auth.py              #   Target auth (form/SSO/OAuth) + multi-identity
+│       ├── tools.py             #   31 agent tools (browser, API, fuzz, WAF detection)
+│       ├── llm_config.py        #   LiteLLM / Bedrock routing, retries, cost
+│       ├── orchestrator.py      #   Multi-agent orchestrator
+│       └── ...                  #   passive_recon, active_baseline, garak, etc.
+├── scripts/                     # Ops, triage, reports (see scripts/README.md)
 │   ├── triage_engine.py         #   3-layer triage engine + exploitation tiers + entropy filter + dedup + narrative
 │   ├── cve_lookup.py            #   NVD + OSV.dev CVE lookup
 │   ├── report_generator.py      #   PDF report generator
 │   ├── excel_exporter.py        #   Excel report exporter
 │   └── check_scan_active.py     #   Pre-deploy scan-active safety check (RBAC Basic Auth)
-├── web/
-│   ├── app.py                   #   FastAPI backend
-│   ├── db.py                    #   SQLite persistence
+├── web/                         # FastAPI UI + API (see web/README.md)
+│   ├── app.py                   #   FastAPI backend, SSE, scan launcher
+│   ├── db.py                    #   SQLite persistence (default reads)
+│   ├── db_pg.py                 #   PostgreSQL dual-write / read helpers
+│   ├── db_router.py             #   READ_FROM_PG routing
+│   ├── scan_launcher.py         #   Fargate / local-docker worker launch
+│   ├── live_events.py           #   Redis pub/sub for SSE
 │   └── static/index.html        #   Single-page web UI
+├── migrations/                  # PostgreSQL DDL (see migrations/README.md)
+├── infra/terraform/             # AWS production stack
 ├── mcp_server.py                # MCP server for Cursor/Claude Desktop
 ├── deploy.sh                    # One-command EC2 deployment
 ├── docker-compose.yml           # Docker Compose config
@@ -380,14 +416,17 @@ Select **"Multi-Agent"** in the Scan Profile dropdown or set `scan_profile: "mul
 └── requirements.txt             # Python dependencies
 ```
 
-### Data storage (SQLite, not browser disk)
+### Data storage
 
-- **`results/scanner.db`** — source of truth: `scans` (metadata), `scan_results` (full findings + summary JSON), `app_kv` (UI prefs), `cost_ledger`. On startup, any scan with `result_file` on disk but no `scan_results` row is **back-filled** and `findings_count` is reconciled.
-- **Crash / error / pause resilience** — on every save, the transient `live_*` counters (cost, tokens, LLM calls, tool calls, findings_count, phases_completed) and structured summaries (per-phase breakdown, per-phase tool usage, last-500 crawled URLs, out-of-scope URLs) are promoted into the persisted `scans` row. Errored, stopped, paused, or container-killed scans therefore keep their last-known-good metrics and breakdowns in the DB — the UI's Phases / Crawled Pages / Out of Scope tabs stay populated. The only field not persisted is the detailed per-tool-call request/response log (`live_tests`), which can reach ~20 MB per scan and is still kept in-memory only; on graceful error it's written into `scan_results.payload.summary.test_log`.
-- **`results/raw/*.json`** — written when a scan finishes as **backup/export** only; API reads **DB first**, then legacy file once to populate DB.
-- **Scan list** (`GET /api/scans`) — DB-backed only (no file-only orphan rows).
-- **Payloads export** (`GET /api/results/{id}/payloads`) — generated in memory (no `payloads_*.json` cache file).
-- **Other files (not scan DB):** `imports/*` (uploaded Postman/Burp/OpenAPI), `results/reports/*` (PDF/XLSX exports), `data/models_cache.json` (Bedrock model list cache), `results/cache/*` (CVE lookup caches). These do not drive scan history or findings in the UI.
+**SQLite (default reads):** `results/scanner.db` — `scans`, `scan_results`, `app_kv`, `cost_ledger`, `users`, `invites`. On startup, legacy `results/raw/*.json` files are back-filled into the DB when missing. See [db/README.md](db/README.md).
+
+**PostgreSQL (production rollout):** RDS instance `dast-scanner` receives **dual-writes** when `DUAL_WRITE_PG=1` and `DATABASE_URL` are set (`web/db_pg.py`). Schema in `migrations/0001_init.sql`. Enable **`READ_FROM_PG=1`** to prefer Postgres for API reads (with SQLite fallback). Fargate workers use `RUNNER_PG_ONLY=1` in the runner image.
+
+- **Crash / error / pause resilience** — on every save, transient `live_*` counters and phase/crawl summaries are promoted into the `scans` row so stopped or errored scans keep metrics in the DB. The detailed per-tool-call log (`live_tests`, up to ~20 MB) stays in-memory during the scan; on graceful completion/error it is written to `scan_results.payload.summary.test_log`.
+- **`results/raw/*.json`** — backup/export when a scan finishes; API reads **DB first**, then legacy file once to populate DB.
+- **Scan list** (`GET /api/scans`) — paginated `{"items": [...], "total": N}` from DB (see `web/db_router.py` when `READ_FROM_PG=1`).
+- **Payloads export** (`GET /api/results/{id}/payloads`) — generated in memory (no on-disk cache).
+- **Other files:** `imports/*`, `results/reports/*`, `data/models_cache.json`, `results/cache/*` — not the scan history source of truth.
 
 **Regression (local code + UI strings):** `python _regression_local.py` (use a venv with `pip install -r requirements.txt` so agent/auth imports pass).
 
@@ -408,6 +447,8 @@ python scripts/run_regression_ec2.py --pytest # same, plus pytest tests/
 | Document | Description |
 |----------|-------------|
 | [Architecture](docs/architecture.md) | AI agent design, LLM loop, tool system, phase orchestration |
+| [Platform rollout](docs/architecture/scalable-scanner-platform-proposal.md) | Fargate workers, Postgres, Redis, SSE — target production design |
+| [Terraform](infra/terraform/README.md) | RDS, ALB, WAF, ECS, ECR, Redis, backups, VPC endpoints |
 | [System Prompt Guide](docs/system-prompt-guide.md) | **How the LLM is instructed** — system prompt structure, phase prompts, payload methodology, finding format |
 | [Scanner Internals](docs/scanner-internals.md) | **E2E scan flow** — tool execution, evidence buffer, evidence summary, context trimming, finding extraction |
 | [Contributing & Extending](docs/contributing.md) | **How to add new phases, tools, and optimize detection** — step-by-step guide for team members |
