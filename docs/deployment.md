@@ -2,6 +2,8 @@
 
 [← Back to README](../README.md)
 
+> **Day-to-day code deploys** (hot-patch `docker cp`, `tar` pipe, when to use `deploy.sh`, ECR runner push): see the README sections **[Install from scratch](../README.md#install-from-scratch)** and **[Day-to-day code deploys](../README.md#day-to-day-code-deploys)**. This file covers Bedrock, `.env`, SSO, verification scripts, and failure modes.
+
 ## EC2 Deployment (Recommended)
 
 ### Prerequisites
@@ -22,21 +24,17 @@ sudo apt-get install -y xmlsec1 libxmlsec1-dev pkg-config libssl-dev libffi-dev
 
 ### Quick Deploy
 
+**First-time / greenfield:** follow README [Install from scratch](../README.md#install-from-scratch) (Terraform → clone → `deploy.sh` → ECR runner → verify).
+
+**Existing host — full image rebuild only:**
+
 ```bash
-# 1. Upload to EC2
-scp -i key.pem -r ./POC ubuntu@<EC2-IP>:~/ai-dast-scanner
-
-# 2. Configure
-ssh -i key.pem ubuntu@<EC2-IP>
 cd ~/ai-dast-scanner
-cp .env.example .env
-nano .env   # Add your credentials
-
-# 3. Deploy
+docker exec dast-scanner python3 /tmp/check_scan_active.py   # MANDATORY — must exit 0
 bash deploy.sh
-# → Builds Docker image, starts container
-# → Web UI at http://<EC2-IP>/
 ```
+
+**Existing host — typical code change:** README [Day-to-day code deploys](../README.md#day-to-day-code-deploys) pattern **A** or **B** (~10–30 s), not `deploy.sh`.
 
 ### Verify deployment (smoke + optional full scan)
 
@@ -57,9 +55,22 @@ python scripts/e2e_remote_scan.py            # wait until completed / error (nee
 
 Override target: `E2E_TARGET_URL=https://...` or `--target-url`. Use only sites you are authorized to test.
 
-### Pre-deploy scan check
+### Pre-deploy scan check (MANDATORY)
 
-Before `docker cp` / `docker restart`, run `scripts/check_scan_active.py` inside the container. The script calls `GET /api/scans` with **HTTP Basic Auth** when **both** `DAST_AUTH_USER` and `DAST_AUTH_PASS` are set in the environment. If you run it from the host shell without exporting those vars, it falls back to unauthenticated requests and prints a **WARNING** (safe only on pre-RBAC images). Inside the container they are usually already set from `.env`.
+**MANDATORY** before **any** code change reaches the running UI container (`docker cp`, `docker restart`, or `bash deploy.sh`). Do not treat this as optional.
+
+```bash
+docker exec dast-scanner python3 /tmp/check_scan_active.py
+```
+
+The script is normally already on the host at `scripts/check_scan_active.py` and copied into the container at `/tmp/check_scan_active.py` during prior deploys. Refresh from your workstation if missing (see README [Day-to-day code deploys](../README.md#day-to-day-code-deploys)).
+
+- Exit **0** → safe to proceed.
+- Exit **1** → **STOP** — a scan is active or paused; wait or stop the scan first.
+
+The script calls `GET /api/scans` with **HTTP Basic Auth** when **both** `DAST_AUTH_USER` and `DAST_AUTH_PASS` are set in the container environment. If you run it from the host shell without those vars exported, it falls back to unauthenticated requests and prints a **WARNING** (only acceptable on pre-RBAC images). Inside the container they are usually already set from `.env`.
+
+**Why:** Scan state (LLM conversation, browser session, findings buffer) lives in process memory. A restart kills in-flight work; pause-deploy-resume does **not** work.
 
 ### Authentication
 
@@ -99,6 +110,35 @@ PUBLIC_BASE_URL=                   # Base URL for invite links (e.g. https://sca
 The `deploy.sh` script runs `docker compose build && docker compose up -d`. To customize, edit the `.env` file.
 
 The `--restart unless-stopped` flag ensures auto-restart on crash or EC2 reboot.
+
+## Common deploy failures
+
+### `IMAGE_NAME` empty / `docker build -t` with no tag
+
+**Symptom:** `deploy.sh` fails building with an empty `-t` argument, or logs show `docker build -t  .`.
+
+**Cause:** `deploy.sh` was started from a **non-interactive** shell (`nohup`, CI, or a truncated SSH one-liner) where `IMAGE_NAME="ai-dast-scanner"` was not set the same way as in an interactive bash session, or the script was invoked without a proper login shell.
+
+**Fix:** SSH in interactively, `cd ~/ai-dast-scanner`, run `bash deploy.sh` in a normal terminal. Do not background the first deploy on a fresh host.
+
+### ECR push from EC2: `ConnectTimeoutError` to `api.ecr.us-east-2.amazonaws.com`
+
+**Symptom:** `aws ecr get-login-password` works but `docker push` times out reaching ECR.
+
+**Cause (usually one or both):**
+
+1. EC2 is in a private subnet **without** VPC interface endpoints for **ECR API** and **ECR DKR** (Terraform: `vpc_endpoints_ecs.tf`) and without a NAT path to the internet.
+2. EC2 instance role lacks ECR permissions: `ecr:GetAuthorizationToken` plus `ecr:BatchCheckLayerAvailability`, `ecr:CompleteLayerUpload`, `ecr:InitiateLayerUpload`, `ecr:PutImage`, `ecr:UploadLayerPart` on `arn:aws:ecr:us-east-2:168551359048:repository/dast-scanner-runner`.
+
+**Fix:** Apply Terraform endpoints (or allow HTTPS egress to ECR), attach ECR push policy to the instance role, then retry `docker login` + `docker push`. See README [Step 4](../README.md#step-4-push-fargate-runner-image-to-ecr).
+
+### Hot-patch lost after `bash deploy.sh`
+
+**Symptom:** A fix deployed via `docker cp` worked until someone ran `bash deploy.sh`, then the bug returned.
+
+**Cause:** `deploy.sh` rebuilds the image from the **git tree on the host**, not from uncommitted files you only copied into the running container.
+
+**Fix:** Commit and `git pull` on EC2 (or `scp` the full tree to `~/ai-dast-scanner`) before `deploy.sh`. For quick tests, use hot-patch only for changes that are already committed or will be synced to the host immediately after.
 
 ## Local Development (No Docker)
 

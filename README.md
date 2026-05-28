@@ -32,7 +32,7 @@ Users ──► rt.ai.webscanner.gendigital.com (CNAME)
 | **Network** | VPC interface endpoints (Secrets Manager, ECR API/DKR, CloudWatch Logs) plus S3 gateway endpoint so Lambda/Fargate in private subnets avoid public egress for AWS APIs. |
 | **IaC** | `infra/terraform/` — profile **`dast-poc`**, region **`us-east-2`**. Plan/apply only with explicit approval (see [Deployment protocol](.cursor/rules/deployment-protocol.mdc)). |
 
-**Deploying application code to EC2** still uses `deploy.sh` / `docker cp` + `docker restart` on the UI host. Run `scripts/check_scan_active.py` first — **never restart while a scan is running** (in-process state is lost). Every deploy requires explicit operator approval; see `.cursor/rules/deployment-protocol.mdc`.
+**Deploying application code** — new operators: [Install from scratch](#install-from-scratch); day-to-day: [Day-to-day code deploys](#day-to-day-code-deploys). Run `scripts/check_scan_active.py` before any container restart (**mandatory** — in-process scan state is lost on restart). Human operators must get explicit approval before touching EC2; see [.cursor/rules/deployment-protocol.mdc](.cursor/rules/deployment-protocol.mdc).
 
 ## Architecture (scanner engine)
 
@@ -183,34 +183,197 @@ uvicorn web.app:app --host 0.0.0.0 --port 80
 
 Optional Postgres dual-write locally: set `DATABASE_URL`, `DUAL_WRITE_PG=1` in `.env` (see [db/README.md](db/README.md)).
 
-### EC2 UI deployment (operators)
+## Install from scratch
 
-Application deploys to the **UI host only** (`3.20.180.251`, container `dast-scanner`). Fargate worker images are built/pushed to ECR separately (see [scanners/runner/README.md](scanners/runner/README.md)).
+End-to-end path for a **new operator** provisioning AWS infrastructure and bringing up the UI + Fargate scan workers. Depth on Terraform variables, WAF, and backups: [infra/terraform/README.md](infra/terraform/README.md). Bedrock, `.env`, and SSO: [docs/deployment.md](docs/deployment.md).
 
-```bash
-# 1. Upload changed files (or full tree) to EC2
-scp -i key.pem -r ./POC ubuntu@3.20.180.251:~/ai-dast-scanner
+### Prerequisites
 
-# 2. On host: check no scan is running, then deploy
-ssh -i key.pem ubuntu@3.20.180.251
-docker exec dast-scanner python3 /tmp/check_scan_active.py   # must exit 0
-bash deploy.sh
-```
+| Item | Value |
+|------|--------|
+| **AWS account** | `168551359048` |
+| **Region** | `us-east-2` |
+| **AWS CLI profile** | `dast-poc` — verify: `aws sts get-caller-identity --profile dast-poc` |
+| **Terraform** | `>= 1.6` (repo pins in `infra/terraform/versions.tf`; team standard **1.9.8** on Windows — add install dir to `PATH`, e.g. `C:\terraform\terraform_1.9.8`) |
+| **SSH key** | `C:\Projects\Pen-Test\Acunetix\siba-dast-agentic-poc.pem` (outside repo; never commit) |
+| **EC2 UI** (after Step 1) | `ubuntu@3.20.180.251`, container `dast-scanner`, app root `~/ai-dast-scanner` |
+| **Git** | Clone `master` at a known SHA (e.g. `9d8cd59`): `https://github.com/sibadakkata/ai-agentic-dast.git` or `https://git.int.avast.com/red-team/ai-agentic-dast.git` |
 
-Do **not** restart the UI container during an active scan. See [docs/deployment.md](docs/deployment.md) and `.cursor/rules/deployment-protocol.mdc`.
+**Approval gates:** Do **not** run `terraform apply` without explicit review/approval ([deployment protocol](.cursor/rules/deployment-protocol.mdc)). Do **not** `scp` / restart production EC2 without operator sign-off.
 
-### AWS infrastructure (Terraform)
+### Step 1: Provision infrastructure with Terraform
 
-RDS, ALB, WAF, ECS, ECR, Redis, Lambda backups, and VPC endpoints are managed under `infra/terraform/`. This is separate from day-to-day app deploys:
+From a workstation with AWS credentials:
 
 ```powershell
-cd infra/terraform
+cd C:\Projects\Pen-Test\Acunetix\POC\infra\terraform
+Copy-Item terraform.tfvars.example terraform.tfvars   # if first time
+# Edit terraform.tfvars — required: ec2_security_group_id, ec2_private_ip (see infra/terraform/README.md)
+terraform init
+terraform fmt -recursive
+terraform validate
 terraform plan -var-file=terraform.tfvars -out=tfplan
-# Review plan — apply only with explicit approval:
+# STOP — review tfplan with a second operator; apply only after explicit approval:
 terraform apply tfplan
 ```
 
-> Full deployment guide: [docs/deployment.md](docs/deployment.md) · Terraform: [infra/terraform/README.md](infra/terraform/README.md)
+**Terraform creates (among other things):** RDS PostgreSQL, ALB + WAF, ECS cluster + Fargate task definition, ECR repo `dast-scanner-runner`, ElastiCache Redis, Secrets Manager `dast/rds/master`, backup Lambda → S3, VPC interface endpoints (Secrets Manager, ECR API/DKR, CloudWatch Logs). It does **not** deploy application Python/HTML or Docker images for the UI — that is Step 3.
+
+Note the ALB DNS from outputs: `terraform output alb_dns_name` (or use `https://rt.ai.webscanner.gendigital.com` when DNS is wired).
+
+### Step 2: First-time EC2 setup
+
+`terraform apply` assumes an **existing** UI EC2 instance (security group + private IP in `terraform.tfvars`). On the instance (Ubuntu 24.04+, Docker installed, port 80 open):
+
+```bash
+ssh -i /path/to/siba-dast-agentic-poc.pem ubuntu@3.20.180.251
+git clone https://git.int.avast.com/red-team/ai-agentic-dast.git ~/ai-dast-scanner
+cd ~/ai-dast-scanner
+git checkout 9d8cd59   # or current master
+cp .env.example .env
+nano .env              # Bedrock/AWS, DAST_AUTH_*, DATABASE_URL, DUAL_WRITE_PG, SCAN_LAUNCHER=fargate, ECS_* — see docs/deployment.md
+```
+
+Attach/confirm the EC2 instance IAM role includes Bedrock invoke, Secrets Manager read for `dast/rds/master`, and ECS `RunTask` (Terraform `ec2_iam.tf` when `ec2_iam_role_name` is set).
+
+### Step 3: First application boot (UI container)
+
+On the EC2 host (interactive shell — see [Common deploy failures](docs/deployment.md#common-deploy-failures) if `deploy.sh` is run via `nohup`):
+
+```bash
+cd ~/ai-dast-scanner
+bash deploy.sh
+# First run: Docker image build ~5–15 min (Playwright + deps)
+```
+
+Smoke from your laptop (replace host with ALB DNS or public IP):
+
+```bash
+curl -sf http://<ALB-DNS>/healthz && echo OK
+# Or production URL:
+curl -sf https://rt.ai.webscanner.gendigital.com/healthz && echo OK
+```
+
+### Step 4: Push Fargate runner image to ECR
+
+Build on **EC2** (recommended). Building on Windows and copying sources risks UTF-16 corruption in `.py` files if edited with certain tools — see [.cursor/rules/file-encoding.mdc](.cursor/rules/file-encoding.mdc).
+
+**Prerequisites on the EC2 instance role:**
+
+- IAM: `ecr:GetAuthorizationToken` plus `ecr:BatchCheckLayerAvailability`, `ecr:CompleteLayerUpload`, `ecr:InitiateLayerUpload`, `ecr:PutImage`, `ecr:UploadLayerPart` on repository `dast-scanner-runner`
+- Network: VPC interface endpoints for **ECR API** and **ECR DKR** (Terraform `vpc_endpoints_ecs.tf`) **or** outbound HTTPS to `*.ecr.us-east-2.amazonaws.com` and `*.dkr.ecr.us-east-2.amazonaws.com`
+
+Without both, `docker push` fails with `ConnectTimeoutError` to `api.ecr.us-east-2.amazonaws.com` (see [docs/deployment.md](docs/deployment.md)).
+
+On EC2:
+
+```bash
+cd ~/ai-dast-scanner
+export AWS_REGION=us-east-2
+ECR_URL=$(terraform -chdir=infra/terraform output -raw ecr_scanner_runner_url)
+# e.g. 168551359048.dkr.ecr.us-east-2.amazonaws.com/dast-scanner-runner
+TAG=v9d8cd59   # match git SHA or release tag
+
+aws ecr get-login-password --region "$AWS_REGION" | \
+  docker login --username AWS --password-stdin 168551359048.dkr.ecr.us-east-2.amazonaws.com
+
+docker build -f scanners/runner/Dockerfile -t dast-scanner-runner:"$TAG" .
+docker tag dast-scanner-runner:"$TAG" "$ECR_URL:$TAG"
+docker push "$ECR_URL:$TAG"
+```
+
+Bump the image tag in the ECS task definition via Terraform or `aws ecs register-task-definition` so `RunTask` pulls the new digest. Worker details: [scanners/runner/README.md](scanners/runner/README.md).
+
+### Step 5: Verify
+
+1. Open `https://rt.ai.webscanner.gendigital.com` (or ALB URL); sign in with `DAST_AUTH_USER` / `DAST_AUTH_PASS` (or SAML per [docs/SSO_RBAC.md](docs/SSO_RBAC.md)).
+2. Start a smoke scan against OWASP Juice Shop (or `python scripts/e2e_remote_scan.py --smoke` from your laptop — [docs/deployment.md](docs/deployment.md)).
+3. Confirm a Fargate task appears: ECS console → cluster `dast-scanner` → Tasks, or CloudWatch log group `/ecs/dast-scanner-runner`.
+
+---
+
+## Day-to-day code deploys
+
+**UI host:** `3.20.180.251` · **Container:** `dast-scanner` · **SSH key:** `C:\Projects\Pen-Test\Acunetix\siba-dast-agentic-poc.pem`
+
+**MANDATORY before any pattern that restarts the container:** `scripts/check_scan_active.py` must exit **0** (no active/paused scan). In-process scan state is lost on restart; pause-deploy-resume does **not** work. The script is usually already in the container at `/tmp/check_scan_active.py`; refresh if needed:
+
+```powershell
+scp -i "C:\Projects\Pen-Test\Acunetix\siba-dast-agentic-poc.pem" `
+  "C:\Projects\Pen-Test\Acunetix\POC\scripts\check_scan_active.py" `
+  ubuntu@3.20.180.251:/tmp/
+ssh -i "C:\Projects\Pen-Test\Acunetix\siba-dast-agentic-poc.pem" ubuntu@3.20.180.251 `
+  "docker cp /tmp/check_scan_active.py dast-scanner:/tmp/ && docker exec dast-scanner python3 /tmp/check_scan_active.py"
+```
+
+Only proceed when output includes **SAFE TO DEPLOY**. See [.cursor/rules/deployment-protocol.mdc](.cursor/rules/deployment-protocol.mdc) for approval rules.
+
+### A. Hot-patch a few files (~30 sec)
+
+Use when `requirements.txt`, `Dockerfile`, and Playwright/OS packages are **unchanged**.
+
+```powershell
+$pem = "C:\Projects\Pen-Test\Acunetix\siba-dast-agentic-poc.pem"
+$sshTarget = "ubuntu@3.20.180.251"
+$f = "web/app.py"
+scp -i $pem "C:\Projects\Pen-Test\Acunetix\POC\$($f -replace '/','\')" "${sshTarget}:/tmp/_deploy.tmp"
+ssh -i $pem $sshTarget "docker exec dast-scanner python3 /tmp/check_scan_active.py && docker cp /tmp/_deploy.tmp dast-scanner:/app/$f && docker restart dast-scanner"
+```
+
+### B. Hot-patch many files or a whole folder (~10 sec)
+
+```powershell
+$pem = "C:\Projects\Pen-Test\Acunetix\siba-dast-agentic-poc.pem"
+$sshTarget = "ubuntu@3.20.180.251"
+ssh -i $pem $sshTarget "docker exec dast-scanner python3 /tmp/check_scan_active.py"
+tar -cf - -C "C:\Projects\Pen-Test\Acunetix\POC" web | ssh -i $pem $sshTarget "docker exec -i dast-scanner tar -xf - -C /app"
+ssh -i $pem $sshTarget "docker restart dast-scanner"
+```
+
+Replace `web` with `scanners/ai_agent`, `web/static`, etc. Only hot-patch files that are **committed in git** (or already on the host tree); otherwise the next `bash deploy.sh` rebuild clobbers uncommitted `docker cp` changes.
+
+### C. Full rebuild — `bash deploy.sh` (5–15 min)
+
+On EC2, from `~/ai-dast-scanner` in an **interactive** shell:
+
+```bash
+docker exec dast-scanner python3 /tmp/check_scan_active.py   # MUST exit 0
+bash deploy.sh
+```
+
+Use when you changed **`requirements.txt`**, root **`Dockerfile`**, Playwright/browser deps, or system packages in the image. `deploy.sh` already runs the scan-active check if the container is up.
+
+### D. Fargate runner image rebuild
+
+Rebuild and push to ECR (Step 4 above). ECS picks up the new image on the next `RunTask`; no UI container restart required unless you also changed the control plane.
+
+### When to use what
+
+| What changed | Deploy path | Typical time |
+|--------------|-------------|--------------|
+| One or a few `.py` / templates / static files under `web/` or `scanners/ai_agent/` | **A** — `scp` + `docker cp` + `docker restart` | ~30 s |
+| Many files or a directory | **B** — `tar` pipe into `docker exec … tar` | ~10 s |
+| `requirements.txt`, `Dockerfile`, Playwright/OS packages, compose image definition | **C** — `bash deploy.sh` on EC2 | 5–15 min |
+| `scanners/runner/` worker code | **D** — `docker build` + `docker push` to ECR | 3–10 min |
+| `.env` / environment variables only | Edit `~/ai-dast-scanner/.env` on host, then `docker restart dast-scanner` (after scan check) | ~30 s |
+| RDS, ALB, WAF, ECS task definition, IAM, security groups, VPC, empty ECR repo, S3, Lambda | **Terraform** `plan` + `apply` | minutes |
+
+---
+
+## Infra vs application: what tool does what
+
+| Layer | Tool | Notes |
+|-------|------|-------|
+| RDS, ALB, WAF, ECS task def, IAM, SG, VPC, ECR repo, S3, Lambda | **Terraform** | Declarative; drift-detected |
+| Fargate runner image | **docker build** + **docker push** to ECR | Image bytes, not infra |
+| Fargate task def image tag bump | **Terraform** OR **aws CLI** | Tag change = infra config |
+| EC2 UI code (`.py` / templates / static) | **docker cp** + **docker restart** | Hot-patch into running container |
+| EC2 UI image rebuild (deps changed) | **`bash deploy.sh`** on host | Full image rebuild |
+| `.env` / env vars | Edit `~/ai-dast-scanner/.env` + **docker restart** | No `scp`/build |
+
+**Terraform does NOT deploy application code.** Use the [code-deploy patterns](#day-to-day-code-deploys) above for that.
+
+> More detail: [docs/deployment.md](docs/deployment.md) · [infra/terraform/README.md](infra/terraform/README.md) · [GitHub Actions (optional)](docs/deployment/github-actions-setup.md)
 
 ## Authentication
 
