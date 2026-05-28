@@ -247,6 +247,31 @@ python openclaw-skill/test_skill.py scan --url https://testphp.vulnweb.com --wai
 python openclaw-skill/test_skill.py stop scan_20260312_082647_cbb4a2
 ```
 
+### 13. Launch with operator AI instructions
+
+Pass free-form guidance to the scanning agent (focus areas, paths to skip, credential rules):
+
+```powershell
+python openclaw-skill/test_skill.py scan --url https://example.com --mode both
+```
+
+HTTP body field: `ai_instructions` on `POST /api/scan` or `POST /api/v1/scans`.
+
+**MCP tool call** (`mcp_server.py` — tool name `launch_scan` or `start_scan`):
+
+```json
+{
+  "name": "launch_scan",
+  "arguments": {
+    "target_url": "https://example.com",
+    "scan_mode": "both",
+    "ai_instructions": "Focus on authentication and IDOR. Do not test /payments or /checkout."
+  }
+}
+```
+
+Production: set `SCANNER_URL=https://rt.ai.webscanner.gendigital.com` and Basic Auth env vars.
+
 ---
 
 ## With OpenClaw (Team Chat)

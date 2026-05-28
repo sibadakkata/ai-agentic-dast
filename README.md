@@ -442,6 +442,45 @@ python scripts/run_regression_ec2.py --pytest # same, plus pytest tests/
 
 **Piecemeal:** `python scripts/e2e_ec2_smoke.py` (read-only HTTP smoke). `python scripts/regression_persistence.py --api-only` skips local `results/scanner.db` and only checks the remote URL (set `DAST_BASE_URL`). Without `DAST_AUTH_PASS`, a **401** on `/api/ui-settings` is reported as **SKIP**, not failure.
 
+## Using the API
+
+Interactive API docs (Swagger UI): [https://rt.ai.webscanner.gendigital.com/docs](https://rt.ai.webscanner.gendigital.com/docs)  
+OpenAPI JSON: [https://rt.ai.webscanner.gendigital.com/openapi.json](https://rt.ai.webscanner.gendigital.com/openapi.json)  
+ReDoc: `/redoc` on the same host. Local dev: `http://localhost:8080/docs`.
+
+Protected routes use HTTP Basic Auth (`DAST_AUTH_USER` / `DAST_AUTH_PASS` on the server). There is no API-key scheme in OpenAPI yet.
+
+**Launch a scan** (legacy JSON endpoint, same fields as the UI):
+
+```bash
+curl -s -u "YOUR_API_KEY_OR_NONE:YOUR_SECRET" \
+  -H "Content-Type: application/json" \
+  -X POST "https://rt.ai.webscanner.gendigital.com/api/scan" \
+  -d '{
+    "target_url": "https://example.com",
+    "scan_mode": "both",
+    "ai_instructions": "Focus on authentication and IDOR. Do not test /payments."
+  }'
+```
+
+Typed launch (OpenAPI-documented, supports base64 Postman/Burp in JSON): `POST /api/v1/scans` — see Swagger for the full schema.
+
+**Poll status:**
+
+```bash
+curl -s -u "YOUR_API_KEY_OR_NONE:YOUR_SECRET" \
+  "https://rt.ai.webscanner.gendigital.com/api/scan/SCAN_ID"
+```
+
+**Fetch triaged results:**
+
+```bash
+curl -s -u "YOUR_API_KEY_OR_NONE:YOUR_SECRET" \
+  "https://rt.ai.webscanner.gendigital.com/api/results/SCAN_ID"
+```
+
+MCP integration: [openclaw-skill/README.md](openclaw-skill/README.md) and root [mcp_server.py](mcp_server.py) (`launch_scan` / `start_scan` tools).
+
 ## Documentation
 
 | Document | Description |

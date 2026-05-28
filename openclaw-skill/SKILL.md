@@ -40,10 +40,12 @@ Authorization: Basic {base64(SCANNER_USER:SCANNER_PASS)}
   "auth_type": "none",
   "credentials_user_b": {"username": "", "password": ""},
   "credentials_admin": {"username": "", "password": ""},
-  "credentials_tenant_b": {"username": "", "password": ""}
+  "credentials_tenant_b": {"username": "", "password": ""},
+  "ai_instructions": "Focus on auth and IDOR; do not test /payments"
 }
 ```
 
+- `ai_instructions` (optional): Operator guidance for the LLM agent — focus areas, paths to skip, credential rules. Example: "Focus on authentication and IDOR; do not test the /payments endpoint."
 - `scan_mode`: Use "api" if user says API/endpoint, "website" if they say website/page, "both" if unclear
 - `model`: Default to Claude Haiku unless user specifies otherwise
 - Available models: `bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0`, `bedrock/mistral.ministral-3-8b-instruct`
