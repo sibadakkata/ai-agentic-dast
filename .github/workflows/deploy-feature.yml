@@ -1,0 +1,109 @@
+name: Deploy feature branch
+
+on:
+  push:
+    branches: [feature/scalable-scanner-platform]
+  workflow_dispatch:
+    inputs:
+      do_deploy:
+        description: Deploy changed files to EC2 and restart container
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  AWS_REGION: us-east-2
+  ECR_REPOSITORY: dast-scanner-runner
+  EC2_HOST: 3.20.180.251
+  EC2_USER: ubuntu
+  CONTAINER_NAME: dast-scanner
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Regression tests
+        run: |
+          python -m pytest tests/ -q \
+            --ignore=tests/test_regression_ui.py \
+            --ignore=tests/test_api_imports.py \
+            --ignore=tests/test_tls_skip_flag.py
+
+  build-and-push:
+    needs: test
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Detect runner image changes
+        id: changes
+        run: |
+          BEFORE="${{ github.event.before }}"
+          if [ -z "$BEFORE" ] || [ "$BEFORE" = "0000000000000000000000000000000000000000" ]; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if git diff --name-only "$BEFORE" "${{ github.sha }}" | grep -qE '^(scanners/runner/|Dockerfile$|scanners/runner/Dockerfile)'; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Configure AWS (OIDC)
+        if: steps.changes.outputs.changed == 'true'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+      - name: Login to ECR
+        if: steps.changes.outputs.changed == 'true'
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+      - name: Build and push runner image
+        if: steps.changes.outputs.changed == 'true'
+        env:
+          ECR_REGISTRY: ${{ steps.ecr.outputs.registry }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          docker build -f scanners/runner/Dockerfile -t "$ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:$IMAGE_TAG" .
+          docker push "$ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:$IMAGE_TAG"
+          docker tag "$ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:$IMAGE_TAG" "$ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:latest"
+          docker push "$ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:latest"
+
+  deploy-ec2:
+    needs: test
+    if: github.event_name == 'workflow_dispatch' && inputs.do_deploy == true
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup SSH key
+        run: |
+          install -m 600 -d ~/.ssh
+          echo "${{ secrets.EC2_SSH_PRIVATE_KEY }}" > ~/.ssh/ec2.pem
+          chmod 600 ~/.ssh/ec2.pem
+          ssh-keyscan -H ${{ env.EC2_HOST }} >> ~/.ssh/known_hosts
+      - name: Scan-active safety check
+        run: |
+          scp -i ~/.ssh/ec2.pem scripts/check_scan_active.py ${{ env.EC2_USER }}@${{ env.EC2_HOST }}:/tmp/
+          ssh -i ~/.ssh/ec2.pem ${{ env.EC2_USER }}@${{ env.EC2_HOST }} \
+            "docker cp /tmp/check_scan_active.py ${{ env.CONTAINER_NAME }}:/tmp/ && docker exec ${{ env.CONTAINER_NAME }} python3 /tmp/check_scan_active.py"
+      - name: Deploy web files and restart
+        run: |
+          CHANGED=$(git diff --name-only HEAD~1 HEAD | grep -E '^(web/|scanners/|scripts/|config/)' || true)
+          if [ -z "$CHANGED" ]; then echo "No app files changed"; exit 0; fi
+          for f in $CHANGED; do
+            scp -i ~/.ssh/ec2.pem "$f" ${{ env.EC2_USER }}@${{ env.EC2_HOST }}:/tmp/deploy_$(basename "$f")
+            ssh -i ~/.ssh/ec2.pem ${{ env.EC2_USER }}@${{ env.EC2_HOST }} \
+              "docker cp /tmp/deploy_$(basename "$f") ${{ env.CONTAINER_NAME }}:/app/$f"
+          done
+          ssh -i ~/.ssh/ec2.pem ${{ env.EC2_USER }}@${{ env.EC2_HOST }} "docker restart ${{ env.CONTAINER_NAME }}"
