@@ -44,7 +44,13 @@ class UserRepository:
 
     def get_user_by_id(self, user_id: str) -> Optional[User]:
         row = scandb.users_get_by_id(user_id)
-        return self._row_to_user(row) if row else None
+        if row:
+            return self._row_to_user(row)
+        if pgdb.dual_write_enabled():
+            pg_row = pgdb.users_get_by_id(user_id)
+            if pg_row:
+                return self._row_to_user(pg_row)
+        return None
 
     def get_user_by_email(self, email: str) -> Optional[User]:
         email_n = _normalize_email(email)
@@ -114,9 +120,16 @@ class UserRepository:
                 updates["name"] = name
             if role is not None:
                 updates["role"] = role
-            scandb.users_update(existing.id, updates)
+            sqlite_row = scandb.users_get_by_email(email_n)
+            sqlite_id = sqlite_row["id"] if sqlite_row else existing.id
+            scandb.users_update(sqlite_id, updates)
             _mirror_pg("users_update", existing.id, updates)
-            return self.get_user_by_id(existing.id)  # type: ignore[return-value]
+            user = self.get_user_by_id(existing.id)
+            if user is None and sqlite_id != existing.id:
+                user = self.get_user_by_id(sqlite_id)
+            if user is None:
+                user = existing
+            return user
         return self.create_user(email_n, name=name, role=role or UserRole.USER.value)
 
     def set_role(self, user_id: str, role: str) -> Optional[User]:

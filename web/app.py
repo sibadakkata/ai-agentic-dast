@@ -1016,6 +1016,8 @@ async def login_submit(request: Request):
         user = _USER_REPO.upsert_login(
             email, name=str(username), role=UserRole.ADMIN.value
         )
+        if user is None:
+            return RedirectResponse("/login?error=1", status_code=302)
         token = create_session_token(user.id)
         resp = RedirectResponse("/", status_code=302)
         resp.set_cookie(
