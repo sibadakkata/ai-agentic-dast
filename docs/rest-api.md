@@ -2,16 +2,18 @@
 
 [← Back to README](../README.md)
 
+> **Quick start:** For launch, polling, results, and troubleshooting, see **[api.md](api.md)** first. This page keeps extended endpoint coverage (pause, retry, reports, crawl-only).
+
 The scanner exposes a full REST API — the same one the Web UI uses. Any CI/CD pipeline, script, or external tool can invoke scans programmatically.
 
-- **Interactive docs**: `http://<host>:8080/docs` (Swagger UI) or `/redoc`
-- **Auth**: HTTP Basic Auth on all `/api/*` endpoints
+- **Interactive docs**: `http://<host>/docs` (Swagger UI) or `/redoc`
+- **Auth**: HTTP Basic Auth on all `/api/*` endpoints (**automation/API only** — operators use SSO; see [SSO_RBAC.md](SSO_RBAC.md))
 - **Health check**: `GET /health` (no auth — for load balancers)
 
 ## Setup
 
 ```bash
-export DAST_URL="http://YOUR-EC2-HOST:8080"
+export DAST_URL="http://YOUR-EC2-HOST"
 export DAST_USER="dast-admin"
 export DAST_PASS="YourPassword"
 ```
@@ -58,8 +60,25 @@ curl -s -u "$DAST_USER:$DAST_PASS" \
 | `exclude_urls` | No | `[]` | URLs/paths the scanner must skip entirely |
 | `extra_domains` | No | `[]` | Additional domains to include in scope |
 | `api_imports` | No | `{}` | Map of import type to filename |
+| `model_policy` | No | `manual` | `manual` or `auto` (per-phase Bedrock selection) |
+| `budget_cap_usd` | No | ~2× estimate | Pause scan when LLM spend reaches cap |
 
 **Response**: `{"scan_id": "scan_20260304_143022_a1b2c3", "status": "started"}`
+
+### Cost estimate and budget gate
+
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| POST | `/api/scans/estimate` | Basic / session | Rough `low_usd` / `expected_usd` / `high_usd` for launch form |
+| GET | `/api/scans/{id}/budget` | Read access | Cap, spend, status, `model_choices` |
+| POST | `/api/scans/{id}/budget/approve` | Owner or admin | Body `{ "new_cap_usd": float }` — resume scan |
+| POST | `/api/scans/{id}/budget/stop` | Owner or admin | Stop scan on budget gate |
+
+```bash
+curl -s -u "$DAST_USER:$DAST_PASS" -H "Content-Type: application/json" \
+  -X POST "$DAST_URL/api/scans/estimate" \
+  -d '{"target_url":"https://example.com","model_policy":"auto"}' | jq .
+```
 
 ### 3. Upload API Spec (Postman / OpenAPI)
 
@@ -200,7 +219,7 @@ curl -s "$DAST_URL/health" | jq .
 ```python
 import requests, time
 
-BASE = "http://YOUR-EC2-HOST:8080"
+BASE = "http://YOUR-EC2-HOST"
 AUTH = ("dast-admin", "YourPassword")
 
 # Start scan

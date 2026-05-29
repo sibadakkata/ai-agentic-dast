@@ -1,0 +1,77 @@
+# Interface endpoints for Fargate tasks pulling from ECR and writing logs (~$7/mo each).
+
+resource "aws_security_group" "vpce_ecs" {
+  count = var.enable_ecs_runner ? 1 : 0
+
+  name        = "dast-scanner-vpce-ecs"
+  description = "VPC endpoints for Fargate (ECR, Logs)"
+  vpc_id      = data.aws_vpc.default.id
+
+  ingress {
+    description     = "HTTPS from Fargate tasks"
+    from_port       = 443
+    to_port         = 443
+    protocol        = "tcp"
+    security_groups = [aws_security_group.ecs_runner[0].id]
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  tags = {
+    Name = "dast-scanner-vpce-ecs"
+  }
+
+  lifecycle {
+    create_before_destroy = true
+  }
+}
+
+resource "aws_vpc_endpoint" "ecr_api" {
+  count = var.enable_ecs_runner ? 1 : 0
+
+  vpc_id              = data.aws_vpc.default.id
+  service_name        = "com.amazonaws.${data.aws_region.current.name}.ecr.api"
+  vpc_endpoint_type   = "Interface"
+  subnet_ids          = data.aws_subnets.default.ids
+  security_group_ids  = [aws_security_group.vpce_ecs[0].id]
+  private_dns_enabled = true
+
+  tags = {
+    Name = "dast-scanner-ecr-api"
+  }
+}
+
+resource "aws_vpc_endpoint" "ecr_dkr" {
+  count = var.enable_ecs_runner ? 1 : 0
+
+  vpc_id              = data.aws_vpc.default.id
+  service_name        = "com.amazonaws.${data.aws_region.current.name}.ecr.dkr"
+  vpc_endpoint_type   = "Interface"
+  subnet_ids          = data.aws_subnets.default.ids
+  security_group_ids  = [aws_security_group.vpce_ecs[0].id]
+  private_dns_enabled = true
+
+  tags = {
+    Name = "dast-scanner-ecr-dkr"
+  }
+}
+
+resource "aws_vpc_endpoint" "logs" {
+  count = var.enable_ecs_runner ? 1 : 0
+
+  vpc_id              = data.aws_vpc.default.id
+  service_name        = "com.amazonaws.${data.aws_region.current.name}.logs"
+  vpc_endpoint_type   = "Interface"
+  subnet_ids          = data.aws_subnets.default.ids
+  security_group_ids  = [aws_security_group.vpce_ecs[0].id]
+  private_dns_enabled = true
+
+  tags = {
+    Name = "dast-scanner-logs"
+  }
+}

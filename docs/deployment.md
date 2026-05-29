@@ -2,6 +2,32 @@
 
 [← Back to README](../README.md)
 
+> **Day-to-day code deploys** (hot-patch `docker cp`, `tar` pipe, when to use `deploy.sh`, ECR runner push): see the README sections **[Install from scratch](../README.md#install-from-scratch)** and **[Day-to-day code deploys](../README.md#day-to-day-code-deploys)**. This file covers Bedrock, `.env`, SSO, verification scripts, and failure modes.
+
+## Smart deploy classification
+
+`scripts/deploy/classify_changes.py` maps a git diff to three flags. `deploy.sh` on EC2 (when `.last_deployed_sha` exists) delegates to `scripts/deploy/deploy.sh`, which runs only the needed steps and updates the marker.
+
+| Changed paths | UI hot-patch (`docker cp` + restart) | UI image rebuild (`deploy.sh --full`) | Runner image rebuild (ECR) |
+|---------------|--------------------------------------|---------------------------------------|----------------------------|
+| `web/**/*.py`, templates, `web/static/**` | Yes (default) | Only if deps/image definition changed | Yes — runner `COPY web/` |
+| `scanners/**/*.py` (not only runner entry) | Yes (into UI container) | — | Yes — runner `COPY scanners/` |
+| `scanners/runner/**` | — | — | Yes |
+| `scripts/**`, `config/**` | Yes (UI) | — | Yes (runner copies both) |
+| `requirements*.txt`, `pyproject.toml`, `Pipfile*` | — | Yes | Yes |
+| Root `Dockerfile`, `docker-compose*.yml` | — | Yes | — |
+| `scanners/runner/Dockerfile` | — | — | Yes |
+| `docs/**`, `README.md`, `.cursor/**`, `tests/**`, `infra/**` | — | — | — |
+
+Dry-run on your laptop:
+
+```bash
+python scripts/deploy/classify_changes.py HEAD~5..HEAD
+python scripts/deploy/classify_changes.py cbf8c61..HEAD --json
+```
+
+Runner ECR push is still manual / `scripts/ec2_build_push_runner.py` — incremental `deploy.sh` prints instructions when `needs_runner_rebuild` is true.
+
 ## EC2 Deployment (Recommended)
 
 ### Prerequisites
@@ -11,56 +37,113 @@
 | **Instance** | t3.xlarge or larger (4 vCPU, 16 GB RAM) |
 | **OS** | Ubuntu 24.04 LTS (x86_64) — required for Playwright Chromium |
 | **Disk** | 100 GB |
-| **Security Group** | Inbound TCP port 8080 |
+| **Security Group** | Inbound TCP port 80 |
 | **IAM Role** | Bedrock invoke permissions (see below) |
+
+The Docker image installs **`xmlsec1`**, **`libxmlsec1-dev`**, **`pkg-config`**, **`libssl-dev`**, and **`libffi-dev`** (required by `python3-saml` for SSO). On a **bare-metal** host without Docker, install the same packages before `pip install`:
+
+```bash
+sudo apt-get install -y xmlsec1 libxmlsec1-dev pkg-config libssl-dev libffi-dev
+```
 
 ### Quick Deploy
 
+**First-time / greenfield:** follow README [Install from scratch](../README.md#install-from-scratch) (Terraform → clone → `deploy.sh` → ECR runner → verify).
+
+**Existing host — full image rebuild only:**
+
 ```bash
-# 1. Upload to EC2
-scp -i key.pem -r ./POC ubuntu@<EC2-IP>:~/ai-dast-scanner
-
-# 2. Configure
-ssh -i key.pem ubuntu@<EC2-IP>
 cd ~/ai-dast-scanner
-cp .env.example .env
-nano .env   # Add your credentials
-
-# 3. Deploy
+docker exec dast-scanner python3 /tmp/check_scan_active.py   # MANDATORY — must exit 0
 bash deploy.sh
-# → Builds Docker image, starts container
-# → Web UI at http://<EC2-IP>:8080
 ```
+
+**Existing host — typical code change:** `git pull` then `bash deploy.sh` (incremental; hot-patch by default). Manual pattern **A**/**B** in the README still works. Use `bash deploy.sh --full` only for dependency/Dockerfile changes.
 
 ### Verify deployment (smoke + optional full scan)
 
 From your laptop (same network as allowed to reach the instance):
 
 ```bash
-# Read-only HTTP checks
-export DAST_BASE_URL=http://YOUR_HOST:8080
+# Operator/automation curls — HTTP Basic Auth (not end-user SSO login)
+export DAST_BASE_URL=http://YOUR_HOST
 export DAST_AUTH_USER=dast-admin
-export DAST_AUTH_PASS=YourStrongPassword   # if ui-settings is protected
+export DAST_AUTH_PASS=YourStrongPassword
 python scripts/run_regression_ec2.py --pytest
 
 # Start a short scan against a public test app (OWASP Juice Shop demo by default)
-export DAST_BASE_URL=http://YOUR_HOST:8080
+export DAST_BASE_URL=http://YOUR_HOST
 python scripts/e2e_remote_scan.py --smoke    # health + POST /api/scan + running status
 python scripts/e2e_remote_scan.py            # wait until completed / error (needs LLM keys on server)
 ```
 
 Override target: `E2E_TARGET_URL=https://...` or `--target-url`. Use only sites you are authorized to test.
 
+### Pre-deploy scan check (MANDATORY)
+
+**MANDATORY** before **any** code change reaches the running UI container (`docker cp`, `docker restart`, or `bash deploy.sh`). Do not treat this as optional.
+
+```bash
+docker exec dast-scanner python3 /tmp/check_scan_active.py
+```
+
+The script is normally already on the host at `scripts/check_scan_active.py` and copied into the container at `/tmp/check_scan_active.py` during prior deploys. Refresh from your workstation if missing (see README [Day-to-day code deploys](../README.md#day-to-day-code-deploys)).
+
+- Exit **0** → safe to proceed.
+- Exit **1** → **STOP** — a scan is active or paused; wait or stop the scan first.
+
+The script calls `GET /api/scans` with **operator automation** HTTP Basic Auth when **both** `DAST_AUTH_USER` and `DAST_AUTH_PASS` are set in the container environment (this is **not** the Red Team operator sign-in path — end users use SSO). If you run it from the host shell without those vars exported, it falls back to unauthenticated requests and prints a **WARNING** (only acceptable on pre-RBAC images). Inside the container they are usually already set from `.env`.
+
+**Why:** Scan state (LLM conversation, browser session, findings buffer) lives in process memory. A restart kills in-flight work; pause-deploy-resume does **not** work.
+
+### Authentication
+
+**Platform access (human operators):** **SAML 2.0** via Microsoft Entra ID — see **[docs/SSO_RBAC.md](SSO_RBAC.md)**. This is the canonical production path.
+
+**Automation / API / deploy scripts:** HTTP Basic Auth via `DAST_AUTH_USER` / `DAST_AUTH_PASS` (examples below, `check_scan_active.py`, regression scripts). Do **not** distribute these credentials to Red Team operators as their primary login.
+
+While `SSO_ENABLED=false` during rollout, `/login` may show an interim username/password form — treat it as temporary until SSO and HTTPS are live.
+
+**First-boot bootstrap (SSO on):** set `INITIAL_ADMIN_EMAILS` to a comma-separated list of admin emails in the deploy environment (not in git). On the **first** successful SAML login for a listed address, that user is created with role `admin`. Once **any** admin user exists in the database, `INITIAL_ADMIN_EMAILS` is ignored.
+
+Full Entra app registration, SAML certificate layout, invites, group RBAC, and troubleshooting: **[docs/SSO_RBAC.md](SSO_RBAC.md)** — do not duplicate that walkthrough here.
+
+### Bedrock model list (auto-refresh)
+
+The UI model picker is populated from `data/models_cache.json`, refreshed automatically on container startup and every **24 hours** (override with `MODEL_REFRESH_HOURS` or legacy `MODEL_DISCOVERY_INTERVAL_H`). Discovery calls Bedrock `list_foundation_models` and `list_inference_profiles` in `BEDROCK_REGION` / `AWS_DEFAULT_REGION` (default **us-east-2**), canary-tests each candidate, and writes the cache. **Anthropic Opus/Sonnet models require inference profile IDs** (`us.anthropic.*`); bare foundation IDs are skipped when a profile exists.
+
+Admins can trigger a manual refresh: `POST /api/models/refresh` (session or Basic Auth). Status: `GET /api/models/status`.
+
 ### Environment Variables
 
 ```bash
-# .env
+# .env — LLM / AWS
 AWS_ACCESS_KEY_ID=AKIA...         # For Bedrock models
 AWS_SECRET_ACCESS_KEY=...
 AWS_DEFAULT_REGION=us-east-1
-DAST_AUTH_USER=dast-admin          # Web UI login
-DAST_AUTH_PASS=YourStrongPassword
 ANTHROPIC_API_KEY=sk-ant-...       # Optional (if using Anthropic directly)
+
+# Automation / API Basic Auth (scripts, MCP, check_scan_active.py — NOT end-user SSO login)
+DAST_AUTH_USER=dast-admin
+DAST_AUTH_PASS=YourStrongPassword
+
+# SSO / RBAC — canonical operator access (see docs/SSO_RBAC.md)
+SSO_ENABLED=false                  # true = SAML (production); false = interim local /login form
+INITIAL_ADMIN_EMAILS=              # First SSO bootstrap only; comma-separated admin emails
+SAML_IDP_METADATA_URL=
+SAML_SP_ENTITY_ID=
+SAML_SP_ACS_URL=
+SAML_SP_CERT_PATH=                 # Optional PEM paths under config/saml/
+SAML_SP_KEY_PATH=
+SSO_ADMIN_GROUP_IDS=               # Comma-separated Entra group object IDs → admin role
+SSO_USER_GROUP_IDS=                # Comma-separated Entra group object IDs → user role
+SSO_GROUP_CLAIM_NAME=              # Optional SAML groups claim name override
+MODEL_REFRESH_HOURS=24             # Re-discover Bedrock models (also MODEL_DISCOVERY_INTERVAL_H)
+BEDROCK_REGION=us-east-2           # Region for list_foundation_models / inference profiles (required if AWS_DEFAULT_REGION is not us-east-2)
+
+EC2 instance role also needs `bedrock:ListFoundationModels` and `bedrock:ListInferenceProfiles` (plus `bedrock:InvokeModel` / Converse) for automatic model refresh. Without List*, the UI still shows curated fallback models including Opus 4.7.
+DAST_SESSION_SECRET=               # Session cookie HMAC (set in production)
+PUBLIC_BASE_URL=                   # Base URL for invite links (e.g. https://scanner.example.com)
 ```
 
 ### Docker Compose
@@ -69,13 +152,45 @@ The `deploy.sh` script runs `docker compose build && docker compose up -d`. To c
 
 The `--restart unless-stopped` flag ensures auto-restart on crash or EC2 reboot.
 
+## Common deploy failures
+
+### `IMAGE_NAME` empty / `docker build -t` with no tag
+
+**Symptom:** `deploy.sh` fails building with an empty `-t` argument, or logs show `docker build -t  .`.
+
+**Cause:** `deploy.sh` was started from a **non-interactive** shell (`nohup`, cron, or a truncated SSH one-liner) where `IMAGE_NAME="ai-dast-scanner"` was not set the same way as in an interactive bash session, or the script was invoked without a proper login shell.
+
+**Fix:** SSH in interactively, `cd ~/ai-dast-scanner`, run `bash deploy.sh` in a normal terminal. Do not background the first deploy on a fresh host.
+
+### ECR push from EC2: `ConnectTimeoutError` to `api.ecr.us-east-2.amazonaws.com`
+
+**Symptom:** `aws ecr get-login-password` works but `docker push` times out reaching ECR.
+
+**Cause (usually one or both):**
+
+1. EC2 is in a private subnet **without** VPC interface endpoints for **ECR API** and **ECR DKR** (Terraform: `vpc_endpoints_ecs.tf`) and without a NAT path to the internet.
+2. EC2 instance role lacks ECR permissions: `ecr:GetAuthorizationToken` plus `ecr:BatchCheckLayerAvailability`, `ecr:CompleteLayerUpload`, `ecr:InitiateLayerUpload`, `ecr:PutImage`, `ecr:UploadLayerPart` on `arn:aws:ecr:us-east-2:168551359048:repository/dast-scanner-runner`.
+
+**Fix:** Apply Terraform endpoints (or allow HTTPS egress to ECR), attach ECR push policy to the instance role, then retry `docker login` + `docker push`. See README [Step 4](../README.md#step-4-push-fargate-runner-image-to-ecr).
+
+### Hot-patch lost after `bash deploy.sh`
+
+**Symptom:** A fix deployed via `docker cp` worked until someone ran `bash deploy.sh`, then the bug returned.
+
+**Cause:** `deploy.sh` rebuilds the image from the **git tree on the host**, not from uncommitted files you only copied into the running container.
+
+**Fix:** Commit and `git pull` on EC2 (or `scp` the full tree to `~/ai-dast-scanner`) before `deploy.sh`. For quick tests, use hot-patch only for changes that are already committed or will be synced to the host immediately after.
+
 ## Local Development (No Docker)
 
+Install SAML system libraries first (same as the Dockerfile):
+
 ```bash
+sudo apt-get install -y xmlsec1 libxmlsec1-dev pkg-config libssl-dev libffi-dev
 pip install -r requirements.txt
 playwright install chromium
-cp .env.example .env && nano .env
-uvicorn web.app:app --host 0.0.0.0 --port 8080
+cp .env.example .env && nano .env   # SSO_ENABLED=false for local dev; DAST_AUTH_* for API/scripts
+uvicorn web.app:app --host 0.0.0.0 --port 80
 ```
 
 ## CLI Usage

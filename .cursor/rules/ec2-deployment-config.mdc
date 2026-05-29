@@ -1,0 +1,42 @@
+---
+description: EC2 deployment configuration for the DAST scanner - host, user, SSH key, container name
+alwaysApply: true
+---
+
+# EC2 Deployment Configuration
+
+Use these values for all remote operations (`scp`, `ssh`, `docker cp`, `docker restart`) against the DAST scanner EC2 instance. **Do not ask the user for these again.**
+
+## Connection
+
+- **Host**: `3.20.180.251`
+- **User**: `ubuntu`
+- **SSH key**: `C:\Projects\Pen-Test\Acunetix\siba-dast-agentic-poc.pem`
+- **Docker container name**: `dast-scanner`
+- **Remote app root**: `~/ai-dast-scanner` (mounted into container at `/app`)
+
+## Canonical command templates (PowerShell)
+
+Upload a file:
+
+```powershell
+scp -i "C:\Projects\Pen-Test\Acunetix\siba-dast-agentic-poc.pem" <local_path> ubuntu@3.20.180.251:/tmp/
+```
+
+Copy into container and restart:
+
+```powershell
+ssh -i "C:\Projects\Pen-Test\Acunetix\siba-dast-agentic-poc.pem" ubuntu@3.20.180.251 "docker cp /tmp/<file> dast-scanner:/app/<path> && docker restart dast-scanner"
+```
+
+Run the scan-active safety check (required before every deploy per `deployment-protocol.mdc`). The script uses **automation** HTTP Basic Auth (`DAST_AUTH_*` in-container) — end-user platform access is **SSO**, not Basic Auth:
+
+```powershell
+scp -i "C:\Projects\Pen-Test\Acunetix\siba-dast-agentic-poc.pem" scripts\check_scan_active.py ubuntu@3.20.180.251:/tmp/
+ssh -i "C:\Projects\Pen-Test\Acunetix\siba-dast-agentic-poc.pem" ubuntu@3.20.180.251 "docker cp /tmp/check_scan_active.py dast-scanner:/tmp/ && docker exec dast-scanner python3 /tmp/check_scan_active.py"
+```
+
+## Rules
+- Always quote the `.pem` path (it contains spaces in the parent chain).
+- Never commit the `.pem` file to git.
+- The SSH key lives **outside** the repo (`C:\Projects\Pen-Test\Acunetix\`), not inside `POC\`.

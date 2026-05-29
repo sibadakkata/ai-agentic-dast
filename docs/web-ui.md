@@ -9,6 +9,9 @@ The scanner includes a single-page web UI for managing scans, viewing results, a
 | Feature | Description |
 |---------|-------------|
 | **New Scan** | Enter target URL, optional credentials, pick model and scan mode |
+| **Model selection mode** | **Manual model** (default) — existing model dropdown unchanged. **Auto (scanner picks best model)** — disables the dropdown and uses tiered Bedrock models per phase (Haiku → Sonnet → Opus). Yellow info banner warns that cost may be 3–10× higher than Haiku-only |
+| **Budget cap** | Optional USD cap on LLM spend for the scan; live estimate from `POST /api/scans/estimate` shown under the field. Blank cap defaults to ~2× the expected estimate at launch |
+| **Budget approval** | When spend hits the cap, the scan **pauses** (same mechanism as manual Pause). Owner (or admin) sees a yellow banner in the live scan view to raise the cap and resume, or stop the scan |
 | **AI Scan Planner** | Type natural-language instruction → LLM generates structured scan plan → review and confirm |
 | **Scan Profile** | `Vulnerability Scan` (default, full OWASP testing) or `Crawl Only` (discovery + passive checks, no attack payloads). A `CRAWL` badge appears next to crawl-only scans in the scan list and a "Profile: Crawl Only" stat in the scan detail header |
 | **Vulnerability Focus** | Select specific vuln types (XSS, SQLi, CMDI, etc.) or "Full Scan" for all. Disabled in `Crawl Only` mode |
@@ -33,8 +36,14 @@ The scanner includes a single-page web UI for managing scans, viewing results, a
 | **Retry Failed** | One-click re-run for errored/cancelled scans (same ID) |
 | **Scan Mode Badge** | Each scan shows its mode (`api`, `website`, `both`) |
 | **Error Details** | View error messages, scan mode, and progress log for failed scans |
-| **Basic Auth** | Password-protected (configurable via env vars) |
+| **Platform access** | **SSO** (Entra SAML) for operators; HTTP Basic Auth for automation/API only |
 | **Cost Tracking** | Real-time and cumulative LLM cost display per scan and across all scans |
+
+### Model selection and budget (screenshot placeholder)
+
+> _Screenshot: New Scan form showing Selection mode radio, budget cap field, and cost estimate helper text._
+
+When **Auto** is selected, expand **Models used by phase** in the live scan header after phases start to see which model ran for each phase id.
 
 ## Scan Configuration
 
@@ -89,11 +98,6 @@ Available in both Manual and AI modes:
 
 ## Authentication
 
-The Web UI is protected with HTTP Basic Auth:
+**Red Team operators** sign in via **Microsoft Entra ID (SAML 2.0)** — **Sign in with Microsoft** on `/login`. See [SSO & RBAC](SSO_RBAC.md).
 
-```bash
-DAST_AUTH_USER=dast-admin
-DAST_AUTH_PASS=YourStrongPassword
-```
-
-Set these in your `.env` file before deploying.
+**HTTP Basic Auth** (`DAST_AUTH_USER` / `DAST_AUTH_PASS` in `.env`) is for **API clients, CI, MCP, and deploy scripts** — not for distributing credentials to end users. While `SSO_ENABLED=false` during rollout, an interim username/password form may appear; that is temporary until SSO is live.

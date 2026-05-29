@@ -1,0 +1,11 @@
+# PostgreSQL Migrations
+
+[← Back to README](../README.md) · [db/README.md](../db/README.md)
+
+DDL for **RDS PostgreSQL** when `DUAL_WRITE_PG` / `READ_FROM_PG` are enabled.
+
+| File | Description |
+|------|-------------|
+| `0001_init.sql` | Initial schema (`users`, `scans`, `scan_results`, `live_events`, …) |
+
+Apply to RDS before enabling dual-write in production. SQLite on the UI host uses `db/schema.sql` via `web/db.py`.

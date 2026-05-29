@@ -11,8 +11,9 @@ Complete reference of every security check the scanner performs. Organized by sc
 | Passive Reconnaissance | 26 checks | $0 (deterministic) | Zero/Very Low |
 | Active Web Phases | 25 phases | LLM-driven | Low (context-aware) |
 | Active API Phases | 15 phases | LLM-driven | Low (context-aware) |
+| LLM Application Security | 1 phase (37 baseline + 41 Garak + LLM-Agent) | Mixed ($0 baseline + LLM-Agent) | Low (preflight validated) |
 | Attack Chain Analysis | 1 phase (12 chain patterns) | LLM-driven | Low (must prove with evidence) |
-| **Total** | **67 check categories** | | |
+| **Total** | **69 check categories** | | |
 
 > Passive checks run on the seed host **and** every passively-discovered in-scope HTTPS sub-domain (from page DOM, `robots.txt`, `sitemap.xml`, and live browser network traffic). After every active phase, any newly observed sub-domain gets a passive re-audit for TLS and security headers (Stage A host-delta, capped at 10 new hosts per phase). See [Web Scanning](web-scanning.md#sibling-sub-domain-coverage) for the full flow.
 

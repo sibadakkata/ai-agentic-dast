@@ -1,0 +1,12 @@
+# FastAPI UI and API
+
+[<- Back to README](../README.md)
+
+FastAPI app (`app.py`) serves the single-page UI and the REST API used by the Web UI, CI/CD, MCP (`mcp_server.py`), and OpenClaw skill.
+
+**Production:** `https://rt.ai.webscanner.gendigital.com`  
+**Main endpoints:** `POST /api/v1/scans`, `POST /api/scan`, `GET /api/scan/{id}`, `GET /api/results/{id}`, `GET /api/scans`, `POST /api/upload` — full reference in [docs/api.md](../docs/api.md).
+
+**Key modules:** `app.py`, `scan_models.py`, `db.py`, `db_pg.py`, `scan_launcher.py`, `static/index.html`.
+
+**Deploy:** never restart the container during an active scan; run `scripts/check_scan_active.py` first.

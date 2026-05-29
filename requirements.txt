@@ -19,3 +19,6 @@ openpyxl>=3.1.0
 tldextract>=5.1.0
 sslyze>=6.0.0
 dnspython>=2.6.0
+python3-saml>=1.16.0
+psycopg[binary,pool]>=3.1
+redis>=5.0.0

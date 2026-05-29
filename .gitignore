@@ -1,8 +1,12 @@
 # Credentials & keys
 config/targets.env
+config/saml/
 *.env
 !*.env.example
 *.pem
+*.crt
+*.key
+!tests/fixtures/**
 
 # Results (generated at runtime)
 results/*.db
@@ -16,6 +20,12 @@ results/errors.log
 
 # Archive (POC-specific data)
 archive/
+
+# Deploy marker (EC2 host only; written by deploy.sh)
+.last_deployed_sha
+
+# Local encoding-gate tests
+.tmp-tests/
 
 # Build artifacts
 *.zip
@@ -89,3 +99,14 @@ PoC Report/__pycache__/
 PoC Report/slide_previews/
 PoC Report/backup/
 PoC Report/~$*.xlsx
+
+# Terraform local state / scratch (never commit)
+infra/terraform/.terraform/
+infra/terraform/*.tfstate
+infra/terraform/*.tfstate.*
+infra/terraform/tfplan*
+infra/terraform/plan_*
+infra/terraform/*.log
+infra/terraform/*.bak
+infra/terraform/terraform.tfvars
+infra/terraform/*.tmp

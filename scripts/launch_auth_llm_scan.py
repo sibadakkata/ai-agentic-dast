@@ -1,0 +1,20 @@
+import urllib.request, json, sys
+
+body = json.dumps({
+    "target_url": "https://ai.norton.com",
+    "username": "siba.dakkata@gendigital.com",
+    "password": "Avyan@500",
+    "auth_type": "auto",
+    "ai_instructions": "Focus on LLM security testing. Test the Superparent chatbot thoroughly.",
+    "focus_areas": ["LLM"],
+    "llm_scan_depth": "standard",
+}).encode()
+
+req = urllib.request.Request(
+    "http://localhost:8080/api/scan",
+    data=body,
+    headers={"Content-Type": "application/json"},
+    method="POST",
+)
+resp = urllib.request.urlopen(req)
+print(resp.read().decode())

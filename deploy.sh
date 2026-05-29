@@ -1,12 +1,16 @@
 #!/usr/bin/env bash
 #
-# deploy.sh — Deploy AI DAST Scanner to a fresh EC2
+# deploy.sh — Deploy AI DAST Scanner (incremental by default, --full for greenfield)
+#
+# On an existing host with .last_deployed_sha, runs scripts/deploy/deploy.sh
+# (hot-patch by default; UI/runner rebuild only when classify_changes says so).
+# Use --full for first-time / dependency / Dockerfile rebuild (original behavior).
 #
 # Prerequisites on the EC2 instance:
 #   - Ubuntu 22.04+ (or Amazon Linux 2023)
 #   - Docker installed (Docker Compose optional but recommended)
 #   - At least 4 GB RAM, 50 GB disk
-#   - Port 8080 (web UI) open in Security Group
+#   - Port 80 (web UI) open in Security Group
 #
 # Usage:
 #   1. Copy this entire project folder to the EC2 instance:
@@ -21,6 +25,10 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
+
+if [ "${1:-}" != "--full" ] && [ -f "$SCRIPT_DIR/.last_deployed_sha" ] && [ -f "$SCRIPT_DIR/scripts/deploy/deploy.sh" ]; then
+    exec bash "$SCRIPT_DIR/scripts/deploy/deploy.sh"
+fi
 
 IMAGE_NAME="ai-dast-scanner"
 CONTAINER_NAME="dast-scanner"
@@ -45,6 +53,14 @@ if docker ps --format '{{.Names}}' 2>/dev/null | grep -q "$CONTAINER_NAME"; then
         exit 1
     fi
 fi
+
+echo "[1/N] Encoding check (UTF-16 / null bytes)..."
+PY=python3
+command -v python3 >/dev/null 2>&1 || PY=python
+"$PY" "$SCRIPT_DIR/scripts/checks/check_no_null_bytes.py" --all || {
+    echo "ERROR: encoding check failed. Refusing to deploy."
+    exit 1
+}
 
 # Load .env
 set -a; source .env; set +a
@@ -81,6 +97,7 @@ else
         --name "$CONTAINER_NAME" \
         --network host \
         --restart unless-stopped \
+        --env-file .env \
         -e "ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}" \
         -e "OPENAI_API_KEY=${OPENAI_API_KEY:-}" \
         -e "AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID:-}" \
@@ -88,6 +105,8 @@ else
         -e "AWS_DEFAULT_REGION=${AWS_DEFAULT_REGION:-us-east-1}" \
         -e "DAST_AUTH_USER=${DAST_AUTH_USER:-dast-admin}" \
         -e "DAST_AUTH_PASS=${DAST_AUTH_PASS:-changeme}" \
+        -e "DUAL_WRITE_PG=${DUAL_WRITE_PG:-0}" \
+        -e "DATABASE_URL=${DATABASE_URL:-}" \
         -v "$(pwd)/dast-data/results:/app/results" \
         -v "$(pwd)/dast-data/imports:/app/imports" \
         "$IMAGE_NAME"
@@ -96,7 +115,7 @@ fi
 # ─── Wait for services ──────────────────────────────────────────────
 echo "==> Waiting for dast-scanner to become healthy..."
 for i in $(seq 1 30); do
-    if curl -sf http://localhost:8080/health >/dev/null 2>&1; then
+    if curl -sf http://localhost:80/health >/dev/null 2>&1; then
         echo "    dast-scanner is up."
         break
     fi
@@ -104,12 +123,18 @@ for i in $(seq 1 30); do
     sleep 1
 done
 
+# ─── Record deploy SHA (incremental deploy baseline) ────────────────
+if command -v git >/dev/null 2>&1 && git rev-parse HEAD >/dev/null 2>&1; then
+    git rev-parse HEAD > "$SCRIPT_DIR/.last_deployed_sha"
+    echo "==> Recorded $(cat "$SCRIPT_DIR/.last_deployed_sha") in .last_deployed_sha"
+fi
+
 # ─── Summary ────────────────────────────────────────────────────────
 echo ""
 echo "========================================================"
 echo "  AI DAST Scanner deployed successfully!"
 echo ""
-echo "  Web UI:    http://$(curl -sf ifconfig.me 2>/dev/null || echo '<this-ip>'):8080"
+echo "  Web UI:    http://$(curl -sf ifconfig.me 2>/dev/null || echo '<this-ip>'):80"
 echo ""
 echo "  Credentials: see .env (DAST_AUTH_USER / DAST_AUTH_PASS)"
 echo ""

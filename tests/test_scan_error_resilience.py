@@ -178,9 +178,11 @@ def test_crawl_only_profile_skips_body_fuzz_block():
 
 
 def test_crawl_only_documented_in_app_validation():
-    """The /api/scan validator must accept 'crawl_only' as a profile."""
+    """The scan launch validator must accept 'crawl_only' as a profile."""
     from web import app as web_app
-    src = inspect.getsource(web_app)
+    from web import scan_models as sm
+
+    src = inspect.getsource(web_app) + inspect.getsource(sm)
     assert '"crawl_only"' in src or "'crawl_only'" in src
     assert '"vulnerability_scan"' in src or "'vulnerability_scan'" in src
 

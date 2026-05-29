@@ -600,6 +600,50 @@ async def _guarded(idx: int, phase: ScanPhase):
 
 ---
 
+## Intelligent model selection (`ModelSelector`)
+
+`scanners/ai_agent/auto_router.py` implements tiered Bedrock selection when `model_policy` is `auto`:
+
+| Tier | Typical model | Phase examples |
+|------|---------------|----------------|
+| **CHEAP** | Haiku | `web_recon`, `api_recon`, `crawl_only`, passive/crawl/dns-style ids |
+| **BALANCED** | Sonnet | Standard OWASP vuln phases (XSS, SQLi, SSRF, API injection, …) |
+| **PREMIUM** | Opus (or strongest Sonnet) | `web_a01`, BFLA/session/authz, business logic, chain phases, smart-retry pass |
+
+`run_phases_parallel` and the sequential phase loop call `ModelSelector.select(phase_id)` before each phase. Choices are stored on the scan as `model_choices` and in each `phase_log` entry’s `model` field.
+
+Manual policy (`model_policy: "manual"`) preserves the previous single-model behavior.
+
+## Budget guard and cost tracking
+
+`scanners/ai_agent/budget.py` provides:
+
+- **`estimate_scan_cost()`** — rough low / expected / high USD at launch (not a billing quote).
+- **`BudgetGuard`** — `LLMRouter` invokes `on_cost(delta_usd)` after each completion; when `budget_total_usd >= budget_cap_usd`, sets `budget_status` to `awaiting_approval`, sets `pause_flag`, and appends a progress message. Only the scan **owner** (SSO user who started the scan) or an **admin** may approve via `POST /api/scans/{id}/budget/approve` or stop via `POST /api/scans/{id}/budget/stop`.
+
+```mermaid
+sequenceDiagram
+    participant UI
+    participant API as web/app.py
+    participant Agent as agent.run_scan
+    participant Router as LLMRouter
+    participant Guard as BudgetGuard
+
+    UI->>API: POST /api/scan (model_policy, budget_cap)
+    API->>Agent: start thread + BudgetGuard + ModelSelector
+    loop Each phase
+        Agent->>Agent: ModelSelector.select(phase)
+        Agent->>Router: complete(model)
+        Router->>Guard: on_cost(delta)
+        alt cap exceeded
+            Guard->>Guard: pause_flag.set()
+            Guard-->>UI: budget_status awaiting_approval
+            UI->>API: POST budget/approve
+            API->>Guard: raise cap, pause_flag.clear()
+        end
+    end
+```
+
 ## LLM Router Retry Contract (`LLMRouter.complete`)
 
 Originally the router only retried `RateLimitError`. Any other transient signature — `ConnectError`, 502/503/504, `ReadTimeout`, throttling — was terminal on first occurrence. In practice this shows up as 1–6 silently-failed phases per scan whenever Bedrock has a ~30 s blip.
@@ -725,7 +769,8 @@ All three readers now guard with `isinstance(t, dict)` (and analogous checks on 
 | `scanners/ai_agent/js_registry.py` | Global JS URL registry | `JSUrlRegistry` — collects every JS URL the scanner encounters across auth, SPA, and the network listener; in-scope filtering happens here. Used by passive recon's CVE audit so library detection isn't scoped to the seed page only |
 | `scanners/ai_agent/llm_detect.py` | LLM app detection | DOM/network heuristics to identify chatbot/AI features (confidence scoring) |
 | `scanners/ai_agent/llm_baseline.py` | LLM security probes | 37 deterministic probes: prompt injection, info disclosure, output handling, excessive agency, prompt leakage, DoS ($0 LLM cost) |
-| `scanners/ai_agent/garak_runner.py` | Garak orchestration | Optional NVIDIA Garak integration: config generation, subprocess execution, JSONL result parsing |
+| `scanners/ai_agent/garak_runner.py` | Garak orchestration | NVIDIA Garak integration: config generation, subprocess execution, JSONL result parsing, browser bridge coordination |
+| `scanners/ai_agent/browser_llm_bridge.py` | LLM chatbot bridge | Playwright browser interaction for authenticated chatbot testing, stability-based DOM response capture, HTTP bridge server for Garak, preflight validation, loading indicator filtering |
 | `scanners/ai_agent/api_import.py` | API parsers | Postman, OpenAPI, Burp → `EndpointRegistry` |
 | `scanners/ai_agent/baseline_executor.py` | API baseline | Happy-path execution, variable chaining |
 | `scanners/ai_agent/body_fuzzer.py` | Body fuzzing | LLM-planned, engine-executed fuzzing |

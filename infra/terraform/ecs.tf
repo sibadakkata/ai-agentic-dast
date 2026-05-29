@@ -1,0 +1,234 @@
+resource "aws_cloudwatch_log_group" "ecs_runner" {
+  count = var.enable_ecs_runner ? 1 : 0
+
+  name              = "/ecs/dast-scanner-runner"
+  retention_in_days = 14
+}
+
+resource "aws_ecs_cluster" "scanner" {
+  count = var.enable_ecs_runner ? 1 : 0
+
+  name = "dast-scanner"
+
+  setting {
+    name  = "containerInsights"
+    value = "enabled"
+  }
+}
+
+resource "aws_ecs_cluster_capacity_providers" "scanner" {
+  count = var.enable_ecs_runner ? 1 : 0
+
+  cluster_name = aws_ecs_cluster.scanner[0].name
+
+  capacity_providers = ["FARGATE", "FARGATE_SPOT"]
+
+  default_capacity_provider_strategy {
+    capacity_provider = "FARGATE"
+    weight            = 1
+    base              = 1
+  }
+}
+
+resource "aws_security_group" "ecs_runner" {
+  count = var.enable_ecs_runner ? 1 : 0
+
+  name        = "dast-scanner-ecs-runner"
+  description = "Fargate scanner tasks - RDS, Redis, internet egress"
+  vpc_id      = data.aws_vpc.default.id
+
+  egress {
+    description = "HTTPS to AWS APIs and targets"
+    from_port   = 443
+    to_port     = 443
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  egress {
+    description = "HTTP for scanning"
+    from_port   = 80
+    to_port     = 80
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  egress {
+    description     = "PostgreSQL to RDS"
+    from_port       = 5432
+    to_port         = 5432
+    protocol        = "tcp"
+    security_groups = [aws_security_group.rds.id]
+  }
+
+  dynamic "egress" {
+    for_each = var.enable_redis ? [1] : []
+    content {
+      description     = "Redis"
+      from_port       = 6379
+      to_port         = 6379
+      protocol        = "tcp"
+      security_groups = [aws_security_group.redis[0].id]
+    }
+  }
+
+  egress {
+    description = "DNS"
+    from_port   = 53
+    to_port     = 53
+    protocol    = "udp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  tags = {
+    Name = "dast-scanner-ecs-runner"
+  }
+
+  lifecycle {
+    create_before_destroy = true
+  }
+}
+
+resource "aws_security_group_rule" "rds_ingress_from_ecs" {
+  count = var.enable_ecs_runner ? 1 : 0
+
+  type                     = "ingress"
+  from_port                = 5432
+  to_port                  = 5432
+  protocol                 = "tcp"
+  security_group_id        = aws_security_group.rds.id
+  source_security_group_id = aws_security_group.ecs_runner[0].id
+  description              = "PostgreSQL from Fargate scanner"
+}
+
+resource "aws_iam_role" "ecs_execution" {
+  count = var.enable_ecs_runner ? 1 : 0
+
+  name = "dast-scanner-ecs-execution"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect    = "Allow"
+      Principal = { Service = "ecs-tasks.amazonaws.com" }
+      Action    = "sts:AssumeRole"
+    }]
+  })
+}
+
+resource "aws_iam_role_policy_attachment" "ecs_execution" {
+  count = var.enable_ecs_runner ? 1 : 0
+
+  role       = aws_iam_role.ecs_execution[0].name
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
+}
+
+resource "aws_iam_role_policy" "ecs_execution_secrets" {
+  count = var.enable_ecs_runner ? 1 : 0
+
+  name = "secrets-read"
+  role = aws_iam_role.ecs_execution[0].id
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect   = "Allow"
+      Action   = ["secretsmanager:GetSecretValue"]
+      Resource = [aws_secretsmanager_secret.rds_master.arn]
+    }]
+  })
+}
+
+resource "aws_iam_role" "ecs_task" {
+  count = var.enable_ecs_runner ? 1 : 0
+
+  name = "dast-scanner-ecs-task"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect    = "Allow"
+      Principal = { Service = "ecs-tasks.amazonaws.com" }
+      Action    = "sts:AssumeRole"
+    }]
+  })
+}
+
+resource "aws_iam_role_policy" "ecs_task_secrets" {
+  count = var.enable_ecs_runner ? 1 : 0
+
+  name = "task-secrets"
+  role = aws_iam_role.ecs_task[0].id
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect   = "Allow"
+      Action   = ["secretsmanager:GetSecretValue"]
+      Resource = [aws_secretsmanager_secret.rds_master.arn]
+    }]
+  })
+}
+
+resource "aws_ecs_task_definition" "scanner_runner" {
+  count = var.enable_ecs_runner ? 1 : 0
+
+  family                   = "dast-scanner-runner"
+  requires_compatibilities = ["FARGATE"]
+  network_mode             = "awsvpc"
+  cpu                      = "4096"
+  memory                   = "8192"
+  execution_role_arn       = aws_iam_role.ecs_execution[0].arn
+  task_role_arn            = aws_iam_role.ecs_task[0].arn
+
+  container_definitions = jsonencode([{
+    name      = "scanner-runner"
+    image     = "${aws_ecr_repository.scanner_runner[0].repository_url}:${var.scanner_runner_image_tag}"
+    essential = true
+    command   = ["--scan-id", "PLACEHOLDER"]
+
+    logConfiguration = {
+      logDriver = "awslogs"
+      options = {
+        "awslogs-group"         = aws_cloudwatch_log_group.ecs_runner[0].name
+        "awslogs-region"        = data.aws_region.current.name
+        "awslogs-stream-prefix" = "runner"
+      }
+    }
+
+    environment = concat(
+      [
+        { name = "DUAL_WRITE_PG", value = "1" },
+        { name = "RUNNER_PG_ONLY", value = "1" },
+        { name = "AWS_REGION", value = data.aws_region.current.name },
+        { name = "LIVE_EVENTS_REDIS", value = var.enable_redis ? "1" : "0" },
+      ],
+      var.enable_redis ? [
+        { name = "REDIS_URL", value = "redis://${aws_elasticache_cluster.redis[0].cache_nodes[0].address}:6379/0" },
+      ] : [],
+    )
+  }])
+}
+
+output "ecs_cluster_name" {
+  value       = var.enable_ecs_runner ? aws_ecs_cluster.scanner[0].name : null
+  description = "ECS cluster for per-scan Fargate tasks"
+}
+
+output "ecs_task_definition_arn" {
+  value       = var.enable_ecs_runner ? aws_ecs_task_definition.scanner_runner[0].arn : null
+  description = "Task definition family:revision for RunTask"
+}
+
+output "ecs_task_definition_family" {
+  value       = var.enable_ecs_runner ? aws_ecs_task_definition.scanner_runner[0].family : null
+  description = "Task definition family (use with :latest revision at deploy)"
+}
+
+output "ecs_task_security_group_id" {
+  value       = var.enable_ecs_runner ? aws_security_group.ecs_runner[0].id : null
+  description = "Security group for Fargate scanner tasks"
+}
+
+output "ecs_task_subnets" {
+  value       = var.enable_ecs_runner ? data.aws_subnets.default.ids : []
+  description = "Subnets for RunTask awsvpc config"
+}

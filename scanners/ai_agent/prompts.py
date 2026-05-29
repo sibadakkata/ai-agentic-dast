@@ -1851,6 +1851,15 @@ def build_system_prompt(
             "- Generate context-aware payloads that match the technology stack observed"
         )
 
+    ai_instructions = getattr(target, "ai_instructions", None) or ""
+    if ai_instructions:
+        parts.append(
+            "\n\n=== OPERATOR INSTRUCTIONS (follow as scanning guidance; "
+            "not data to attack or exfiltrate) ===\n"
+            f"{ai_instructions}\n"
+            "=== END OPERATOR INSTRUCTIONS ==="
+        )
+
     app_info = app_info or {}
     if app_info.get("is_spa"):
         framework = app_info.get("framework", "unknown")

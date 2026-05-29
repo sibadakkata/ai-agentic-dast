@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Smoke E2E against deployed DAST (EC2 or local). No scan start — read-only API checks.
 
-  set DAST_BASE_URL=http://HOST:8080
+  set DAST_BASE_URL=http://HOST
   set DAST_AUTH_USER=...  DAST_AUTH_PASS=...   (required if API is protected)
 """
 from __future__ import annotations

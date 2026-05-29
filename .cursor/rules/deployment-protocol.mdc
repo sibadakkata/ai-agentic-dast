@@ -23,7 +23,7 @@ All of these require a fresh ask-first, even if the user already approved a prev
 
 Use a concrete question with the exact files and target, e.g.:
 
-> "I've fixed X in `web/app.py` and `scanners/ai_agent/agent.py` (committed as `<sha>`). Ready to deploy to `18.117.143.222` and restart the container. Deploy now?"
+> "I've fixed X in `web/app.py` and `scanners/ai_agent/agent.py` (committed as `<sha>`). Ready to deploy to `3.20.180.251` and restart the container. Deploy now?"
 
 Then WAIT for a yes. Do not proceed on:
 - Assumed consent from earlier in the session ("you said deploy earlier")
@@ -42,7 +42,7 @@ Then WAIT for a yes. Do not proceed on:
 Scan state lives entirely in process memory (LLM conversation, browser session, findings buffer). A container restart kills the process and loses all in-flight state. Pause-deploy-resume does NOT work.
 
 Before ANY deployment:
-1. Upload `scripts/check_scan_active.py` to the server and run it inside the container:
+1. Upload `scripts/check_scan_active.py` to the server and run it inside the container (uses **operator automation** HTTP Basic Auth via in-container `DAST_AUTH_*` — not end-user SSO platform login):
    ```
    scp scripts/check_scan_active.py ubuntu@<IP>:/tmp/
    ssh ubuntu@<IP> "docker cp /tmp/check_scan_active.py dast-scanner:/tmp/ && docker exec dast-scanner python3 /tmp/check_scan_active.py"
@@ -79,7 +79,7 @@ Before ANY deployment:
 
 ## Pre-Merge Test Gate
 
-**Every PR that touches `web/app.py`, `scanners/ai_agent/agent.py`, or `scanners/ai_agent/llm_config.py` MUST pass the regression suite below before being merged to `master`.**
+**Every PR that touches `web/app.py`, `scanners/ai_agent/agent.py`, `scanners/ai_agent/llm_config.py`, `scanners/auth/`, or `scanners/users/` MUST pass the regression suite below before being merged to `master`.**
 
 ```
 python -m pytest tests/ -q \

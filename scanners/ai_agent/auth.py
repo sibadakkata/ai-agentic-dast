@@ -89,6 +89,7 @@ class ScanTarget:
     # still get TLS when observed in browser traffic (host-delta after each
     # phase). Use for "TLS on sibling only after crawl" workflows.
     skip_passive_sibling_tls: bool = False
+    ai_instructions: str | None = None  # operator guidance injected into agent system prompt
 
 
 def _resolve_env_vars(obj: Any) -> Any:
@@ -486,8 +487,18 @@ async def _llm_auth_agent_loop(
         current_root = _extract_root_domain(current_host)
 
         # Quick check: on target (or same root domain, not a login page) → success
+        # When credentials are provided, require at least one "fill" action
+        # (i.e. actually entering credentials) before declaring success.
+        # This prevents the agent from short-circuiting on SPA landing pages
+        # that load without a redirect (OIDC apps like ai.norton.com require
+        # clicking a "Sign In" button first).
+        has_creds = bool(username and password)
+        creds_were_used = any(
+            s.get("action") == "fill" for s in steps_taken
+        )
         if (current_host == target_host or current_root == target_root) \
-                and not _is_login_url(ctx["url"]):
+                and not _is_login_url(ctx["url"]) \
+                and (not has_creds or creds_were_used):
             print(f"  [AUTH-AGENT] Step {step_i+1}: On target ({current_host}) — success")
             return {"success": True, "need_mfa": False, "need_captcha": False,
                     "failed": False, "steps": steps_taken,
@@ -1257,6 +1268,7 @@ def load_targets_from_dict(t: dict) -> ScanTarget:
         business_flow=t.get("business_flow") or None,
         scan_profile=(t.get("scan_profile") or "vulnerability_scan"),
         skip_passive_sibling_tls=bool(t.get("skip_passive_sibling_tls")),
+        ai_instructions=t.get("ai_instructions") or None,
     )
 
 

@@ -105,6 +105,31 @@ def init():
                     k TEXT PRIMARY KEY,
                     v TEXT NOT NULL
                 );
+
+                CREATE TABLE IF NOT EXISTS users (
+                    id              TEXT PRIMARY KEY,
+                    email           TEXT NOT NULL UNIQUE,
+                    name            TEXT,
+                    role            TEXT NOT NULL,
+                    created_at      TEXT NOT NULL,
+                    last_login_at   TEXT,
+                    is_active       INTEGER NOT NULL DEFAULT 1
+                );
+                CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
+
+                CREATE TABLE IF NOT EXISTS invites (
+                    id                  TEXT PRIMARY KEY,
+                    email               TEXT NOT NULL,
+                    role                TEXT NOT NULL,
+                    token               TEXT NOT NULL UNIQUE,
+                    created_by          TEXT NOT NULL,
+                    created_at          TEXT NOT NULL,
+                    expires_at          TEXT NOT NULL,
+                    used_at             TEXT,
+                    used_by_user_id     TEXT
+                );
+                CREATE INDEX IF NOT EXISTS idx_invites_email ON invites(email);
+                CREATE INDEX IF NOT EXISTS idx_invites_token ON invites(token);
             """)
             conn.commit()
             logger.info("SQLite DB initialised at %s", DB_PATH)
@@ -351,6 +376,19 @@ def get_scan_result(scan_id: str) -> str | None:
     return None
 
 
+def list_findings(scan_id: str) -> list[dict]:
+    """Findings from scan_results JSON (pre-normalized PG rows)."""
+    raw = get_scan_result(scan_id)
+    if not raw:
+        return []
+    try:
+        data = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return []
+    findings = data.get("findings") if isinstance(data, dict) else None
+    return findings if isinstance(findings, list) else []
+
+
 # ── App-wide key/value (UI preferences, etc.) ───────────────────────────
 
 def app_kv_get(key: str) -> str | None:
@@ -374,5 +412,179 @@ def app_kv_set(key: str, value: str):
                 (key, value),
             )
             conn.commit()
+        finally:
+            conn.close()
+
+
+# ── Users ────────────────────────────────────────────────────────────────
+
+def _row_to_dict(row: sqlite3.Row | None) -> dict | None:
+    if row is None:
+        return None
+    return dict(row)
+
+
+def users_insert(row: dict):
+    with _lock:
+        conn = _connect()
+        try:
+            conn.execute(
+                """
+                INSERT INTO users (id, email, name, role, created_at, last_login_at, is_active)
+                VALUES (:id, :email, :name, :role, :created_at, :last_login_at, :is_active)
+                """,
+                row,
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+
+def users_get_by_id(user_id: str) -> dict | None:
+    conn = _connect()
+    try:
+        row = conn.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+    finally:
+        conn.close()
+    return _row_to_dict(row)
+
+
+def users_get_by_email(email: str) -> dict | None:
+    conn = _connect()
+    try:
+        row = conn.execute(
+            "SELECT * FROM users WHERE email = ?", (email.lower().strip(),)
+        ).fetchone()
+    finally:
+        conn.close()
+    return _row_to_dict(row)
+
+
+def users_list_all(*, include_inactive: bool = False) -> list[dict]:
+    conn = _connect()
+    try:
+        if include_inactive:
+            rows = conn.execute(
+                "SELECT * FROM users ORDER BY created_at DESC"
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM users WHERE is_active = 1 ORDER BY created_at DESC"
+            ).fetchall()
+    finally:
+        conn.close()
+    return [dict(r) for r in rows]
+
+
+def users_update(user_id: str, updates: dict):
+    if not updates:
+        return
+    cols = ", ".join(f"{k} = ?" for k in updates)
+    vals = list(updates.values()) + [user_id]
+    with _lock:
+        conn = _connect()
+        try:
+            conn.execute(f"UPDATE users SET {cols} WHERE id = ?", vals)
+            conn.commit()
+        finally:
+            conn.close()
+
+
+def users_delete(user_id: str) -> bool:
+    with _lock:
+        conn = _connect()
+        try:
+            cur = conn.execute("DELETE FROM users WHERE id = ?", (user_id,))
+            conn.commit()
+            return cur.rowcount > 0
+        finally:
+            conn.close()
+
+
+# ── Invites ──────────────────────────────────────────────────────────────
+
+def invites_insert(row: dict):
+    with _lock:
+        conn = _connect()
+        try:
+            conn.execute(
+                """
+                INSERT INTO invites (
+                    id, email, role, token, created_by, created_at,
+                    expires_at, used_at, used_by_user_id
+                ) VALUES (
+                    :id, :email, :role, :token, :created_by, :created_at,
+                    :expires_at, :used_at, :used_by_user_id
+                )
+                """,
+                row,
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+
+def invites_get_by_id(invite_id: str) -> dict | None:
+    conn = _connect()
+    try:
+        row = conn.execute("SELECT * FROM invites WHERE id = ?", (invite_id,)).fetchone()
+    finally:
+        conn.close()
+    return _row_to_dict(row)
+
+
+def invites_get_pending_by_email(email: str) -> dict | None:
+    conn = _connect()
+    try:
+        row = conn.execute(
+            """
+            SELECT * FROM invites
+            WHERE email = ? AND used_at IS NULL
+            ORDER BY created_at DESC
+            LIMIT 1
+            """,
+            (email.lower().strip(),),
+        ).fetchone()
+    finally:
+        conn.close()
+    return _row_to_dict(row)
+
+
+def invites_list_pending() -> list[dict]:
+    conn = _connect()
+    try:
+        rows = conn.execute(
+            """
+            SELECT * FROM invites
+            WHERE used_at IS NULL
+            ORDER BY created_at DESC
+            """
+        ).fetchall()
+    finally:
+        conn.close()
+    return [dict(r) for r in rows]
+
+
+def invites_update(invite_id: str, updates: dict):
+    if not updates:
+        return
+    cols = ", ".join(f"{k} = ?" for k in updates)
+    vals = list(updates.values()) + [invite_id]
+    with _lock:
+        conn = _connect()
+        try:
+            conn.execute(f"UPDATE invites SET {cols} WHERE id = ?", vals)
+            conn.commit()
+        finally:
+            conn.close()
+
+
+def invites_delete(invite_id: str) -> bool:
+    with _lock:
+        conn = _connect()
+        try:
+            cur = conn.execute("DELETE FROM invites WHERE id = ?", (invite_id,))
+            conn.commit()
+            return cur.rowcount > 0
         finally:
             conn.close()

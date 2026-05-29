@@ -2,6 +2,10 @@
 
 [← Back to README](../README.md)
 
+## Intelligent model selection
+
+When `model_policy` is `auto`, `ModelSelector` (`scanners/ai_agent/auto_router.py`) picks a Bedrock model per phase using a three-tier policy (cheap / balanced / premium). Manual policy keeps one operator-selected model for all phases. Optional `budget_cap_usd` ties spend to `BudgetGuard`: the scan pauses at the cap and requires approval from the **scan owner** (SSO user who launched it) or an **admin** before resuming. See [scanner-internals.md](scanner-internals.md) and [web-ui.md](web-ui.md).
+
 ## System Overview
 
 The scanner is built around a **single LLM agent** that drives a real browser and HTTP client through security tests autonomously. No hardcoded attack playbooks — the LLM reasons about what it sees and crafts payloads accordingly.
@@ -140,15 +144,19 @@ The core scanning logic follows an **Observe-Think-Act-Analyze-Plan** cycle:
 
 ### LLM Application Security Phase (conditional)
 
-When the scanner detects chatbot/AI-powered features (via `llm_detect.py` DOM + network heuristics), it auto-includes an LLM security phase. This phase is **deterministic** -- it does not use the LLM agent loop.
+When the scanner detects chatbot/AI-powered features (via `llm_detect.py` DOM + network heuristics), it auto-includes an LLM security phase with three testing layers.
 
 | Phase ID | Name | Probes | Detection |
 |----------|------|--------|-----------|
-| `web_llm_security` | LLM Application Security (OWASP LLM Top 10) | 37 built-in + Garak (optional) | Pattern-matching/regex, $0 LLM cost |
+| `web_llm_security` | LLM Application Security (OWASP LLM Top 10) | 37 built-in + 41 Garak probes + LLM-Agent adaptive probes | Pattern-matching + browser interaction + LLM analysis |
 
-**Built-in probes (llm_baseline.py):** 10 prompt injection, 8 info disclosure, 5 output handling, 5 excessive agency, 6 prompt leakage, 3 unbounded consumption.
+**Built-in probes (llm_baseline.py):** 10 prompt injection, 8 info disclosure, 5 output handling, 5 excessive agency, 6 prompt leakage, 3 unbounded consumption. Deterministic, $0 LLM cost.
 
-**Garak (optional):** If installed (`pip install garak`), runs NVIDIA's 50+ probe battery via subprocess. Garak is NOT required -- the scanner works without it.
+**Garak (NVIDIA):** 41 probe families covering jailbreaks, toxicity, prompt injection, API key extraction, and encoding attacks — prioritised by security impact (jailbreak → toxicity → info disclosure). Terminal-specific probes (ansiescape, badchars) are excluded.
+
+**LLM-Agent:** Adaptive, context-aware payloads crafted by the AI agent — jailbreak roleplay, data exfiltration, multi-turn escalation, SSRF via chatbot, encoding tricks.
+
+**Browser Bridge (`browser_llm_bridge.py`):** Both Garak and LLM-Agent interact with UI-based chatbots through a Playwright browser bridge. The bridge logs into the target, navigates to the chat UI, types prompts into the real input field, and captures responses via **stability-based container text diff** — monitoring DOM changes until the chatbot finishes responding, filtering out loading indicators ("Working...", "Thinking..."), timestamps, and prompt echoes. A **preflight validation** sends a "Hello" test message before running probes; if the chatbot doesn't respond meaningfully, probes are skipped with a two-tier fallback (browser → HTTP → skip). When the target has no browser-accessible chat UI, Garak falls back to direct HTTP API testing.
 
 Force LLM testing on any target with `focus_areas: ["LLM"]`.
 

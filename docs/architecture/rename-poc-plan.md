@@ -1,0 +1,126 @@
+# Production rename: strip `poc` from AWS resources and config
+
+**Date:** 2026-05-27  
+**Branch:** `feature/scalable-scanner-platform`  
+**Account:** `168551359048` | **Region:** `us-east-2` | **AWS profile:** `dast-poc` (local CLI name unchanged)
+
+## Scope
+
+| In scope | Out of scope |
+|----------|----------------|
+| AWS resource names, tags, endpoints | Local repo folder `C:\Projects\Pen-Test\Acunetix\POC` |
+| Terraform `name` / `identifier` / descriptions | Git branch names |
+| Secrets path `dast/poc/rds/master` → `dast/rds/master` | `poc.jar` exploit strings in scanner payloads |
+| Docs / README infra references | `siba-dast-agentic-poc.pem` SSH key filename |
+| EC2 `DATABASE_URL` host after RDS rename | Bug-bounty "PoC" prose in scanner comments |
+
+## Audit summary
+
+### Code / Terraform (logical names)
+
+| File | Matches | Action |
+|------|---------|--------|
+| `infra/terraform/*.tf` | ~60 resource names/tags | Renamed in code |
+| `infra/terraform/README.md` | 8 | Updated |
+| `providers.tf` | `Env = poc` → `prod` | Done |
+| `providers.tf` | `profile = dast-poc` | Kept (local AWS profile) |
+| `scanners/`, `web/` | `poc.jar`, epoch, bug-bounty PoC | Skipped |
+| `README.md`, `deploy.sh`, `docs/deployment.md` | `./POC` path | Skipped (local path) |
+
+### Live AWS resources (pre-rename)
+
+| Type | Old name |
+|------|----------|
+| RDS instance | `dast-scanner-poc` |
+| RDS endpoint | `dast-scanner-poc.clvdrnz05aof.us-east-2.rds.amazonaws.com` |
+| DB subnet group | `dast-scanner-poc` |
+| ALB | `dast-scanner-poc` |
+| ALB DNS | `dast-scanner-poc-1469221476.us-east-2.elb.amazonaws.com` |
+| Target group | `dast-scanner-poc-ui` |
+| WAF Web ACL | `dast-scanner-poc` |
+| Secret | `dast/poc/rds/master` |
+| S3 bucket | `dast-scanner-poc-db-backups-168551359048` (empty) |
+| Lambda | `dast-scanner-poc-db-backup` |
+| Lambda layer | `dast-scanner-poc-psycopg` |
+| IAM roles | `dast-scanner-poc-db-backup`, `dast-scanner-poc-rds-monitoring` |
+| Security groups | `dast-scanner-poc-rds`, `dast-scanner-poc-alb`, `dast-scanner-poc-lambda-backup` |
+| EventBridge | `dast-scanner-poc-weekly-db-backup` |
+| CloudWatch logs | `/aws/lambda/dast-scanner-poc-db-backup`, `aws-waf-logs-dast-scanner-poc`, `/aws/rds/instance/dast-scanner-poc/postgresql` |
+
+## Full mapping table
+
+| Old | New | Strategy |
+|-----|-----|----------|
+| `dast-scanner-poc` (RDS identifier) | `dast-scanner` | In-place `modify-db-instance --new-db-instance-identifier` |
+| `dast-scanner-poc` (subnet group) | `dast-scanner` | Terraform replace (brief) |
+| `dast-scanner-poc-rds` (SG) | `dast-scanner-rds` | Terraform replace + attach to RDS |
+| `dast-scanner-poc-rds-monitoring` (IAM) | `dast-scanner-rds-monitoring` | Terraform replace |
+| `dast-scanner-poc` (ALB) | `dast-scanner` | Destroy + create |
+| `dast-scanner-poc-ui` (TG) | `dast-scanner-ui` | Destroy + create |
+| `dast-scanner-poc-alb` (SG) | `dast-scanner-alb` | Destroy + create |
+| `dast-scanner-poc` (WAF) | `dast-scanner` | Destroy + create |
+| `aws-waf-logs-dast-scanner-poc` | `aws-waf-logs-dast-scanner` | Destroy + create |
+| `dast/poc/rds/master` | `dast/rds/master` | New secret + copy value; delete old |
+| `dast-scanner-poc-db-backups-*` | `dast-scanner-db-backups-*` | New bucket (empty); destroy old |
+| `dast-scanner-poc-db-backup` (λ/IAM) | `dast-scanner-db-backup` | Destroy + create |
+| `dast-scanner-poc-psycopg` (layer) | `dast-scanner-psycopg` | Destroy + create |
+| `dast-scanner-poc-weekly-db-backup` | `dast-scanner-weekly-db-backup` | Destroy + create |
+| Tag `Env=poc` | `Env=prod` | Terraform default_tags |
+| `dastScannerPocWebAcl` (metric) | `dastScannerWebAcl` | WAF recreate |
+
+## Order of operations
+
+1. **Code** — Update all Terraform/docs (done on branch).
+2. **Scan-active check** — Must be 0 active (verified).
+3. **RDS snapshot** — `dast-scanner-pre-rename-<timestamp>`; wait `available`.
+4. **RDS in-place rename** — `dast-scanner-poc` → `dast-scanner`; wait `available`; note new endpoint.
+5. **EC2 `.env`** — Update `DATABASE_URL` host; restart container (`deploy.sh` or docker run).
+6. **Verify** — `pgdb.health_check()`, row counts SQLite vs PG.
+7. **Secrets migration** — Read old secret JSON; create `dast/rds/master` with same password + new host; update EC2 if needed.
+8. **Terraform plan/apply** — Recreate ALB, WAF, Lambda, S3, SGs, subnet group; **inspect plan** for unintended RDS destroy.
+9. **Post-apply** — ALB DNS smoke test; Lambda test invoke; delete old secret after 24h soak.
+
+## Downtime estimate
+
+| Step | Downtime |
+|------|----------|
+| RDS rename | 1–5 min (Postgres unavailable) |
+| Container restart | ~30 s |
+| ALB/TG recreate | 2–5 min (new DNS; EC2 :80 direct still works) |
+| Full Terraform apply | 10–20 min |
+
+## Rollback
+
+| Step | Rollback |
+|------|----------|
+| RDS rename | Restore snapshot to new instance `dast-scanner-poc-restored`; point `.env` at restored endpoint |
+| EC2 env | Revert `.env` to previous endpoint; restart container |
+| Terraform | `git revert` + `terraform apply` with previous code; or `terraform state` repair |
+| Secrets | Keep old `dast/poc/rds/master` until new secret verified |
+| S3 | Old bucket retained until sync confirmed (bucket was empty at cutover) |
+
+## Pre-cutover checks
+
+- [x] S3 backup bucket empty (no object copy required)
+- [x] Scan-active: 0 running (234 total scans reported)
+- [ ] Terraform plan reviewed (no `aws_db_instance.main` destroy) — **blocked: `terraform` not on PATH in agent shell**
+- [x] Snapshot `available`: `dast-scanner-pre-rename-202605271200`
+
+## Execution log (2026-05-27)
+
+| Step | Status | Notes |
+|------|--------|-------|
+| Terraform code rename | Done | All `*.tf` + README |
+| RDS in-place rename | Done | `dast-scanner` / `dast-scanner.clvdrnz05aof.us-east-2.rds.amazonaws.com` |
+| EC2 `.env` + container restart | Done | `--env-file .env`; `pgdb.health_check()` → `ok` |
+| New secret `dast/rds/master` | Done | ARN `...secret:dast/rds/master-QOiDsC`; old secret retained |
+| `terraform apply` (ALB, WAF, λ, S3, SGs) | **Pending** | Requires local Terraform + plan review |
+
+## Post-cutover verification
+
+- [x] RDS `dast-scanner` status `available`
+- [x] `pgdb.health_check()` → `{'status': 'ok'}`
+- [x] Scan list count 234 (scan-active script)
+- [ ] Full SQLite vs PG row-count script (agent shell quoting issues; verify manually)
+- [x] `docker logs` — no Postgres connection errors after restart
+- [ ] ALB `HEAD /` via **new** DNS — pending Terraform recreate

@@ -1,0 +1,24 @@
+#!/usr/bin/env python3
+"""Apply migrations/0001_init.sql using DATABASE_URL from environment."""
+import os
+import sys
+
+import psycopg
+
+def main() -> int:
+    url = os.environ.get("DATABASE_URL")
+    if not url:
+        print("DATABASE_URL not set", file=sys.stderr)
+        return 1
+    sql_path = sys.argv[1] if len(sys.argv) > 1 else "/tmp/0001_init.sql"
+    with open(sql_path, encoding="utf-8") as f:
+        sql = f.read()
+    conn = psycopg.connect(url)
+    conn.autocommit = True
+    cur = conn.cursor()
+    cur.execute(sql)
+    print("schema applied")
+    return 0
+
+if __name__ == "__main__":
+    raise SystemExit(main())

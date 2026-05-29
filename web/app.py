@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import asynccontextmanager
 import glob
 import hashlib
 import logging
@@ -18,6 +19,7 @@ from datetime import datetime
 from pathlib import Path
 
 import httpx
+from pydantic import BaseModel
 
 from fastapi import FastAPI, BackgroundTasks, Depends, HTTPException, Request, UploadFile, File, Form, WebSocket, WebSocketDisconnect, status
 from io import BytesIO
@@ -39,6 +41,8 @@ from scanners.ai_agent.api_import import (
 )
 from scanners.ai_agent.auth import load_targets_from_dict
 from scanners.ai_agent.llm_config import LLMRouter, check_connectivity
+from scanners.ai_agent.auto_router import ModelSelector
+from scanners.ai_agent.budget import BudgetGuard, estimate_scan_cost
 from scanners.ai_agent.model_discovery import (
     discover_models,
     get_cached_models,
@@ -48,13 +52,31 @@ from scripts.triage_engine import classify as triage_classify
 
 from starlette.middleware.gzip import GZipMiddleware
 
+
+@asynccontextmanager
+async def _app_lifespan(application: FastAPI):
+    """Start Bedrock model discovery after the app is up (worker process ready)."""
+    del application
+    threading.Thread(target=_schedule_model_discovery, daemon=True, name="model-discovery-init").start()
+    yield
+
+
 app = FastAPI(
-    title="AI Agentic Web Scanner",
-    description="LLM-powered Dynamic Application Security Testing API. "
-    "Start scans, poll status, download results and PDF reports programmatically.",
+    title="AI DAST Scanner API",
+    description=(
+        "LLM-powered Dynamic Application Security Testing (DAST) API. "
+        "Launch scans with the same options as the web UI, poll status, and fetch triaged results. "
+        "Architecture: https://confluence.corp.nortonlifelock.com/spaces/CIP/pages/954017481/Red+Team+AI+Web+Scanner"
+    ),
     version="1.0.0",
+    openapi_url="/openapi.json",
     docs_url="/docs",
     redoc_url="/redoc",
+    servers=[
+        {"url": "https://rt.ai.webscanner.gendigital.com", "description": "Production"},
+        {"url": "http://localhost:8080", "description": "Local dev"},
+    ],
+    lifespan=_app_lifespan,
 )
 
 app.add_middleware(GZipMiddleware, minimum_size=1000)
@@ -73,39 +95,43 @@ async def _global_exception_handler(request: Request, exc: Exception):
                  "detail": "An internal error occurred. Check server logs for details."},
     )
 
-# --- Auth (cookie sessions + Basic Auth fallback for API clients) -------------
+# --- Auth (SAML SSO + session cookies + Basic Auth for API/local dev) ---------
+from scanners.auth import saml as saml_auth
+from scanners.auth.middleware import auth_middleware
+from scanners.auth.rbac import init_rbac, require_admin
+from scanners.auth.session import (
+    SESSION_COOKIE as _SESSION_COOKIE,
+    SESSION_MAX_AGE as _SESSION_MAX_AGE,
+    create_legacy_session_token,
+    create_session_token,
+    resolve_session_user,
+    verify_session_token,
+)
+from scanners.users.models import UserRole
+from scanners.users.repository import UserRepository
+from web.routes_users import init_user_routes, router as users_router
+
 _security = HTTPBasic(auto_error=False)
 _AUTH_USER = os.environ.get("DAST_AUTH_USER", "dast-admin")
 _AUTH_PASS = os.environ.get("DAST_AUTH_PASS", "changeme")
-_SESSION_SECRET = os.environ.get("DAST_SESSION_SECRET", secrets.token_hex(32))
-_SESSION_COOKIE = "dast_session"
-_SESSION_MAX_AGE = 86400 * 7  # 7 days
+
+_USER_REPO = UserRepository()
+init_rbac(_USER_REPO)
+init_user_routes(_USER_REPO)
+app.include_router(users_router)
 
 
 def _create_session_token(username: str) -> str:
-    ts = str(int(time.time()))
-    payload = f"{username}:{ts}"
-    sig = hmac.new(_SESSION_SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()[:32]
-    return f"{payload}:{sig}"
+    """Legacy v1 token (tests / backward compat)."""
+    return create_legacy_session_token(username)
 
 
 def _verify_session_token(token: str) -> str | None:
-    if not token:
-        return None
-    parts = token.split(":")
-    if len(parts) != 3:
-        return None
-    username, ts_str, sig = parts
-    try:
-        ts = int(ts_str)
-    except ValueError:
-        return None
-    if time.time() - ts > _SESSION_MAX_AGE:
-        return None
-    expected = hmac.new(_SESSION_SECRET.encode(), f"{username}:{ts_str}".encode(), hashlib.sha256).hexdigest()[:32]
-    if not hmac.compare_digest(sig, expected):
-        return None
-    return username
+    """Return username (v1) or user_id (v2) when valid."""
+    resolved = verify_session_token(token)
+    if resolved and resolved.startswith("legacy:"):
+        return resolved[7:]
+    return resolved
 
 
 def _check_basic_auth(credentials: HTTPBasicCredentials | None) -> bool:
@@ -116,12 +142,19 @@ def _check_basic_auth(credentials: HTTPBasicCredentials | None) -> bool:
     return user_ok and pass_ok
 
 
+def _session_valid(request: Request) -> bool:
+    cookie = request.cookies.get(_SESSION_COOKIE)
+    if cookie and resolve_session_user(cookie, _USER_REPO):
+        return True
+    from scanners.auth.rbac import _basic_auth_user
+    return _basic_auth_user(request) is not None
+
+
 async def _verify(request: Request, credentials: HTTPBasicCredentials | None = Depends(_security)):
     """Authenticate via session cookie (browser) or Basic Auth (API/curl)."""
-    cookie = request.cookies.get(_SESSION_COOKIE)
-    if cookie and _verify_session_token(cookie):
+    if _session_valid(request):
         return True
-    if _check_basic_auth(credentials):
+    if credentials and _check_basic_auth(credentials):
         return True
     if credentials:
         raise HTTPException(status_code=401, detail="Invalid credentials", headers={"WWW-Authenticate": "Basic"})
@@ -130,12 +163,59 @@ async def _verify(request: Request, credentials: HTTPBasicCredentials | None = D
 
 async def _verify_or_redirect(request: Request, credentials: HTTPBasicCredentials | None = Depends(_security)):
     """For browser pages: redirect to /login if not authenticated."""
-    cookie = request.cookies.get(_SESSION_COOKIE)
-    if cookie and _verify_session_token(cookie):
+    if _session_valid(request):
         return True
     if _check_basic_auth(credentials):
         return True
     return False
+
+
+def _request_user(request: Request):
+    from scanners.auth.rbac import _basic_auth_user
+    user = getattr(request.state, "user", None)
+    if user:
+        return user
+    return _basic_auth_user(request)
+
+
+def _scans_for_user(request: Request) -> dict[str, dict]:
+    user = _request_user(request)
+    if user is None or user.is_admin:
+        return SCANS
+    return {
+        sid: info
+        for sid, info in SCANS.items()
+        if info.get("owner_user_id") == user.id
+    }
+
+
+def _user_can_read_scan(scan_id: str, user) -> bool:
+    if scan_id not in SCANS or user is None:
+        return False
+    if user.is_admin:
+        return True
+    return SCANS[scan_id].get("owner_user_id") == user.id
+
+
+def _user_can_manage_scan_budget(scan_id: str, user) -> bool:
+    """Scan owner or platform admin may approve budget or stop on budget gate."""
+    if scan_id not in SCANS or user is None:
+        return False
+    if user.is_admin:
+        return True
+    return SCANS[scan_id].get("owner_user_id") == user.id
+
+
+def _budget_owner_label(owner_user_id: str | None) -> str:
+    if not owner_user_id:
+        return "scan owner"
+    try:
+        u = _USER_REPO.get_by_id(owner_user_id)
+        if u:
+            return u.name or u.email or owner_user_id
+    except Exception:
+        pass
+    return owner_user_id
 
 app.mount("/static", StaticFiles(directory=Path(__file__).parent / "static"), name="static")
 
@@ -150,6 +230,11 @@ async def _no_cache_static(request: Request, call_next):
     return response
 
 
+@app.middleware("http")
+async def _auth_gate(request: Request, call_next):
+    return await auth_middleware(request, call_next)
+
+
 BASE = Path(__file__).resolve().parent.parent
 RAW_DIR = BASE / "results" / "raw"
 REPORTS_DIR = BASE / "results" / "reports"
@@ -157,7 +242,29 @@ RAW_DIR.mkdir(parents=True, exist_ok=True)
 REPORTS_DIR.mkdir(parents=True, exist_ok=True)
 
 from web import db as scandb
+from web import db_pg as pgdb
+from web import db_router as dbread
+from web import scan_launcher
+from web.live_events import publish_event
+from web.scan_models import (
+    ScanLaunchRequest,
+    materialize_api_imports,
+    parse_scan_launch_dict,
+    request_to_launch_params,
+    validate_scan_launch_params,
+)
+
 scandb.init()
+
+
+def _mirror_to_pg(op: str, *args, **kwargs) -> None:
+    """Best-effort Postgres dual-write after SQLite (Phase 0)."""
+    try:
+        fn = getattr(pgdb, op, None)
+        if fn is not None:
+            fn(*args, **kwargs)
+    except Exception:
+        logger.warning("Postgres dual-write %s failed", op, exc_info=True)
 
 SCANS: dict[str, dict] = {}
 CANCEL_FLAGS: dict[str, threading.Event] = {}
@@ -235,6 +342,27 @@ def _normalize_verdict(raw) -> str:
     return _MAP.get(v, v)
 
 
+def _migrate_scan_owners():
+    """Assign owner_user_id on legacy scans to the first admin."""
+    admin_id = _USER_REPO.get_first_admin_id()
+    if not admin_id:
+        email = f"{_AUTH_USER}@local.dev"
+        existing = _USER_REPO.get_user_by_email(email)
+        if existing:
+            admin_id = existing.id
+        else:
+            admin_id = _USER_REPO.create_user(
+                email, name=_AUTH_USER, role=UserRole.ADMIN.value
+            ).id
+    dirty = False
+    for info in SCANS.values():
+        if not info.get("owner_user_id"):
+            info["owner_user_id"] = admin_id
+            dirty = True
+    if dirty:
+        _save_scans_to_disk()
+
+
 def _load_scans_from_disk():
     """Restore scan metadata from SQLite on startup.
 
@@ -242,10 +370,10 @@ def _load_scans_from_disk():
     """
     _old_meta = BASE / "results" / "scans_meta.json"
     _old_ledger = BASE / "results" / "cost_ledger.json"
-    if scandb.scan_count() == 0 and _old_meta.exists():
+    if dbread.scan_count() == 0 and _old_meta.exists():
         scandb.migrate_from_json(_old_meta, _old_ledger)
 
-    data = scandb.load_all_scans()
+    data = dbread.load_all_scans()
     dirty = False
     for scan_id, info in data.items():
         if info.get("status") == "running":
@@ -256,7 +384,7 @@ def _load_scans_from_disk():
             info["progress"] = progress
             dirty = True
             try:
-                raw = scandb.get_scan_result(scan_id)
+                raw = dbread.get_scan_result(scan_id)
                 if raw:
                     partial = json.loads(raw)
                     fc = len(partial.get("findings", []))
@@ -294,12 +422,15 @@ def _load_scans_from_disk():
     if dirty:
         _save_scans_to_disk()
 
+    _migrate_scan_owners()
+
     _backfill_scan_results_from_disk()
 
-    if scandb.get_cost_ledger().get("all_time_cost", 0) == 0 and SCANS:
+    if dbread.get_cost_ledger().get("all_time_cost", 0) == 0 and SCANS:
         bootstrap_cost = sum(s.get("cost", 0) or 0 for s in SCANS.values())
         if bootstrap_cost > 0:
             scandb.set_cost_ledger(bootstrap_cost)
+            _mirror_to_pg("set_cost_ledger", bootstrap_cost)
 
 _TRANSIENT_KEYS = frozenset({"live_tests", "live_findings", "live_phases", "live_crawled", "live_forms", "live_tool_calls", "live_out_of_scope", "live_tokens", "live_llm_calls", "live_cost", "live_cache_read", "live_cache_write", "live_phase_tools", "_router", "_findings_seen"})
 _SECRET_KEYS = frozenset({"_password"})
@@ -427,6 +558,29 @@ def _finding_key(f: dict) -> tuple | None:
     return (title, url, param)
 
 
+def _synthesize_rr(f: dict) -> list[dict]:
+    """Build a request_response array from flat request/response_summary fields.
+    Garak and LLM-Agent findings store these as flat dicts rather than the
+    request_response array that the UI expects."""
+    rr = f.get("request_response") or []
+    if rr:
+        return rr
+    req = f.get("request")
+    resp = f.get("response_summary")
+    if req and isinstance(req, dict):
+        entry = {
+            "tool": f.get("tool", ""),
+            "url": req.get("url", f.get("url", "")),
+            "method": req.get("method", "POST"),
+            "payload": f.get("payload", ""),
+            "status": str(resp.get("status_code", "")) if resp else "",
+            "request": req,
+            "response": {"body": resp.get("body", "") if resp else ""},
+        }
+        return [entry]
+    return []
+
+
 def _dedupe_findings(findings: list[dict]) -> tuple[list[dict], set]:
     """Return (deduped_list, seen_keys_set) preserving the first occurrence order."""
     out: list[dict] = []
@@ -449,7 +603,9 @@ def _save_scan(scan_id: str):
     if not info:
         return
     try:
-        scandb.upsert_scan(scan_id, _clean_scan_for_db(info))
+        row = _clean_scan_for_db(info)
+        scandb.upsert_scan(scan_id, row)
+        _mirror_to_pg("upsert_scan", scan_id, row)
     except Exception:
         logger.exception("Failed to persist scan %s to SQLite", scan_id)
 
@@ -459,6 +615,7 @@ def _save_scans_to_disk():
     try:
         persist = {sid: _clean_scan_for_db(info) for sid, info in SCANS.items()}
         scandb.upsert_all(persist)
+        _mirror_to_pg("upsert_all", persist)
     except Exception:
         logger.exception("Failed to bulk-persist scans to SQLite")
 
@@ -493,6 +650,7 @@ def _autosave_loop():
                     batch[sid] = _clean_scan_for_db(info)
             if batch:
                 scandb.upsert_all(batch)
+                _mirror_to_pg("upsert_all", batch)
             for sid in to_flush:
                 info = SCANS.get(sid)
                 if info and info.get("live_findings"):
@@ -511,7 +669,9 @@ def _persist_scan_result(scan_id: str, data: dict):
     """Write full result JSON to SQLite (source of truth for API reads)."""
     _RESULTS_CACHE.pop(scan_id, None)
     try:
-        scandb.save_scan_result(scan_id, json.dumps(data, default=str))
+        payload = json.dumps(data, default=str)
+        scandb.save_scan_result(scan_id, payload)
+        _mirror_to_pg("save_scan_result", scan_id, payload)
     except Exception:
         logger.exception("Failed to persist scan_results for %s", scan_id)
 
@@ -532,7 +692,9 @@ def _persist_partial_findings(scan_id: str, scan: dict):
             },
             "summary": {"total_findings": len(findings)},
         }
-        scandb.save_scan_result(scan_id, json.dumps(partial, default=str))
+        payload = json.dumps(partial, default=str)
+        scandb.save_scan_result(scan_id, payload)
+        _mirror_to_pg("save_scan_result", scan_id, payload)
     except Exception:
         logger.debug("Partial findings checkpoint failed for %s", scan_id, exc_info=True)
 
@@ -573,13 +735,34 @@ def _load_raw_result_dict(scan_id: str) -> dict | None:
     subsequent reads are fast. See
     tests/test_results_endpoint_resilience.py::TestPartialDbFallback.
     """
-    raw = scandb.get_scan_result(scan_id)
+    raw = dbread.get_scan_result(scan_id)
     cached: dict | None = None
     if raw:
         try:
             cached = json.loads(raw)
         except Exception:
             cached = None
+
+    if dbread.READ_FROM_PG:
+        try:
+            pg_findings = dbread.list_findings(scan_id)
+            if pg_findings:
+                if cached is None:
+                    cached = {
+                        "findings": pg_findings,
+                        "summary": {"total_findings": len(pg_findings)},
+                        "metadata": {},
+                    }
+                else:
+                    cached = dict(cached)
+                    cached["findings"] = pg_findings
+                    summary = cached.get("summary")
+                    if isinstance(summary, dict):
+                        summary = dict(summary)
+                        summary["total_findings"] = len(pg_findings)
+                        cached["summary"] = summary
+        except Exception:
+            logger.debug("PG list_findings failed for %s", scan_id, exc_info=True)
 
     cached_is_partial = bool(
         isinstance(cached, dict)
@@ -614,7 +797,7 @@ def _backfill_scan_results_from_disk():
     meta_dirty = False
     for scan_id, info in list(SCANS.items()):
         try:
-            if scandb.get_scan_result(scan_id):
+            if dbread.get_scan_result(scan_id):
                 continue
             rf = info.get("result_file")
             if not rf:
@@ -676,7 +859,7 @@ def _ensure_triaged(sid: str, s: dict) -> list[dict]:
             "evidence": f.get("evidence", ""),
             "remediation": f.get("remediation", ""),
             "confidence": f.get("confidence", ""),
-            "request_response": f.get("request_response", []),
+            "request_response": _synthesize_rr(f),
             "cwe": t.get("cwe", ""),
             "cvss": t.get("cvss"),
             "cvss_rationale": t.get("cvss_rationale", ""),
@@ -721,13 +904,15 @@ _load_scans_from_disk()
 # --- Model registry (dynamic, auto-discovered from Bedrock) ------------------
 # Fallback used when the cache is empty (discovery not yet run, or IAM missing bedrock:ListFoundationModels).
 _FALLBACK_MODELS = [
-    {"id": "bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0", "name": "Claude Haiku 4.5 (recommended)", "cost": "~$0.80/$4 per 1M tokens", "provider": "Anthropic", "input_cost_per_m": 0.80},
+    {"id": "bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0", "name": "Claude Haiku 4.5 (recommended)", "cost": "~$0.80/$4 per 1M tokens", "provider": "Anthropic", "input_cost_per_m": 0.80, "recommended": True},
     {"id": "bedrock/us.anthropic.claude-sonnet-4-5-20250929-v1:0", "name": "Claude Sonnet 4.5", "cost": "~$3/$15 per 1M tokens", "provider": "Anthropic", "input_cost_per_m": 3.00},
     {"id": "bedrock/us.anthropic.claude-sonnet-4-6", "name": "Claude Sonnet 4.6 (best quality)", "cost": "~$3/$15 per 1M tokens", "provider": "Anthropic", "input_cost_per_m": 3.00},
     {"id": "bedrock/us.anthropic.claude-opus-4-6-v1", "name": "Claude Opus 4.6 (premium)", "cost": "~$15/$75 per 1M tokens", "provider": "Anthropic", "input_cost_per_m": 15.00, "high_cost": True},
+    {"id": "bedrock/us.anthropic.claude-opus-4-7", "name": "Claude Opus 4.7 (premium)", "cost": "~$15/$75 per 1M tokens", "provider": "Anthropic", "input_cost_per_m": 15.00, "high_cost": True},
 ]
 
-_MODEL_DISCOVERY_INTERVAL = int(os.environ.get("MODEL_DISCOVERY_INTERVAL_H", "24")) * 3600
+_refresh_h = os.environ.get("MODEL_REFRESH_HOURS") or os.environ.get("MODEL_DISCOVERY_INTERVAL_H", "24")
+_MODEL_DISCOVERY_INTERVAL = int(_refresh_h) * 3600
 _model_discovery_lock = threading.Lock()
 _last_discovery_time: float = 0.0
 
@@ -816,22 +1001,39 @@ def _schedule_model_discovery():
     logger.info("Model discovery scheduler started (interval=%dh)", _MODEL_DISCOVERY_INTERVAL // 3600)
 
 
-# Kick off discovery on import (runs in background thread so startup isn't blocked)
-threading.Thread(target=_schedule_model_discovery, daemon=True, name="model-discovery-init").start()
-
-
 @app.get("/health", tags=["System"])
 async def health_check():
-    """Health check endpoint (no auth) — useful for load balancers and monitoring."""
+    """Health check with light runtime stats (no auth)."""
     running = sum(1 for s in SCANS.values() if s.get("status") == "running")
     return {"status": "ok", "scans_running": running, "total_scans": len(SCANS)}
+
+
+@app.get("/healthz", tags=["System"], include_in_schema=False)
+async def healthz():
+    """ALB target health — 200 OK, no database access."""
+    return Response(status_code=200)
+
+
+@app.get("/api/admin/db-health", tags=["Admin"])
+async def admin_db_health(_admin=Depends(require_admin)):
+    """SQLite + Postgres dual-write health (admin only)."""
+    sqlite_status = "ok"
+    try:
+        scandb.scan_count()
+    except Exception as exc:
+        sqlite_status = f"degraded:{exc}"
+    pg = pgdb.health_check()
+    return {
+        "sqlite": sqlite_status,
+        "postgres": pg.get("status", "degraded"),
+        "postgres_error": pg.get("error") or None,
+    }
 
 
 @app.get("/login", include_in_schema=False)
 async def login_page(request: Request):
     """Serve the login page. If already authenticated, redirect to /."""
-    cookie = request.cookies.get(_SESSION_COOKIE)
-    if cookie and _verify_session_token(cookie):
+    if _session_valid(request):
         from fastapi.responses import RedirectResponse
         return RedirectResponse("/", status_code=302)
     return FileResponse(
@@ -842,21 +1044,28 @@ async def login_page(request: Request):
 
 @app.post("/login", include_in_schema=False)
 async def login_submit(request: Request):
-    """Validate credentials and set session cookie."""
+    """Validate credentials and set session cookie (local dev when SSO disabled)."""
+    from fastapi.responses import RedirectResponse
+    if saml_auth.sso_enabled():
+        return RedirectResponse("/sso/login", status_code=302)
     form = await request.form()
     username = form.get("username", "")
     password = form.get("password", "")
     if hmac.compare_digest(str(username).encode(), _AUTH_USER.encode()) and \
        hmac.compare_digest(str(password).encode(), _AUTH_PASS.encode()):
-        from fastapi.responses import RedirectResponse
-        token = _create_session_token(str(username))
+        email = f"{username}@local.dev"
+        user = _USER_REPO.upsert_login(
+            email, name=str(username), role=UserRole.ADMIN.value
+        )
+        if user is None:
+            return RedirectResponse("/login?error=1", status_code=302)
+        token = create_session_token(user.id)
         resp = RedirectResponse("/", status_code=302)
         resp.set_cookie(
             key=_SESSION_COOKIE, value=token,
             max_age=_SESSION_MAX_AGE, httponly=True, samesite="lax",
         )
         return resp
-    from fastapi.responses import RedirectResponse
     return RedirectResponse("/login?error=1", status_code=302)
 
 
@@ -881,20 +1090,21 @@ async def index(request: Request, auth=Depends(_verify_or_redirect)):
 
 
 @app.get("/api/dashboard", tags=["System"])
-async def get_dashboard():
+async def get_dashboard(request: Request):
     """Aggregate stats for the dashboard page."""
     try:
-        return await _get_dashboard_inner()
+        return await _get_dashboard_inner(request)
     except Exception as e:
         logger.error("get_dashboard failed: %s", e, exc_info=True)
         return JSONResponse({"error": f"Dashboard error: {type(e).__name__}: {e}"}, status_code=500)
 
-async def _get_dashboard_inner():
-    total = len(SCANS)
-    running = sum(1 for s in SCANS.values() if s.get("status") == "running")
-    completed = sum(1 for s in SCANS.values() if s.get("status") in ("completed", "done"))
-    errored = sum(1 for s in SCANS.values() if s.get("status") in ("error", "failed"))
-    cancelled = sum(1 for s in SCANS.values() if s.get("status") == "cancelled")
+async def _get_dashboard_inner(request: Request):
+    visible = _scans_for_user(request)
+    total = len(visible)
+    running = sum(1 for s in visible.values() if s.get("status") == "running")
+    completed = sum(1 for s in visible.values() if s.get("status") in ("completed", "done"))
+    errored = sum(1 for s in visible.values() if s.get("status") in ("error", "failed"))
+    cancelled = sum(1 for s in visible.values() if s.get("status") == "cancelled")
 
     severity_breakdown: dict[str, int] = {}
     verdict_breakdown: dict[str, int] = {}
@@ -904,7 +1114,7 @@ async def _get_dashboard_inner():
     errored_cost = 0.0
     running_cost = 0.0
 
-    for sid, s in SCANS.items():
+    for sid, s in visible.items():
         scan_cost = s.get("cost", 0) or s.get("live_cost", 0) or 0
         total_cost += scan_cost
         st = s.get("status", "")
@@ -914,26 +1124,24 @@ async def _get_dashboard_inner():
             errored_cost += scan_cost
         elif st in ("running", "paused", "pausing"):
             running_cost += scan_cost
-        findings = _ensure_triaged(sid, s)
-
-        if not findings:
-            total_findings += s.get("findings_count", 0) or 0
-        else:
-            for f in findings:
-                total_findings += 1
-                raw_sev_val = f.get("severity") or f.get("final_severity") or "Info"
-                raw_sev = (raw_sev_val if isinstance(raw_sev_val, str) else str(raw_sev_val)).strip()
-                sev = _normalize_severity(raw_sev)
-                if sev and sev not in ("Not Exploitable", "TBD", ""):
-                    severity_breakdown[sev] = severity_breakdown.get(sev, 0) + 1
-                raw_verdict = f.get("verdict", "NEEDS_VERIFICATION")
-                verdict = _normalize_verdict(raw_verdict)
-                verdict_breakdown[verdict] = verdict_breakdown.get(verdict, 0) + 1
+        total_findings += s.get("findings_count", 0) or 0
+        # Use only in-memory triage cache — never load/triage full result files here
+        # (265 scans × disk read × triage_classify made /api/dashboard very slow on cold start).
+        findings = s.get("triaged_findings") or []
+        for f in findings:
+            raw_sev_val = f.get("severity") or f.get("final_severity") or "Info"
+            raw_sev = (raw_sev_val if isinstance(raw_sev_val, str) else str(raw_sev_val)).strip()
+            sev = _normalize_severity(raw_sev)
+            if sev and sev not in ("Not Exploitable", "TBD", ""):
+                severity_breakdown[sev] = severity_breakdown.get(sev, 0) + 1
+            raw_verdict = f.get("verdict", "NEEDS_VERIFICATION")
+            verdict = _normalize_verdict(raw_verdict)
+            verdict_breakdown[verdict] = verdict_breakdown.get(verdict, 0) + 1
 
     recent = []
-    sorted_scans = sorted(SCANS.items(), key=lambda x: x[1].get("started", ""), reverse=True)[:10]
+    sorted_scans = sorted(visible.items(), key=lambda x: x[1].get("started", ""), reverse=True)[:10]
     for sid, s in sorted_scans:
-        findings_list = _ensure_triaged(sid, s)
+        findings_list = s.get("triaged_findings") or []
         recent.append({
             "id": sid,
             "target": s.get("target_url", ""),
@@ -946,7 +1154,7 @@ async def _get_dashboard_inner():
             "started": s.get("started", ""),
         })
 
-    ledger = scandb.get_cost_ledger()
+    ledger = dbread.get_cost_ledger()
     all_time_cost = ledger.get("all_time_cost", 0)
     deleted_cost = ledger.get("deleted_scans_cost", 0)
     deleted_count = ledger.get("deleted_scans_count", 0)
@@ -1105,8 +1313,8 @@ async def get_models():
 
 
 @app.post("/api/models/refresh", tags=["System"])
-async def refresh_models(creds=Depends(_verify)):
-    """Trigger a model re-discovery (canary-tests all Bedrock models)."""
+async def refresh_models(_admin=Depends(require_admin)):
+    """Trigger a model re-discovery (canary-tests all Bedrock models). Admin only."""
     threading.Thread(target=_run_model_discovery_bg, daemon=True).start()
     return {"status": "discovery_started", "message": "Model discovery running in background. Refresh in ~60s."}
 
@@ -1125,6 +1333,7 @@ async def models_status():
 
 @app.get("/api/scans", tags=["Scans"])
 async def list_scans(
+    request: Request,
     page: int = 1,
     per_page: int = 25,
     search: str = "",
@@ -1132,8 +1341,13 @@ async def list_scans(
     per_page = min(max(per_page, 1), 100)
     page = max(page, 1)
 
+    visible = _scans_for_user(request)
+    if _use_external_scanner() and dbread.READ_FROM_PG:
+        for scan_id, info in list(visible.items()):
+            if info.get("status") in ("running", "queued") or info.get("worker_ref"):
+                _sync_scan_from_pg(scan_id)
     all_scans = []
-    for scan_id, info in sorted(SCANS.items(), key=lambda x: x[1].get("started", ""), reverse=True):
+    for scan_id, info in sorted(visible.items(), key=lambda x: x[1].get("started", ""), reverse=True):
         entry: dict = {
             "id": scan_id,
             "target": info.get("target_url", ""),
@@ -1180,7 +1394,7 @@ async def get_ui_settings(creds=Depends(_verify)):
     """Column visibility and triage table prefs (stored in SQLite, not browser storage)."""
     out: dict = {}
     for key in ("scanColVisibility", "triage_cols"):
-        raw = scandb.app_kv_get(key)
+        raw = dbread.app_kv_get(key)
         if not raw:
             continue
         try:
@@ -1191,8 +1405,8 @@ async def get_ui_settings(creds=Depends(_verify)):
 
 
 @app.put("/api/ui-settings", tags=["Settings"])
-async def put_ui_settings(request: Request, creds=Depends(_verify)):
-    """Merge partial UI settings into app_kv."""
+async def put_ui_settings(request: Request, creds=Depends(require_admin)):
+    """Merge partial UI settings into app_kv (admin only)."""
     try:
         body = await request.json()
     except Exception:
@@ -1202,7 +1416,9 @@ async def put_ui_settings(request: Request, creds=Depends(_verify)):
     for key in ("scanColVisibility", "triage_cols"):
         if key not in body:
             continue
-        scandb.app_kv_set(key, json.dumps(body[key], default=str))
+        val = json.dumps(body[key], default=str)
+        scandb.app_kv_set(key, val)
+        _mirror_to_pg("app_kv_set", key, val)
     return {"status": "ok"}
 
 
@@ -1568,6 +1784,7 @@ async def analyze_instruction(request: Request):
             "    - 'standard', 'balanced', 'moderate' → 'standard'\n"
             "    - 'thorough', 'deep', 'full', 'exhaustive' → 'deep'\n"
             "    - focus_areas non-empty → ALWAYS 'deep' regardless of anything else\n"
+            "  llm_scan_depth ('standard'|'deep') — controls Garak LLM probe depth. 'standard' = 15 payloads/probe (~8 min), 'deep' = 256 payloads/probe (~30 min). Default 'standard'. Set to 'deep' ONLY when the user explicitly says 'deep LLM', 'full LLM', 'thorough LLM', or 'all Garak payloads'.\n"
             "  exclude_urls (list of URLs/paths the user wants to SKIP — extract from phrases like 'skip', 'exclude', 'don't scan', 'ignore', 'avoid'),\n"
             "  extra_domains (list of additional allowed domains mentioned in the instruction),\n"
             "  steps (list of human-readable steps the scan will take),\n"
@@ -1587,6 +1804,8 @@ async def analyze_instruction(request: Request):
             plan["scan_intensity"] = "deep"
         if plan.get("focus_areas"):
             plan["scan_intensity"] = "deep"
+        if not plan.get("llm_scan_depth"):
+            plan["llm_scan_depth"] = "standard"
         result = {"plan": plan, "model_used": model}
         if ep_summary:
             result["api_endpoints_summary"] = ep_summary
@@ -1597,60 +1816,143 @@ async def analyze_instruction(request: Request):
         return JSONResponse({"error": str(e)}, status_code=500)
 
 
-@app.post("/api/scan", tags=["Scans"])
-async def start_scan(request: Request):
+def _build_scan_job_config(
+    *,
+    target_url: str,
+    username: str,
+    password: str,
+    model: str,
+    scan_mode: str,
+    auth_type: str,
+    api_imports: dict,
+    extra_domains: list,
+    scan_scope: str,
+    focus_urls: list,
+    focus_areas: list,
+    exclude_urls: list,
+    scan_intensity: str,
+    llm_scan_depth: str,
+    scan_profile: str,
+    skip_passive_sibling_tls: bool,
+    username_b: str,
+    password_b: str,
+    credentials_admin: dict,
+    credentials_tenant_b: dict,
+    workflow_id: str | None,
+    business_flow: str | None,
+    ai_instructions: str | None = None,
+) -> dict:
+    return {
+        "target_url": target_url,
+        "username": username,
+        "password": password,
+        "model": model,
+        "scan_mode": scan_mode,
+        "auth_type": auth_type,
+        "api_imports": api_imports,
+        "extra_domains": extra_domains,
+        "scan_scope": scan_scope,
+        "focus_urls": focus_urls,
+        "focus_areas": focus_areas,
+        "exclude_urls": exclude_urls,
+        "scan_intensity": scan_intensity,
+        "llm_scan_depth": llm_scan_depth,
+        "scan_profile": scan_profile,
+        "skip_passive_sibling_tls": skip_passive_sibling_tls,
+        "username_b": username_b,
+        "password_b": password_b,
+        "credentials_admin": credentials_admin,
+        "credentials_tenant_b": credentials_tenant_b,
+        "workflow_id": workflow_id,
+        "business_flow": business_flow,
+        "ai_instructions": ai_instructions,
+    }
+
+
+def _use_external_scanner() -> bool:
+    return scan_launcher.SPAWN_SCANNER_CONTAINER or scan_launcher.SCAN_LAUNCHER in (
+        "local-docker",
+        "docker",
+        "fargate",
+    )
+
+
+def _sync_scan_from_pg(scan_id: str) -> bool:
+    """Refresh in-memory scan row from Postgres after an external worker updates it."""
+    info = SCANS.get(scan_id)
+    if not info or not dbread.READ_FROM_PG:
+        return False
+    if not info.get("worker_ref") and not (
+        _use_external_scanner() and info.get("status") in ("running", "queued")
+    ):
+        return False
     try:
-        body = await request.json()
+        fresh = pgdb.get_scan_info(scan_id)
     except Exception:
-        return JSONResponse({"error": "Invalid JSON body"}, status_code=400)
-    target_url = body.get("target_url", "").strip()
-    username = body.get("username", "").strip()
-    password = body.get("password", "").strip()
-    username_b = body.get("username_b", "").strip()
-    password_b = body.get("password_b", "").strip()
-    credentials_admin = body.get("credentials_admin") or {}
-    credentials_tenant_b = body.get("credentials_tenant_b") or {}
-    model = _resolve_model_id(body.get("model", ""))
-    scan_mode_raw = body.get("scan_mode", "both")
-    _MODE_MAP = {"standard": "both", "quick": "both", "deep": "both",
-                 "full": "both", "web": "website", "site": "website"}
-    scan_mode = _MODE_MAP.get(scan_mode_raw, scan_mode_raw)
-    if scan_mode not in ("website", "api", "both"):
-        scan_mode = "both"
+        logger.debug("PG sync failed for %s", scan_id, exc_info=True)
+        return False
+    if not fresh:
+        return False
+    for key in _TRANSIENT_KEYS:
+        if key in info:
+            fresh[key] = info[key]
+    if info.get("worker_ref") and "worker_ref" not in fresh:
+        fresh["worker_ref"] = info["worker_ref"]
+    SCANS[scan_id].update(fresh)
+    return True
 
-    auth_type = body.get("auth_type", "auto")
-    api_imports = body.get("api_imports", {}) or {}
-    extra_domains = body.get("extra_domains", []) or []
-    scan_scope = body.get("scan_scope", "directory")
-    focus_urls = body.get("focus_urls", []) or []
-    focus_areas = body.get("focus_areas", []) or []
-    exclude_urls = body.get("exclude_urls", []) or []
-    scan_intensity = body.get("scan_intensity", "deep")
-    workflow_id = body.get("workflow_id", "").strip() or None
-    business_flow = body.get("business_flow", "").strip() or None
-    scan_profile = (body.get("scan_profile") or "vulnerability_scan").strip().lower()
-    skip_passive_sibling_tls = bool(body.get("skip_passive_sibling_tls"))
-    if scan_intensity not in ("light", "standard", "deep"):
-        scan_intensity = "deep"
-    if focus_areas:
-        scan_intensity = "deep"
 
-    if scan_scope not in ("url_only", "directory", "full_site"):
-        scan_scope = "directory"
+def _launch_scan_core(params, owner_id: str | None, *, postman_collection_b64: str | None = None, burp_export_b64: str | None = None):
+    """Create scan record and start in-process thread or external worker."""
+    err = validate_scan_launch_params(params)
+    if err:
+        return JSONResponse({"error": err}, status_code=400)
 
-    if scan_profile not in ("vulnerability_scan", "crawl_only", "multi_agent"):
-        scan_profile = "vulnerability_scan"
-    # Crawl-only is incompatible with focus_areas (focus_areas selects vuln
-    # categories; crawl-only tests nothing). Silently drop focus_areas in
-    # crawl-only mode rather than fail — the user's intent was "just crawl".
-    if scan_profile == "crawl_only":
-        focus_areas = []
+    try:
+        api_imports = materialize_api_imports(
+            params.api_imports,
+            IMPORTS_DIR,
+            postman_collection_b64=postman_collection_b64,
+            burp_export_b64=burp_export_b64,
+        )
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
 
-    if not target_url:
-        return JSONResponse({"error": "Target URL is required"}, status_code=400)
+    model_policy = (getattr(params, "model_policy", None) or "manual").strip().lower()
+    if model_policy not in ("manual", "auto"):
+        model_policy = "manual"
+
+    models_list = _get_models()
+    if model_policy == "auto":
+        model = _resolve_model_id(params.model) if params.model else _cheapest_model()
+    else:
+        model = _resolve_model_id(params.model) if params.model else _cheapest_model()
+
+    cost_estimate = estimate_scan_cost(
+        params.scan_mode,
+        params.scan_intensity,
+        params.llm_scan_depth,
+        model_policy,
+        model if model_policy == "manual" else None,
+        models_list,
+    )
+    budget_cap = getattr(params, "budget_cap_usd", None)
+    if budget_cap is None and cost_estimate.get("recommended_budget_usd"):
+        budget_cap = cost_estimate["recommended_budget_usd"]
 
     scan_id = f"scan_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
-    model_name = next((m.get("name", m.get("id", model)) for m in _get_models() if m.get("id") == model), model)
+    if model_policy == "auto":
+        model_name = "Auto (scanner-selected model)"
+    else:
+        model_name = next(
+            (m.get("name", m.get("id", model)) for m in models_list if m.get("id") == model),
+            model,
+        )
+
+    if owner_id and pgdb.dual_write_enabled():
+        canonical = pgdb.resolve_owner_user_id(owner_id)
+        if canonical:
+            owner_id = canonical
 
     cancel_flag = threading.Event()
     pause_flag = threading.Event()
@@ -1660,51 +1962,160 @@ async def start_scan(request: Request):
     interactive_session = _create_interactive_session(scan_id)
 
     SCANS[scan_id] = {
-        "target_url": target_url,
+        "target_url": params.target_url,
+        "owner_user_id": owner_id,
         "model": model,
         "model_name": model_name,
+        "model_policy": model_policy,
+        "model_choices": {},
+        "budget_cap_usd": budget_cap,
+        "budget_total_usd": 0.0,
+        "budget_status": "ok" if budget_cap is not None else None,
+        "estimated_cost_usd": cost_estimate.get("expected_usd"),
+        "cost_estimate": cost_estimate,
         "status": "running",
         "started": datetime.now().isoformat(),
         "progress": [],
-        "scan_mode": scan_mode,
-        "scan_scope": scan_scope,
-        "focus_urls": focus_urls,
-        "focus_areas": focus_areas,
-        "exclude_urls": exclude_urls,
-        "scan_intensity": scan_intensity,
-        "scan_profile": scan_profile,
-        "skip_passive_sibling_tls": skip_passive_sibling_tls,
-        "workflow_id": workflow_id,
-        "business_flow": business_flow,
-        "auth_type": auth_type,
-        "_username": username,
-        "_password": password,
-        "_username_b": username_b,
-        "_password_b": password_b,
-        "_credentials_admin": credentials_admin,
-        "_credentials_tenant_b": credentials_tenant_b,
+        "scan_mode": params.scan_mode,
+        "scan_scope": params.scan_scope,
+        "focus_urls": params.focus_urls,
+        "focus_areas": params.focus_areas,
+        "exclude_urls": params.exclude_urls,
+        "scan_intensity": params.scan_intensity,
+        "llm_scan_depth": params.llm_scan_depth,
+        "scan_profile": params.scan_profile,
+        "skip_passive_sibling_tls": params.skip_passive_sibling_tls,
+        "workflow_id": params.workflow_id,
+        "business_flow": params.business_flow,
+        "ai_instructions": params.ai_instructions,
+        "auth_type": params.auth_type,
+        "_username": params.username,
+        "_password": params.password,
+        "_username_b": params.username_b,
+        "_password_b": params.password_b,
+        "_credentials_admin": params.credentials_admin,
+        "_credentials_tenant_b": params.credentials_tenant_b,
         "_api_imports": api_imports,
-        "_extra_domains": extra_domains,
+        "_extra_domains": params.extra_domains,
+        "_custom_headers": params.custom_headers,
     }
     _save_scan(scan_id)
 
+    if _use_external_scanner():
+        job_config = _build_scan_job_config(
+            target_url=params.target_url,
+            username=params.username,
+            password=params.password,
+            model=model,
+            scan_mode=params.scan_mode,
+            auth_type=params.auth_type,
+            api_imports=api_imports,
+            extra_domains=params.extra_domains,
+            scan_scope=params.scan_scope,
+            focus_urls=params.focus_urls,
+            focus_areas=params.focus_areas,
+            exclude_urls=params.exclude_urls,
+            scan_intensity=params.scan_intensity,
+            llm_scan_depth=params.llm_scan_depth,
+            scan_profile=params.scan_profile,
+            skip_passive_sibling_tls=params.skip_passive_sibling_tls,
+            username_b=params.username_b,
+            password_b=params.password_b,
+            credentials_admin=params.credentials_admin,
+            credentials_tenant_b=params.credentials_tenant_b,
+            workflow_id=params.workflow_id,
+            business_flow=params.business_flow,
+            ai_instructions=params.ai_instructions,
+        )
+        SCANS[scan_id]["status"] = "queued"
+        _save_scan(scan_id)
+        try:
+            worker_ref = scan_launcher.launch_scan_worker(scan_id, job_config)
+            SCANS[scan_id]["worker_ref"] = worker_ref
+            SCANS[scan_id]["status"] = "running"
+            _save_scan(scan_id)
+            publish_event(scan_id, "queued", {"worker_ref": worker_ref})
+        except Exception as exc:
+            logger.exception("Failed to launch scanner worker for %s", scan_id)
+            SCANS[scan_id]["status"] = "error"
+            SCANS[scan_id]["error"] = str(exc)
+            _save_scan(scan_id)
+            return JSONResponse({"error": str(exc), "scan_id": scan_id}, status_code=500)
+        return {"scan_id": scan_id, "status": "queued", "worker_ref": worker_ref}
+
     thread = threading.Thread(
         target=_run_scan_in_thread,
-        args=(scan_id, target_url, username, password, model, scan_mode, auth_type, api_imports, extra_domains, cancel_flag, pause_flag),
-        kwargs={"scan_scope": scan_scope, "focus_urls": focus_urls, "focus_areas": focus_areas, "scan_intensity": scan_intensity, "exclude_urls": exclude_urls, "username_b": username_b, "password_b": password_b, "credentials_admin": credentials_admin, "credentials_tenant_b": credentials_tenant_b, "interactive_session": interactive_session, "workflow_id": workflow_id, "business_flow": business_flow, "scan_profile": scan_profile, "skip_passive_sibling_tls": skip_passive_sibling_tls},
+        args=(
+            scan_id,
+            params.target_url,
+            params.username,
+            params.password,
+            model,
+            params.scan_mode,
+            params.auth_type,
+            api_imports,
+            params.extra_domains,
+            cancel_flag,
+            pause_flag,
+        ),
+        kwargs={
+            "scan_scope": params.scan_scope,
+            "focus_urls": params.focus_urls,
+            "focus_areas": params.focus_areas,
+            "scan_intensity": params.scan_intensity,
+            "llm_scan_depth": params.llm_scan_depth,
+            "exclude_urls": params.exclude_urls,
+            "username_b": params.username_b,
+            "password_b": params.password_b,
+            "credentials_admin": params.credentials_admin,
+            "credentials_tenant_b": params.credentials_tenant_b,
+            "interactive_session": interactive_session,
+            "workflow_id": params.workflow_id,
+            "business_flow": params.business_flow,
+            "scan_profile": params.scan_profile,
+            "skip_passive_sibling_tls": params.skip_passive_sibling_tls,
+            "ai_instructions": params.ai_instructions,
+        },
         daemon=True,
     )
     thread.start()
     return {"scan_id": scan_id, "status": "started"}
 
 
-def _run_scan_in_thread(scan_id, target_url, username, password, model, scan_mode, auth_type, api_imports=None, extra_domains=None, cancel_flag=None, pause_flag=None, start_from_phase=0, initial_findings=None, scan_scope="directory", focus_urls=None, focus_areas=None, scan_intensity="deep", exclude_urls=None, username_b="", password_b="", credentials_admin=None, credentials_tenant_b=None, interactive_session=None, workflow_id=None, business_flow=None, scan_profile="vulnerability_scan", skip_passive_sibling_tls=False):
+@app.post("/api/scan", tags=["Scans"])
+async def start_scan(request: Request):
+    """Start a scan (JSON body). Accepts the same fields as the web UI launch form."""
+    owner = _request_user(request)
+    owner_id = owner.id if owner else None
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "Invalid JSON body"}, status_code=400)
+    params = parse_scan_launch_dict(body)
+    return _launch_scan_core(params, owner_id)
+
+
+@app.post("/api/v1/scans", tags=["Scans"], response_model=None)
+async def start_scan_v1(body: ScanLaunchRequest, request: Request):
+    """Start a scan via typed JSON (OpenAPI-documented). Supports base64 file imports."""
+    owner = _request_user(request)
+    owner_id = owner.id if owner else None
+    params = request_to_launch_params(body)
+    return _launch_scan_core(
+        params,
+        owner_id,
+        postman_collection_b64=body.postman_collection_b64,
+        burp_export_b64=body.burp_export_b64,
+    )
+
+
+def _run_scan_in_thread(scan_id, target_url, username, password, model, scan_mode, auth_type, api_imports=None, extra_domains=None, cancel_flag=None, pause_flag=None, start_from_phase=0, initial_findings=None, scan_scope="directory", focus_urls=None, focus_areas=None, scan_intensity="deep", llm_scan_depth="standard", exclude_urls=None, username_b="", password_b="", credentials_admin=None, credentials_tenant_b=None, interactive_session=None, workflow_id=None, business_flow=None, scan_profile="vulnerability_scan", skip_passive_sibling_tls=False, ai_instructions=None):
     """Run scan in a separate thread with its own event loop so the main UI stays responsive."""
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     try:
         loop.run_until_complete(
-            _run_scan_task(scan_id, target_url, username, password, model, scan_mode, auth_type, api_imports, extra_domains, cancel_flag, pause_flag, start_from_phase, initial_findings, scan_scope=scan_scope, focus_urls=focus_urls, focus_areas=focus_areas, scan_intensity=scan_intensity, exclude_urls=exclude_urls, username_b=username_b, password_b=password_b, credentials_admin=credentials_admin, credentials_tenant_b=credentials_tenant_b, interactive_session=interactive_session, workflow_id=workflow_id, business_flow=business_flow, scan_profile=scan_profile, skip_passive_sibling_tls=skip_passive_sibling_tls)
+            _run_scan_task(scan_id, target_url, username, password, model, scan_mode, auth_type, api_imports, extra_domains, cancel_flag, pause_flag, start_from_phase, initial_findings, scan_scope=scan_scope, focus_urls=focus_urls, focus_areas=focus_areas, scan_intensity=scan_intensity, llm_scan_depth=llm_scan_depth, exclude_urls=exclude_urls, username_b=username_b, password_b=password_b, credentials_admin=credentials_admin, credentials_tenant_b=credentials_tenant_b, interactive_session=interactive_session, workflow_id=workflow_id, business_flow=business_flow, scan_profile=scan_profile, skip_passive_sibling_tls=skip_passive_sibling_tls, ai_instructions=ai_instructions)
         )
     finally:
         loop.close()
@@ -1713,7 +2124,7 @@ def _run_scan_in_thread(scan_id, target_url, username, password, model, scan_mod
         INTERACTIVE_BROWSERS.pop(scan_id, None)
 
 
-async def _run_scan_task(scan_id, target_url, username, password, model, scan_mode, auth_type, api_imports=None, extra_domains=None, cancel_flag=None, pause_flag=None, start_from_phase=0, initial_findings=None, scan_scope="directory", focus_urls=None, focus_areas=None, scan_intensity="deep", exclude_urls=None, username_b="", password_b="", credentials_admin=None, credentials_tenant_b=None, interactive_session=None, workflow_id=None, business_flow=None, scan_profile="vulnerability_scan", skip_passive_sibling_tls=False):
+async def _run_scan_task(scan_id, target_url, username, password, model, scan_mode, auth_type, api_imports=None, extra_domains=None, cancel_flag=None, pause_flag=None, start_from_phase=0, initial_findings=None, scan_scope="directory", focus_urls=None, focus_areas=None, scan_intensity="deep", llm_scan_depth="standard", exclude_urls=None, username_b="", password_b="", credentials_admin=None, credentials_tenant_b=None, interactive_session=None, workflow_id=None, business_flow=None, scan_profile="vulnerability_scan", skip_passive_sibling_tls=False, ai_instructions=None):
     try:
         scan = SCANS[scan_id]
         scan["progress"].append("Initializing LLM router...")
@@ -1722,6 +2133,8 @@ async def _run_scan_task(scan_id, target_url, username, password, model, scan_mo
         seeded, _seen = _dedupe_findings(initial_findings or [])
         scan["live_findings"] = seeded
         scan["_findings_seen"] = _seen
+        for f in seeded:
+            _mirror_to_pg("save_finding", scan_id, f)
         scan["live_crawled"] = []
         scan["live_forms"] = 0
         scan["live_tool_calls"] = 0
@@ -1803,6 +2216,7 @@ async def _run_scan_task(scan_id, target_url, username, password, model, scan_mo
                 if key is not None:
                     seen.add(key)
                 scan["live_findings"].append(f)
+                _mirror_to_pg("save_finding", scan_id, f)
                 # Intra-phase checkpoint: persist every 5 new findings so a
                 # mid-phase crash doesn't lose findings discovered since the
                 # last phase_end. phase_end still persists on boundaries.
@@ -1933,7 +2347,36 @@ async def _run_scan_task(scan_id, target_url, username, password, model, scan_mo
             logger.error("Pre-scan connectivity check FAILED: %s — %s", target_url, exc)
             return
 
-        router = LLMRouter(models=[model])
+        model_policy = scan.get("model_policy", "manual")
+        model_choices = scan.setdefault("model_choices", {})
+        owner_id = scan.get("owner_user_id")
+        owner_label = _budget_owner_label(owner_id)
+
+        def _on_budget_exceeded():
+            scan["status"] = "paused"
+            _save_scan(scan_id)
+
+        guard = BudgetGuard(
+            scan_id,
+            scan.get("budget_cap_usd"),
+            owner_id,
+            SCANS,
+            pause_flag,
+            owner_label=owner_label,
+            on_exceeded=_on_budget_exceeded,
+        )
+        scan["_budget_guard"] = guard
+
+        model_selector = None
+        if model_policy == "auto":
+            model_selector = ModelSelector(
+                _get_models(), policy="auto", manual_model=model,
+            )
+
+        router_models = [model]
+        if model_policy == "auto":
+            router_models = list({m["id"] for m in _get_models()} | {model})
+        router = LLMRouter(models=router_models, on_cost=guard.record)
         scan["_router"] = router
 
         resolved_imports = {}
@@ -1955,10 +2398,12 @@ async def _run_scan_task(scan_id, target_url, username, password, model, scan_mo
             "focus_areas": focus_areas or [],
             "exclude_urls": exclude_urls or [],
             "scan_intensity": scan_intensity,
+            "llm_scan_depth": llm_scan_depth,
             "scan_profile": scan_profile,
             "skip_passive_sibling_tls": skip_passive_sibling_tls,
             "workflow_id": workflow_id,
             "business_flow": business_flow,
+            "ai_instructions": ai_instructions or scan.get("ai_instructions"),
         }
         if username_b or password_b:
             target_dict["credentials_b"] = {"username": username_b, "password": password_b}
@@ -1971,7 +2416,21 @@ async def _run_scan_task(scan_id, target_url, username, password, model, scan_mo
         scan["progress"].append(f"Starting scan with {model}...")
         start = time.perf_counter()
         config_dir = str(BASE / "config")
-        findings, metrics = await run_scan(target, model, router, config_dir, on_progress=_on_progress, extra_domains=extra_domains, cancel_flag=cancel_flag, pause_flag=pause_flag, start_from_phase=start_from_phase, initial_findings=initial_findings, interactive_session=interactive_session)
+        findings, metrics = await run_scan(
+            target,
+            model,
+            router,
+            config_dir,
+            on_progress=_on_progress,
+            extra_domains=extra_domains,
+            cancel_flag=cancel_flag,
+            pause_flag=pause_flag,
+            start_from_phase=start_from_phase,
+            initial_findings=initial_findings,
+            interactive_session=interactive_session,
+            model_selector=model_selector,
+            model_choices=model_choices,
+        )
         duration = time.perf_counter() - start
 
         model_slug = model.replace("/", "_").replace(".", "_").replace(":", "_")
@@ -2003,6 +2462,7 @@ async def _run_scan_task(scan_id, target_url, username, password, model, scan_mo
         SCANS[scan_id].pop("auth_challenge", None)
         SCANS[scan_id].pop("interactive_browser", None)
         scandb.add_all_time_cost(final_cost)
+        _mirror_to_pg("add_all_time_cost", final_cost)
         _save_scan(scan_id)
     except ScanCancelled:
         duration = time.perf_counter() - start
@@ -2044,6 +2504,7 @@ async def _run_scan_task(scan_id, target_url, username, password, model, scan_mo
         SCANS[scan_id].pop("interactive_browser", None)
         if _cost:
             scandb.add_all_time_cost(_cost)
+            _mirror_to_pg("add_all_time_cost", _cost)
         _save_scan(scan_id)
     except Exception as e:
         try:
@@ -2098,12 +2559,97 @@ async def _run_scan_task(scan_id, target_url, username, password, model, scan_mo
         SCANS[scan_id].pop("interactive_browser", None)
         if err_cost:
             scandb.add_all_time_cost(err_cost)
+            _mirror_to_pg("add_all_time_cost", err_cost)
         _save_scan(scan_id)
+
+
+@app.get("/api/scans/{scan_id}/stream", tags=["Scans"])
+async def stream_scan_events(scan_id: str, request: Request):
+    """SSE stream of live scan events (Redis + PG replay)."""
+    last_id = 0
+    raw_last = request.headers.get("last-event-id") or request.headers.get("Last-Event-ID") or "0"
+    try:
+        last_id = int(raw_last)
+    except (TypeError, ValueError):
+        last_id = 0
+
+    from web import live_events
+
+    def _format_sse(ev: dict) -> str:
+        eid = ev.get("id", 0)
+        etype = ev.get("event_type", "message")
+        data = json.dumps(ev.get("payload") or {}, default=str)
+        return f"id: {eid}\nevent: {etype}\ndata: {data}\n\n"
+
+    def _terminal(ev: dict) -> bool:
+        return ev.get("event_type") in ("completed", "error", "cancelled")
+
+    async def event_generator():
+        cursor = last_id
+        # Replay missed events from PG (reconnect / Last-Event-ID)
+        for ev in live_events.replay_events(scan_id, after_id=cursor, limit=500):
+            yield _format_sse(ev)
+            eid = ev.get("id", 0)
+            cursor = max(cursor, int(eid) if eid else 0)
+            if _terminal(ev):
+                return
+
+        if live_events.LIVE_EVENTS_REDIS and os.environ.get("REDIS_URL", "").strip():
+            queue: asyncio.Queue = asyncio.Queue()
+            loop = asyncio.get_running_loop()
+
+            def _redis_worker():
+                try:
+                    for ev in live_events.subscribe_redis(scan_id):
+                        loop.call_soon_threadsafe(queue.put_nowait, ev)
+                except Exception:
+                    pass
+                finally:
+                    loop.call_soon_threadsafe(queue.put_nowait, None)
+
+            import threading
+            threading.Thread(target=_redis_worker, daemon=True).start()
+            while True:
+                try:
+                    ev = await asyncio.wait_for(queue.get(), timeout=30.0)
+                except asyncio.TimeoutError:
+                    yield ": keepalive\n\n"
+                    continue
+                if ev is None:
+                    break
+                eid = ev.get("id", 0)
+                if eid and int(eid) <= cursor:
+                    continue
+                yield _format_sse(ev)
+                cursor = max(cursor, int(eid) if eid else 0)
+                if _terminal(ev):
+                    break
+            return
+
+        while True:
+            batch = live_events.replay_events(scan_id, after_id=cursor, limit=50)
+            if batch:
+                for ev in batch:
+                    yield _format_sse(ev)
+                    eid = ev.get("id", 0)
+                    cursor = max(cursor, int(eid) if eid else 0)
+                if any(_terminal(ev) for ev in batch):
+                    break
+            else:
+                yield ": keepalive\n\n"
+                await asyncio.sleep(1.5)
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 @app.get("/api/scan/{scan_id}", tags=["Scans"])
 async def get_scan_status(scan_id: str):
     if scan_id in SCANS:
+        _sync_scan_from_pg(scan_id)
         s = SCANS[scan_id]
         return {
             "scan_id": scan_id,
@@ -2116,6 +2662,7 @@ async def get_scan_status(scan_id: str):
             "focus_areas": s.get("focus_areas", []),
             "exclude_urls": s.get("exclude_urls", []),
             "scan_intensity": s.get("scan_intensity", "deep"),
+            "llm_scan_depth": s.get("llm_scan_depth", "standard"),
             "scan_profile": s.get("scan_profile", "vulnerability_scan"),
             "started": s.get("started"),
             "progress": s.get("progress", []),
@@ -2129,6 +2676,13 @@ async def get_scan_status(scan_id: str):
             "findings_count": s.get("findings_count", len(s.get("live_findings", []))),
             "phases_completed": s.get("phases_completed", len(s.get("live_phases", []))),
             "findings": s.get("live_findings", []) or _load_partial_findings(scan_id),
+            "model_policy": s.get("model_policy", "manual"),
+            "model_choices": s.get("model_choices", {}),
+            "budget_cap_usd": s.get("budget_cap_usd"),
+            "budget_total_usd": s.get("budget_total_usd", 0),
+            "budget_status": s.get("budget_status"),
+            "estimated_cost_usd": s.get("estimated_cost_usd"),
+            "owner_user_id": s.get("owner_user_id"),
         }
     data = _load_raw_result_dict(scan_id)
     if data:
@@ -2201,7 +2755,121 @@ async def get_scan_live(scan_id: str, since_test: int = 0, since_finding: int = 
         "parallel_active": s.get("parallel_active", False),
         "cache_read_tokens": s.get("live_cache_read", 0),
         "cache_write_tokens": s.get("live_cache_write", 0),
+        "model_policy": s.get("model_policy", "manual"),
+        "model_choices": s.get("model_choices", {}),
+        "budget_cap_usd": s.get("budget_cap_usd"),
+        "budget_total_usd": s.get("budget_total_usd", 0),
+        "budget_status": s.get("budget_status"),
+        "owner_user_id": s.get("owner_user_id"),
     }
+
+
+@app.post("/api/scans/estimate", tags=["Scans"])
+async def estimate_scan_cost_api(request: Request, _auth=Depends(_verify)):
+    """Rough USD cost estimate for the current launch form selections."""
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    params = parse_scan_launch_dict(body)
+    model_policy = (params.model_policy or "manual").lower()
+    model = _resolve_model_id(params.model) if params.model else _cheapest_model()
+    est = estimate_scan_cost(
+        params.scan_mode,
+        params.scan_intensity,
+        params.llm_scan_depth,
+        model_policy,
+        model if model_policy == "manual" else None,
+        _get_models(),
+    )
+    return est
+
+
+@app.get("/api/scans/{scan_id}/budget", tags=["Scans"])
+async def get_scan_budget(scan_id: str, request: Request, _auth=Depends(_verify)):
+    user = _request_user(request)
+    if not _user_can_read_scan(scan_id, user):
+        raise HTTPException(status_code=404, detail="Scan not found")
+    s = SCANS[scan_id]
+    return {
+        "cap_usd": s.get("budget_cap_usd"),
+        "total_usd": s.get("budget_total_usd", 0),
+        "status": s.get("budget_status"),
+        "owner_user_id": s.get("owner_user_id"),
+        "model_choices": s.get("model_choices", {}),
+        "model_policy": s.get("model_policy", "manual"),
+        "estimated_cost_usd": s.get("estimated_cost_usd"),
+    }
+
+
+class _BudgetApproveBody(BaseModel):
+    new_cap_usd: float
+
+
+@app.post("/api/scans/{scan_id}/budget/approve", tags=["Scans"])
+async def approve_scan_budget(
+    scan_id: str,
+    body: _BudgetApproveBody,
+    request: Request,
+    _auth=Depends(_verify),
+):
+    user = _request_user(request)
+    if not _user_can_manage_scan_budget(scan_id, user):
+        raise HTTPException(status_code=403, detail="Only the scan owner or an admin can approve budget")
+    s = SCANS[scan_id]
+    total = float(s.get("budget_total_usd") or 0)
+    new_cap = float(body.new_cap_usd)
+    if new_cap <= total:
+        raise HTTPException(
+            status_code=400,
+            detail=f"new_cap_usd must be greater than current spend (${total:.2f})",
+        )
+    s["budget_cap_usd"] = new_cap
+    s["budget_status"] = "approved"
+    pause = PAUSE_FLAGS.get(scan_id)
+    if pause:
+        pause.clear()
+    approver = user.name or user.email or user.id
+    s["progress"] = s.get("progress", []) + [
+        f"▶ Budget raised to ${new_cap:.2f} by {approver} — resuming",
+    ]
+    if s.get("status") == "paused":
+        s["status"] = "running"
+    guard = s.get("_budget_guard")
+    if guard is not None:
+        guard._cap = new_cap
+        guard._exceeded = False
+    _save_scan(scan_id)
+    return {
+        "scan_id": scan_id,
+        "budget_cap_usd": new_cap,
+        "budget_total_usd": total,
+        "budget_status": "approved",
+        "status": s.get("status"),
+    }
+
+
+@app.post("/api/scans/{scan_id}/budget/stop", tags=["Scans"])
+async def stop_scan_budget(scan_id: str, request: Request, _auth=Depends(_verify)):
+    user = _request_user(request)
+    if not _user_can_manage_scan_budget(scan_id, user):
+        raise HTTPException(status_code=403, detail="Only the scan owner or an admin can stop on budget")
+    s = SCANS[scan_id]
+    s["budget_status"] = "stopped_by_budget"
+    flag = CANCEL_FLAGS.get(scan_id)
+    if flag:
+        flag.set()
+    pause = PAUSE_FLAGS.get(scan_id)
+    if pause:
+        pause.clear()
+    actor = user.name or user.email or user.id
+    s["progress"] = s.get("progress", []) + [
+        f"Scan stopped by {actor} (budget gate)",
+    ]
+    if s.get("status") in ("running", "paused", "pausing"):
+        s["status"] = "stopping"
+    _save_scan(scan_id)
+    return {"scan_id": scan_id, "budget_status": "stopped_by_budget", "status": s.get("status")}
 
 
 @app.post("/api/scan/{scan_id}/stop", tags=["Scans"])
@@ -2413,8 +3081,10 @@ def _extract_scan_params(old: dict, scan_id: str | None = None) -> dict:
         "focus_areas": old.get("focus_areas", []) or [],
         "exclude_urls": old.get("exclude_urls", []) or [],
         "scan_intensity": old.get("scan_intensity", "deep"),
+        "llm_scan_depth": old.get("llm_scan_depth", "standard"),
         "scan_profile": old.get("scan_profile", "vulnerability_scan"),
         "skip_passive_sibling_tls": old.get("skip_passive_sibling_tls", False),
+        "ai_instructions": old.get("ai_instructions"),
     }
 
 
@@ -2481,7 +3151,7 @@ async def retry_scan(scan_id: str, request: Request):
         args=(scan_id, params["target_url"], params["username"], params["password"],
               model, scan_mode, params["auth_type"], params["api_imports"],
               params["extra_domains"], cancel_flag, pause_flag, start_from, prior_findings),
-        kwargs={"scan_scope": params["scan_scope"], "focus_urls": params["focus_urls"], "focus_areas": params["focus_areas"], "scan_intensity": params["scan_intensity"], "scan_profile": params.get("scan_profile", "vulnerability_scan"), "exclude_urls": params.get("exclude_urls", []), "username_b": params.get("username_b", ""), "password_b": params.get("password_b", ""), "credentials_admin": params.get("credentials_admin"), "credentials_tenant_b": params.get("credentials_tenant_b"), "interactive_session": interactive_session, "skip_passive_sibling_tls": params.get("skip_passive_sibling_tls", False)},
+        kwargs={"scan_scope": params["scan_scope"], "focus_urls": params["focus_urls"], "focus_areas": params["focus_areas"], "scan_intensity": params["scan_intensity"], "llm_scan_depth": params.get("llm_scan_depth", "standard"), "scan_profile": params.get("scan_profile", "vulnerability_scan"), "exclude_urls": params.get("exclude_urls", []), "username_b": params.get("username_b", ""), "password_b": params.get("password_b", ""), "credentials_admin": params.get("credentials_admin"), "credentials_tenant_b": params.get("credentials_tenant_b"), "interactive_session": interactive_session, "skip_passive_sibling_tls": params.get("skip_passive_sibling_tls", False), "ai_instructions": params.get("ai_instructions")},
         daemon=True,
     )
     thread.start()
@@ -2538,6 +3208,7 @@ async def rescan(scan_id: str, request: Request):
         "focus_areas": params["focus_areas"],
         "exclude_urls": params.get("exclude_urls", []),
         "scan_intensity": params["scan_intensity"],
+        "llm_scan_depth": params.get("llm_scan_depth", "standard"),
         "scan_profile": params.get("scan_profile", "vulnerability_scan"),
         "skip_passive_sibling_tls": params.get("skip_passive_sibling_tls", False),
         "auth_type": params["auth_type"],
@@ -2549,6 +3220,7 @@ async def rescan(scan_id: str, request: Request):
         "_credentials_tenant_b": params.get("credentials_tenant_b") or {},
         "_api_imports": params["api_imports"],
         "_extra_domains": params["extra_domains"],
+        "ai_instructions": params.get("ai_instructions"),
     }
     _save_scan(new_id)
 
@@ -2557,7 +3229,7 @@ async def rescan(scan_id: str, request: Request):
         args=(new_id, params["target_url"], params["username"], params["password"],
               model, scan_mode, params["auth_type"], params["api_imports"],
               params["extra_domains"], cancel_flag, pause_flag),
-        kwargs={"scan_scope": params["scan_scope"], "focus_urls": params["focus_urls"], "focus_areas": params["focus_areas"], "scan_intensity": params["scan_intensity"], "scan_profile": params.get("scan_profile", "vulnerability_scan"), "exclude_urls": params.get("exclude_urls", []), "username_b": params.get("username_b", ""), "password_b": params.get("password_b", ""), "credentials_admin": params.get("credentials_admin"), "credentials_tenant_b": params.get("credentials_tenant_b"), "interactive_session": interactive_session, "skip_passive_sibling_tls": params.get("skip_passive_sibling_tls", False)},
+        kwargs={"scan_scope": params["scan_scope"], "focus_urls": params["focus_urls"], "focus_areas": params["focus_areas"], "scan_intensity": params["scan_intensity"], "llm_scan_depth": params.get("llm_scan_depth", "standard"), "scan_profile": params.get("scan_profile", "vulnerability_scan"), "exclude_urls": params.get("exclude_urls", []), "username_b": params.get("username_b", ""), "password_b": params.get("password_b", ""), "credentials_admin": params.get("credentials_admin"), "credentials_tenant_b": params.get("credentials_tenant_b"), "interactive_session": interactive_session, "skip_passive_sibling_tls": params.get("skip_passive_sibling_tls", False), "ai_instructions": params.get("ai_instructions")},
         daemon=True,
     )
     thread.start()
@@ -2565,7 +3237,7 @@ async def rescan(scan_id: str, request: Request):
 
 
 @app.delete("/api/scan/{scan_id}", tags=["Scans"])
-async def delete_scan(scan_id: str):
+async def delete_scan(scan_id: str, _admin=Depends(require_admin)):
     """Stop (if running) and fully delete a scan, its result files, and reports."""
     deleted = []
     errors = []
@@ -2585,6 +3257,7 @@ async def delete_scan(scan_id: str):
         if scan_cost > 0:
             try:
                 scandb.add_deleted_cost(scan_cost)
+                _mirror_to_pg("add_deleted_cost", scan_cost)
             except Exception as e:
                 errors.append(f"cost ledger: {e}")
         result_file = SCANS[scan_id].get("result_file")
@@ -2592,6 +3265,7 @@ async def delete_scan(scan_id: str):
         _RESULTS_CACHE.pop(scan_id, None)
         try:
             scandb.delete_scan(scan_id)
+            _mirror_to_pg("delete_scan", scan_id)
         except Exception as e:
             errors.append(f"db delete: {e}")
         CANCEL_FLAGS.pop(scan_id, None)
@@ -2628,7 +3302,7 @@ async def delete_scan(scan_id: str):
 
 
 @app.delete("/api/scans", tags=["Scans"])
-async def delete_all_scans():
+async def delete_all_scans(_admin=Depends(require_admin)):
     """Stop all running scans and delete all scan records, result files, and reports."""
     for sid, info in list(SCANS.items()):
         if info.get("status") in ("running", "paused", "pausing", "stopping"):
@@ -2643,11 +3317,13 @@ async def delete_all_scans():
     bulk_count = len(SCANS)
     if bulk_cost > 0:
         scandb.add_deleted_cost(bulk_cost, bulk_count)
+        _mirror_to_pg("add_deleted_cost", bulk_cost, bulk_count)
     SCANS.clear()
     CANCEL_FLAGS.clear()
     PAUSE_FLAGS.clear()
     try:
         scandb.delete_all_scans()
+        _mirror_to_pg("delete_all_scans")
     except Exception as e:
         logger.warning("delete_all_scans DB cleanup: %s", e)
     count = 0
@@ -2730,7 +3406,7 @@ async def _get_results_inner(scan_id: str):
             "evidence": f.get("evidence", ""),
             "confidence": f.get("confidence", ""),
             "remediation": f.get("remediation", ""),
-            "request_response": f.get("request_response", []),
+            "request_response": _synthesize_rr(f),
         })
         triaged = triage_classify(f, test_log, _index=_tl_index)
         final_sev = triaged.get("final_severity", "Info")
@@ -2749,7 +3425,7 @@ async def _get_results_inner(scan_id: str):
             "evidence": f.get("evidence", ""),
             "remediation": f.get("remediation", ""),
             "confidence": f.get("confidence", ""),
-            "request_response": f.get("request_response", []),
+            "request_response": _synthesize_rr(f),
             "cwe": triaged.get("cwe", ""),
             "cvss": triaged.get("cvss"),
             "cvss_rationale": triaged.get("cvss_rationale", ""),
@@ -2759,6 +3435,10 @@ async def _get_results_inner(scan_id: str):
             "verification_evidence": triaged.get("verification_evidence", ""),
             "exploitation_tier": triaged.get("exploitation_tier", ""),
             "triage_narrative": triaged.get("triage_narrative", {}),
+            "exploit_evidence": triaged.get("exploit_evidence", ""),
+            "detection_label": triaged.get("detection_label", ""),
+            "detection_method": triaged.get("detection_method", ""),
+            "curl_command": triaged.get("curl_command") or triaged.get("curl", ""),
         }
 
         key = f"{triaged.get('title', '')}||{triaged.get('url', '')}"
@@ -3785,8 +4465,12 @@ def _find_scan_for_report(filename: str) -> tuple[str, dict]:
 
 
 @app.get("/api/reports", tags=["Results"])
-async def list_reports():
+async def list_reports(request: Request):
     """List all generated PDF and Excel reports grouped by target."""
+    user = _request_user(request)
+    visible_ids = None if (user is None or user.is_admin) else {
+        sid for sid, info in SCANS.items() if info.get("owner_user_id") == user.id
+    }
     reports = []
     try:
         files = sorted(REPORTS_DIR.iterdir(), reverse=True) if REPORTS_DIR.exists() else []
@@ -3796,6 +4480,10 @@ async def list_reports():
         if f.suffix not in (".pdf", ".xlsx"):
             continue
         scan_id, scan_info = _find_scan_for_report(f.name)
+        if visible_ids is not None and scan_id and scan_id not in visible_ids:
+            continue
+        if visible_ids is not None and not scan_id:
+            continue
         target = scan_info.get("target_url", "")
         if not target and scan_id:
             try:
@@ -3839,7 +4527,7 @@ async def download_report(filename: str):
 
 
 @app.delete("/api/reports/{filename}", tags=["Results"])
-async def delete_report_file(filename: str):
+async def delete_report_file(filename: str, _admin=Depends(require_admin)):
     """Delete a single report file."""
     fpath = REPORTS_DIR / filename
     if not fpath.exists():
@@ -3852,7 +4540,7 @@ async def delete_report_file(filename: str):
 
 
 @app.delete("/api/reports", tags=["Results"])
-async def delete_reports_for_target(target: str = ""):
+async def delete_reports_for_target(target: str = "", _admin=Depends(require_admin)):
     """Delete all reports (and optionally scan data) for a target URL."""
     if not target:
         return JSONResponse({"error": "target query param required"}, status_code=400)
@@ -3892,11 +4580,13 @@ async def delete_reports_for_target(target: str = ""):
         if target_del_cost > 0:
             try:
                 scandb.add_deleted_cost(target_del_cost, len(ids_to_delete))
+                _mirror_to_pg("add_deleted_cost", target_del_cost, len(ids_to_delete))
             except Exception:
                 pass
         if ids_to_delete:
             try:
                 scandb.delete_scans(ids_to_delete)
+                _mirror_to_pg("delete_scans", ids_to_delete)
             except Exception:
                 pass
 

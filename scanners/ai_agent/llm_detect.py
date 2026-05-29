@@ -56,6 +56,12 @@ _LLM_ENDPOINT_PATTERNS: list[re.Pattern] = [
     re.compile(r"/copilot/", re.I),
     re.compile(r"/llm/", re.I),
     re.compile(r"/rag/", re.I),
+    re.compile(r"/chat/message", re.I),
+    re.compile(r"/chat/sessions", re.I),
+    re.compile(r"/agent/sessions", re.I),
+    re.compile(r"/neoclaw", re.I),
+    re.compile(r"/neoclaw-agent/chat", re.I),
+    re.compile(r"/tools/invoke", re.I),
 ]
 
 _JS_SDK_FINGERPRINTS = [

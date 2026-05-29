@@ -1,0 +1,30 @@
+# Scripts
+
+[← Back to README](../README.md)
+
+Operational and offline utilities.
+
+## Safety / deploy
+
+| Script | Purpose |
+|--------|---------|
+| `check_scan_active.py` | Must pass before EC2 UI container restart |
+
+## Scan pipeline
+
+| Script | Purpose |
+|--------|---------|
+| `triage_engine.py` | TP/FP triage |
+| `report_generator.py` | PDF reports |
+| `excel_exporter.py` | Excel export |
+
+## Regression
+
+| Script | Purpose |
+|--------|---------|
+| `run_regression_ec2.py` | Remote checks via `DAST_BASE_URL` |
+| `e2e_ec2_smoke.py` | HTTP smoke |
+
+Many `tmp_*` and `gate*` scripts are rollout/debug one-offs.
+
+[deployment.md](../docs/deployment.md) · [rest-api.md](../docs/rest-api.md)

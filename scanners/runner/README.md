@@ -1,0 +1,41 @@
+# Scanner Runner (Fargate / local worker)
+
+[← Back to README](../../README.md) · [Scanners](../README.md)
+
+Standalone container entrypoint for **one scan per task**. Used in production as AWS Fargate tasks; locally via `docker run` or `SCAN_LAUNCHER=local-docker`.
+
+## Image
+
+- **Dockerfile:** `scanners/runner/Dockerfile` (Playwright base + scanner code)
+- **ECR repository:** `dast-scanner-runner` (Terraform `infra/terraform/ecr.tf`)
+- **Entrypoint:** `python3 -m scanners.runner.main --scan-id <id>`
+
+Default env in the image: `DUAL_WRITE_PG=1`, `RUNNER_PG_ONLY=1`.
+
+## Build and push (operators)
+
+Build from repo root:
+
+```bash
+docker build -f scanners/runner/Dockerfile -t dast-scanner-runner:local .
+```
+
+Tag and push to the ECR URL from `terraform output ecr_scanner_runner_url`. Update the ECS task definition after each push.
+
+## Runtime configuration
+
+Passed from the UI via `web/scan_launcher.build_job_env()`:
+
+| Variable | Purpose |
+|----------|---------|
+| `SCAN_ID` | Scan identifier |
+| `SCAN_JOB_JSON` | Full scan config JSON |
+| `DATABASE_URL` | Postgres connection |
+| `DUAL_WRITE_PG` | `1` in production workers |
+| `REDIS_URL` / `LIVE_EVENTS_REDIS` | Live events for UI SSE |
+
+ECS on the UI host: `SCAN_LAUNCHER=fargate`, `ECS_CLUSTER`, `ECS_TASK_DEFINITION`, `ECS_SUBNETS`, `ECS_SECURITY_GROUPS`.
+
+## UI integration
+
+When `_use_external_scanner()` is true, the UI does not run the agent in-process. Progress uses Postgres/Redis when enabled. Always run `scripts/check_scan_active.py` before restarting the **UI** container.

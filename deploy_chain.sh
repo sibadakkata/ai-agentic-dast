@@ -6,5 +6,5 @@ docker cp /tmp/runtime_verifier.py dast-scanner:/app/scripts/runtime_verifier.py
 docker restart dast-scanner
 echo "Waiting for app to come up..."
 sleep 6
-STATUS=$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8080/)
+STATUS=$(curl -s -o /dev/null -w '%{http_code}' http://localhost:80/)
 echo "App status: $STATUS"

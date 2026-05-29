@@ -1,0 +1,30 @@
+# Scanners
+
+[← Back to README](../README.md)
+
+Python packages that implement the DAST scan engine and worker runtime.
+
+## Layout
+
+| Path | Role |
+|------|------|
+| **`ai_agent/`** | Core LLM agent: phases, tools, Playwright, passive/active baseline, multi-agent orchestrator, Garak/LLM security |
+| **`runner/`** | Standalone worker process — one scan per container/task ([runner README](runner/README.md)) |
+| **`auth/`** | SAML / platform authentication helpers used by the UI |
+| **`users/`** | User and invite persistence helpers |
+
+## Where scans run
+
+| Mode | How | Env |
+|------|-----|-----|
+| **In-process** (legacy dev) | `web/app.py` thread runs `agent.run_scan` | `SCAN_LAUNCHER` unset or not `fargate` |
+| **Fargate** (production) | UI calls `web/scan_launcher.py` → ECS RunTask | `SCAN_LAUNCHER=fargate`, `ECS_*`, task definition |
+| **Local Docker** | `docker run` runner image | `SCAN_LAUNCHER=local-docker` or `SPAWN_SCANNER_CONTAINER=1` |
+
+Production workers use ECR repository **`dast-scanner-runner`** ([infra/terraform/README.md](../infra/terraform/README.md)).
+
+## Further reading
+
+- [Architecture](../docs/architecture.md) — agent loop, tools, phases
+- [Scanner internals](../docs/scanner-internals.md) — E2E flow and evidence
+- [Contributing](../docs/contributing.md) — adding phases and tools
