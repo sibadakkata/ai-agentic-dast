@@ -600,49 +600,27 @@ async def _guarded(idx: int, phase: ScanPhase):
 
 ---
 
-## Intelligent model selection (`ModelSelector`)
+## Intelligent model selection & budget (engineering)
 
-`scanners/ai_agent/auto_router.py` implements tiered Bedrock selection when `model_policy` is `auto`:
+User-facing guide: **[intelligent-model-selection.md](intelligent-model-selection.md)** (examples, approval flow, API/MCP).
 
-| Tier | Typical model | Phase examples |
-|------|---------------|----------------|
-| **CHEAP** | Haiku | `web_recon`, `api_recon`, `crawl_only`, passive/crawl/dns-style ids |
-| **BALANCED** | Sonnet | Standard OWASP vuln phases (XSS, SQLi, SSRF, API injection, …) |
-| **PREMIUM** | Opus (or strongest Sonnet) | `web_a01`, BFLA/session/authz, business logic, chain phases, smart-retry pass |
+### Extending the tier policy (`auto_router.py`)
 
-`run_phases_parallel` and the sequential phase loop call `ModelSelector.select(phase_id)` before each phase. Choices are stored on the scan as `model_choices` and in each `phase_log` entry’s `model` field.
+1. **Add a phase id to a tier set** — edit `_CHEAP_IDS`, `_BALANCED_IDS`, or `_PREMIUM_IDS` in `scanners/ai_agent/auto_router.py`, then call `_register_tiers()` (runs at import).
+2. **Substring rules** — extend `_PREMIUM_SUBSTRINGS` or the recon heuristics in `tier_for_phase()` for ids not in the explicit sets.
+3. **Per-call override** — pass `hint` into `ModelSelector.select(phase_id, hint=...)`:
+   - `{"retry": True}` or `{"tier": "premium"}` → PREMIUM (used on failed-phase retry)
+   - `{"large_context": True}` or `{"synthesis": True}` → PREMIUM
 
-Manual policy (`model_policy: "manual"`) preserves the previous single-model behavior.
+`run_phases_parallel` and the sequential loop call `select()` before each phase; results land in `SCANS[id]["model_choices"]` and `phase_log[].model`.
 
-## Budget guard and cost tracking
+### BudgetGuard wiring (`budget.py` + `llm_config.py`)
 
-`scanners/ai_agent/budget.py` provides:
+- **`estimate_scan_cost()`** — heuristic at launch; exposed as `POST /api/scans/estimate`.
+- **`BudgetGuard.on_cost(delta_usd)`** — registered on `LLMRouter` via `on_cost` callback; `LLMRouter._track` invokes it after each completion with the incremental USD for that call.
+- **Cap exceeded** — guard sets `budget_status` to `awaiting_approval`, sets `pause_flag`, and calls `on_exceeded` (appends progress). Approve path in `web/app.py` clears pause, updates `_cap`, and sets `budget_status` to `approved`.
 
-- **`estimate_scan_cost()`** — rough low / expected / high USD at launch (not a billing quote).
-- **`BudgetGuard`** — `LLMRouter` invokes `on_cost(delta_usd)` after each completion; when `budget_total_usd >= budget_cap_usd`, sets `budget_status` to `awaiting_approval`, sets `pause_flag`, and appends a progress message. Only the scan **owner** (SSO user who started the scan) or an **admin** may approve via `POST /api/scans/{id}/budget/approve` or stop via `POST /api/scans/{id}/budget/stop`.
-
-```mermaid
-sequenceDiagram
-    participant UI
-    participant API as web/app.py
-    participant Agent as agent.run_scan
-    participant Router as LLMRouter
-    participant Guard as BudgetGuard
-
-    UI->>API: POST /api/scan (model_policy, budget_cap)
-    API->>Agent: start thread + BudgetGuard + ModelSelector
-    loop Each phase
-        Agent->>Agent: ModelSelector.select(phase)
-        Agent->>Router: complete(model)
-        Router->>Guard: on_cost(delta)
-        alt cap exceeded
-            Guard->>Guard: pause_flag.set()
-            Guard-->>UI: budget_status awaiting_approval
-            UI->>API: POST budget/approve
-            API->>Guard: raise cap, pause_flag.clear()
-        end
-    end
-```
+Manual `model_policy` skips `ModelSelector` and uses the operator-selected model for all phases.
 
 ## LLM Router Retry Contract (`LLMRouter.complete`)
 

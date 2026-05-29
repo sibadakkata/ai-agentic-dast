@@ -13,4 +13,8 @@
 
 See also [architecture.md](architecture.md), [deployment.md](deployment.md), [SSO_RBAC.md](SSO_RBAC.md).
 
-**Intelligent model selection & budget gate:** [web-ui.md](web-ui.md) (UI), [scanner-internals.md](scanner-internals.md) (engine), [rest-api.md](rest-api.md) / [api.md](api.md) (`POST /api/scans/estimate`, budget approve/stop).
+| [intelligent-model-selection.md](intelligent-model-selection.md) | **Auto mode & budget gate** — user guide, examples, API/MCP/OpenClaw quickstarts |
+| [web-ui.md](web-ui.md) | Web UI — toggle, cap field, approval banner |
+| [scanner-internals.md](scanner-internals.md) | Engineering — extending tier policy, BudgetGuard wiring |
+| [api.md](api.md) | REST reference — estimate, budget, approve, stop |
+| [mcp.md](mcp.md) | MCP tools — `start_scan`, `estimate_scan_cost`, budget workflow |

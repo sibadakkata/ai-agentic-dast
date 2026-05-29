@@ -70,7 +70,15 @@ class ScanLaunchRequest(BaseModel):
                     "ai_instructions": (
                         "Focus on authentication and IDOR. Do not test /payments paths."
                     ),
-                }
+                },
+                {
+                    "target_url": "https://staging.example.com",
+                    "scan_mode": "both",
+                    "model_policy": "auto",
+                    "budget_cap_usd": 5.0,
+                    "scan_intensity": "deep",
+                    "llm_scan_depth": "standard",
+                },
             ]
         }
     )
@@ -88,11 +96,16 @@ class ScanLaunchRequest(BaseModel):
     model: str = Field(default="", description="LLM model id from GET /api/models")
     model_policy: str = Field(
         default="manual",
-        description="manual | auto — auto selects model per phase",
+        description='Model selection policy: "manual" (single model for all phases) or '
+        '"auto" (Haiku/Sonnet/Opus per phase via ModelSelector)',
+        examples=["manual", "auto"],
     )
     budget_cap_usd: float | None = Field(
         default=None,
-        description="Optional USD budget cap; scan pauses when exceeded",
+        description="Optional USD budget cap; scan pauses at cap until owner/admin approves "
+        "a higher limit. Omit for unlimited; if omitted at launch, defaults to "
+        "recommended_budget_usd from POST /api/scans/estimate (~2× expected cost).",
+        examples=[3.0, 5.0, 8.0],
     )
     username: str = ""
     password: str = ""
@@ -151,6 +164,93 @@ class ScanLaunchRequest(BaseModel):
     @classmethod
     def _strip_target(cls, v: str) -> str:
         return (v or "").strip()
+
+
+class ScanCostEstimateRequest(BaseModel):
+    """Body for POST /api/scans/estimate — same launch knobs as scan create."""
+
+    model_config = ConfigDict(
+        json_schema_extra={
+            "examples": [
+                {
+                    "scan_mode": "web",
+                    "scan_intensity": "deep",
+                    "llm_scan_depth": "standard",
+                    "model_policy": "auto",
+                }
+            ]
+        }
+    )
+
+    target_url: str | None = Field(default=None, description="Optional; not used in math today")
+    scan_mode: str = Field(default="both", examples=["website", "api", "both"])
+    scan_intensity: str = Field(default="deep", examples=["light", "standard", "deep"])
+    llm_scan_depth: str = Field(default="standard", examples=["standard", "deep"])
+    model_policy: str = Field(
+        default="auto",
+        description='"manual" or "auto"',
+        examples=["auto"],
+    )
+    model: str | None = Field(
+        default=None,
+        description="Manual model id when model_policy is manual",
+    )
+
+
+class ScanCostEstimateResponse(BaseModel):
+    """Rough USD estimate (not a billing quote)."""
+
+    low_usd: float
+    expected_usd: float
+    high_usd: float
+    recommended_budget_usd: float
+    assumptions: list[str] = Field(default_factory=list)
+    per_phase: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class ScanBudgetResponse(BaseModel):
+    """GET /api/scans/{scan_id}/budget."""
+
+    cap_usd: float | None = None
+    total_usd: float = 0
+    status: str | None = None
+    owner_user_id: str | None = None
+    model_choices: dict[str, str] = Field(default_factory=dict)
+    model_policy: str = "manual"
+    estimated_cost_usd: float | None = None
+
+
+class BudgetApproveRequest(BaseModel):
+    """POST /api/scans/{scan_id}/budget/approve."""
+
+    model_config = ConfigDict(json_schema_extra={"examples": [{"new_cap_usd": 5.0}]})
+
+    new_cap_usd: float = Field(
+        ...,
+        description="New budget cap in USD; must exceed current spend (total_usd)",
+        examples=[5.0, 10.0],
+    )
+
+
+class BudgetApproveResponse(BaseModel):
+    scan_id: str
+    budget_cap_usd: float
+    budget_total_usd: float
+    budget_status: str
+    status: str | None = None
+
+
+class BudgetStopResponse(BaseModel):
+    scan_id: str
+    budget_status: str
+    status: str | None = None
+
+
+class ScanLaunchResponse(BaseModel):
+    """POST /api/v1/scans and legacy POST /api/scan success body."""
+
+    scan_id: str
+    status: str = Field(examples=["started"])
 
 
 @dataclass

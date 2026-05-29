@@ -2,7 +2,7 @@
 
 [← Back to README](../README.md)
 
-> **Quick start:** For launch, polling, results, and troubleshooting, see **[api.md](api.md)** first. This page keeps extended endpoint coverage (pause, retry, reports, crawl-only).
+> **Quick start:** For launch, polling, results, budget/estimate endpoints, and troubleshooting, see **[api.md](api.md)** (canonical). This page keeps extended endpoint coverage (pause, retry, reports, crawl-only). Auto mode & budget gate: [intelligent-model-selection.md](intelligent-model-selection.md).
 
 The scanner exposes a full REST API — the same one the Web UI uses. Any CI/CD pipeline, script, or external tool can invoke scans programmatically.
 

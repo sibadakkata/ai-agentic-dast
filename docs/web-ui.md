@@ -45,6 +45,20 @@ The scanner includes a single-page web UI for managing scans, viewing results, a
 
 When **Auto** is selected, expand **Models used by phase** in the live scan header after phases start to see which model ran for each phase id.
 
+### When you'll see the approval banner
+
+<!-- SCREENSHOT: Budget approval banner with cap, spend, and three actions -->
+
+During a live scan, if LLM spend reaches `budget_cap_usd`, the scan **pauses** and a yellow **budget approval** banner appears above the progress log (only for the scan owner or an admin):
+
+| Control | Action |
+|---------|--------|
+| **Increase budget and resume** | Enter a new cap (defaults to ~2× current spend) and approve — calls `POST /api/scans/{id}/budget/approve` |
+| **Stop scan** | Ends the scan at the gate — `POST /api/scans/{id}/budget/stop` |
+| **Models used by phase** | Expandable breakdown of phase id → model (auto mode audit) |
+
+Others see a note that only the scan owner can approve. Full flow: [intelligent-model-selection.md](intelligent-model-selection.md#the-approval-gate).
+
 ## Scan Configuration
 
 | Setting | Options | Default | Notes |

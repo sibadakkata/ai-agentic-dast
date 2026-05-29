@@ -95,6 +95,8 @@ Legacy launch endpoint; same semantics as `/api/v1/scans` but accepts any JSON d
 
 ### POST /api/scans/estimate
 
+> User guide: [intelligent-model-selection.md](intelligent-model-selection.md)
+
 Rough cost estimate for a launch configuration (not a billing quote). Same body fields as scan launch (`scan_mode`, `scan_intensity`, `llm_scan_depth`, `model_policy`, `model`).
 
 **Response:** `{ "low_usd", "expected_usd", "high_usd", "assumptions", "per_phase", "recommended_budget_usd" }`

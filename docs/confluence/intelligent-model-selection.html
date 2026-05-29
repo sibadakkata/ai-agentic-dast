@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<title>Intelligent Model Selection &amp; Budget Gate</title>
+</head>
+<body>
+
+<div style="background:#f4f5f7;border-left:4px solid #0052cc;padding:12px 16px;margin-bottom:24px;">
+<p><strong>Audience:</strong> scanner operators and engineers.<br/>
+<strong>Last updated:</strong> 2026-05-29.</p>
+<p>Auto mode selects Haiku / Sonnet / Opus per scan phase. An optional USD budget cap pauses the scan until the owner or an admin approves a higher limit.</p>
+</div>
+
+<h2>Why Auto mode?</h2>
+<p>Manual mode uses one model for every phase. Auto mode assigns cheaper models to recon/crawl and stronger models to access control, business logic, and attack-chain phases—typically better coverage per dollar on full OWASP scans.</p>
+
+<!-- SCREENSHOT: New Scan form with Manual vs Auto radio and budget cap -->
+
+<h2>Phase → tier → model</h2>
+<p>Policy is implemented in <code>scanners/ai_agent/auto_router.py</code>.</p>
+
+<table border="1" cellpadding="6" cellspacing="0">
+<thead><tr><th>Tier</th><th>Model</th><th>Example phase IDs</th></tr></thead>
+<tbody>
+<tr><td>CHEAP</td><td>Haiku</td><td><code>web_recon</code>, <code>api_recon</code>, <code>crawl_only</code>, <code>passive_recon</code>, <code>dns_enum</code></td></tr>
+<tr><td>BALANCED</td><td>Sonnet</td><td><code>web_a03_xss</code>, <code>web_a03_sqli</code>, <code>api_injection</code>, <code>api_ssrf</code>, …</td></tr>
+<tr><td>PREMIUM</td><td>Opus</td><td><code>web_a01</code>, <code>api_authz</code>, <code>api_bfla</code>, <code>api_business_logic</code>, <code>attack_chain_analysis</code>, <code>chain_*</code></td></tr>
+</tbody>
+</table>
+
+<p>Substring overrides: <code>idor</code>, <code>authz</code>, <code>bfla</code>, <code>business_logic</code>, <code>multi_tenant</code>, <code>session_mgmt</code>. Retries with <code>hint.retry</code> promote to PREMIUM.</p>
+
+<h2>Worked examples</h2>
+
+<h3>1. Marketing site recon</h3>
+<p>Auto + crawl-only → Haiku phases only. Expected ~$0.15. Budget warning unlikely.</p>
+
+<h3>2. SaaS OWASP scan with login</h3>
+<p>Haiku recon, Sonnet vuln phases, Opus for <code>web_a01</code> and <code>web_session_mgmt</code>. Expected ~$1.50; recommended budget ~$3.</p>
+
+<h3>3. Multi-tenant API (BOLA / business logic)</h3>
+<p>Opus on <code>api_authz</code>, <code>api_bfla</code>, <code>api_business_logic</code>, <code>attack_chain_analysis</code>. Expected ~$4; recommended budget ~$8.</p>
+
+<h3>4. Retry after Sonnet failure</h3>
+<p>Failed phase retry uses <code>hint.retry</code> → Opus for that phase. Audit via <strong>Models used by phase</strong> in the live scan UI.</p>
+
+<h2>Approval gate</h2>
+<!-- SCREENSHOT: Budget approval banner with Increase / Stop / phase breakdown -->
+
+<ol>
+<li><strong>ok</strong> — scan running; spend tracked.</li>
+<li><strong>awaiting_approval</strong> — cap reached; scan paused.</li>
+<li>Owner or admin clicks <strong>Increase budget and resume</strong> (or API approve).</li>
+<li><strong>approved</strong> — scan resumes until new cap.</li>
+</ol>
+<p>Only the <strong>SSO user who launched the scan</strong> or a platform <strong>admin</strong> may approve (enforced server-side).</p>
+
+<h2>API quickstart</h2>
+<pre>POST /api/scans/estimate
+{"scan_mode":"both","scan_intensity":"deep","model_policy":"auto"}
+
+POST /api/v1/scans
+{"target_url":"https://staging.example.com","model_policy":"auto","budget_cap_usd":5.0}
+
+POST /api/scans/{id}/budget/approve
+{"new_cap_usd": 10.0}</pre>
+
+<h2>MCP (Cursor / Claude Desktop)</h2>
+<p>Tools: <code>start_scan</code> (<code>model_policy</code>, <code>budget_cap_usd</code>), <code>estimate_scan_cost</code>, <code>get_scan_budget</code>, <code>approve_scan_budget</code>, <code>stop_scan_for_budget</code>.</p>
+
+<h2>OpenClaw</h2>
+<p>Natural language: “Scan staging.example.com in auto mode with a $3 budget” → POST body with <code>model_policy: "auto"</code>, <code>budget_cap_usd: 3</code>.</p>
+
+<h2>Cost transparency</h2>
+<p>Per-scan cost in UI; <code>model_choices</code> maps phase → model in auto mode; platform analytics tab for cross-scan spend.</p>
+
+<hr/>
+<h2>Source repository</h2>
+<ul>
+<li><code>docs/intelligent-model-selection.md</code></li>
+<li><code>docs/web-ui.md</code></li>
+<li><code>docs/api.md</code></li>
+<li><code>docs/mcp.md</code></li>
+<li><code>scanners/ai_agent/auto_router.py</code></li>
+<li><code>scanners/ai_agent/budget.py</code></li>
+</ul>
+
+</body>
+</html>

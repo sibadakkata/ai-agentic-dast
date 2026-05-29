@@ -35,6 +35,8 @@ Authorization: Basic {base64(SCANNER_USER:SCANNER_PASS)}
   "target_url": "<url>",
   "scan_mode": "website|api|both",
   "model": "bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0",
+  "model_policy": "manual",
+  "budget_cap_usd": 5.0,
   "username": "",
   "password": "",
   "auth_type": "none",
@@ -46,8 +48,10 @@ Authorization: Basic {base64(SCANNER_USER:SCANNER_PASS)}
 ```
 
 - `ai_instructions` (optional): Operator guidance for the LLM agent — focus areas, paths to skip, credential rules. Example: "Focus on authentication and IDOR; do not test the /payments endpoint."
+- `model_policy`: `manual` (default) — use `model` for every phase. `auto` — scanner picks Haiku/Sonnet/Opus per phase (see [intelligent-model-selection.md](../docs/intelligent-model-selection.md)).
+- `budget_cap_usd` (optional): USD cap on LLM spend; scan pauses at cap until owner approves a higher limit via `POST /api/scans/{id}/budget/approve`. Omit for unlimited. Call `POST /api/scans/estimate` first to get `recommended_budget_usd`.
 - `scan_mode`: Use "api" if user says API/endpoint, "website" if they say website/page, "both" if unclear
-- `model`: Default to Claude Haiku unless user specifies otherwise
+- `model`: Default to Claude Haiku unless user specifies otherwise (ignored for phase selection when `model_policy` is `auto`)
 - Available models: `bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0`, `bedrock/mistral.ministral-3-8b-instruct`
 - `credentials_user_b/admin/tenant_b`: Optional multi-identity credentials for cross-user, cross-role, cross-tenant testing. Each supports `username`+`password`, `bearer` (token), or `api_key`. Only include when user provides extra identities
 - Returns `{ "scan_id": "...", "status": "running" }`
@@ -152,6 +156,18 @@ When presenting scan results to the user, format them clearly:
 **For summary:** Show total findings, true positives, false positives, precision percentage.
 
 ## Example Conversations
+
+User: "Scan staging.example.com in auto mode with a $3 budget"
+-> POST /api/scan with:
+```json
+{
+  "target_url": "https://staging.example.com",
+  "scan_mode": "both",
+  "model_policy": "auto",
+  "budget_cap_usd": 3.0
+}
+```
+-> Return scan_id; if paused at cap, call POST /api/scans/{id}/budget/approve with owner's credentials
 
 User: "Scan https://example.com"
 -> Start a website scan, return the scan ID, poll for status

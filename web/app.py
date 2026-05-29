@@ -247,7 +247,14 @@ from web import db_router as dbread
 from web import scan_launcher
 from web.live_events import publish_event
 from web.scan_models import (
+    BudgetApproveRequest,
+    BudgetApproveResponse,
+    BudgetStopResponse,
+    ScanBudgetResponse,
+    ScanCostEstimateRequest,
+    ScanCostEstimateResponse,
     ScanLaunchRequest,
+    ScanLaunchResponse,
     materialize_api_imports,
     parse_scan_launch_dict,
     request_to_launch_params,
@@ -2082,7 +2089,17 @@ def _launch_scan_core(params, owner_id: str | None, *, postman_collection_b64: s
     return {"scan_id": scan_id, "status": "started"}
 
 
-@app.post("/api/scan", tags=["Scans"])
+@app.post(
+    "/api/scan",
+    tags=["Scans"],
+    response_model=ScanLaunchResponse,
+    summary="Start scan (legacy JSON)",
+    description=(
+        "Launch a scan with the same JSON fields as the Web UI form. "
+        "Supports `model_policy` (`manual` | `auto`) and optional `budget_cap_usd`. "
+        "Prefer **POST /api/v1/scans** for OpenAPI-typed bodies and import examples."
+    ),
+)
 async def start_scan(request: Request):
     """Start a scan (JSON body). Accepts the same fields as the web UI launch form."""
     owner = _request_user(request)
@@ -2095,7 +2112,17 @@ async def start_scan(request: Request):
     return _launch_scan_core(params, owner_id)
 
 
-@app.post("/api/v1/scans", tags=["Scans"], response_model=None)
+@app.post(
+    "/api/v1/scans",
+    tags=["Scans"],
+    response_model=ScanLaunchResponse,
+    summary="Start scan (typed)",
+    description=(
+        "Recommended launch endpoint. Set `model_policy` to `auto` for per-phase "
+        "Haiku/Sonnet/Opus selection, and `budget_cap_usd` to pause at a spend limit. "
+        "Call **POST /api/scans/estimate** first to see `recommended_budget_usd`."
+    ),
+)
 async def start_scan_v1(body: ScanLaunchRequest, request: Request):
     """Start a scan via typed JSON (OpenAPI-documented). Supports base64 file imports."""
     owner = _request_user(request)
@@ -2764,14 +2791,22 @@ async def get_scan_live(scan_id: str, since_test: int = 0, since_finding: int = 
     }
 
 
-@app.post("/api/scans/estimate", tags=["Scans"])
-async def estimate_scan_cost_api(request: Request, _auth=Depends(_verify)):
+@app.post(
+    "/api/scans/estimate",
+    tags=["Scans"],
+    response_model=ScanCostEstimateResponse,
+    summary="Estimate scan cost",
+    description=(
+        "Returns rough `low_usd`, `expected_usd`, `high_usd`, and `recommended_budget_usd` "
+        "for the given launch knobs. Not a billing quote — use to pre-fill `budget_cap_usd`."
+    ),
+)
+async def estimate_scan_cost_api(
+    body: ScanCostEstimateRequest,
+    _auth=Depends(_verify),
+):
     """Rough USD cost estimate for the current launch form selections."""
-    try:
-        body = await request.json()
-    except Exception:
-        body = {}
-    params = parse_scan_launch_dict(body)
+    params = parse_scan_launch_dict(body.model_dump(exclude_none=True))
     model_policy = (params.model_policy or "manual").lower()
     model = _resolve_model_id(params.model) if params.model else _cheapest_model()
     est = estimate_scan_cost(
@@ -2785,7 +2820,16 @@ async def estimate_scan_cost_api(request: Request, _auth=Depends(_verify)):
     return est
 
 
-@app.get("/api/scans/{scan_id}/budget", tags=["Scans"])
+@app.get(
+    "/api/scans/{scan_id}/budget",
+    tags=["Scans"],
+    response_model=ScanBudgetResponse,
+    summary="Get scan budget state",
+    description=(
+        "Returns cap, spend, `budget_status`, per-phase `model_choices` (auto mode), "
+        "and `owner_user_id` for approval workflows."
+    ),
+)
 async def get_scan_budget(scan_id: str, request: Request, _auth=Depends(_verify)):
     user = _request_user(request)
     if not _user_can_read_scan(scan_id, user):
@@ -2802,14 +2846,20 @@ async def get_scan_budget(scan_id: str, request: Request, _auth=Depends(_verify)
     }
 
 
-class _BudgetApproveBody(BaseModel):
-    new_cap_usd: float
-
-
-@app.post("/api/scans/{scan_id}/budget/approve", tags=["Scans"])
+@app.post(
+    "/api/scans/{scan_id}/budget/approve",
+    tags=["Scans"],
+    response_model=BudgetApproveResponse,
+    summary="Approve higher budget and resume",
+    description=(
+        "Raises `budget_cap_usd`, clears the pause flag, and resumes the scan. "
+        "**Auth:** scan owner (SSO user who launched) or platform `admin` only. "
+        "`new_cap_usd` must be greater than current `total_usd` spend."
+    ),
+)
 async def approve_scan_budget(
     scan_id: str,
-    body: _BudgetApproveBody,
+    body: BudgetApproveRequest,
     request: Request,
     _auth=Depends(_verify),
 ):
@@ -2849,7 +2899,16 @@ async def approve_scan_budget(
     }
 
 
-@app.post("/api/scans/{scan_id}/budget/stop", tags=["Scans"])
+@app.post(
+    "/api/scans/{scan_id}/budget/stop",
+    tags=["Scans"],
+    response_model=BudgetStopResponse,
+    summary="Stop scan at budget gate",
+    description=(
+        "Stops a scan that hit the budget cap. **Auth:** scan owner or `admin` only. "
+        "Sets `budget_status` to `stopped_by_budget` and triggers cancellation."
+    ),
+)
 async def stop_scan_budget(scan_id: str, request: Request, _auth=Depends(_verify)):
     user = _request_user(request)
     if not _user_can_manage_scan_budget(scan_id, user):

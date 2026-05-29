@@ -37,7 +37,7 @@ description: Builds and runs an LLM-powered agentic web security scanner using L
 │   ├── app.py                    # FastAPI backend (stop, pause, resume, retry, multi-identity, CVSS re-classify)
 │   ├── db.py                     # SQLite persistence
 │   └── static/index.html         # Single-page web UI (CVSS column, multi-identity inputs, grouping)
-├── mcp_server.py                 # MCP server — 17 tools for AI assistant integration
+├── mcp_server.py                 # MCP server — scan, budget, findings tools
 ├── imports/                      # API definition files (Postman/Burp/OpenAPI)
 ├── Dockerfile                    # Production container (Playwright + Chromium)
 ├── requirements.txt
@@ -649,12 +649,20 @@ imports/
 
 The scanner exposes all capabilities via an MCP (Model Context Protocol) server in `mcp_server.py`. This allows any MCP-compatible client (Cursor, Claude Desktop, Open Claw, custom agents) to operate the scanner.
 
-### 17 Available Tools
+### Auto mode & budget (MCP / API)
+
+When the user asks for an **auto-mode** scan, pass `model_policy='auto'` and a `budget_cap_usd`. Call `POST /api/scans/estimate` (or MCP `estimate_scan_cost`) first; default cap ≈ `recommended_budget_usd` (typically ~2× expected). If the scan pauses at the cap, use `approve_scan_budget` (owner/admin) or `stop_scan_for_budget`. See [docs/intelligent-model-selection.md](../../docs/intelligent-model-selection.md).
+
+### MCP tools (budget + scan)
 
 | Tool | Purpose |
 |------|---------|
 | `health_check` | Verify scanner connectivity |
-| `start_scan` | Begin a new security scan |
+| `start_scan` | Begin a scan (`model_policy`, `budget_cap_usd`) |
+| `estimate_scan_cost` | Pre-launch USD estimate |
+| `get_scan_budget` | Cap, spend, status, per-phase models |
+| `approve_scan_budget` | Raise cap and resume |
+| `stop_scan_for_budget` | Stop at budget gate |
 | `get_scan_status` | Poll current scan progress |
 | `wait_for_scan` | Block until scan completes |
 | `stop_scan` | Cancel a running scan |

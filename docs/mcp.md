@@ -133,24 +133,76 @@ Unless noted, tools return JSON dicts from the API, or an `{"error": "...", "mes
 | `extra_domains` | string | No | Comma-separated extra in-scope hosts |
 | `postman_file` | string | No | Filename from `upload_api_spec` |
 | `ai_instructions` | string | No | Operator guidance (see below) |
+| `model_policy` | string | No | `manual` (default) or `auto` — per-phase Haiku/Sonnet/Opus |
+| `budget_cap_usd` | float | No | USD cap; scan pauses at limit until approved |
 
 | | |
 |---|---|
 | **HTTP** | `POST /api/scan` |
 | **Returns** | `{"scan_id": "...", "status": "started"}` |
 
+**Auto mode example:**
+
 ```json
 {
-  "name": "launch_scan",
+  "name": "start_scan",
   "arguments": {
-    "target_url": "https://example.com",
+    "target_url": "https://staging.example.com",
     "scan_mode": "both",
-    "ai_instructions": "Focus on authentication and IDOR. Do not test /payments."
+    "model_policy": "auto",
+    "budget_cap_usd": 5.0
   }
 }
 ```
 
-Typed launches with more fields (base64 imports, `scan_profile`) are available via [HTTP `POST /api/v1/scans`](api.md) — MCP currently wraps the legacy `/api/scan` body.
+Typed launches with more fields (base64 imports, `scan_profile`) are available via [HTTP `POST /api/v1/scans`](api.md) — MCP forwards `model_policy` and `budget_cap_usd` on `/api/scan`.
+
+Guide: [intelligent-model-selection.md](intelligent-model-selection.md)
+
+### estimate_scan_cost
+
+| | |
+|---|---|
+| **HTTP** | `POST /api/scans/estimate` |
+
+| Name | Type | Required | Description |
+|------|------|----------|-------------|
+| `scan_mode` | string | No | `website`, `api`, `both` |
+| `scan_intensity` | string | No | `light`, `standard`, `deep` |
+| `llm_scan_depth` | string | No | `standard`, `deep` |
+| `model_policy` | string | No | `manual` or `auto` |
+| `manual_model` | string | No | Model id when policy is `manual` |
+
+### get_scan_budget
+
+| | |
+|---|---|
+| **HTTP** | `GET /api/scans/{scan_id}/budget` |
+
+Returns `cap_usd`, `total_usd`, `status`, `model_choices`, `model_policy`.
+
+### approve_scan_budget
+
+| | |
+|---|---|
+| **HTTP** | `POST /api/scans/{scan_id}/budget/approve` |
+
+| Name | Type | Required | Description |
+|------|------|----------|-------------|
+| `scan_id` | string | Yes | Paused scan |
+| `new_cap_usd` | float | Yes | New cap (must exceed current spend) |
+
+**Auth:** `SCANNER_USER` must be scan owner or admin.
+
+**Example chat:** “It paused — approve up to $10” → `approve_scan_budget(scan_id, new_cap_usd=10.0)`.
+
+### stop_scan_for_budget
+
+| | |
+|---|---|
+| **HTTP** | `POST /api/scans/{scan_id}/budget/stop` |
+
+Stops a scan at the budget gate (owner/admin). Use `stop_scan` for generic cancellation.
 
 ### get_scan_status
 
