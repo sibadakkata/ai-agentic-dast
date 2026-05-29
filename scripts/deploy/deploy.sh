@@ -33,11 +33,6 @@ NEEDS_UI_HOTPATCH="$(echo "$PLAN_JSON" | python3 -c "import json,sys; print('1' 
 NEEDS_UI_REBUILD="$(echo "$PLAN_JSON" | python3 -c "import json,sys; print('1' if json.load(sys.stdin)['needs_ui_rebuild'] else '0')")"
 NEEDS_RUNNER_REBUILD="$(echo "$PLAN_JSON" | python3 -c "import json,sys; print('1' if json.load(sys.stdin)['needs_runner_rebuild'] else '0')")"
 
-if ! python3 "$CHECK_ENCODING" --all; then
-  echo "ERROR: encoding check failed — fix UTF-16/null-byte files before deploy"
-  exit 1
-fi
-
 if docker ps --format '{{.Names}}' 2>/dev/null | grep -q "^${CONTAINER_NAME}$"; then
   echo "==> Checking for active scans..."
   docker cp "$CHECK_ACTIVE" "$CONTAINER_NAME:/tmp/check_scan_active.py" 2>/dev/null || true
@@ -46,6 +41,14 @@ if docker ps --format '{{.Names}}' 2>/dev/null | grep -q "^${CONTAINER_NAME}$"; 
     exit 1
   fi
 fi
+
+echo "[1/N] Encoding check (UTF-16 / null bytes)..."
+PY=python3
+command -v python3 >/dev/null 2>&1 || PY=python
+"$PY" "$CHECK_ENCODING" --all || {
+  echo "ERROR: encoding check failed. Refusing to deploy."
+  exit 1
+}
 
 if [ "$NEEDS_UI_REBUILD" = "1" ]; then
   echo "==> UI image rebuild required"

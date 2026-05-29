@@ -54,6 +54,14 @@ if docker ps --format '{{.Names}}' 2>/dev/null | grep -q "$CONTAINER_NAME"; then
     fi
 fi
 
+echo "[1/N] Encoding check (UTF-16 / null bytes)..."
+PY=python3
+command -v python3 >/dev/null 2>&1 || PY=python
+"$PY" "$SCRIPT_DIR/scripts/checks/check_no_null_bytes.py" --all || {
+    echo "ERROR: encoding check failed. Refusing to deploy."
+    exit 1
+}
+
 # Load .env
 set -a; source .env; set +a
 

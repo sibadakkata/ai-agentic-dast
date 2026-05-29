@@ -308,13 +308,7 @@ bash deploy.sh
 
 First-time / dependency rebuild: `bash deploy.sh --full`.
 
-**Encoding gates (local dev):** install git hooks once per clone:
-
-```powershell
-powershell -File scripts/install_git_hooks.ps1
-```
-
-CI runs `scripts/checks/check_no_null_bytes.py --all` on every PR (workflow **Encoding check**).
+`deploy.sh` runs `scripts/checks/check_no_null_bytes.py --all` automatically before any hot-patch or image rebuild (refuses deploy on UTF-16 / null-byte files). Docker image builds also fail at `COPY` time if bad encoding is baked in.
 
 **MANDATORY before any pattern that restarts the container:** `scripts/check_scan_active.py` must exit **0** (no active/paused scan). In-process scan state is lost on restart; pause-deploy-resume does **not** work. The script is usually already in the container at `/tmp/check_scan_active.py`; refresh if needed:
 
