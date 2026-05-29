@@ -657,7 +657,7 @@ input:focus-visible, select:focus-visible, textarea:focus-visible { outline:none
     <div id="ai-instruct-mode">
       <div class="form-group full">
         <label style="text-transform:none;font-size:13px;font-weight:500;color:var(--text2);letter-spacing:0;">Describe what you want to scan — the AI will build a plan for your approval</label>
-        <textarea id="ai-instruction" class="ai-instruct-area" placeholder="Example: Scan https://staging.example.com using user@email.com / MyP@ss123. Focus only on /app/dashboard page and look for XSS vulnerabilities — we found one during manual pen-testing."></textarea>
+        <textarea id="ai-instruction" class="ai-instruct-area" placeholder="Example: Scan https://staging.example.com using user@email.com / MyP@ss123. Focus only on /app/dashboard page and look for XSS vulnerabilities — we found one during manual pen-testing." oninput="_debounceAICostEstimate()"></textarea>
       </div>
       <div class="form-group full" style="margin-top:8px;">
         <div class="expandable" onclick="toggleExpand(this)" style="font-size:13px;font-weight:600;color:var(--text2);letter-spacing:0.3px;">
@@ -689,15 +689,39 @@ input:focus-visible, select:focus-visible, textarea:focus-visible { outline:none
           </div>
         </div>
       </div>
-      <div style="display:flex;gap:12px;align-items:flex-end;margin-top:12px;flex-wrap:wrap;">
-        <div class="form-group" style="min-width:220px;">
+      <div class="form-group full" style="margin-top:12px;">
+        <label>Selection mode</label>
+        <div style="display:flex;gap:16px;flex-wrap:wrap;font-size:13px;">
+          <label style="display:flex;align-items:center;gap:6px;cursor:pointer;">
+            <input type="radio" name="ai-model-policy" id="ai-model-policy-manual" value="manual" checked onchange="_onAIModelPolicyChange()">
+            Manual model
+          </label>
+          <label style="display:flex;align-items:center;gap:6px;cursor:pointer;">
+            <input type="radio" name="ai-model-policy" id="ai-model-policy-auto" value="auto" onchange="_onAIModelPolicyChange()">
+            Auto (scanner picks best model)
+          </label>
+        </div>
+        <div id="ai-auto-model-info" style="display:none;margin-top:8px;padding:10px 14px;border-radius:8px;background:rgba(251,191,36,0.12);border:1px solid rgba(251,191,36,0.35);font-size:12px;color:#92400e;line-height:1.5;">
+          Auto mode will pick the cheapest model for simple phases and may invoke premium models (e.g. Opus) for complex reasoning. Cost may be 3–10× higher than Haiku-only. Set a budget cap below to be safe.
+        </div>
+      </div>
+      <div class="form-grid" style="margin-top:8px;">
+        <div class="form-group">
           <label>Model</label>
           <select id="ai-model-select" style="padding:8px 12px;font-size:13px;" onchange="_onModelChange(this,'ai-model-warning')"></select>
+          <div id="ai-model-warning" style="display:none;margin-top:6px;padding:10px 14px;border-radius:8px;background:rgba(251,191,36,0.08);border:1px solid rgba(251,191,36,0.25);font-size:12px;color:#b45309;line-height:1.5;"></div>
         </div>
+        <div class="form-group">
+          <label>Budget cap (USD)</label>
+          <input type="number" id="ai-budget-cap-usd" step="0.10" min="0" placeholder="e.g. 5.00" onchange="_refreshAICostEstimate()" oninput="_debounceAICostEstimate()">
+          <div id="ai-budget-cap-hint" style="display:block;margin-top:4px;font-size:11px;color:var(--text2);line-height:1.4;">Default cap: $30 — leave blank to use the default. Auto-mode scans triggered from API/MCP/OpenClaw always use this default.</div>
+          <div id="ai-cost-estimate-hint" style="display:block;margin-top:8px;font-size:12px;color:var(--text2);line-height:1.45;">Estimated cost: loading…</div>
+        </div>
+      </div>
+      <div style="display:flex;gap:12px;align-items:center;margin-top:8px;flex-wrap:wrap;">
         <button type="button" class="btn btn-sm btn-primary" id="analyze-btn" onclick="analyzeInstruction()" style="height:38px;">Analyze & Plan</button>
         <span id="analyze-status" style="font-size:13px;color:var(--text2);"></span>
       </div>
-      <div id="ai-model-warning" style="display:none;margin-top:8px;padding:10px 14px;border-radius:8px;background:rgba(251,191,36,0.08);border:1px solid rgba(251,191,36,0.25);font-size:12px;color:#b45309;line-height:1.5;"></div>
 
       <!-- BLR in AI mode -->
       <div class="form-group full" style="margin-top:14px;">
@@ -779,6 +803,7 @@ input:focus-visible, select:focus-visible, textarea:focus-visible { outline:none
       <div class="form-group">
         <label>Budget cap (USD)</label>
         <input type="number" id="budget-cap-usd" step="0.10" min="0" placeholder="e.g. 5.00" onchange="_refreshCostEstimate()" oninput="_debounceCostEstimate()">
+        <div id="budget-cap-hint" style="margin-top:4px;font-size:11px;color:var(--text2);line-height:1.4;">Default cap: $30 — leave blank to use the default. Auto-mode scans triggered from API/MCP/OpenClaw always use this default.</div>
         <div id="cost-estimate-hint" style="margin-top:6px;font-size:12px;color:var(--text2);line-height:1.45;">Estimated cost: loading…</div>
       </div>
       <div class="form-group">
@@ -816,7 +841,7 @@ input:focus-visible, select:focus-visible, textarea:focus-visible { outline:none
       </div>
       <div class="form-group">
         <label>Scan Intensity</label>
-        <select id="scan-intensity">
+        <select id="scan-intensity" onchange="_refreshCostEstimate(); _debounceAICostEstimate();">
           <option value="light">Light — quick recon, few payloads</option>
           <option value="standard">Standard — balanced coverage</option>
           <option value="deep" selected>Deep — exhaustive payloads (default)</option>
@@ -2421,13 +2446,35 @@ async function _loadModelDropdowns() {
         _onModelChange(sel, warn);
       });
       _onModelPolicyChange();
+      _onAIModelPolicyChange();
       _refreshCostEstimate();
+      _refreshAICostEstimate();
     }
   } catch(e) { console.error('load models error:', e); }
 }
 
 var _costEstimateTimer = null;
 var _lastCostEstimate = null;
+var _aiCostEstimateTimer = null;
+var _lastAICostEstimate = null;
+var _autoModeDefaultCapUsd = 30;
+
+function _resolveBudgetCapUsd(inputId) {
+  const v = parseFloat((document.getElementById(inputId) || {}).value);
+  if (isNaN(v) || v <= 0) return undefined;
+  return v;
+}
+
+function _updateBudgetCapHints(defaultUsd) {
+  if (defaultUsd == null || isNaN(defaultUsd)) return;
+  _autoModeDefaultCapUsd = defaultUsd;
+  const msg = 'Default cap: $' + Number(defaultUsd).toFixed(0) +
+    ' — leave blank to use the default. Auto-mode scans triggered from API/MCP/OpenClaw always use this default.';
+  ['ai-budget-cap-hint', 'budget-cap-hint'].forEach(function(id) {
+    const el = document.getElementById(id);
+    if (el) el.textContent = msg;
+  });
+}
 
 function _modelPolicy() {
   const auto = document.getElementById('model-policy-auto');
@@ -2442,6 +2489,81 @@ function _onModelPolicyChange() {
   if (info) info.style.display = manual ? 'none' : 'block';
   if (manual && sel) _onModelChange(sel, 'manual-model-warning');
   _refreshCostEstimate();
+}
+
+function _aiModelPolicy() {
+  const auto = document.getElementById('ai-model-policy-auto');
+  return (auto && auto.checked) ? 'auto' : 'manual';
+}
+
+function _onAIModelPolicyChange() {
+  const manual = _aiModelPolicy() === 'manual';
+  const sel = document.getElementById('ai-model-select');
+  const info = document.getElementById('ai-auto-model-info');
+  if (sel) { sel.disabled = !manual; sel.style.opacity = manual ? '1' : '0.55'; }
+  if (info) info.style.display = manual ? 'none' : 'block';
+  if (manual && sel) _onModelChange(sel, 'ai-model-warning');
+  _refreshAICostEstimate();
+}
+
+function _aiTargetUrl() {
+  if (_currentPlan && _currentPlan.target_url) return _currentPlan.target_url;
+  const text = (document.getElementById('ai-instruction') || {}).value || '';
+  const m = text.match(/https?:\/\/[^\s<>"']+/i);
+  return m ? m[0] : 'https://example.com';
+}
+
+function _aiPlanModel() {
+  if (_aiModelPolicy() !== 'auto') {
+    return (document.getElementById('ai-model-select') || {}).value || '';
+  }
+  const models = Object.values(_modelMeta || {});
+  const rec = models.find(m => m.recommended);
+  if (rec) return rec.id;
+  const haiku = models.find(m => (m.id || '').toLowerCase().includes('haiku'));
+  if (haiku) return haiku.id;
+  const sel = document.getElementById('ai-model-select');
+  if (sel && sel.options.length) {
+    for (let i = 0; i < sel.options.length; i++) {
+      const v = sel.options[i].value || '';
+      if (v.toLowerCase().includes('haiku')) return v;
+    }
+    return sel.value;
+  }
+  return '';
+}
+
+function _debounceAICostEstimate() {
+  if (_aiCostEstimateTimer) clearTimeout(_aiCostEstimateTimer);
+  _aiCostEstimateTimer = setTimeout(_refreshAICostEstimate, 400);
+}
+
+async function _refreshAICostEstimate() {
+  const hint = document.getElementById('ai-cost-estimate-hint');
+  if (!hint) return;
+  const body = {
+    target_url: _aiTargetUrl(),
+    model: (document.getElementById('ai-model-select') || {}).value || '',
+    model_policy: _aiModelPolicy(),
+    scan_mode: (_currentPlan && _currentPlan.scan_mode) || (document.getElementById('scan-mode') || {}).value || 'both',
+    scan_intensity: (_currentPlan && _currentPlan.scan_intensity) || (document.getElementById('scan-intensity') || {}).value || 'deep',
+    llm_scan_depth: (document.getElementById('llm-deep-scan') && document.getElementById('llm-deep-scan').checked) ? 'deep' : 'standard',
+    scan_profile: (_currentPlan && _currentPlan.scan_profile) || (document.getElementById('scan-profile') || {}).value || 'vulnerability_scan',
+  };
+  try {
+    const r = await fetch('/api/scans/estimate', { method: 'POST', headers: {'Content-Type':'application/json'}, credentials: 'same-origin', body: JSON.stringify(body) });
+    if (!r.ok) { hint.textContent = 'Estimated cost: unavailable'; return; }
+    const d = await r.json();
+    _lastAICostEstimate = d;
+    if (d.default_cap_usd != null) _updateBudgetCapHints(d.default_cap_usd);
+    const capEl = document.getElementById('ai-budget-cap-usd');
+    if (capEl && !capEl.value && d.default_cap_usd) capEl.placeholder = String(d.default_cap_usd);
+    hint.textContent = 'Estimated cost: $' + d.low_usd.toFixed(2) + ' – $' + d.high_usd.toFixed(2) +
+      ' (expected ~$' + d.expected_usd.toFixed(2) + '). Recommended budget: $' +
+      (d.recommended_budget_usd || (d.expected_usd * 2)).toFixed(2);
+  } catch (e) {
+    hint.textContent = 'Estimated cost: unavailable';
+  }
 }
 
 function _debounceCostEstimate() {
@@ -2466,8 +2588,9 @@ async function _refreshCostEstimate() {
     if (!r.ok) { hint.textContent = 'Estimated cost: unavailable'; return; }
     const d = await r.json();
     _lastCostEstimate = d;
+    if (d.default_cap_usd != null) _updateBudgetCapHints(d.default_cap_usd);
     const capEl = document.getElementById('budget-cap-usd');
-    if (capEl && !capEl.value && d.recommended_budget_usd) capEl.placeholder = String(d.recommended_budget_usd);
+    if (capEl && !capEl.value && d.default_cap_usd) capEl.placeholder = String(d.default_cap_usd);
     hint.textContent = 'Estimated cost: $' + d.low_usd.toFixed(2) + ' – $' + d.high_usd.toFixed(2) +
       ' (expected ~$' + d.expected_usd.toFixed(2) + '). Recommended budget: $' +
       (d.recommended_budget_usd || (d.expected_usd * 2)).toFixed(2);
@@ -2479,7 +2602,8 @@ async function _refreshCostEstimate() {
 function _onModelChange(sel, warnId) {
   const w = document.getElementById(warnId);
   if (!w) return;
-  if (_modelPolicy() === 'auto') { w.style.display = 'none'; _refreshCostEstimate(); return; }
+  if (warnId === 'ai-model-warning' && _aiModelPolicy() === 'auto') { w.style.display = 'none'; _refreshAICostEstimate(); return; }
+  if (warnId === 'manual-model-warning' && _modelPolicy() === 'auto') { w.style.display = 'none'; _refreshCostEstimate(); return; }
   const m = _modelMeta[sel.value];
   if (m && m.high_cost) {
     w.innerHTML = '<strong style="color:#92400e;">&#9888; Premium Model — High Cost</strong><br>' +
@@ -2593,11 +2717,11 @@ async function analyzeInstruction() {
     _aiApiImports = await _uploadAiImports();
     btn.textContent = 'Analyzing...';
     status.textContent = 'Sending to AI...';
-    const selectedModel = document.getElementById('ai-model-select').value;
+    const selectedModel = _aiPlanModel();
     const resp = await fetch('/api/scan/analyze', {
       method: 'POST',
       headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({instruction: text, model: selectedModel, api_imports: _aiApiImports}),
+      body: JSON.stringify({instruction: text, model: selectedModel, model_policy: _aiModelPolicy(), api_imports: _aiApiImports}),
     });
     if (!resp.ok) {
       const txt = await resp.text();
@@ -2671,6 +2795,7 @@ function renderPlan(plan) {
   container.innerHTML = html;
   container.style.display = '';
   container.scrollIntoView({behavior:'smooth', block:'nearest'});
+  _refreshAICostEstimate();
 }
 
 async function confirmPlan() {
@@ -2684,6 +2809,7 @@ async function confirmPlan() {
     username: p.username || '',
     password: p.password || '',
     model: model,
+    model_policy: _aiModelPolicy(),
     scan_mode: p.scan_mode || 'both',
     scan_profile: p.scan_profile || 'vulnerability_scan',
     skip_passive_sibling_tls: !!(document.getElementById('skip-passive-sibling-tls') && document.getElementById('skip-passive-sibling-tls').checked),
@@ -2700,6 +2826,8 @@ async function confirmPlan() {
     workflow_id: document.getElementById('ai-workflow-select').value || document.getElementById('workflow-select').value || '',
     business_flow: (document.getElementById('ai-business-flow').value || document.getElementById('business-flow').value || '').trim(),
   };
+  const aiCap = _resolveBudgetCapUsd('ai-budget-cap-usd');
+  if (aiCap !== undefined) body.budget_cap_usd = aiCap;
   if (ubEl && ubEl.value.trim()) body.username_b = ubEl.value.trim();
   if (pbEl && pbEl.value.trim()) body.password_b = pbEl.value.trim();
   body.credentials_admin = _collectIdentityCreds('admin-username', 'admin-password');
@@ -3356,7 +3484,6 @@ async function startScan() {
     password: document.getElementById('password').value,
     model: document.getElementById('model-select').value,
     model_policy: _modelPolicy(),
-    budget_cap_usd: (function(){ const v = parseFloat((document.getElementById('budget-cap-usd')||{}).value); return isNaN(v) || v <= 0 ? (_lastCostEstimate && _lastCostEstimate.recommended_budget_usd) : v; })(),
     scan_mode: document.getElementById('scan-mode').value,
     scan_profile: (document.getElementById('scan-profile') || {}).value || 'vulnerability_scan',
     skip_passive_sibling_tls: !!(document.getElementById('skip-passive-sibling-tls') && document.getElementById('skip-passive-sibling-tls').checked),
@@ -3373,6 +3500,8 @@ async function startScan() {
     workflow_id: document.getElementById('workflow-select').value || '',
     business_flow: (document.getElementById('business-flow').value || '').trim(),
   };
+  const manualCap = _resolveBudgetCapUsd('budget-cap-usd');
+  if (manualCap !== undefined) body.budget_cap_usd = manualCap;
   if (usernameB || passwordB) {
     body.username_b = usernameB;
     body.password_b = passwordB;
