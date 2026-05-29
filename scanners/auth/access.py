@@ -21,6 +21,17 @@ class AccessResult:
     allowed: bool
     user: Optional[User] = None
     reason: str = ""
+    source: str = ""
+
+
+def _apply_group_role(
+    repo: UserRepository, user: User, group_role: str | None
+) -> User:
+    if group_role and user.role != group_role:
+        synced = repo.set_role(user.id, group_role)
+        if synced:
+            return synced
+    return user
 
 
 def resolve_email_access(
@@ -29,33 +40,44 @@ def resolve_email_access(
     repo: UserRepository,
     *,
     initial_admins: set[str] | None = None,
+    groups: list[str] | None = None,
 ) -> AccessResult:
     """Determine whether *email* may log in and return/create the user record."""
+    from scanners.auth.groups import groups_mapping_enabled, resolve_role_from_groups
+
     email_n = email.strip().lower()
     if not email_n or "@" not in email_n:
         return AccessResult(False, reason="invalid_email")
 
     admins = initial_admins if initial_admins is not None else parse_initial_admin_emails()
+    group_role = resolve_role_from_groups(groups or [])
 
     if email_n in admins:
         user = repo.upsert_login(email_n, name=name, role=UserRole.ADMIN.value)
-        return AccessResult(True, user=user)
+        user = _apply_group_role(repo, user, group_role)
+        return AccessResult(True, user=user, source="bootstrap")
 
     existing = repo.get_user_by_email(email_n)
     if existing:
         if not existing.is_active:
             return AccessResult(False, reason="deactivated")
         user = repo.upsert_login(email_n, name=name)
-        return AccessResult(True, user=user)
+        user = _apply_group_role(repo, user, group_role)
+        return AccessResult(True, user=user, source="existing")
 
     invite = repo.get_pending_invite_by_email(email_n)
     if invite and repo.is_invite_valid(invite):
         user = repo.create_user(email_n, name=name, role=invite.role)
         repo.accept_invite(email_n, user.id)
         user = repo.upsert_login(email_n, name=name)
-        return AccessResult(True, user=user)
+        user = _apply_group_role(repo, user, group_role)
+        return AccessResult(True, user=user, source="invite")
 
-    return AccessResult(
-        False,
-        reason="not_authorized",
-    )
+    if group_role is not None:
+        user = repo.upsert_login(email_n, name=name, role=group_role)
+        return AccessResult(True, user=user, source="group")
+
+    if groups_mapping_enabled():
+        return AccessResult(False, reason="not_in_required_group")
+
+    return AccessResult(False, reason="not_authorized")

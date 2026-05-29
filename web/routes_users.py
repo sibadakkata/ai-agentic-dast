@@ -202,9 +202,11 @@ async def sso_acs(request: Request):
         result["email"],
         result.get("name", ""),
         _get_repo(),
+        groups=result.get("groups") or [],
     )
     if not access.allowed or not access.user:
-        return RedirectResponse("/sso/denied?reason=not_authorized", status_code=302)
+        reason = access.reason or "not_authorized"
+        return RedirectResponse(f"/sso/denied?reason={reason}", status_code=302)
     resp = RedirectResponse("/", status_code=302)
     _set_session_cookie(resp, access.user.id)
     return resp
@@ -232,6 +234,10 @@ async def sso_logout():
 async def sso_denied(request: Request, reason: str = "not_authorized"):
     reason_text = {
         "not_authorized": "Not authorized — contact your admin to request access.",
+        "not_in_required_group": (
+            "You are not in an Entra ID group allowed to use this application. "
+            "Contact your admin or IT to be added to the correct security group."
+        ),
         "saml_error": "Sign-in failed. Please try again or contact your administrator.",
         "deactivated": "Your account has been deactivated.",
     }.get(reason, "Access denied.")

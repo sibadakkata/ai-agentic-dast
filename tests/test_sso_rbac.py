@@ -86,7 +86,7 @@ class TestSamlAcs:
         monkeypatch.setattr("scanners.auth.saml.sso_enabled", lambda: True)
         monkeypatch.setattr(
             "scanners.auth.saml.process_acs",
-            lambda r, p: {"ok": True, "email": "admin@example.com", "name": "A"},
+            lambda r, p: {"ok": True, "email": "admin@example.com", "name": "A", "groups": []},
         )
         resp = client.post("/sso/acs", data={"SAMLResponse": "x"}, follow_redirects=False)
         assert resp.status_code == 302 and resp.headers["location"] == "/"
@@ -97,7 +97,7 @@ class TestSamlAcs:
         monkeypatch.setattr("scanners.auth.saml.sso_enabled", lambda: True)
         monkeypatch.setattr(
             "scanners.auth.saml.process_acs",
-            lambda r, p: {"ok": True, "email": "u@example.com", "name": "U"},
+            lambda r, p: {"ok": True, "email": "u@example.com", "name": "U", "groups": []},
         )
         resp = client.post("/sso/acs", data={"SAMLResponse": "x"}, follow_redirects=False)
         assert resp.status_code == 302 and "denied" in resp.headers["location"]
