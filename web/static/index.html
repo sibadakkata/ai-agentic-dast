@@ -705,21 +705,23 @@ input:focus-visible, select:focus-visible, textarea:focus-visible { outline:none
           Auto mode will pick the cheapest model for simple phases and may invoke premium models (e.g. Opus) for complex reasoning. Cost may be 3–10× higher than Haiku-only. Set a budget cap below to be safe.
         </div>
       </div>
-      <div style="display:flex;gap:12px;align-items:flex-end;margin-top:8px;flex-wrap:wrap;">
-        <div class="form-group" style="min-width:220px;">
+      <div class="form-grid" style="margin-top:8px;">
+        <div class="form-group">
           <label>Model</label>
           <select id="ai-model-select" style="padding:8px 12px;font-size:13px;" onchange="_onModelChange(this,'ai-model-warning')"></select>
+          <div id="ai-model-warning" style="display:none;margin-top:6px;padding:10px 14px;border-radius:8px;background:rgba(251,191,36,0.08);border:1px solid rgba(251,191,36,0.25);font-size:12px;color:#b45309;line-height:1.5;"></div>
         </div>
-        <div class="form-group" style="min-width:160px;">
+        <div class="form-group">
           <label>Budget cap (USD)</label>
           <input type="number" id="ai-budget-cap-usd" step="0.10" min="0" placeholder="e.g. 5.00" onchange="_refreshAICostEstimate()" oninput="_debounceAICostEstimate()">
-          <div id="ai-budget-cap-hint" style="margin-top:4px;font-size:11px;color:var(--text2);line-height:1.4;">Default cap: $30 — leave blank to use the default. Auto-mode scans triggered from API/MCP/OpenClaw always use this default.</div>
-          <div id="ai-cost-estimate-hint" style="margin-top:6px;font-size:12px;color:var(--text2);line-height:1.45;">Estimated cost: loading…</div>
+          <div id="ai-budget-cap-hint" style="display:block;margin-top:4px;font-size:11px;color:var(--text2);line-height:1.4;">Default cap: $30 — leave blank to use the default. Auto-mode scans triggered from API/MCP/OpenClaw always use this default.</div>
+          <div id="ai-cost-estimate-hint" style="display:block;margin-top:8px;font-size:12px;color:var(--text2);line-height:1.45;">Estimated cost: loading…</div>
         </div>
+      </div>
+      <div style="display:flex;gap:12px;align-items:center;margin-top:8px;flex-wrap:wrap;">
         <button type="button" class="btn btn-sm btn-primary" id="analyze-btn" onclick="analyzeInstruction()" style="height:38px;">Analyze & Plan</button>
         <span id="analyze-status" style="font-size:13px;color:var(--text2);"></span>
       </div>
-      <div id="ai-model-warning" style="display:none;margin-top:8px;padding:10px 14px;border-radius:8px;background:rgba(251,191,36,0.08);border:1px solid rgba(251,191,36,0.25);font-size:12px;color:#b45309;line-height:1.5;"></div>
 
       <!-- BLR in AI mode -->
       <div class="form-group full" style="margin-top:14px;">
