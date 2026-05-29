@@ -14,6 +14,7 @@
 See also [architecture.md](architecture.md), [deployment.md](deployment.md), [SSO_RBAC.md](SSO_RBAC.md).
 
 | [intelligent-model-selection.md](intelligent-model-selection.md) | **Auto mode & budget gate** — user guide, examples, API/MCP/OpenClaw quickstarts |
+| [confluence/red-team-ai-web-scanner.xhtml](confluence/red-team-ai-web-scanner.xhtml) | Paste-ready Confluence overview page for non-developers |
 | [web-ui.md](web-ui.md) | Web UI — toggle, cap field, approval banner |
 | [scanner-internals.md](scanner-internals.md) | Engineering — extending tier policy, BudgetGuard wiring |
 | [api.md](api.md) | REST reference — estimate, budget, approve, stop |

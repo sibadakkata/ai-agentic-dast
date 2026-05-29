@@ -1,0 +1,63 @@
+<ac:structured-macro ac:name="info" ac:schema-version="1"><ac:rich-text-body><p><strong>Auto mode</strong> and the <strong>budget gate</strong> are new (May 2026). This page is a short overview; technical detail lives in the Git repo.</p></ac:rich-text-body></ac:structured-macro>
+
+<p>The <strong>Red Team AI Web Scanner</strong> is internal LLM-driven DAST for authorized web and API testing by Red Team, AppSec, and product teams.</p>
+
+<h2>What it does</h2>
+<ul>
+<li>Discovers attack surface on sites, SPAs, and APIs (Playwright + HTTP tools).</li>
+<li>Runs OWASP-aligned phases (XSS, SQLi, SSRF, IDOR/BOLA, auth flaws, and more).</li>
+<li>Imports Postman, Burp, or Swagger/OpenAPI for API coverage.</li>
+<li>Streams live progress; exports PDF, Excel, or JSON when done.</li>
+<li>Tracks LLM cost per scan and in Cost Analytics.</li>
+</ul>
+
+<h2>How to run a scan</h2>
+<p><strong>Web UI (recommended):</strong> <a href="http://3.20.180.251/">http://3.20.180.251</a> → <strong>SSO</strong> → <strong>New Scan</strong>.</p>
+<!-- TODO: attach screenshot of New Scan form (Auto mode + Budget cap) -->
+<p><strong>Automation:</strong> REST API (<code>docs/api.md</code>, <a href="http://3.20.180.251/docs">Swagger</a>), MCP (<code>docs/mcp.md</code>), or OpenClaw (<code>openclaw-skill/README.md</code>) — see Git for setup; budget approval is Web UI only.</p>
+
+<ac:structured-macro ac:name="warning" ac:schema-version="1"><ac:rich-text-body><p>Only scan targets you are authorized to test. The scanner performs active attacks (injection, auth bypass probes, and similar). Misuse may violate policy and law.</p></ac:rich-text-body></ac:structured-macro>
+
+<h2>Ways to scan</h2>
+<ul>
+<li><strong>Website</strong>, <strong>API</strong>, or <strong>Both</strong> — one job covers site plus APIs when needed.</li>
+<li><strong>Imports</strong> — Postman, Burp, or Swagger/OpenAPI.</li>
+<li><strong>Business flow</strong> — describe a multi-step journey in plain language.</li>
+<li><strong>Intensity</strong> — Light, Standard, or Deep; <strong>Crawl only</strong> skips attack payloads.</li>
+</ul>
+
+<h2>Choosing a model</h2>
+<ul>
+<li><strong>Manual (default):</strong> One model (Haiku, Sonnet, or Opus) for all phases.</li>
+<li><strong>Auto (new):</strong> Haiku, Sonnet, or Opus per phase for cost vs. quality.</li>
+<li><strong>Opus</strong> on hard phases: access control, business logic, session mgmt, attack chains.</li>
+<li>Live cost on the scan page; Auto shows <strong>Models used by phase</strong>.</li>
+</ul>
+
+<h2>Budget gate</h2>
+<ul>
+<li>Auto mode default cap: <strong>$30 USD</strong> per scan (server-side).</li>
+<li>Custom cap: Web UI scan form (SSO). API/MCP/OpenClaw keep $30 — prevents runaway automation cost.</li>
+<li>At cap, scan <strong>pauses</strong> until the starter or an admin approves more budget in the Web UI.</li>
+</ul>
+<!-- TODO: attach screenshot of budget approval banner on live scan view -->
+
+<h2>Where to find things</h2>
+<table>
+<tbody>
+<tr><th>Need</th><th>Where</th></tr>
+<tr><td>Web UI</td><td><a href="http://3.20.180.251/">http://3.20.180.251</a></td></tr>
+<tr><td>REST API reference</td><td><a href="http://3.20.180.251/docs">http://3.20.180.251/docs</a> (Swagger)</td></tr>
+<tr><td>MCP / Claude Desktop setup</td><td>Repo: <code>docs/mcp.md</code></td></tr>
+<tr><td>OpenClaw skill</td><td>Repo: <code>openclaw-skill/README.md</code></td></tr>
+<tr><td>Deep-dive on model selection</td><td>Repo: <code>docs/intelligent-model-selection.md</code></td></tr>
+<tr><td>Source repo</td><td><a href="https://git.int.avast.com/red-team/ai-agentic-dast">git.int.avast.com/red-team/ai-agentic-dast</a></td></tr>
+</tbody>
+</table>
+
+<h2>Owners and contacts</h2>
+<ul>
+<li><strong>Owner:</strong> Red Team — Siba Dakkata</li>
+<li><strong>Repository:</strong> Internal GitLab <code>git.int.avast.com/red-team/ai-agentic-dast</code></li>
+<li><strong>Branch:</strong> <code>feature/scalable-scanner-platform</code> (active development)</li>
+</ul>
