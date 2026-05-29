@@ -139,6 +139,10 @@ Typical tool sequence:
 
 ---
 
+For polling, status, scan IDs, and what happens after UI approval, see [automation-mcp-openclaw-api.md](automation-mcp-openclaw-api.md).
+
+---
+
 ## OpenClaw quickstart
 
 User prompt:

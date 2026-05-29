@@ -14,7 +14,7 @@
 <h2>How to run a scan</h2>
 <p><strong>Web UI (recommended):</strong> <a href="http://3.20.180.251/">http://3.20.180.251</a> → <strong>SSO</strong> → <strong>New Scan</strong>.</p>
 <!-- TODO: attach screenshot of New Scan form (Auto mode + Budget cap) -->
-<p><strong>Automation:</strong> REST API (<code>docs/api.md</code>, <a href="http://3.20.180.251/docs">Swagger</a>), MCP (<code>docs/mcp.md</code>), or OpenClaw (<code>openclaw-skill/README.md</code>) — see Git for setup; budget approval is Web UI only.</p>
+<p><strong>Automation:</strong> REST API (<code>docs/api.md</code>, <a href="http://3.20.180.251/docs">Swagger</a>), MCP (<code>docs/mcp.md</code>), or OpenClaw (<code>openclaw-skill/README.md</code>) — see Git for setup; budget approval is Web UI only. For scan IDs, polling, and post-approval resume, see the [Red Team AI Web Scanner — Automation: MCP, OpenClaw, REST API|Red Team AI Web Scanner — Automation: MCP, OpenClaw, REST API] child page.</p>
 
 <ac:structured-macro ac:name="warning" ac:schema-version="1"><ac:rich-text-body><p>Only scan targets you are authorized to test. The scanner performs active attacks (injection, auth bypass probes, and similar). Misuse may violate policy and law.</p></ac:rich-text-body></ac:structured-macro>
 
@@ -32,6 +32,7 @@
 <li><strong>Auto (new):</strong> Haiku, Sonnet, or Opus per phase for cost vs. quality.</li>
 <li><strong>Opus</strong> on hard phases: access control, business logic, session mgmt, attack chains.</li>
 <li>Live cost on the scan page; Auto shows <strong>Models used by phase</strong>.</li>
+<li>For automation usage (MCP, OpenClaw, REST API), see the [Red Team AI Web Scanner — Automation: MCP, OpenClaw, REST API|Red Team AI Web Scanner — Automation: MCP, OpenClaw, REST API] child page.</li>
 </ul>
 
 <h2>Budget gate</h2>
@@ -51,6 +52,7 @@
 <tr><td>MCP / Claude Desktop setup</td><td>Repo: <code>docs/mcp.md</code></td></tr>
 <tr><td>OpenClaw skill</td><td>Repo: <code>openclaw-skill/README.md</code></td></tr>
 <tr><td>Deep-dive on model selection</td><td>Repo: <code>docs/intelligent-model-selection.md</code></td></tr>
+<tr><td>Automation (MCP, OpenClaw, API)</td><td>Confluence: [Red Team AI Web Scanner — Automation: MCP, OpenClaw, REST API|Red Team AI Web Scanner — Automation: MCP, OpenClaw, REST API] · Repo: <code>docs/automation-mcp-openclaw-api.md</code></td></tr>
 <tr><td>Source repo</td><td><a href="https://git.int.avast.com/red-team/ai-agentic-dast">git.int.avast.com/red-team/ai-agentic-dast</a></td></tr>
 </tbody>
 </table>

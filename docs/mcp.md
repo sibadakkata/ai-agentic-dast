@@ -157,7 +157,7 @@ Unless noted, tools return JSON dicts from the API, or an `{"error": "...", "mes
 
 Typed launches with more fields (base64 imports, `scan_profile`) are available via [HTTP `POST /api/v1/scans`](api.md) — MCP forwards `model_policy` only.
 
-Guide: [intelligent-model-selection.md](intelligent-model-selection.md)
+Guide: [intelligent-model-selection.md](intelligent-model-selection.md). Full automation flow (scan IDs, polling after UI approval): [automation-mcp-openclaw-api.md](automation-mcp-openclaw-api.md).
 
 ### estimate_scan_cost
 

@@ -39,6 +39,8 @@ $env:SCANNER_PASS = "your-secret"         # must match server DAST_AUTH_PASS
 
 When the scanner runs with RBAC, all `/api/*` calls need Basic Auth — set `SCANNER_USER` / `SCANNER_PASS` to the same values as `DAST_AUTH_USER` / `DAST_AUTH_PASS` on the server. Browser SSO does not apply to this CLI; see [SSO & RBAC](../docs/SSO_RBAC.md).
 
+For scan IDs, polling, budget pause/resume after Web UI approval, see [automation-mcp-openclaw-api.md](../docs/automation-mcp-openclaw-api.md).
+
 ---
 
 ## All Commands & Examples
