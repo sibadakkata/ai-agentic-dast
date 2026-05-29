@@ -1,65 +1,266 @@
-<ac:structured-macro ac:name="info" ac:schema-version="1"><ac:rich-text-body><p><strong>Auto mode</strong> and the <strong>budget gate</strong> are new (May 2026). This page is a short overview; technical detail lives in the Git repo.</p></ac:rich-text-body></ac:structured-macro>
+<h1>Red Team AI Web Scanner</h1>
+<ac:structured-macro ac:name="info" ac:schema-version="1" ac:macro-id="50d0690b-cdf5-4047-a59d-0529baac55c2"><ac:rich-text-body><p>Canonical technical reference for the AI DAST Scanner platform (May 2026). Audience: security architecture reviewers, AppSec testers, Red Team, and internal product teams running authorized assessments.</p></ac:rich-text-body></ac:structured-macro>
 
-<p>The <strong>Red Team AI Web Scanner</strong> is internal LLM-driven DAST for authorized web and API testing by Red Team, AppSec, and product teams.</p>
+<h2>1. Overview</h2>
+<p>The <strong>Red Team AI Web Scanner</strong> is an internal, LLM-driven Dynamic Application Security Testing (DAST) platform. An autonomous agent reasons about each target application, discovers attack surface (SPAs, forms, APIs), generates context-aware payloads, and executes multi-phase security tests using Playwright and HTTP tooling. Findings, evidence, and live telemetry are persisted to PostgreSQL and streamed to the UI in real time.</p>
+<p><strong>What it does:</strong> Orchestrates authorized web/API security scans with passive recon, crawling, and OWASP-aligned vulnerability phases (XSS, SQLi, SSRF, IDOR/BOLA, CSRF, auth flaws, and more). Supports Postman and Burp imports, multiple auth modes, and selectable LLM models on AWS Bedrock.</p>
+<p><strong>Who it is for:</strong> Red Team, Application Security, and internal product teams who need self-service, repeatable DAST against staging or lab targets (with appropriate authorization).</p>
+<p><strong>Status:</strong> Production <em>soft launch</em> as of May 2026 — ALB + WAF ingress, Fargate-per-scan workers, RDS PostgreSQL Multi-AZ primary store, weekly S3 backups. HTTPS on the ALB is pending corporate TLS certificate issuance; HTTP is used during soft launch behind WAF rate limits.</p>
 
-<h2>What it does</h2>
-<ul>
-<li>Discovers attack surface on sites, SPAs, and APIs (Playwright + HTTP tools).</li>
-<li>Runs OWASP-aligned phases (XSS, SQLi, SSRF, IDOR/BOLA, auth flaws, and more).</li>
-<li>Imports Postman, Burp, or Swagger/OpenAPI for API coverage.</li>
-<li>Streams live progress; exports PDF, Excel, or JSON when done.</li>
-<li>Tracks LLM cost per scan and in Cost Analytics.</li>
-</ul>
+<h2>2. Architecture</h2>
+<ac:structured-macro ac:name="code" ac:schema-version="1" ac:macro-id="dff7e30c-8da6-47f5-8829-0d30c1252b1f"><ac:parameter ac:name="language">text</ac:parameter><ac:plain-text-body><![CDATA[
+                         +------------------+
+                         |  User Browser    |
+                         +--------+---------+
+                                  | HTTP (Basic auth)
+                                  v
+              rt.ai.webscanner.gendigital.com (CNAME)
+                                  |
+                                  v
++----------------+    +-----------+------------+    +------------------+
+|  AWS WAFv2     |--->|  ALB (public)        |--->|  EC2 :80         |
+|  OWASP + rate  |    |  us-east-2           |    |  Docker: UI      |
++----------------+    +----------------------+    |  FastAPI         |
+                                                   +--------+---------+
+                                                            |
+                    +---------------------------------------+--------------------------------+
+                    |                                       |                                |
+                    v                                       v                                v
+           +--------+--------+                    +---------+---------+            +---------+---------+
+           | ECS RunTask     |                    | RDS PostgreSQL    |            | ElastiCache Redis |
+           | Fargate 4vCPU   |                    | Multi-AZ (VPC)    |            | pub/sub live evts |
+           | 1 task / scan   |                    +-------------------+            +-------------------+
+           +--------+--------+                              ^
+                    |                                       |
+        +-----------+-----------+                           |
+        | Playwright + Agent  |                           |
+        | LLM loop (Bedrock)  |---------------------------+
+        +-----------+-----------+
+                    |
+        +-----------+-----------+
+        | Public Internet       |
+        | (scan targets)        |
+        +-----------------------+
 
-<h2>How to run a scan</h2>
-<p><strong>Web UI (recommended):</strong> <a href="http://3.20.180.251/">http://3.20.180.251</a> → <strong>SSO</strong> → <strong>New Scan</strong>.</p>
-<!-- TODO: attach screenshot of New Scan form (Auto mode + Budget cap) -->
-<p><strong>Automation:</strong> REST API (<code>docs/api.md</code>, <a href="http://3.20.180.251/docs">Swagger</a>), MCP (<code>docs/mcp.md</code>), or OpenClaw (<code>openclaw-skill/README.md</code>) — see Git for setup; budget approval is Web UI only. For scan IDs, polling, and post-approval resume, see the [Red Team AI Web Scanner — Automation: MCP, OpenClaw, REST API|Red Team AI Web Scanner — Automation: MCP, OpenClaw, REST API] child page.</p>
+Auxiliary: S3 backups <-- Lambda (weekly) <-- EventBridge
+           Secrets Manager (RDS creds) via VPC interface endpoints
+           ECR / CloudWatch / S3 via VPC endpoints
+]]></ac:plain-text-body></ac:structured-macro>
 
-<ac:structured-macro ac:name="warning" ac:schema-version="1"><ac:rich-text-body><p>Only scan targets you are authorized to test. The scanner performs active attacks (injection, auth bypass probes, and similar). Misuse may violate policy and law.</p></ac:rich-text-body></ac:structured-macro>
-
-<h2>Ways to scan</h2>
-<ul>
-<li><strong>Website</strong>, <strong>API</strong>, or <strong>Both</strong> — one job covers site plus APIs when needed.</li>
-<li><strong>Imports</strong> — Postman, Burp, or Swagger/OpenAPI.</li>
-<li><strong>Business flow</strong> — describe a multi-step journey in plain language.</li>
-<li><strong>Intensity</strong> — Light, Standard, or Deep; <strong>Crawl only</strong> skips attack payloads.</li>
-</ul>
-
-<h2>Choosing a model</h2>
-<ul>
-<li><strong>Manual (default):</strong> One model (Haiku, Sonnet, or Opus) for all phases.</li>
-<li><strong>Auto (new):</strong> Haiku, Sonnet, or Opus per phase for cost vs. quality.</li>
-<li><strong>Opus</strong> on hard phases: access control, business logic, session mgmt, attack chains.</li>
-<li>Live cost on the scan page; Auto shows <strong>Models used by phase</strong>.</li>
-<li>For automation usage (MCP, OpenClaw, REST API), see the [Red Team AI Web Scanner — Automation: MCP, OpenClaw, REST API|Red Team AI Web Scanner — Automation: MCP, OpenClaw, REST API] child page.</li>
-</ul>
-
-<h2>Budget gate</h2>
-<ul>
-<li>Auto mode default cap: <strong>$30 USD</strong> per scan (server-side).</li>
-<li>Custom cap: Web UI scan form (SSO). API/MCP/OpenClaw keep $30 — prevents runaway automation cost.</li>
-<li>At cap, scan <strong>pauses</strong> until the starter or an admin approves more budget in the Web UI.</li>
-</ul>
-<!-- TODO: attach screenshot of budget approval banner on live scan view -->
-
-<h2>Where to find things</h2>
+<h3>Component responsibilities</h3>
 <table>
+<thead><tr><th>Component</th><th>Role</th></tr></thead>
 <tbody>
-<tr><th>Need</th><th>Where</th></tr>
-<tr><td>Web UI</td><td><a href="http://3.20.180.251/">http://3.20.180.251</a></td></tr>
-<tr><td>REST API reference</td><td><a href="http://3.20.180.251/docs">http://3.20.180.251/docs</a> (Swagger)</td></tr>
-<tr><td>MCP / Claude Desktop setup</td><td>Repo: <code>docs/mcp.md</code></td></tr>
-<tr><td>OpenClaw skill</td><td>Repo: <code>openclaw-skill/README.md</code></td></tr>
-<tr><td>Deep-dive on model selection</td><td>Repo: <code>docs/intelligent-model-selection.md</code></td></tr>
-<tr><td>Automation (MCP, OpenClaw, API)</td><td>Confluence: [Red Team AI Web Scanner — Automation: MCP, OpenClaw, REST API|Red Team AI Web Scanner — Automation: MCP, OpenClaw, REST API] · Repo: <code>docs/automation-mcp-openclaw-api.md</code></td></tr>
-<tr><td>Source repo</td><td><a href="https://git.int.avast.com/red-team/ai-agentic-dast">git.int.avast.com/red-team/ai-agentic-dast</a></td></tr>
+<tr><td><strong>UI (FastAPI)</strong></td><td>Runs on EC2 in Docker. Scan orchestration, results UI, REST API, Server-Sent Events (SSE) for live progress. Calls <code>ecs:RunTask</code> to spawn scanner workers.</td></tr>
+<tr><td><strong>Scanner Runner (ECS Fargate)</strong></td><td>Ephemeral task per scan (<code>dast-scanner-runner:5</code>, 4 vCPU / 8 GB). Executes the LLM agent loop, Playwright browser automation, and writes findings to RDS.</td></tr>
+<tr><td><strong>PostgreSQL (RDS Multi-AZ)</strong></td><td>Primary durable store: scans, findings, <code>scan_results</code>, <code>live_events</code>, users/sessions. Encrypted at rest.</td></tr>
+<tr><td><strong>Redis (ElastiCache)</strong></td><td>Pub/sub channel for live events between Fargate runners and the UI process.</td></tr>
+<tr><td><strong>ALB + WAFv2</strong></td><td>Public ingress. Managed OWASP rules, SQLi ruleset, IP reputation, anonymous IP list, rate-based rule (2000 req / 5 min).</td></tr>
+<tr><td><strong>S3 backups bucket</strong></td><td>Versioned, encrypted weekly PostgreSQL dumps (<code>dast-scanner-db-backups-168551359048</code>).</td></tr>
+<tr><td><strong>Lambda + EventBridge</strong></td><td><code>dast-scanner-db-backup</code> runs weekly (Sunday), <code>pg_dump</code> to tar.gz, upload to S3.</td></tr>
+<tr><td><strong>AWS Bedrock</strong></td><td>LLM provider: Claude Haiku 4.5 (default, cost-efficient) and Claude Sonnet 4.5 (deeper reasoning, higher cost).</td></tr>
 </tbody>
 </table>
 
-<h2>Owners and contacts</h2>
+<ac:structured-macro ac:name="info" ac:schema-version="1" ac:macro-id="163ab42a-45cd-4103-9e0f-e444194741b0"><ac:rich-text-body><p><strong>Dual-write era:</strong> During migration, scan state was written to both SQLite (on EC2) and PostgreSQL. <strong>Current state (May 2026):</strong> PostgreSQL is the primary read/write store. SQLite still receives dual-write (<code>DUAL_WRITE_PG=1</code>) as a safety net on the UI host; Fargate runners use <code>RUNNER_PG_ONLY=1</code>. Plan to retire SQLite once operational confidence is established.</p></ac:rich-text-body></ac:structured-macro>
+
+<h2>3. Network diagram and flows</h2>
+<ac:structured-macro ac:name="code" ac:schema-version="1" ac:macro-id="5c7f80c4-08fd-4038-bec6-88eb430b5f83"><ac:parameter ac:name="language">text</ac:parameter><ac:plain-text-body><![CDATA[
+INGRESS (public path)
+  User --> DNS rt.ai.webscanner.gendigital.com (CNAME)
+       --> ALB dast-scanner-336692728.us-east-2.elb.amazonaws.com
+       --> WAFv2 (dast-scanner)
+       --> EC2 3.20.180.251:80 (SG: only from ALB SG)
+       --> Docker dast-scanner (FastAPI UI)
+
+SCAN LAUNCH (mixed public / VPC-private)
+  UI --ecs:RunTask--> Fargate task (awsvpc, public IP assigned)
+  Task --VPC-private--> RDS (5432), Redis (6379), Secrets Manager
+  Task --VPC endpoint--> ECR (image pull), CloudWatch Logs, S3 gateway
+  Task --public egress--> Target application (HTTP/HTTPS)
+  Task --TLS public--> Bedrock (us-east-2)
+
+EGRESS / ENDPOINTS
+  [PUBLIC]  Browser->ALB, Fargate->Internet targets, Fargate->Bedrock
+  [VPC]     EC2/Fargate/Lambda -> RDS, Redis
+  [VPC EP]  S3 (gateway), Secrets Manager, ECR (x2), CloudWatch Logs (interface)
+]]></ac:plain-text-body></ac:structured-macro>
+<p>EC2 security group does <strong>not</strong> allow direct Internet access to port 80; only the ALB security group may forward traffic to the UI container.</p>
+
+<h2>4. Infrastructure inventory</h2>
+<table>
+<thead><tr><th>Resource</th><th>Identifier</th><th>Region</th><th>Notes</th></tr></thead>
+<tbody>
+<tr><td>AWS Account</td><td>168551359048</td><td>us-east-2</td><td>Gen Digital Red Team POC account</td></tr>
+<tr><td>EC2</td><td>3.20.180.251</td><td>us-east-2</td><td>UI container host (<code>dast-scanner</code>)</td></tr>
+<tr><td>ALB</td><td>dast-scanner-336692728.us-east-2.elb.amazonaws.com</td><td>us-east-2</td><td>Public; behind WAF</td></tr>
+<tr><td>RDS PostgreSQL</td><td>dast-scanner.clvdrnz05aof.us-east-2.rds.amazonaws.com</td><td>us-east-2</td><td>Multi-AZ, db.t4g.small, encrypted</td></tr>
+<tr><td>ECS Cluster</td><td>dast-scanner</td><td>us-east-2</td><td>Fargate, one task per scan</td></tr>
+<tr><td>Task Definition</td><td>dast-scanner-runner:5</td><td>us-east-2</td><td>4 vCPU / 8 GB; ECR image <code>:latest</code></td></tr>
+<tr><td>ECR Repo</td><td>dast-scanner-runner</td><td>us-east-2</td><td>Runner image artifacts</td></tr>
+<tr><td>Redis</td><td>ElastiCache cache.t4g.micro</td><td>us-east-2</td><td>Live event pub/sub</td></tr>
+<tr><td>WAF</td><td>dast-scanner</td><td>us-east-2</td><td>CommonRuleSet + SQLi + rate limit</td></tr>
+<tr><td>S3 Backups</td><td>dast-scanner-db-backups-168551359048</td><td>us-east-2</td><td>Versioned, encrypted, lifecycle</td></tr>
+<tr><td>Lambda Backup</td><td>dast-scanner-db-backup</td><td>us-east-2</td><td>Weekly Sunday schedule</td></tr>
+<tr><td>Secret (RDS)</td><td>dast/rds/master</td><td>us-east-2</td><td>Secrets Manager</td></tr>
+</tbody>
+</table>
+
+<h2>5. Data flow (single scan)</h2>
+<ol>
+<li>User authenticates via ALB to the UI using HTTP Basic (<code>DAST_AUTH_USER</code> / <code>DAST_AUTH_PASS</code> environment variables on the UI container).</li>
+<li>User submits <code>POST /api/scan</code> with target URL, profile, scope, intensity, and model.</li>
+<li>UI inserts a scan row in PostgreSQL (<code>status=queued</code>) and publishes initial <code>live_events</code>.</li>
+<li>UI calls <code>ecs:RunTask</code> with task definition <code>dast-scanner-runner:5</code>, passing <code>SCAN_ID</code> and job JSON via container environment overrides.</li>
+<li>Fargate task pulls the runner image from ECR through VPC endpoints.</li>
+<li>Task retrieves the RDS password from Secrets Manager (VPC interface endpoint, IAM task role).</li>
+<li>Task connects to RDS over private VPC networking.</li>
+<li>Task subscribes to Redis and publishes live events as phases progress; events are also durably logged to PostgreSQL.</li>
+<li>Task reaches target pages/APIs via assigned public IP (outbound HTTP/HTTPS).</li>
+<li>Task invokes Amazon Bedrock for LLM reasoning, tool use, and payload generation.</li>
+<li>Findings are written to the <code>findings</code> table; aggregated JSON to <code>scan_results</code>; telemetry to Redis + <code>live_events</code>.</li>
+<li>UI streams events to the browser via <code>GET /api/scans/{scan_id}/stream</code> (SSE), replaying from PG and subscribing to Redis.</li>
+<li>Task exits on completion or cancellation; UI reads final status from PostgreSQL.</li>
+</ol>
+
+<h2>6. Security model</h2>
+<h3>Network</h3>
+<p>All sensitive data-plane services (RDS, Redis, Secrets Manager) reside inside the VPC and accept connections only from approved security groups: EC2 UI, Fargate runner tasks, and the backup Lambda. The ALB is the sole public entry point for the UI. The EC2 security group blocks direct port-80 ingress from the Internet; only the ALB security group is permitted.</p>
+<h3>WAF</h3>
+<ul>
+<li>AWSManagedRulesCommonRuleSet</li>
+<li>AWSManagedRulesSQLiRuleSet</li>
+<li>AWS IP reputation and anonymous IP managed lists</li>
+<li>Rate-based rule: 2000 requests per 5 minutes per IP</li>
+</ul>
+<h3>Authentication</h3>
+<p><strong>Current:</strong> HTTP Basic authentication via environment-injected credentials on the UI container. Credentials are distributed through a secure channel (not documented here).</p>
+<p><strong>Planned:</strong> Internal SSO via SAML/OIDC (pending IT integration). No public self-registration.</p>
+<h3>Data protection</h3>
+<ul>
+<li><strong>At rest:</strong> RDS encryption, S3 backup encryption, Secrets Manager for credentials.</li>
+<li><strong>In transit:</strong> ALB HTTPS pending corporate TLS certificate (soft launch uses HTTP on ALB); VPC-internal traffic stays private. Bedrock and target HTTPS use TLS.</li>
+<li><strong>Audit:</strong> CloudWatch logs (ALB access, WAF, Lambda, ECS task stdout). PostgreSQL <code>live_events</code> provides a per-scan audit trail.</li>
+<li><strong>Secrets handling:</strong> Never embedded in container images, committed task definitions, or git. Runtime retrieval via Secrets Manager and IAM roles. Local <code>.env</code> on EC2 is mode <code>600</code> and git-ignored.</li>
+</ul>
+<ac:structured-macro ac:name="warning" ac:schema-version="1" ac:macro-id="6b261ebf-504c-4ddd-b786-bf809706023f"><ac:rich-text-body><p>Only scan targets you are authorized to test. The scanner performs active attacks (injection, auth bypass probes, etc.). Misuse may violate policy and law.</p></ac:rich-text-body></ac:structured-macro>
+
+<h2>7. Scanning features</h2>
+<table>
+<thead><tr><th>Dimension</th><th>Values / notes</th></tr></thead>
+<tbody>
+<tr><td>Scan profile (<code>scan_profile</code>)</td><td><code>crawl_only</code> (discovery only, no attack payloads), <code>vulnerability_scan</code> (default full multi-phase), <code>multi_agent</code> (parallel specialist agents)</td></tr>
+<tr><td>Focused testing (<code>focus_areas</code>)</td><td>Optional list to limit phases, e.g. <code>XSS</code>, <code>SQLi</code>, <code>SSRF</code>, <code>IDOR</code>, <code>CSRF</code>, <code>Auth</code> — empty means all applicable phases</td></tr>
+<tr><td>Scope (<code>scan_scope</code>)</td><td><code>url_only</code>, <code>subdomain</code>, <code>domain</code> (and directory-style defaults where configured)</td></tr>
+<tr><td>Intensity (<code>scan_intensity</code>)</td><td><code>light</code>, <code>standard</code>, <code>deep</code> (controls breadth/depth of LLM-driven testing)</td></tr>
+<tr><td>Model (<code>model_name</code>)</td><td><code>claude-haiku-4-5</code> (default), <code>claude-sonnet-4-5</code></td></tr>
+<tr><td>Auth modes</td><td>Public, HTTP Basic, cookie injection, custom headers; dual-credential IDOR/BOLA testing supported</td></tr>
+<tr><td>API sources</td><td>Manual URL, Postman collection import, Burp proxy export</td></tr>
+<tr><td>Live updates</td><td>SSE <code>/api/scans/{scan_id}/stream</code>; Redis pub/sub + PostgreSQL durable log</td></tr>
+</tbody>
+</table>
+<h3>Phase overview (vulnerability_scan)</h3>
+<ul>
+<li><strong>Passive recon:</strong> TLS configuration, security headers, JavaScript library/CVE hints, technology fingerprinting (runs around the phase loop).</li>
+<li><strong>SPA / site crawl:</strong> Discovers routes, forms, parameters, and API endpoints within scope.</li>
+<li><strong>XSS probes:</strong> Reflected/stored/DOM-context testing with generated payloads.</li>
+<li><strong>SQLi probes:</strong> Error-based, boolean, and time-based inference on parameters and APIs.</li>
+<li><strong>SSRF probes:</strong> Out-of-band and inline callbacks where applicable (API SSRF phase).</li>
+<li><strong>IDOR / authorization:</strong> Horizontal and vertical privilege tests with secondary credentials when supplied.</li>
+<li><strong>CSRF detection:</strong> State-changing requests without anti-CSRF tokens.</li>
+<li><strong>Auth/session:</strong> Weak session handling, credential flows, JWT issues.</li>
+<li><strong>Runtime verification:</strong> Re-tests high-confidence findings to reduce false positives before reporting.</li>
+</ul>
+
+<h2>Choosing a model and budget (new — May 2026)</h2>
+<ul>
+<li><strong>Manual (unchanged):</strong> Pick one model (Haiku, Sonnet, or Opus) for all phases.</li>
+<li><strong>Auto mode:</strong> The platform selects Haiku, Sonnet, or Opus per phase to balance cost and quality.</li>
+<li><strong>Opus on hard phases:</strong> Auto invokes Opus for demanding reasoning (access control, business logic, session management, attack chains).</li>
+<li><strong>Budget default:</strong> Auto mode applies a server-side cap of <strong>$30 USD</strong> per scan by default.</li>
+<li><strong>Custom cap:</strong> A higher or lower per-scan budget can be set only in the Web UI scan form (not via API/MCP/OpenClaw).</li>
+<li><strong>Budget gate:</strong> When spend hits the cap the scan <strong>pauses</strong>; only the scan starter or an admin can approve additional budget in the Web UI.</li>
+</ul>
+<p>For automation usage (MCP, OpenClaw, REST API) see the <strong>Red Team AI Web Scanner — Automation: MCP, OpenClaw, REST API</strong> child page. Deep-dive in Git: <code>docs/intelligent-model-selection.md</code> and <code>docs/automation-mcp-openclaw-api.md</code>.</p>
+
+<h2>8. Usage</h2>
+<p><strong>URL:</strong> <a href="http://rt.ai.webscanner.gendigital.com/">http://rt.ai.webscanner.gendigital.com/</a> (after DNS CNAME is active) or <a href="http://dast-scanner-336692728.us-east-2.elb.amazonaws.com/">http://dast-scanner-336692728.us-east-2.elb.amazonaws.com/</a> (always resolves).</p>
+<p><strong>Login:</strong> HTTP Basic. Credentials are shared via secure channel (not in this document).</p>
+<p><strong>Trigger a scan:</strong> Use the dashboard form or <code>POST /api/scan</code> with JSON (see sample). Use only authorized targets.</p>
+<p><strong>View results:</strong> <code>/scans/{id}</code> (UI), <code>/api/results/{id}</code> (JSON), <code>/api/results/{id}?enc=b64</code> (base64 envelope for clients that cannot handle raw binary in JSON).</p>
+<p><strong>Cancel a scan:</strong> <code>POST /api/scan/{scan_id}/stop</code> (transitions scan to cancelled; Fargate task receives stop signal via DB/Redis).</p>
+<ac:structured-macro ac:name="code" ac:schema-version="1" ac:macro-id="8be186ca-cfae-4655-abc3-3c97abdd0869"><ac:parameter ac:name="language">json</ac:parameter><ac:plain-text-body><![CDATA[
+{
+  "target": "https://juice-shop.herokuapp.com/",
+  "scan_profile": "crawl_only",
+  "scan_scope": "url_only",
+  "scan_intensity": "light",
+  "model_name": "claude-haiku-4-5"
+}
+]]></ac:plain-text-body></ac:structured-macro>
+
+<h2>9. Operations</h2>
+<ul>
+<li><strong>Deploy:</strong> Active branch <code>feature/scalable-scanner-platform</code>. Pushes trigger <code>.github/workflows/feature-deploy.yml</code>: pytest, build/push runner image to ECR, redeploy EC2 UI via <code>deploy.sh</code> (requires GitHub secrets <code>AWS_DEPLOY_ROLE_ARN</code>, <code>EC2_SSH_KEY</code>).</li>
+<li><strong>Backup:</strong> Lambda <code>dast-scanner-db-backup</code> weekly (Sunday); PostgreSQL dump to tar.gz under <code>backups/yyyy/mm/dd/</code> in S3.</li>
+<li><strong>Restore:</strong> Manual <code>pg_restore</code> from tar.gz, or restore RDS snapshot in AWS console.</li>
+<li><strong>Monitoring:</strong> CloudWatch dashboards (Fargate, ALB, RDS). ECS logs: <code>/ecs/dast-scanner-runner</code>. Lambda logs: <code>/aws/lambda/dast-scanner-db-backup</code>.</li>
+<li><strong>Scaling:</strong> Demand-driven — one Fargate task per active scan; no idle worker pool. Bounded by regional Fargate vCPU quota (~10K vCPU).</li>
+</ul>
+
+<h2>10. Cost (monthly estimate)</h2>
+<p>Soft-launch assumption: ~20 scans/day, ~15 minutes average, 4 vCPU / 8 GB per task, Haiku-default LLM usage.</p>
+<table>
+<thead><tr><th>Component</th><th>~USD/month</th></tr></thead>
+<tbody>
+<tr><td>RDS db.t4g.small Multi-AZ</td><td>$25–30</td></tr>
+<tr><td>ALB</td><td>$18–22</td></tr>
+<tr><td>WAF</td><td>$5–10</td></tr>
+<tr><td>S3 + Lambda backup</td><td>$3–5</td></tr>
+<tr><td>ElastiCache cache.t4g.micro</td><td>$12</td></tr>
+<tr><td>VPC endpoints (Secrets, S3, ECR×2, Logs)</td><td>$21–28</td></tr>
+<tr><td>Fargate (20 scans/day × 15 min × 4 vCPU/8 GB)</td><td>$35–45</td></tr>
+<tr><td>ECR storage</td><td>$1–3</td></tr>
+<tr><td>Bedrock (Haiku, ~$0.10/scan)</td><td>$60</td></tr>
+<tr><td><strong>Total</strong></td><td><strong>~$180–215</strong></td></tr>
+</tbody>
+</table>
+
+<h2>11. Owners and contacts</h2>
 <ul>
 <li><strong>Owner:</strong> Red Team — Siba Dakkata</li>
 <li><strong>Repository:</strong> Internal GitLab <code>git.int.avast.com/red-team/ai-agentic-dast</code></li>
 <li><strong>Branch:</strong> <code>feature/scalable-scanner-platform</code> (active development)</li>
 </ul>
+
+
+<h3>LLM agent design</h3>
+<p>Each scan is driven by a tool-using LLM agent (LiteLLM router to Amazon Bedrock). The agent receives structured system prompts per phase, maintains conversation context for the target, and invokes tools for HTTP requests, Playwright navigation, payload submission, and finding registration. Phases run sequentially (or in parallel for <code>multi_agent</code> profile) with defensive logging: every phase appends to <code>phase_log</code> even on worker failure, preserving auditability. Transient Bedrock errors (throttling, 502/503/504, connection resets) are retried with exponential backoff; terminal errors (content filter, context window exceeded) fail fast.</p>
+
+<h3>Persistence schema (conceptual)</h3>
+<ul>
+<li><code>scans</code> — scan metadata, status, configuration snapshot, timestamps.</li>
+<li><code>findings</code> — normalized finding rows (severity, title, URL, evidence references).</li>
+<li><code>scan_results</code> — large JSON blob (full agent output, test log excerpts).</li>
+<li><code>live_events</code> — ordered event stream for UI replay and forensics.</li>
+</ul>
+
+<h3>Environment variables (runtime)</h3>
+<table>
+<thead><tr><th>Variable</th><th>Component</th><th>Purpose</th></tr></thead>
+<tbody>
+<tr><td><code>SCAN_LAUNCHER=fargate</code></td><td>UI</td><td>Use ECS RunTask instead of in-process scanning</td></tr>
+<tr><td><code>ECS_TASK_DEFINITION</code></td><td>UI</td><td>Runner task definition ARN/family revision</td></tr>
+<tr><td><code>DATABASE_URL</code></td><td>UI / Runner</td><td>PostgreSQL connection string (from Secrets Manager on tasks)</td></tr>
+<tr><td><code>REDIS_URL</code></td><td>UI / Runner</td><td>ElastiCache connection for pub/sub</td></tr>
+<tr><td><code>DUAL_WRITE_PG</code></td><td>UI</td><td>Mirror writes to SQLite safety net</td></tr>
+<tr><td><code>RUNNER_PG_ONLY</code></td><td>Runner</td><td>Runner uses PostgreSQL only</td></tr>
+</tbody>
+</table><h2>12. Change log</h2>
+<table>
+<thead><tr><th>Date</th><th>Change</th></tr></thead>
+<tbody>
+<tr><td>2026-05-29</td><td>Added Auto model selection and budget approval gate.</td></tr>
+<tr><td>May 2026</td><td>Production soft launch. Migrated from monolithic EC2 scanner to Fargate-per-scan architecture. RDS PostgreSQL Multi-AZ replaces SQLite as primary store. ALB + WAF in front of UI. Weekly automated database backups to S3.</td></tr>
+</tbody>
+</table>
