@@ -141,7 +141,7 @@ The `--restart unless-stopped` flag ensures auto-restart on crash or EC2 reboot.
 
 **Symptom:** `deploy.sh` fails building with an empty `-t` argument, or logs show `docker build -t  .`.
 
-**Cause:** `deploy.sh` was started from a **non-interactive** shell (`nohup`, CI, or a truncated SSH one-liner) where `IMAGE_NAME="ai-dast-scanner"` was not set the same way as in an interactive bash session, or the script was invoked without a proper login shell.
+**Cause:** `deploy.sh` was started from a **non-interactive** shell (`nohup`, cron, or a truncated SSH one-liner) where `IMAGE_NAME="ai-dast-scanner"` was not set the same way as in an interactive bash session, or the script was invoked without a proper login shell.
 
 **Fix:** SSH in interactively, `cd ~/ai-dast-scanner`, run `bash deploy.sh` in a normal terminal. Do not background the first deploy on a fresh host.
 

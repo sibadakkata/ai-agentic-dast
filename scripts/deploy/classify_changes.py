@@ -49,8 +49,6 @@ IGNORE_GLOBS = [
     ".cursor/**",
     "tests/**",
     "infra/**",
-    ".github/**",
-    ".githooks/**",
     "*.md",
     ".gitignore",
     ".env*",

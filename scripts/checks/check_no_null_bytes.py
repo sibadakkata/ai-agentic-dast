@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Detect UTF-16 BOM and null bytes in source files (pre-commit, CI, local)."""
+"""Detect UTF-16 BOM and null bytes in source files (deploy pre-flight, local manual)."""
 from __future__ import annotations
 
 import argparse

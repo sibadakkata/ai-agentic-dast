@@ -388,7 +388,7 @@ Rebuild and push to ECR (Step 4 above). ECS picks up the new image on the next `
 
 **Terraform does NOT deploy application code.** Use the [code-deploy patterns](#day-to-day-code-deploys) above for that.
 
-> More detail: [docs/deployment.md](docs/deployment.md) · [infra/terraform/README.md](infra/terraform/README.md) · [GitHub Actions (optional)](docs/deployment/github-actions-setup.md)
+> More detail: [docs/deployment.md](docs/deployment.md) · [infra/terraform/README.md](infra/terraform/README.md)
 
 ## Authentication
 

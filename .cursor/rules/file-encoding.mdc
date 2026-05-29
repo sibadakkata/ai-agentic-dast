@@ -41,7 +41,7 @@ ALWAYS, on this Windows host. The Cursor team has acknowledged the bug; the work
 
 ## Enforcement (automated)
 
-Two mechanical gates — no per-clone hook install and no external CI:
+Two mechanical gates (deploy pre-flight + Docker build; no other automation required):
 
 | Layer | Mechanism |
 |-------|-----------|
