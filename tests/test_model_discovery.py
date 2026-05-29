@@ -1,0 +1,60 @@
+"""Tests for Bedrock model discovery (inference profiles + overlay)."""
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from scanners.ai_agent import model_discovery as md
+
+
+def test_friendly_name_opus_47():
+    assert md._friendly_name("us.anthropic.claude-opus-4-7") == "Claude Opus 4.7"
+
+
+def test_collect_candidates_prefers_inference_profile():
+    raw = [
+        {
+            "modelId": "anthropic.claude-opus-4-7",
+            "modelLifecycle": {"status": "ACTIVE"},
+            "outputModalities": ["TEXT"],
+        },
+        {
+            "modelId": "google.gemma-3-4b-it",
+            "modelLifecycle": {"status": "ACTIVE"},
+            "outputModalities": ["TEXT"],
+        },
+    ]
+    profiles = ["us.anthropic.claude-opus-4-7"]
+    candidates = md._collect_candidates(raw, profiles)
+    assert "us.anthropic.claude-opus-4-7" in candidates
+    assert "anthropic.claude-opus-4-7" not in candidates
+    assert "google.gemma-3-4b-it" in candidates
+
+
+def test_apply_overlay_recommended_and_premium():
+    entry = {
+        "id": "bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0",
+        "name": "Claude Haiku 4 5",
+        "recommended": False,
+    }
+    out = md._apply_overlay(entry)
+    assert out["recommended"] is True
+    assert "(recommended)" in out["name"]
+
+    opus = md._apply_overlay({
+        "id": "bedrock/us.anthropic.claude-opus-4-7",
+        "name": "Claude Opus 4.7",
+        "high_cost": False,
+    })
+    assert opus["high_cost"] is True
+    assert "premium" in opus["name"].lower()
+
+
+def test_bedrock_region_defaults_us_east_2(monkeypatch):
+    monkeypatch.delenv("BEDROCK_REGION", raising=False)
+    monkeypatch.delenv("AWS_DEFAULT_REGION", raising=False)
+    assert md._bedrock_region() == "us-east-2"

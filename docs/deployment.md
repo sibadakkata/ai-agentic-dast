@@ -108,6 +108,12 @@ While `SSO_ENABLED=false` during rollout, `/login` may show an interim username/
 
 Full Entra app registration, SAML certificate layout, invites, group RBAC, and troubleshooting: **[docs/SSO_RBAC.md](SSO_RBAC.md)** — do not duplicate that walkthrough here.
 
+### Bedrock model list (auto-refresh)
+
+The UI model picker is populated from `data/models_cache.json`, refreshed automatically on container startup and every **24 hours** (override with `MODEL_REFRESH_HOURS` or legacy `MODEL_DISCOVERY_INTERVAL_H`). Discovery calls Bedrock `list_foundation_models` and `list_inference_profiles` in `BEDROCK_REGION` / `AWS_DEFAULT_REGION` (default **us-east-2**), canary-tests each candidate, and writes the cache. **Anthropic Opus/Sonnet models require inference profile IDs** (`us.anthropic.*`); bare foundation IDs are skipped when a profile exists.
+
+Admins can trigger a manual refresh: `POST /api/models/refresh` (session or Basic Auth). Status: `GET /api/models/status`.
+
 ### Environment Variables
 
 ```bash
@@ -132,6 +138,8 @@ SAML_SP_KEY_PATH=
 SSO_ADMIN_GROUP_IDS=               # Comma-separated Entra group object IDs → admin role
 SSO_USER_GROUP_IDS=                # Comma-separated Entra group object IDs → user role
 SSO_GROUP_CLAIM_NAME=              # Optional SAML groups claim name override
+MODEL_REFRESH_HOURS=24             # Re-discover Bedrock models (also MODEL_DISCOVERY_INTERVAL_H)
+BEDROCK_REGION=us-east-2           # Region for list_foundation_models / inference profiles
 DAST_SESSION_SECRET=               # Session cookie HMAC (set in production)
 PUBLIC_BASE_URL=                   # Base URL for invite links (e.g. https://scanner.example.com)
 ```

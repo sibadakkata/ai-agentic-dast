@@ -861,13 +861,15 @@ _load_scans_from_disk()
 # --- Model registry (dynamic, auto-discovered from Bedrock) ------------------
 # Fallback used when the cache is empty (discovery not yet run, or IAM missing bedrock:ListFoundationModels).
 _FALLBACK_MODELS = [
-    {"id": "bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0", "name": "Claude Haiku 4.5 (recommended)", "cost": "~$0.80/$4 per 1M tokens", "provider": "Anthropic", "input_cost_per_m": 0.80},
+    {"id": "bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0", "name": "Claude Haiku 4.5 (recommended)", "cost": "~$0.80/$4 per 1M tokens", "provider": "Anthropic", "input_cost_per_m": 0.80, "recommended": True},
     {"id": "bedrock/us.anthropic.claude-sonnet-4-5-20250929-v1:0", "name": "Claude Sonnet 4.5", "cost": "~$3/$15 per 1M tokens", "provider": "Anthropic", "input_cost_per_m": 3.00},
     {"id": "bedrock/us.anthropic.claude-sonnet-4-6", "name": "Claude Sonnet 4.6 (best quality)", "cost": "~$3/$15 per 1M tokens", "provider": "Anthropic", "input_cost_per_m": 3.00},
     {"id": "bedrock/us.anthropic.claude-opus-4-6-v1", "name": "Claude Opus 4.6 (premium)", "cost": "~$15/$75 per 1M tokens", "provider": "Anthropic", "input_cost_per_m": 15.00, "high_cost": True},
+    {"id": "bedrock/us.anthropic.claude-opus-4-7", "name": "Claude Opus 4.7 (premium)", "cost": "~$15/$75 per 1M tokens", "provider": "Anthropic", "input_cost_per_m": 15.00, "high_cost": True},
 ]
 
-_MODEL_DISCOVERY_INTERVAL = int(os.environ.get("MODEL_DISCOVERY_INTERVAL_H", "24")) * 3600
+_refresh_h = os.environ.get("MODEL_REFRESH_HOURS") or os.environ.get("MODEL_DISCOVERY_INTERVAL_H", "24")
+_MODEL_DISCOVERY_INTERVAL = int(_refresh_h) * 3600
 _model_discovery_lock = threading.Lock()
 _last_discovery_time: float = 0.0
 
@@ -1272,8 +1274,8 @@ async def get_models():
 
 
 @app.post("/api/models/refresh", tags=["System"])
-async def refresh_models(creds=Depends(_verify)):
-    """Trigger a model re-discovery (canary-tests all Bedrock models)."""
+async def refresh_models(_admin=Depends(require_admin)):
+    """Trigger a model re-discovery (canary-tests all Bedrock models). Admin only."""
     threading.Thread(target=_run_model_discovery_bg, daemon=True).start()
     return {"status": "discovery_started", "message": "Model discovery running in background. Refresh in ~60s."}
 

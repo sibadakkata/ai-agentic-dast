@@ -2439,7 +2439,11 @@ async function refreshModels() {
   const bar = document.getElementById('models-status-bar');
   if (bar) bar.innerHTML = '<span style="font-size:10px;">&#9881;</span> Discovering models...';
   try {
-    await fetch('/api/models/refresh', {method: 'POST'});
+    const r = await fetch('/api/models/refresh', {method: 'POST'});
+    if (r.status === 403) {
+      if (bar) bar.innerHTML = '<span style="color:#d97706;">Admin required to refresh models</span>';
+      return;
+    }
     setTimeout(async () => {
       await _loadModelDropdowns();
       await _loadModelStatus();
