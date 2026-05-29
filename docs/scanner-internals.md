@@ -616,7 +616,10 @@ User-facing guide: **[intelligent-model-selection.md](intelligent-model-selectio
 
 ### BudgetGuard wiring (`budget.py` + `llm_config.py`)
 
-- **`estimate_scan_cost()`** — heuristic at launch; exposed as `POST /api/scans/estimate`.
+- **`AUTO_MODE_DEFAULT_BUDGET_USD`** — env-tunable default ($30) for Auto-mode scans when the caller is not SSO or did not pass a positive cap.
+- **`effective_budget_cap_usd(model_policy, requested_cap, caller_is_sso=...)`** — applied at scan create in `web/app.py`; non-SSO Auto launches always get the default; manual policy passes `requested_cap` through unchanged.
+- **`caller_auth_kind()` / `require_sso_user`** (`scanners/auth/rbac.py`) — distinguish SSO cookie vs Basic Auth; budget approve/stop require SSO.
+- **`estimate_scan_cost()`** — heuristic at launch; exposed as `POST /api/scans/estimate` (includes `default_cap_usd`).
 - **`BudgetGuard.on_cost(delta_usd)`** — registered on `LLMRouter` via `on_cost` callback; `LLMRouter._track` invokes it after each completion with the incremental USD for that call.
 - **Cap exceeded** — guard sets `budget_status` to `awaiting_approval`, sets `pause_flag`, and calls `on_exceeded` (appends progress). Approve path in `web/app.py` clears pause, updates `_cap`, and sets `budget_status` to `approved`.
 

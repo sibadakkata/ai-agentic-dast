@@ -49,7 +49,9 @@ When **Auto** is selected, expand **Models used by phase** in the live scan head
 
 <!-- SCREENSHOT: Budget approval banner with cap, spend, and three actions -->
 
-During a live scan, if LLM spend reaches `budget_cap_usd`, the scan **pauses** and a yellow **budget approval** banner appears above the progress log (only for the scan owner or an admin):
+The **Budget cap (USD)** field on the launch form is the **only** way to set or change a cap (SSO session). Leave blank for the server default (**$30** for Auto mode). API, MCP, and OpenClaw automation always use that default for Auto mode.
+
+During a live scan, if LLM spend reaches `budget_cap_usd`, the scan **pauses** and a yellow **budget approval** banner appears above the progress log (only for the scan owner or an admin, SSO session):
 
 | Control | Action |
 |---------|--------|

@@ -31,6 +31,10 @@ def client(fresh_db, monkeypatch):
     from fastapi.testclient import TestClient
     from web import app as app_module
 
+    import scanners.ai_agent.budget as budget_mod
+
+    monkeypatch.setattr(budget_mod, "AUTO_MODE_DEFAULT_BUDGET_USD", 30.0)
+    monkeypatch.setattr(app_module, "AUTO_MODE_DEFAULT_BUDGET_USD", 30.0)
     monkeypatch.setattr(app_module, "SCANS", {})
     monkeypatch.setattr(app_module, "CANCEL_FLAGS", {})
     monkeypatch.setattr(app_module, "PAUSE_FLAGS", {})

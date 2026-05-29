@@ -63,6 +63,14 @@ When the agent retries a phase, it passes `hint={"retry": True}` into `ModelSele
 
 ## The approval gate
 
+### Budget caps are UI-only
+
+- **Auto mode** always has a server-side cap (default **$30 USD**, tunable via `AUTO_MODE_DEFAULT_BUDGET_USD` on the server).
+- Only **SSO Web UI** sessions may set or change `budget_cap_usd` at launch or via approve/stop.
+- **REST API (Basic Auth), MCP, and OpenClaw** cannot override the cap — any `budget_cap_usd` in the request body is ignored for Auto mode; the server applies the default.
+- **`GET /api/scans/{id}/budget`** is readable by any authenticated caller (includes `approval_requires_sso: true` and `default_cap_usd`).
+- **`POST .../budget/approve`** and **`POST .../budget/stop`** require SSO (403 for Basic Auth automation).
+
 <!-- SCREENSHOT: Yellow budget approval banner on live scan view -->
 
 1. **`budget_status: ok`** — scan runs; `BudgetGuard` accumulates spend from `LLMRouter` cost callbacks.
@@ -72,7 +80,7 @@ When the agent retries a phase, it passes `hint={"retry": True}` into `ModelSele
    - **Stop** — “Stop scan” or `POST /api/scans/{id}/budget/stop`
 4. **`budget_status: approved`** — pause cleared, scan resumes until the new cap.
 
-Server-side enforcement uses `owner_user_id` from the SSO session at launch (`_user_can_manage_scan_budget`). Automation via Basic Auth must use credentials that map to the owner or admin role.
+Server-side enforcement uses `owner_user_id` from the SSO session at launch (`_user_can_manage_scan_budget`). Approve/stop additionally require an SSO session (`require_sso_user`); automation cannot call those endpoints.
 
 ---
 
@@ -87,7 +95,7 @@ curl -s -u "${SCANNER_USER}:${SCANNER_PASS}" \
   -d '{"scan_mode":"both","scan_intensity":"deep","llm_scan_depth":"standard","model_policy":"auto"}'
 ```
 
-**Launch (auto + budget):**
+**Launch (auto — server applies $30 default cap):**
 
 ```bash
 curl -s -u "${SCANNER_USER}:${SCANNER_PASS}" \
@@ -96,15 +104,18 @@ curl -s -u "${SCANNER_USER}:${SCANNER_PASS}" \
   -d '{
     "target_url": "https://staging.example.com",
     "scan_mode": "both",
-    "model_policy": "auto",
-    "budget_cap_usd": 5.0
+    "model_policy": "auto"
   }'
 ```
 
-**Approve after pause:**
+`budget_cap_usd` in the body is **ignored** for Basic Auth callers. Use the Web UI (SSO) to set a custom cap before launch.
+
+**Approve after pause (SSO session cookie required — not Basic Auth):**
+
+Log in via the Web UI, then use the budget banner or a browser session:
 
 ```bash
-curl -s -u "${SCANNER_USER}:${SCANNER_PASS}" \
+curl -s -b "dast_session=YOUR_SSO_COOKIE" \
   -H "Content-Type: application/json" \
   -X POST "${SCANNER_URL}/api/scans/SCAN_ID/budget/approve" \
   -d '{"new_cap_usd": 10.0}'
@@ -118,14 +129,13 @@ Full schemas: [api.md](api.md) and Swagger at `/docs`.
 
 Configure `.cursor/mcp.json` per [mcp.md](mcp.md), then in chat:
 
-> Start an auto-mode scan of https://staging.example.com with a $5 budget.
+> Start an auto-mode scan of https://staging.example.com.
 
 Typical tool sequence:
 
-1. `estimate_scan_cost(model_policy="auto", scan_mode="both")` → read `recommended_budget_usd`
-2. `start_scan(target_url="https://staging.example.com", model_policy="auto", budget_cap_usd=5.0)`
-3. Poll `get_scan_status` or `get_scan_budget` — if `status` is `awaiting_approval`:
-4. `approve_scan_budget(scan_id, new_cap_usd=10.0)` (caller must be owner/admin)
+1. `estimate_scan_cost(model_policy="auto", scan_mode="both")` → read `default_cap_usd` (server default, typically $30)
+2. `start_scan(target_url="https://staging.example.com", model_policy="auto")` — MCP cannot set budget; server applies default cap
+3. Poll `get_scan_status` or `get_scan_budget` — if `status` is `awaiting_approval`, ask the user to approve via the **Web UI** (SSO)
 
 ---
 
@@ -133,12 +143,12 @@ Typical tool sequence:
 
 User prompt:
 
-> Scan staging.example.com in auto mode with a $3 budget.
+> Scan staging.example.com in auto mode.
 
-Agent should `POST /api/scan` (or `/api/v1/scans`) with `model_policy: "auto"` and `budget_cap_usd: 3.0`. See [openclaw-skill/SKILL.md](../openclaw-skill/SKILL.md) and CLI:
+Agent should `POST /api/scan` with `model_policy: "auto"` only. Budget uses the server default ($30). For a custom cap, the user must set it in the Web UI first. See [openclaw-skill/SKILL.md](../openclaw-skill/SKILL.md):
 
 ```powershell
-python openclaw-skill/test_skill.py scan --url https://staging.example.com --model-policy auto --budget-cap 3
+python openclaw-skill/test_skill.py scan --url https://staging.example.com --model-policy auto
 ```
 
 ---

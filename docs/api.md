@@ -68,7 +68,7 @@ Start a scan with a typed JSON body. Prefer this for automation and MCP-aligned 
 | `scan_mode` | string | No | `website`, `api`, or `both` (default `both`) |
 | `model` | string | No | LLM id from `GET /api/models`; empty = default Haiku |
 | `model_policy` | string | No | `manual` (default) or `auto` — per-phase model selection |
-| `budget_cap_usd` | number | No | Optional USD cap; scan pauses when exceeded until owner/admin approves |
+| `budget_cap_usd` | number | No | **SSO Web UI only** for Auto mode. Ignored for Basic Auth/API/MCP/OpenClaw (server default $30). Manual mode: passed through if set. |
 | `username`, `password` | string | No | Primary login (User A) |
 | `auth_type` | string | No | `auto`, `none`, `form`, `sso`, `oauth`, `api_key`, `bearer` |
 | `ai_instructions` | string | No | Operator guidance for the LLM agent (see below) |
@@ -99,7 +99,7 @@ Legacy launch endpoint; same semantics as `/api/v1/scans` but accepts any JSON d
 
 Rough cost estimate for a launch configuration (not a billing quote). Same body fields as scan launch (`scan_mode`, `scan_intensity`, `llm_scan_depth`, `model_policy`, `model`).
 
-**Response:** `{ "low_usd", "expected_usd", "high_usd", "assumptions", "per_phase", "recommended_budget_usd" }`
+**Response:** `{ "low_usd", "expected_usd", "high_usd", "assumptions", "per_phase", "recommended_budget_usd", "default_cap_usd" }`
 
 ```bash
 curl -s -u "${SCANNER_USER}:${SCANNER_PASS}" \
@@ -112,14 +112,20 @@ curl -s -u "${SCANNER_USER}:${SCANNER_PASS}" \
 
 Budget state for a scan. Requires authentication; user must have read access to the scan.
 
-**Response:** `{ "cap_usd", "total_usd", "status", "owner_user_id", "model_choices", "model_policy", "estimated_cost_usd" }`
+**Response:** `{ "cap_usd", "total_usd", "status", "owner_user_id", "model_choices", "model_policy", "estimated_cost_usd", "approval_requires_sso", "default_cap_usd" }` — readable by SSO or Basic Auth.
 
 ### POST /api/scans/{scan_id}/budget/approve
 
-**Auth:** scan owner or `admin`. Body: `{ "new_cap_usd": 5.0 }` — must be greater than current `total_usd`. Clears pause flag and sets `budget_status` to `approved`.
+**Auth:** **SSO session required** (interactive Web UI). Scan owner or `admin`. Basic Auth returns **403**:
+
+```json
+{"detail": "This action requires an interactive Web UI session. Automation (API/MCP/OpenClaw via Basic Auth) cannot modify budgets."}
+```
+
+Body: `{ "new_cap_usd": 5.0 }` — must be greater than current `total_usd`. Clears pause flag and sets `budget_status` to `approved`.
 
 ```bash
-curl -s -u "${SCANNER_USER}:${SCANNER_PASS}" \
+curl -s -b "dast_session=YOUR_SSO_COOKIE" \
   -H "Content-Type: application/json" \
   -X POST "${SCANNER_URL}/api/scans/SCAN_ID/budget/approve" \
   -d '{"new_cap_usd": 5.00}'
@@ -127,10 +133,10 @@ curl -s -u "${SCANNER_USER}:${SCANNER_PASS}" \
 
 ### POST /api/scans/{scan_id}/budget/stop
 
-**Auth:** scan owner or `admin`. Stops the scan (`budget_status`: `stopped_by_budget`, cancel flag set).
+**Auth:** **SSO session required** (same 403 as approve for Basic Auth). Scan owner or `admin`. Stops the scan (`budget_status`: `stopped_by_budget`, cancel flag set).
 
 ```bash
-curl -s -u "${SCANNER_USER}:${SCANNER_PASS}" \
+curl -s -b "dast_session=YOUR_SSO_COOKIE" \
   -X POST "${SCANNER_URL}/api/scans/SCAN_ID/budget/stop" \
   -H "Content-Type: application/json" -d '{}'
 ```

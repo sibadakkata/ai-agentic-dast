@@ -713,6 +713,7 @@ input:focus-visible, select:focus-visible, textarea:focus-visible { outline:none
         <div class="form-group" style="min-width:160px;">
           <label>Budget cap (USD)</label>
           <input type="number" id="ai-budget-cap-usd" step="0.10" min="0" placeholder="e.g. 5.00" onchange="_refreshAICostEstimate()" oninput="_debounceAICostEstimate()">
+          <div id="ai-budget-cap-hint" style="margin-top:4px;font-size:11px;color:var(--text2);line-height:1.4;">Default cap: $30 — leave blank to use the default. Auto-mode scans triggered from API/MCP/OpenClaw always use this default.</div>
           <div id="ai-cost-estimate-hint" style="margin-top:6px;font-size:12px;color:var(--text2);line-height:1.45;">Estimated cost: loading…</div>
         </div>
         <button type="button" class="btn btn-sm btn-primary" id="analyze-btn" onclick="analyzeInstruction()" style="height:38px;">Analyze & Plan</button>
@@ -800,6 +801,7 @@ input:focus-visible, select:focus-visible, textarea:focus-visible { outline:none
       <div class="form-group">
         <label>Budget cap (USD)</label>
         <input type="number" id="budget-cap-usd" step="0.10" min="0" placeholder="e.g. 5.00" onchange="_refreshCostEstimate()" oninput="_debounceCostEstimate()">
+        <div id="budget-cap-hint" style="margin-top:4px;font-size:11px;color:var(--text2);line-height:1.4;">Default cap: $30 — leave blank to use the default. Auto-mode scans triggered from API/MCP/OpenClaw always use this default.</div>
         <div id="cost-estimate-hint" style="margin-top:6px;font-size:12px;color:var(--text2);line-height:1.45;">Estimated cost: loading…</div>
       </div>
       <div class="form-group">
@@ -2453,6 +2455,24 @@ var _costEstimateTimer = null;
 var _lastCostEstimate = null;
 var _aiCostEstimateTimer = null;
 var _lastAICostEstimate = null;
+var _autoModeDefaultCapUsd = 30;
+
+function _resolveBudgetCapUsd(inputId) {
+  const v = parseFloat((document.getElementById(inputId) || {}).value);
+  if (isNaN(v) || v <= 0) return undefined;
+  return v;
+}
+
+function _updateBudgetCapHints(defaultUsd) {
+  if (defaultUsd == null || isNaN(defaultUsd)) return;
+  _autoModeDefaultCapUsd = defaultUsd;
+  const msg = 'Default cap: $' + Number(defaultUsd).toFixed(0) +
+    ' — leave blank to use the default. Auto-mode scans triggered from API/MCP/OpenClaw always use this default.';
+  ['ai-budget-cap-hint', 'budget-cap-hint'].forEach(function(id) {
+    const el = document.getElementById(id);
+    if (el) el.textContent = msg;
+  });
+}
 
 function _modelPolicy() {
   const auto = document.getElementById('model-policy-auto');
@@ -2533,8 +2553,9 @@ async function _refreshAICostEstimate() {
     if (!r.ok) { hint.textContent = 'Estimated cost: unavailable'; return; }
     const d = await r.json();
     _lastAICostEstimate = d;
+    if (d.default_cap_usd != null) _updateBudgetCapHints(d.default_cap_usd);
     const capEl = document.getElementById('ai-budget-cap-usd');
-    if (capEl && !capEl.value && d.recommended_budget_usd) capEl.placeholder = String(d.recommended_budget_usd);
+    if (capEl && !capEl.value && d.default_cap_usd) capEl.placeholder = String(d.default_cap_usd);
     hint.textContent = 'Estimated cost: $' + d.low_usd.toFixed(2) + ' – $' + d.high_usd.toFixed(2) +
       ' (expected ~$' + d.expected_usd.toFixed(2) + '). Recommended budget: $' +
       (d.recommended_budget_usd || (d.expected_usd * 2)).toFixed(2);
@@ -2565,8 +2586,9 @@ async function _refreshCostEstimate() {
     if (!r.ok) { hint.textContent = 'Estimated cost: unavailable'; return; }
     const d = await r.json();
     _lastCostEstimate = d;
+    if (d.default_cap_usd != null) _updateBudgetCapHints(d.default_cap_usd);
     const capEl = document.getElementById('budget-cap-usd');
-    if (capEl && !capEl.value && d.recommended_budget_usd) capEl.placeholder = String(d.recommended_budget_usd);
+    if (capEl && !capEl.value && d.default_cap_usd) capEl.placeholder = String(d.default_cap_usd);
     hint.textContent = 'Estimated cost: $' + d.low_usd.toFixed(2) + ' – $' + d.high_usd.toFixed(2) +
       ' (expected ~$' + d.expected_usd.toFixed(2) + '). Recommended budget: $' +
       (d.recommended_budget_usd || (d.expected_usd * 2)).toFixed(2);
@@ -2786,7 +2808,6 @@ async function confirmPlan() {
     password: p.password || '',
     model: model,
     model_policy: _aiModelPolicy(),
-    budget_cap_usd: (function(){ const v = parseFloat((document.getElementById('ai-budget-cap-usd')||{}).value); return isNaN(v) || v <= 0 ? (_lastAICostEstimate && _lastAICostEstimate.recommended_budget_usd) : v; })(),
     scan_mode: p.scan_mode || 'both',
     scan_profile: p.scan_profile || 'vulnerability_scan',
     skip_passive_sibling_tls: !!(document.getElementById('skip-passive-sibling-tls') && document.getElementById('skip-passive-sibling-tls').checked),
@@ -2803,6 +2824,8 @@ async function confirmPlan() {
     workflow_id: document.getElementById('ai-workflow-select').value || document.getElementById('workflow-select').value || '',
     business_flow: (document.getElementById('ai-business-flow').value || document.getElementById('business-flow').value || '').trim(),
   };
+  const aiCap = _resolveBudgetCapUsd('ai-budget-cap-usd');
+  if (aiCap !== undefined) body.budget_cap_usd = aiCap;
   if (ubEl && ubEl.value.trim()) body.username_b = ubEl.value.trim();
   if (pbEl && pbEl.value.trim()) body.password_b = pbEl.value.trim();
   body.credentials_admin = _collectIdentityCreds('admin-username', 'admin-password');
@@ -3459,7 +3482,6 @@ async function startScan() {
     password: document.getElementById('password').value,
     model: document.getElementById('model-select').value,
     model_policy: _modelPolicy(),
-    budget_cap_usd: (function(){ const v = parseFloat((document.getElementById('budget-cap-usd')||{}).value); return isNaN(v) || v <= 0 ? (_lastCostEstimate && _lastCostEstimate.recommended_budget_usd) : v; })(),
     scan_mode: document.getElementById('scan-mode').value,
     scan_profile: (document.getElementById('scan-profile') || {}).value || 'vulnerability_scan',
     skip_passive_sibling_tls: !!(document.getElementById('skip-passive-sibling-tls') && document.getElementById('skip-passive-sibling-tls').checked),
@@ -3476,6 +3498,8 @@ async function startScan() {
     workflow_id: document.getElementById('workflow-select').value || '',
     business_flow: (document.getElementById('business-flow').value || '').trim(),
   };
+  const manualCap = _resolveBudgetCapUsd('budget-cap-usd');
+  if (manualCap !== undefined) body.budget_cap_usd = manualCap;
   if (usernameB || passwordB) {
     body.username_b = usernameB;
     body.password_b = passwordB;

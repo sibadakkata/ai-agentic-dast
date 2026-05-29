@@ -146,9 +146,12 @@ def start_scan(
     postman_file: str = "",
     ai_instructions: str = "",
     model_policy: str = "manual",
-    budget_cap_usd: float | None = None,
 ) -> dict:
     """Start a new security scan against a target.
+
+    Budget overrides are not accepted from MCP. Auto-mode scans use the server-side
+    default budget ($30 USD unless configured via AUTO_MODE_DEFAULT_BUDGET_USD). To set
+    a custom cap, log in to the Web UI (SSO) before launching.
 
     Args:
         target_url: The URL to scan (e.g., https://example.com).
@@ -164,19 +167,15 @@ def start_scan(
             exclude paths, credential usage). Forwarded to POST /api/scan unchanged.
         model_policy: 'manual' (default) uses `model` for all phases; 'auto' picks
             Haiku/Sonnet/Opus per phase via ModelSelector.
-        budget_cap_usd: Optional USD cap on LLM spend. When exceeded, the scan pauses
-            until approve_scan_budget() is called. Omit or null for unlimited; if omitted
-            with auto mode, the server may default to ~2x the estimate.
 
     Returns:
         scan_id and status. Use get_scan_status() to poll progress.
 
-    Example (auto mode with $5 cap):
+    Example (auto mode):
         start_scan(
             target_url="https://staging.example.com",
             scan_mode="both",
             model_policy="auto",
-            budget_cap_usd=5.0,
             ai_instructions="Focus on auth and IDOR",
         )
     """
@@ -198,8 +197,6 @@ def start_scan(
         body["api_imports"] = {"postman": postman_file}
     if ai_instructions:
         body["ai_instructions"] = ai_instructions
-    if budget_cap_usd is not None:
-        body["budget_cap_usd"] = budget_cap_usd
     return _request("POST", "/api/scan", json=body)
 
 
@@ -215,7 +212,6 @@ def launch_scan(
     postman_file: str = "",
     ai_instructions: str = "",
     model_policy: str = "manual",
-    budget_cap_usd: float | None = None,
 ) -> dict:
     """Alias for start_scan — launch a DAST scan with optional operator AI instructions."""
     return start_scan(
@@ -229,7 +225,6 @@ def launch_scan(
         postman_file=postman_file,
         ai_instructions=ai_instructions,
         model_policy=model_policy,
-        budget_cap_usd=budget_cap_usd,
     )
 
 
@@ -241,9 +236,10 @@ def estimate_scan_cost(
     model_policy: str = "auto",
     manual_model: str = "",
 ) -> dict:
-    """Estimate rough USD cost before launching a scan.
+    """Estimate rough USD cost before launching a scan (read-only).
 
-    Wraps POST /api/scans/estimate. Use this to pick budget_cap_usd for start_scan.
+    Wraps POST /api/scans/estimate. Budget caps cannot be set from MCP; Auto-mode scans
+    use the server default ($30). Use get_scan_budget() to poll spend.
 
     Args:
         scan_mode: 'website', 'api', or 'both'.
@@ -258,7 +254,6 @@ def estimate_scan_cost(
 
     Example:
         estimate_scan_cost(scan_mode="both", model_policy="auto")
-        # -> use recommended_budget_usd as start_scan(budget_cap_usd=...)
     """
     body: dict[str, Any] = {
         "scan_mode": scan_mode,
@@ -273,64 +268,22 @@ def estimate_scan_cost(
 
 @mcp.tool()
 def get_scan_budget(scan_id: str) -> dict:
-    """Get budget cap, spend, status, and per-phase model choices for a scan.
+    """Get budget cap, spend, status, and per-phase model choices for a scan (read-only).
 
-    Wraps GET /api/scans/{scan_id}/budget.
+    Wraps GET /api/scans/{scan_id}/budget. Budget approval requires SSO Web UI login;
+    MCP cannot raise caps or stop at the budget gate.
 
     Args:
         scan_id: Scan id from start_scan().
 
     Returns:
-        cap_usd, total_usd, status (ok | awaiting_approval | approved | stopped_by_budget),
-        model_choices, model_policy, estimated_cost_usd, owner_user_id.
+        cap_usd, total_usd, status, model_choices, model_policy, estimated_cost_usd,
+        owner_user_id, approval_requires_sso, default_cap_usd.
 
     Example:
         get_scan_budget("scan_20260529_120000_abc123")
     """
     return _request("GET", f"/api/scans/{scan_id}/budget")
-
-
-@mcp.tool()
-def approve_scan_budget(scan_id: str, new_cap_usd: float) -> dict:
-    """Raise the budget cap and resume a scan paused at the budget gate.
-
-    Wraps POST /api/scans/{scan_id}/budget/approve.
-
-    The SCANNER_USER used for MCP Basic Auth must be the scan owner or a platform admin
-    (same rule as the Web UI SSO owner check for human operators).
-
-    Args:
-        scan_id: Scan id in awaiting_approval state.
-        new_cap_usd: New cap in USD; must be greater than current total_usd spend.
-
-    Returns:
-        Updated budget_cap_usd, budget_status ('approved'), and scan status.
-
-    Example:
-        # Scan paused at $5 cap with $5.01 spent — approve up to $10:
-        approve_scan_budget("scan_20260529_120000_abc123", new_cap_usd=10.0)
-    """
-    return _request(
-        "POST",
-        f"/api/scans/{scan_id}/budget/approve",
-        json={"new_cap_usd": new_cap_usd},
-    )
-
-
-@mcp.tool()
-def stop_scan_for_budget(scan_id: str) -> dict:
-    """Stop a scan that hit the budget cap (owner/admin only).
-
-    Wraps POST /api/scans/{scan_id}/budget/stop. Sets budget_status to stopped_by_budget
-    and cancels the scan. Use stop_scan() for generic cancellation without budget context.
-
-    Args:
-        scan_id: Scan id paused at budget gate or still running under a cap.
-
-    Example:
-        stop_scan_for_budget("scan_20260529_120000_abc123")
-    """
-    return _request("POST", f"/api/scans/{scan_id}/budget/stop", json={})
 
 
 @mcp.tool()

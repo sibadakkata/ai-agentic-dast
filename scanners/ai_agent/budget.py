@@ -1,8 +1,36 @@
-"""Scan budget guard and rough cost estimation."""
+"""Scan budget guard and rough cost estimation.
+
+Environment:
+    AUTO_MODE_DEFAULT_BUDGET_USD — server-side USD cap for Auto-mode scans when the
+    caller is not an SSO Web UI session or did not specify a positive cap (default 30.0).
+"""
 from __future__ import annotations
 
 import math
+import os
 from typing import Any, Callable
+
+AUTO_MODE_DEFAULT_BUDGET_USD = float(os.environ.get("AUTO_MODE_DEFAULT_BUDGET_USD", "30.0"))
+
+
+def effective_budget_cap_usd(
+    model_policy: str,
+    requested_cap: float | None,
+    *,
+    caller_is_sso: bool,
+) -> float | None:
+    """Resolve enforced budget cap for scan launch.
+
+    Manual policy: returns requested_cap unchanged (may be None = unlimited).
+    Auto policy: SSO with positive requested_cap uses that value; otherwise the
+    server default (AUTO_MODE_DEFAULT_BUDGET_USD).
+    """
+    policy = (model_policy or "manual").lower()
+    if policy != "auto":
+        return requested_cap
+    if caller_is_sso and requested_cap is not None and requested_cap > 0:
+        return float(requested_cap)
+    return AUTO_MODE_DEFAULT_BUDGET_USD
 
 _TIER_PHASE_COUNTS = {"cheap": 12, "balanced": 28, "premium": 6}
 _TOKENS_PER_PHASE_K = {"cheap": 8.0, "balanced": 45.0, "premium": 120.0}

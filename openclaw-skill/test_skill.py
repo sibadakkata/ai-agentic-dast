@@ -221,8 +221,6 @@ def cmd_start(args):
     }
     if getattr(args, "model_policy", None):
         body["model_policy"] = args.model_policy
-    if getattr(args, "budget_cap", None) is not None:
-        body["budget_cap_usd"] = args.budget_cap
     scan = _api("POST", "/api/scan", body)
     scan_id = scan.get("scan_id") or scan.get("id") or "unknown"
     print(f"    Scan ID : {scan_id}")
@@ -414,8 +412,6 @@ Examples:
                         default="bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0")
     p_scan.add_argument("--model-policy", choices=["manual", "auto"],
                         help="manual (default) or auto per-phase model selection")
-    p_scan.add_argument("--budget-cap", type=float, dest="budget_cap",
-                        help="USD budget cap; scan pauses when exceeded")
     p_scan.add_argument("--wait", action="store_true",
                         help="Wait for completion and show results")
 

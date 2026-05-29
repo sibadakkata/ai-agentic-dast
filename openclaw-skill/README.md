@@ -228,8 +228,8 @@ Report: http://localhost:80/api/reports/scan_bedrock_us_anthropic_claude_haiku_4
 ### 11. Start a New Scan
 
 ```powershell
-# Auto mode with $3 budget cap (per-phase Haiku/Sonnet/Opus)
-python openclaw-skill/test_skill.py scan --url https://staging.example.com --mode both --model-policy auto --budget-cap 3
+# Auto mode (server $30 default cap; customize budget in Web UI only)
+python openclaw-skill/test_skill.py scan --url https://staging.example.com --mode both --model-policy auto
 
 # Website scan (default manual / Haiku)
 python openclaw-skill/test_skill.py scan --url https://testphp.vulnweb.com

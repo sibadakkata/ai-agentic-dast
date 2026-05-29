@@ -61,7 +61,7 @@ curl -s -u "$DAST_USER:$DAST_PASS" \
 | `extra_domains` | No | `[]` | Additional domains to include in scope |
 | `api_imports` | No | `{}` | Map of import type to filename |
 | `model_policy` | No | `manual` | `manual` or `auto` (per-phase Bedrock selection) |
-| `budget_cap_usd` | No | ~2× estimate | Pause scan when LLM spend reaches cap |
+| `budget_cap_usd` | No | $30 default (Auto) | **SSO Web UI only** for Auto mode; ignored for Basic Auth automation. See [intelligent-model-selection.md](intelligent-model-selection.md). |
 
 **Response**: `{"scan_id": "scan_20260304_143022_a1b2c3", "status": "started"}`
 

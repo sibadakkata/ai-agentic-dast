@@ -134,7 +134,8 @@ Unless noted, tools return JSON dicts from the API, or an `{"error": "...", "mes
 | `postman_file` | string | No | Filename from `upload_api_spec` |
 | `ai_instructions` | string | No | Operator guidance (see below) |
 | `model_policy` | string | No | `manual` (default) or `auto` — per-phase Haiku/Sonnet/Opus |
-| `budget_cap_usd` | float | No | USD cap; scan pauses at limit until approved |
+
+> **Budget:** MCP cannot set `budget_cap_usd`. Auto-mode scans use the server default (**$30**). Custom caps require the Web UI (SSO).
 
 | | |
 |---|---|
@@ -149,13 +150,12 @@ Unless noted, tools return JSON dicts from the API, or an `{"error": "...", "mes
   "arguments": {
     "target_url": "https://staging.example.com",
     "scan_mode": "both",
-    "model_policy": "auto",
-    "budget_cap_usd": 5.0
+    "model_policy": "auto"
   }
 }
 ```
 
-Typed launches with more fields (base64 imports, `scan_profile`) are available via [HTTP `POST /api/v1/scans`](api.md) — MCP forwards `model_policy` and `budget_cap_usd` on `/api/scan`.
+Typed launches with more fields (base64 imports, `scan_profile`) are available via [HTTP `POST /api/v1/scans`](api.md) — MCP forwards `model_policy` only.
 
 Guide: [intelligent-model-selection.md](intelligent-model-selection.md)
 
@@ -179,30 +179,7 @@ Guide: [intelligent-model-selection.md](intelligent-model-selection.md)
 |---|---|
 | **HTTP** | `GET /api/scans/{scan_id}/budget` |
 
-Returns `cap_usd`, `total_usd`, `status`, `model_choices`, `model_policy`.
-
-### approve_scan_budget
-
-| | |
-|---|---|
-| **HTTP** | `POST /api/scans/{scan_id}/budget/approve` |
-
-| Name | Type | Required | Description |
-|------|------|----------|-------------|
-| `scan_id` | string | Yes | Paused scan |
-| `new_cap_usd` | float | Yes | New cap (must exceed current spend) |
-
-**Auth:** `SCANNER_USER` must be scan owner or admin.
-
-**Example chat:** “It paused — approve up to $10” → `approve_scan_budget(scan_id, new_cap_usd=10.0)`.
-
-### stop_scan_for_budget
-
-| | |
-|---|---|
-| **HTTP** | `POST /api/scans/{scan_id}/budget/stop` |
-
-Stops a scan at the budget gate (owner/admin). Use `stop_scan` for generic cancellation.
+Returns `cap_usd`, `total_usd`, `status`, `model_choices`, `model_policy`, `approval_requires_sso`, `default_cap_usd`. Budget approval must be done in the Web UI (SSO); MCP tools for approve/stop were removed.
 
 ### get_scan_status
 

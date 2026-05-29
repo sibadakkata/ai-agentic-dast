@@ -651,18 +651,16 @@ The scanner exposes all capabilities via an MCP (Model Context Protocol) server 
 
 ### Auto mode & budget (MCP / API)
 
-When the user asks for an **auto-mode** scan, pass `model_policy='auto'` and a `budget_cap_usd`. Call `POST /api/scans/estimate` (or MCP `estimate_scan_cost`) first; default cap ≈ `recommended_budget_usd` (typically ~2× expected). If the scan pauses at the cap, use `approve_scan_budget` (owner/admin) or `stop_scan_for_budget`. See [docs/intelligent-model-selection.md](../../docs/intelligent-model-selection.md).
+When the user asks for an **auto-mode** scan, pass `model_policy='auto'` only. **Do NOT** pass `budget_cap_usd` from MCP / API / OpenClaw — it is ignored; the server applies a **$30** default (Auto mode). Direct users to the **Web UI** if they need a custom budget or to approve a paused scan. See [docs/intelligent-model-selection.md](../../docs/intelligent-model-selection.md).
 
 ### MCP tools (budget + scan)
 
 | Tool | Purpose |
 |------|---------|
 | `health_check` | Verify scanner connectivity |
-| `start_scan` | Begin a scan (`model_policy`, `budget_cap_usd`) |
+| `start_scan` | Begin a scan (`model_policy`; server-side budget for Auto) |
 | `estimate_scan_cost` | Pre-launch USD estimate |
 | `get_scan_budget` | Cap, spend, status, per-phase models |
-| `approve_scan_budget` | Raise cap and resume |
-| `stop_scan_for_budget` | Stop at budget gate |
 | `get_scan_status` | Poll current scan progress |
 | `wait_for_scan` | Block until scan completes |
 | `stop_scan` | Cancel a running scan |

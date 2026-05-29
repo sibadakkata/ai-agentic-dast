@@ -54,23 +54,28 @@
 <li>Owner or admin clicks <strong>Increase budget and resume</strong> (or API approve).</li>
 <li><strong>approved</strong> — scan resumes until new cap.</li>
 </ol>
-<p>Only the <strong>SSO user who launched the scan</strong> or a platform <strong>admin</strong> may approve (enforced server-side).</p>
+<p>Only the <strong>SSO user who launched the scan</strong> or a platform <strong>admin</strong> may approve (enforced server-side). Approve/stop require an <strong>SSO Web UI session</strong> — not Basic Auth automation.</p>
+
+<div style="padding:12px 16px;margin:16px 0;background:#e8f4fc;border-left:4px solid #2684ff;">
+<strong>Budget caps protect against runaway costs.</strong> Only Web UI users (SSO) can change them.
+API, MCP, and OpenClaw automation always run with the server-side default (<strong>$30</strong> for Auto mode, tunable via <code>AUTO_MODE_DEFAULT_BUDGET_USD</code>).
+</div>
 
 <h2>API quickstart</h2>
 <pre>POST /api/scans/estimate
 {"scan_mode":"both","scan_intensity":"deep","model_policy":"auto"}
 
 POST /api/v1/scans
-{"target_url":"https://staging.example.com","model_policy":"auto","budget_cap_usd":5.0}
+{"target_url":"https://staging.example.com","model_policy":"auto"}
 
-POST /api/scans/{id}/budget/approve
-{"new_cap_usd": 10.0}</pre>
+GET /api/scans/{id}/budget
+(approval_requires_sso: true, default_cap_usd: 30)</pre>
 
 <h2>MCP (Cursor / Claude Desktop)</h2>
-<p>Tools: <code>start_scan</code> (<code>model_policy</code>, <code>budget_cap_usd</code>), <code>estimate_scan_cost</code>, <code>get_scan_budget</code>, <code>approve_scan_budget</code>, <code>stop_scan_for_budget</code>.</p>
+<p>Tools: <code>start_scan</code> (<code>model_policy</code> only), <code>estimate_scan_cost</code>, <code>get_scan_budget</code>. Budget cannot be set or approved from MCP.</p>
 
 <h2>OpenClaw</h2>
-<p>Natural language: “Scan staging.example.com in auto mode with a $3 budget” → POST body with <code>model_policy: "auto"</code>, <code>budget_cap_usd: 3</code>.</p>
+<p>Natural language: “Scan staging.example.com in auto mode” → POST body with <code>model_policy: "auto"</code> only (server $30 default cap).</p>
 
 <h2>Cost transparency</h2>
 <p>Per-scan cost in UI; <code>model_choices</code> maps phase → model in auto mode; platform analytics tab for cross-scan spend.</p>

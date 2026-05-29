@@ -42,7 +42,12 @@ from scanners.ai_agent.api_import import (
 from scanners.ai_agent.auth import load_targets_from_dict
 from scanners.ai_agent.llm_config import LLMRouter, check_connectivity
 from scanners.ai_agent.auto_router import ModelSelector
-from scanners.ai_agent.budget import BudgetGuard, estimate_scan_cost
+from scanners.ai_agent.budget import (
+    AUTO_MODE_DEFAULT_BUDGET_USD,
+    BudgetGuard,
+    effective_budget_cap_usd,
+    estimate_scan_cost,
+)
 from scanners.ai_agent.model_discovery import (
     discover_models,
     get_cached_models,
@@ -98,7 +103,7 @@ async def _global_exception_handler(request: Request, exc: Exception):
 # --- Auth (SAML SSO + session cookies + Basic Auth for API/local dev) ---------
 from scanners.auth import saml as saml_auth
 from scanners.auth.middleware import auth_middleware
-from scanners.auth.rbac import init_rbac, require_admin
+from scanners.auth.rbac import caller_auth_kind, init_rbac, require_admin, require_sso_user
 from scanners.auth.session import (
     SESSION_COOKIE as _SESSION_COOKIE,
     SESSION_MAX_AGE as _SESSION_MAX_AGE,
@@ -1909,7 +1914,14 @@ def _sync_scan_from_pg(scan_id: str) -> bool:
     return True
 
 
-def _launch_scan_core(params, owner_id: str | None, *, postman_collection_b64: str | None = None, burp_export_b64: str | None = None):
+def _launch_scan_core(
+    params,
+    owner_id: str | None,
+    *,
+    caller_is_sso: bool = False,
+    postman_collection_b64: str | None = None,
+    burp_export_b64: str | None = None,
+):
     """Create scan record and start in-process thread or external worker."""
     err = validate_scan_launch_params(params)
     if err:
@@ -1943,9 +1955,23 @@ def _launch_scan_core(params, owner_id: str | None, *, postman_collection_b64: s
         model if model_policy == "manual" else None,
         models_list,
     )
-    budget_cap = getattr(params, "budget_cap_usd", None)
-    if budget_cap is None and cost_estimate.get("recommended_budget_usd"):
-        budget_cap = cost_estimate["recommended_budget_usd"]
+    requested_cap = getattr(params, "budget_cap_usd", None)
+    effective_cap = effective_budget_cap_usd(
+        model_policy, requested_cap, caller_is_sso=caller_is_sso
+    )
+    budget_override_ignored = (
+        model_policy == "auto"
+        and not caller_is_sso
+        and requested_cap is not None
+    )
+    if budget_override_ignored:
+        logger.warning(
+            "Ignoring budget_cap_usd=%s from non-SSO caller; applying default $%.2f",
+            requested_cap,
+            effective_cap or AUTO_MODE_DEFAULT_BUDGET_USD,
+        )
+    budget_cap = effective_cap
+    budget_cap_was_overridden = budget_override_ignored
 
     scan_id = f"scan_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
     if model_policy == "auto":
@@ -1976,6 +2002,7 @@ def _launch_scan_core(params, owner_id: str | None, *, postman_collection_b64: s
         "model_policy": model_policy,
         "model_choices": {},
         "budget_cap_usd": budget_cap,
+        "budget_cap_was_overridden_by_caller": budget_cap_was_overridden,
         "budget_total_usd": 0.0,
         "budget_status": "ok" if budget_cap is not None else None,
         "estimated_cost_usd": cost_estimate.get("expected_usd"),
@@ -2048,7 +2075,16 @@ def _launch_scan_core(params, owner_id: str | None, *, postman_collection_b64: s
             SCANS[scan_id]["error"] = str(exc)
             _save_scan(scan_id)
             return JSONResponse({"error": str(exc), "scan_id": scan_id}, status_code=500)
-        return {"scan_id": scan_id, "status": "queued", "worker_ref": worker_ref}
+        resp = {"scan_id": scan_id, "status": "queued", "worker_ref": worker_ref}
+        if budget_override_ignored:
+            resp.update(
+                {
+                    "budget_override_ignored": True,
+                    "applied_cap_usd": budget_cap,
+                    "reason": "Budget overrides are only honored from Web UI sessions",
+                }
+            )
+        return resp
 
     thread = threading.Thread(
         target=_run_scan_in_thread,
@@ -2086,7 +2122,16 @@ def _launch_scan_core(params, owner_id: str | None, *, postman_collection_b64: s
         daemon=True,
     )
     thread.start()
-    return {"scan_id": scan_id, "status": "started"}
+    resp = {"scan_id": scan_id, "status": "started"}
+    if budget_override_ignored:
+        resp.update(
+            {
+                "budget_override_ignored": True,
+                "applied_cap_usd": budget_cap,
+                "reason": "Budget overrides are only honored from Web UI sessions",
+            }
+        )
+    return resp
 
 
 @app.post(
@@ -2109,7 +2154,8 @@ async def start_scan(request: Request):
     except Exception:
         return JSONResponse({"error": "Invalid JSON body"}, status_code=400)
     params = parse_scan_launch_dict(body)
-    return _launch_scan_core(params, owner_id)
+    caller_is_sso = caller_auth_kind(request) == "sso"
+    return _launch_scan_core(params, owner_id, caller_is_sso=caller_is_sso)
 
 
 @app.post(
@@ -2128,9 +2174,11 @@ async def start_scan_v1(body: ScanLaunchRequest, request: Request):
     owner = _request_user(request)
     owner_id = owner.id if owner else None
     params = request_to_launch_params(body)
+    caller_is_sso = caller_auth_kind(request) == "sso"
     return _launch_scan_core(
         params,
         owner_id,
+        caller_is_sso=caller_is_sso,
         postman_collection_b64=body.postman_collection_b64,
         burp_export_b64=body.burp_export_b64,
     )
@@ -2817,6 +2865,7 @@ async def estimate_scan_cost_api(
         model if model_policy == "manual" else None,
         _get_models(),
     )
+    est["default_cap_usd"] = AUTO_MODE_DEFAULT_BUDGET_USD
     return est
 
 
@@ -2843,6 +2892,9 @@ async def get_scan_budget(scan_id: str, request: Request, _auth=Depends(_verify)
         "model_choices": s.get("model_choices", {}),
         "model_policy": s.get("model_policy", "manual"),
         "estimated_cost_usd": s.get("estimated_cost_usd"),
+        "approval_requires_sso": True,
+        "default_cap_usd": AUTO_MODE_DEFAULT_BUDGET_USD,
+        "budget_cap_was_overridden_by_caller": s.get("budget_cap_was_overridden_by_caller"),
     }
 
 
@@ -2862,8 +2914,8 @@ async def approve_scan_budget(
     body: BudgetApproveRequest,
     request: Request,
     _auth=Depends(_verify),
+    user=Depends(require_sso_user),
 ):
-    user = _request_user(request)
     if not _user_can_manage_scan_budget(scan_id, user):
         raise HTTPException(status_code=403, detail="Only the scan owner or an admin can approve budget")
     s = SCANS[scan_id]
@@ -2909,8 +2961,12 @@ async def approve_scan_budget(
         "Sets `budget_status` to `stopped_by_budget` and triggers cancellation."
     ),
 )
-async def stop_scan_budget(scan_id: str, request: Request, _auth=Depends(_verify)):
-    user = _request_user(request)
+async def stop_scan_budget(
+    scan_id: str,
+    request: Request,
+    _auth=Depends(_verify),
+    user=Depends(require_sso_user),
+):
     if not _user_can_manage_scan_budget(scan_id, user):
         raise HTTPException(status_code=403, detail="Only the scan owner or an admin can stop on budget")
     s = SCANS[scan_id]

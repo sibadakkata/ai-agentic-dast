@@ -36,7 +36,6 @@ Authorization: Basic {base64(SCANNER_USER:SCANNER_PASS)}
   "scan_mode": "website|api|both",
   "model": "bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0",
   "model_policy": "manual",
-  "budget_cap_usd": 5.0,
   "username": "",
   "password": "",
   "auth_type": "none",
@@ -49,7 +48,7 @@ Authorization: Basic {base64(SCANNER_USER:SCANNER_PASS)}
 
 - `ai_instructions` (optional): Operator guidance for the LLM agent — focus areas, paths to skip, credential rules. Example: "Focus on authentication and IDOR; do not test the /payments endpoint."
 - `model_policy`: `manual` (default) — use `model` for every phase. `auto` — scanner picks Haiku/Sonnet/Opus per phase (see [intelligent-model-selection.md](../docs/intelligent-model-selection.md)).
-- `budget_cap_usd` (optional): USD cap on LLM spend; scan pauses at cap until owner approves a higher limit via `POST /api/scans/{id}/budget/approve`. Omit for unlimited. Call `POST /api/scans/estimate` first to get `recommended_budget_usd`.
+- **Budget caps** are managed by the scanner Web UI only. OpenClaw-triggered Auto-mode scans use the server-side default (**$30 USD**). Do not send `budget_cap_usd` — it is ignored. For a higher cap, set it in the Web UI before triggering scans from OpenClaw.
 - `scan_mode`: Use "api" if user says API/endpoint, "website" if they say website/page, "both" if unclear
 - `model`: Default to Claude Haiku unless user specifies otherwise (ignored for phase selection when `model_policy` is `auto`)
 - Available models: `bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0`, `bedrock/mistral.ministral-3-8b-instruct`
@@ -157,16 +156,16 @@ When presenting scan results to the user, format them clearly:
 
 ## Example Conversations
 
-User: "Scan staging.example.com in auto mode with a $3 budget"
+User: "Scan staging.example.com in auto mode"
 -> POST /api/scan with:
 ```json
 {
   "target_url": "https://staging.example.com",
   "scan_mode": "both",
-  "model_policy": "auto",
-  "budget_cap_usd": 3.0
+  "model_policy": "auto"
 }
 ```
+(Server applies $30 default cap; user must use Web UI to customize.)
 -> Return scan_id; if paused at cap, call POST /api/scans/{id}/budget/approve with owner's credentials
 
 User: "Scan https://example.com"

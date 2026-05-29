@@ -204,6 +204,9 @@ class ScanCostEstimateResponse(BaseModel):
     expected_usd: float
     high_usd: float
     recommended_budget_usd: float
+    default_cap_usd: float = Field(
+        description="Server-side Auto-mode default budget when UI leaves cap blank",
+    )
     assumptions: list[str] = Field(default_factory=list)
     per_phase: list[dict[str, Any]] = Field(default_factory=list)
 
@@ -218,6 +221,11 @@ class ScanBudgetResponse(BaseModel):
     model_choices: dict[str, str] = Field(default_factory=dict)
     model_policy: str = "manual"
     estimated_cost_usd: float | None = None
+    approval_requires_sso: bool = True
+    default_cap_usd: float = Field(
+        description="Server Auto-mode default; overrides only via Web UI (SSO)",
+    )
+    budget_cap_was_overridden_by_caller: bool | None = None
 
 
 class BudgetApproveRequest(BaseModel):
@@ -251,6 +259,9 @@ class ScanLaunchResponse(BaseModel):
 
     scan_id: str
     status: str = Field(examples=["started"])
+    budget_override_ignored: bool | None = None
+    applied_cap_usd: float | None = None
+    reason: str | None = None
 
 
 @dataclass
