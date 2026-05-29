@@ -86,6 +86,14 @@ class ScanLaunchRequest(BaseModel):
         description="Alias for scan_mode (web/site/api/both)",
     )
     model: str = Field(default="", description="LLM model id from GET /api/models")
+    model_policy: str = Field(
+        default="manual",
+        description="manual | auto — auto selects model per phase",
+    )
+    budget_cap_usd: float | None = Field(
+        default=None,
+        description="Optional USD budget cap; scan pauses when exceeded",
+    )
     username: str = ""
     password: str = ""
     username_b: str = ""
@@ -157,6 +165,8 @@ class ScanLaunchParams:
     credentials_admin: dict = field(default_factory=dict)
     credentials_tenant_b: dict = field(default_factory=dict)
     model: str = ""
+    model_policy: str = "manual"
+    budget_cap_usd: float | None = None
     scan_mode: str = "both"
     auth_type: str = "auto"
     api_imports: dict = field(default_factory=dict)
@@ -193,6 +203,16 @@ def _merge_auth(body: dict[str, Any], params: ScanLaunchParams) -> None:
     if auth.get("api_key"):
         params.credentials_admin = dict(params.credentials_admin or {})
         params.credentials_admin["api_key"] = str(auth["api_key"]).strip()
+
+
+def _parse_budget_cap(raw: Any) -> float | None:
+    if raw is None or raw == "":
+        return None
+    try:
+        val = float(raw)
+    except (TypeError, ValueError):
+        return None
+    return val if val > 0 else None
 
 
 def _normalize_scan_mode(raw: str) -> str:
@@ -267,6 +287,8 @@ def parse_scan_launch_dict(body: dict[str, Any]) -> ScanLaunchParams:
         credentials_admin=body.get("credentials_admin") or {},
         credentials_tenant_b=body.get("credentials_tenant_b") or {},
         model=(body.get("model") or "").strip(),
+        model_policy=(body.get("model_policy") or "manual").strip().lower(),
+        budget_cap_usd=_parse_budget_cap(body.get("budget_cap_usd")),
         scan_mode=_normalize_scan_mode(scan_mode_raw),
         auth_type=(body.get("auth_type") or "auto").strip(),
         api_imports=dict(body.get("api_imports") or {}),
@@ -302,6 +324,8 @@ def validate_scan_launch_params(params: ScanLaunchParams) -> str | None:
         params.scan_profile = "vulnerability_scan"
     if params.scan_profile == "crawl_only":
         params.focus_areas = []
+    if params.model_policy not in ("manual", "auto"):
+        params.model_policy = "manual"
     return None
 
 

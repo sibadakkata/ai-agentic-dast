@@ -19,6 +19,7 @@ from datetime import datetime
 from pathlib import Path
 
 import httpx
+from pydantic import BaseModel
 
 from fastapi import FastAPI, BackgroundTasks, Depends, HTTPException, Request, UploadFile, File, Form, WebSocket, WebSocketDisconnect, status
 from io import BytesIO
@@ -40,6 +41,8 @@ from scanners.ai_agent.api_import import (
 )
 from scanners.ai_agent.auth import load_targets_from_dict
 from scanners.ai_agent.llm_config import LLMRouter, check_connectivity
+from scanners.ai_agent.auto_router import ModelSelector
+from scanners.ai_agent.budget import BudgetGuard, estimate_scan_cost
 from scanners.ai_agent.model_discovery import (
     discover_models,
     get_cached_models,
@@ -184,6 +187,35 @@ def _scans_for_user(request: Request) -> dict[str, dict]:
         for sid, info in SCANS.items()
         if info.get("owner_user_id") == user.id
     }
+
+
+def _user_can_read_scan(scan_id: str, user) -> bool:
+    if scan_id not in SCANS or user is None:
+        return False
+    if user.is_admin:
+        return True
+    return SCANS[scan_id].get("owner_user_id") == user.id
+
+
+def _user_can_manage_scan_budget(scan_id: str, user) -> bool:
+    """Scan owner or platform admin may approve budget or stop on budget gate."""
+    if scan_id not in SCANS or user is None:
+        return False
+    if user.is_admin:
+        return True
+    return SCANS[scan_id].get("owner_user_id") == user.id
+
+
+def _budget_owner_label(owner_user_id: str | None) -> str:
+    if not owner_user_id:
+        return "scan owner"
+    try:
+        u = _USER_REPO.get_by_id(owner_user_id)
+        if u:
+            return u.name or u.email or owner_user_id
+    except Exception:
+        pass
+    return owner_user_id
 
 app.mount("/static", StaticFiles(directory=Path(__file__).parent / "static"), name="static")
 
@@ -1886,9 +1918,36 @@ def _launch_scan_core(params, owner_id: str | None, *, postman_collection_b64: s
     except ValueError as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
 
-    model = _resolve_model_id(params.model)
+    model_policy = (getattr(params, "model_policy", None) or "manual").strip().lower()
+    if model_policy not in ("manual", "auto"):
+        model_policy = "manual"
+
+    models_list = _get_models()
+    if model_policy == "auto":
+        model = _resolve_model_id(params.model) if params.model else _cheapest_model()
+    else:
+        model = _resolve_model_id(params.model) if params.model else _cheapest_model()
+
+    cost_estimate = estimate_scan_cost(
+        params.scan_mode,
+        params.scan_intensity,
+        params.llm_scan_depth,
+        model_policy,
+        model if model_policy == "manual" else None,
+        models_list,
+    )
+    budget_cap = getattr(params, "budget_cap_usd", None)
+    if budget_cap is None and cost_estimate.get("recommended_budget_usd"):
+        budget_cap = cost_estimate["recommended_budget_usd"]
+
     scan_id = f"scan_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
-    model_name = next((m.get("name", m.get("id", model)) for m in _get_models() if m.get("id") == model), model)
+    if model_policy == "auto":
+        model_name = "Auto (scanner-selected model)"
+    else:
+        model_name = next(
+            (m.get("name", m.get("id", model)) for m in models_list if m.get("id") == model),
+            model,
+        )
 
     if owner_id and pgdb.dual_write_enabled():
         canonical = pgdb.resolve_owner_user_id(owner_id)
@@ -1907,6 +1966,13 @@ def _launch_scan_core(params, owner_id: str | None, *, postman_collection_b64: s
         "owner_user_id": owner_id,
         "model": model,
         "model_name": model_name,
+        "model_policy": model_policy,
+        "model_choices": {},
+        "budget_cap_usd": budget_cap,
+        "budget_total_usd": 0.0,
+        "budget_status": "ok" if budget_cap is not None else None,
+        "estimated_cost_usd": cost_estimate.get("expected_usd"),
+        "cost_estimate": cost_estimate,
         "status": "running",
         "started": datetime.now().isoformat(),
         "progress": [],
@@ -2281,7 +2347,36 @@ async def _run_scan_task(scan_id, target_url, username, password, model, scan_mo
             logger.error("Pre-scan connectivity check FAILED: %s — %s", target_url, exc)
             return
 
-        router = LLMRouter(models=[model])
+        model_policy = scan.get("model_policy", "manual")
+        model_choices = scan.setdefault("model_choices", {})
+        owner_id = scan.get("owner_user_id")
+        owner_label = _budget_owner_label(owner_id)
+
+        def _on_budget_exceeded():
+            scan["status"] = "paused"
+            _save_scan(scan_id)
+
+        guard = BudgetGuard(
+            scan_id,
+            scan.get("budget_cap_usd"),
+            owner_id,
+            SCANS,
+            pause_flag,
+            owner_label=owner_label,
+            on_exceeded=_on_budget_exceeded,
+        )
+        scan["_budget_guard"] = guard
+
+        model_selector = None
+        if model_policy == "auto":
+            model_selector = ModelSelector(
+                _get_models(), policy="auto", manual_model=model,
+            )
+
+        router_models = [model]
+        if model_policy == "auto":
+            router_models = list({m["id"] for m in _get_models()} | {model})
+        router = LLMRouter(models=router_models, on_cost=guard.record)
         scan["_router"] = router
 
         resolved_imports = {}
@@ -2321,7 +2416,21 @@ async def _run_scan_task(scan_id, target_url, username, password, model, scan_mo
         scan["progress"].append(f"Starting scan with {model}...")
         start = time.perf_counter()
         config_dir = str(BASE / "config")
-        findings, metrics = await run_scan(target, model, router, config_dir, on_progress=_on_progress, extra_domains=extra_domains, cancel_flag=cancel_flag, pause_flag=pause_flag, start_from_phase=start_from_phase, initial_findings=initial_findings, interactive_session=interactive_session)
+        findings, metrics = await run_scan(
+            target,
+            model,
+            router,
+            config_dir,
+            on_progress=_on_progress,
+            extra_domains=extra_domains,
+            cancel_flag=cancel_flag,
+            pause_flag=pause_flag,
+            start_from_phase=start_from_phase,
+            initial_findings=initial_findings,
+            interactive_session=interactive_session,
+            model_selector=model_selector,
+            model_choices=model_choices,
+        )
         duration = time.perf_counter() - start
 
         model_slug = model.replace("/", "_").replace(".", "_").replace(":", "_")
@@ -2567,6 +2676,13 @@ async def get_scan_status(scan_id: str):
             "findings_count": s.get("findings_count", len(s.get("live_findings", []))),
             "phases_completed": s.get("phases_completed", len(s.get("live_phases", []))),
             "findings": s.get("live_findings", []) or _load_partial_findings(scan_id),
+            "model_policy": s.get("model_policy", "manual"),
+            "model_choices": s.get("model_choices", {}),
+            "budget_cap_usd": s.get("budget_cap_usd"),
+            "budget_total_usd": s.get("budget_total_usd", 0),
+            "budget_status": s.get("budget_status"),
+            "estimated_cost_usd": s.get("estimated_cost_usd"),
+            "owner_user_id": s.get("owner_user_id"),
         }
     data = _load_raw_result_dict(scan_id)
     if data:
@@ -2639,7 +2755,121 @@ async def get_scan_live(scan_id: str, since_test: int = 0, since_finding: int = 
         "parallel_active": s.get("parallel_active", False),
         "cache_read_tokens": s.get("live_cache_read", 0),
         "cache_write_tokens": s.get("live_cache_write", 0),
+        "model_policy": s.get("model_policy", "manual"),
+        "model_choices": s.get("model_choices", {}),
+        "budget_cap_usd": s.get("budget_cap_usd"),
+        "budget_total_usd": s.get("budget_total_usd", 0),
+        "budget_status": s.get("budget_status"),
+        "owner_user_id": s.get("owner_user_id"),
     }
+
+
+@app.post("/api/scans/estimate", tags=["Scans"])
+async def estimate_scan_cost_api(request: Request, _auth=Depends(_verify)):
+    """Rough USD cost estimate for the current launch form selections."""
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    params = parse_scan_launch_dict(body)
+    model_policy = (params.model_policy or "manual").lower()
+    model = _resolve_model_id(params.model) if params.model else _cheapest_model()
+    est = estimate_scan_cost(
+        params.scan_mode,
+        params.scan_intensity,
+        params.llm_scan_depth,
+        model_policy,
+        model if model_policy == "manual" else None,
+        _get_models(),
+    )
+    return est
+
+
+@app.get("/api/scans/{scan_id}/budget", tags=["Scans"])
+async def get_scan_budget(scan_id: str, request: Request, _auth=Depends(_verify)):
+    user = _request_user(request)
+    if not _user_can_read_scan(scan_id, user):
+        raise HTTPException(status_code=404, detail="Scan not found")
+    s = SCANS[scan_id]
+    return {
+        "cap_usd": s.get("budget_cap_usd"),
+        "total_usd": s.get("budget_total_usd", 0),
+        "status": s.get("budget_status"),
+        "owner_user_id": s.get("owner_user_id"),
+        "model_choices": s.get("model_choices", {}),
+        "model_policy": s.get("model_policy", "manual"),
+        "estimated_cost_usd": s.get("estimated_cost_usd"),
+    }
+
+
+class _BudgetApproveBody(BaseModel):
+    new_cap_usd: float
+
+
+@app.post("/api/scans/{scan_id}/budget/approve", tags=["Scans"])
+async def approve_scan_budget(
+    scan_id: str,
+    body: _BudgetApproveBody,
+    request: Request,
+    _auth=Depends(_verify),
+):
+    user = _request_user(request)
+    if not _user_can_manage_scan_budget(scan_id, user):
+        raise HTTPException(status_code=403, detail="Only the scan owner or an admin can approve budget")
+    s = SCANS[scan_id]
+    total = float(s.get("budget_total_usd") or 0)
+    new_cap = float(body.new_cap_usd)
+    if new_cap <= total:
+        raise HTTPException(
+            status_code=400,
+            detail=f"new_cap_usd must be greater than current spend (${total:.2f})",
+        )
+    s["budget_cap_usd"] = new_cap
+    s["budget_status"] = "approved"
+    pause = PAUSE_FLAGS.get(scan_id)
+    if pause:
+        pause.clear()
+    approver = user.name or user.email or user.id
+    s["progress"] = s.get("progress", []) + [
+        f"▶ Budget raised to ${new_cap:.2f} by {approver} — resuming",
+    ]
+    if s.get("status") == "paused":
+        s["status"] = "running"
+    guard = s.get("_budget_guard")
+    if guard is not None:
+        guard._cap = new_cap
+        guard._exceeded = False
+    _save_scan(scan_id)
+    return {
+        "scan_id": scan_id,
+        "budget_cap_usd": new_cap,
+        "budget_total_usd": total,
+        "budget_status": "approved",
+        "status": s.get("status"),
+    }
+
+
+@app.post("/api/scans/{scan_id}/budget/stop", tags=["Scans"])
+async def stop_scan_budget(scan_id: str, request: Request, _auth=Depends(_verify)):
+    user = _request_user(request)
+    if not _user_can_manage_scan_budget(scan_id, user):
+        raise HTTPException(status_code=403, detail="Only the scan owner or an admin can stop on budget")
+    s = SCANS[scan_id]
+    s["budget_status"] = "stopped_by_budget"
+    flag = CANCEL_FLAGS.get(scan_id)
+    if flag:
+        flag.set()
+    pause = PAUSE_FLAGS.get(scan_id)
+    if pause:
+        pause.clear()
+    actor = user.name or user.email or user.id
+    s["progress"] = s.get("progress", []) + [
+        f"Scan stopped by {actor} (budget gate)",
+    ]
+    if s.get("status") in ("running", "paused", "pausing"):
+        s["status"] = "stopping"
+    _save_scan(scan_id)
+    return {"scan_id": scan_id, "budget_status": "stopped_by_budget", "status": s.get("status")}
 
 
 @app.post("/api/scan/{scan_id}/stop", tags=["Scans"])

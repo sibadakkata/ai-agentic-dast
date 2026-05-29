@@ -4,6 +4,9 @@ LLM-powered Dynamic Application Security Testing (DAST) scanner that works again
 
 A **multi-agent architecture** deploys 13 specialist agents in parallel — each an expert in its vulnerability class — coordinated by an orchestrator with shared context, inter-agent messaging, and an independent verifier that confirms findings and builds exploit chains. Covers the full **OWASP Web Top 10 (2021)**, **OWASP API Top 10 (2023)**, and **OWASP LLM Top 10 (2025)** — 32 OWASP categories total. Each agent drives a real Chromium browser and HTTP client, crafting context-aware payloads, interpreting responses, and reporting findings autonomously.
 
+- **Auto model selection** — optional per-phase Bedrock tiering (Haiku / Sonnet / Opus) while keeping manual model pick unchanged for operators who prefer a fixed model
+- **Budget cap & owner approval** — optional USD cap pauses the scan at limit; only the launching SSO user or an admin can raise the cap and resume ([docs/web-ui.md](docs/web-ui.md))
+
 **Production architecture:** [Red Team AI Web Scanner (Confluence)](https://confluence.corp.nortonlifelock.com/spaces/CIP/pages/954017481/Red+Team+AI+Web+Scanner) · [Terraform / AWS](infra/terraform/README.md) · [Scalable platform design](docs/architecture/scalable-scanner-platform-proposal.md)
 
 > ## Access model

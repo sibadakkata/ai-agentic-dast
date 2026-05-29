@@ -67,6 +67,8 @@ Start a scan with a typed JSON body. Prefer this for automation and MCP-aligned 
 | `target_url` | string | Yes | URL or API entry point to scan |
 | `scan_mode` | string | No | `website`, `api`, or `both` (default `both`) |
 | `model` | string | No | LLM id from `GET /api/models`; empty = default Haiku |
+| `model_policy` | string | No | `manual` (default) or `auto` — per-phase model selection |
+| `budget_cap_usd` | number | No | Optional USD cap; scan pauses when exceeded until owner/admin approves |
 | `username`, `password` | string | No | Primary login (User A) |
 | `auth_type` | string | No | `auto`, `none`, `form`, `sso`, `oauth`, `api_key`, `bearer` |
 | `ai_instructions` | string | No | Operator guidance for the LLM agent (see below) |
@@ -90,6 +92,46 @@ curl -s -u "${SCANNER_USER}:${SCANNER_PASS}" \
 ### POST /api/scan
 
 Legacy launch endpoint; same semantics as `/api/v1/scans` but accepts any JSON dict the UI uses (including fields not yet on the v1 model). MCP `start_scan` / `launch_scan` call this route.
+
+### POST /api/scans/estimate
+
+Rough cost estimate for a launch configuration (not a billing quote). Same body fields as scan launch (`scan_mode`, `scan_intensity`, `llm_scan_depth`, `model_policy`, `model`).
+
+**Response:** `{ "low_usd", "expected_usd", "high_usd", "assumptions", "per_phase", "recommended_budget_usd" }`
+
+```bash
+curl -s -u "${SCANNER_USER}:${SCANNER_PASS}" \
+  -H "Content-Type: application/json" \
+  -X POST "${SCANNER_URL}/api/scans/estimate" \
+  -d '{"target_url":"https://example.com","model_policy":"auto","scan_mode":"both"}'
+```
+
+### GET /api/scans/{scan_id}/budget
+
+Budget state for a scan. Requires authentication; user must have read access to the scan.
+
+**Response:** `{ "cap_usd", "total_usd", "status", "owner_user_id", "model_choices", "model_policy", "estimated_cost_usd" }`
+
+### POST /api/scans/{scan_id}/budget/approve
+
+**Auth:** scan owner or `admin`. Body: `{ "new_cap_usd": 5.0 }` — must be greater than current `total_usd`. Clears pause flag and sets `budget_status` to `approved`.
+
+```bash
+curl -s -u "${SCANNER_USER}:${SCANNER_PASS}" \
+  -H "Content-Type: application/json" \
+  -X POST "${SCANNER_URL}/api/scans/SCAN_ID/budget/approve" \
+  -d '{"new_cap_usd": 5.00}'
+```
+
+### POST /api/scans/{scan_id}/budget/stop
+
+**Auth:** scan owner or `admin`. Stops the scan (`budget_status`: `stopped_by_budget`, cancel flag set).
+
+```bash
+curl -s -u "${SCANNER_USER}:${SCANNER_PASS}" \
+  -X POST "${SCANNER_URL}/api/scans/SCAN_ID/budget/stop" \
+  -H "Content-Type: application/json" -d '{}'
+```
 
 ### GET /api/scan/{scan_id}
 

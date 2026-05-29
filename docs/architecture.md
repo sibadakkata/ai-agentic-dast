@@ -2,6 +2,10 @@
 
 [← Back to README](../README.md)
 
+## Intelligent model selection
+
+When `model_policy` is `auto`, `ModelSelector` (`scanners/ai_agent/auto_router.py`) picks a Bedrock model per phase using a three-tier policy (cheap / balanced / premium). Manual policy keeps one operator-selected model for all phases. Optional `budget_cap_usd` ties spend to `BudgetGuard`: the scan pauses at the cap and requires approval from the **scan owner** (SSO user who launched it) or an **admin** before resuming. See [scanner-internals.md](scanner-internals.md) and [web-ui.md](web-ui.md).
+
 ## System Overview
 
 The scanner is built around a **single LLM agent** that drives a real browser and HTTP client through security tests autonomously. No hardcoded attack playbooks — the LLM reasons about what it sees and crafts payloads accordingly.
