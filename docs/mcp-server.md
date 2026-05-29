@@ -40,7 +40,9 @@ pip install mcp
 |------|-------------|
 | `health_check` | Check if scanner is running |
 | `list_models` | List available LLM models |
-| `start_scan` | Start a new security scan |
+| `start_scan` | Start a scan (`model_policy`; Auto mode uses server $30 default cap) |
+| `estimate_scan_cost` | Pre-launch USD estimate (read-only) |
+| `get_scan_budget` | Cap, spend, status, `model_choices` (read-only; approve via Web UI) |
 | `stop_scan` | Stop a running scan (saves partial findings) |
 | `retry_scan` | Re-run a failed/cancelled scan in-place |
 | `get_scan_status` | Poll scan progress |

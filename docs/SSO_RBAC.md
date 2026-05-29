@@ -4,6 +4,16 @@
 
 The AI DAST scanner supports **SAML 2.0** sign-in via **Microsoft Entra ID** (Azure AD) and **role-based access control** with two roles: `admin` (Red Team Admin) and `user` (Member).
 
+### Scan budget approval
+
+Each scan stores `owner_user_id` from the SSO session at launch. When a scan hits its LLM **budget cap**, it pauses until:
+
+- The **owner** (same SSO user) approves a higher cap via the UI or `POST /api/scans/{id}/budget/approve`, or
+- An **admin** approves on their behalf, or
+- The owner/admin stops the scan via `POST /api/scans/{id}/budget/stop`.
+
+Other members cannot approve another user’s scan unless they are `admin`.
+
 ## Environment variables
 
 | Variable | Required | Description |

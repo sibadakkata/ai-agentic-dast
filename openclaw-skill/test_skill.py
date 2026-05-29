@@ -214,11 +214,14 @@ def cmd_start(args):
     print(f"    Status: {health.get('status', 'unknown')}")
 
     print(f"\n[2] Starting {args.mode} scan on {args.url}...")
-    scan = _api("POST", "/api/scan", {
+    body = {
         "target_url": args.url,
         "scan_mode": args.mode,
         "model": args.model,
-    })
+    }
+    if getattr(args, "model_policy", None):
+        body["model_policy"] = args.model_policy
+    scan = _api("POST", "/api/scan", body)
     scan_id = scan.get("scan_id") or scan.get("id") or "unknown"
     print(f"    Scan ID : {scan_id}")
     print(f"    Status  : {scan.get('status', 'unknown')}")
@@ -407,6 +410,8 @@ Examples:
                         choices=["website", "api", "both"])
     p_scan.add_argument("--model",
                         default="bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0")
+    p_scan.add_argument("--model-policy", choices=["manual", "auto"],
+                        help="manual (default) or auto per-phase model selection")
     p_scan.add_argument("--wait", action="store_true",
                         help="Wait for completion and show results")
 

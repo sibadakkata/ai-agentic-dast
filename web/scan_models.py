@@ -70,7 +70,15 @@ class ScanLaunchRequest(BaseModel):
                     "ai_instructions": (
                         "Focus on authentication and IDOR. Do not test /payments paths."
                     ),
-                }
+                },
+                {
+                    "target_url": "https://staging.example.com",
+                    "scan_mode": "both",
+                    "model_policy": "auto",
+                    "budget_cap_usd": 5.0,
+                    "scan_intensity": "deep",
+                    "llm_scan_depth": "standard",
+                },
             ]
         }
     )
@@ -86,6 +94,19 @@ class ScanLaunchRequest(BaseModel):
         description="Alias for scan_mode (web/site/api/both)",
     )
     model: str = Field(default="", description="LLM model id from GET /api/models")
+    model_policy: str = Field(
+        default="manual",
+        description='Model selection policy: "manual" (single model for all phases) or '
+        '"auto" (Haiku/Sonnet/Opus per phase via ModelSelector)',
+        examples=["manual", "auto"],
+    )
+    budget_cap_usd: float | None = Field(
+        default=None,
+        description="Optional USD budget cap; scan pauses at cap until owner/admin approves "
+        "a higher limit. Omit for unlimited; if omitted at launch, defaults to "
+        "recommended_budget_usd from POST /api/scans/estimate (~2× expected cost).",
+        examples=[3.0, 5.0, 8.0],
+    )
     username: str = ""
     password: str = ""
     username_b: str = ""
@@ -145,6 +166,104 @@ class ScanLaunchRequest(BaseModel):
         return (v or "").strip()
 
 
+class ScanCostEstimateRequest(BaseModel):
+    """Body for POST /api/scans/estimate — same launch knobs as scan create."""
+
+    model_config = ConfigDict(
+        json_schema_extra={
+            "examples": [
+                {
+                    "scan_mode": "web",
+                    "scan_intensity": "deep",
+                    "llm_scan_depth": "standard",
+                    "model_policy": "auto",
+                }
+            ]
+        }
+    )
+
+    target_url: str | None = Field(default=None, description="Optional; not used in math today")
+    scan_mode: str = Field(default="both", examples=["website", "api", "both"])
+    scan_intensity: str = Field(default="deep", examples=["light", "standard", "deep"])
+    llm_scan_depth: str = Field(default="standard", examples=["standard", "deep"])
+    model_policy: str = Field(
+        default="auto",
+        description='"manual" or "auto"',
+        examples=["auto"],
+    )
+    model: str | None = Field(
+        default=None,
+        description="Manual model id when model_policy is manual",
+    )
+
+
+class ScanCostEstimateResponse(BaseModel):
+    """Rough USD estimate (not a billing quote)."""
+
+    low_usd: float
+    expected_usd: float
+    high_usd: float
+    recommended_budget_usd: float
+    default_cap_usd: float = Field(
+        description="Server-side Auto-mode default budget when UI leaves cap blank",
+    )
+    assumptions: list[str] = Field(default_factory=list)
+    per_phase: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class ScanBudgetResponse(BaseModel):
+    """GET /api/scans/{scan_id}/budget."""
+
+    cap_usd: float | None = None
+    total_usd: float = 0
+    status: str | None = None
+    owner_user_id: str | None = None
+    model_choices: dict[str, str] = Field(default_factory=dict)
+    model_policy: str = "manual"
+    estimated_cost_usd: float | None = None
+    approval_requires_sso: bool = True
+    default_cap_usd: float = Field(
+        description="Server Auto-mode default; overrides only via Web UI (SSO)",
+    )
+    budget_cap_was_overridden_by_caller: bool | None = None
+
+
+class BudgetApproveRequest(BaseModel):
+    """POST /api/scans/{scan_id}/budget/approve."""
+
+    model_config = ConfigDict(json_schema_extra={"examples": [{"new_cap_usd": 5.0}]})
+
+    new_cap_usd: float = Field(
+        ...,
+        description="New budget cap in USD; must exceed current spend (total_usd)",
+        examples=[5.0, 10.0],
+    )
+
+
+class BudgetApproveResponse(BaseModel):
+    scan_id: str
+    budget_cap_usd: float
+    budget_total_usd: float
+    budget_status: str
+    status: str | None = None
+
+
+class BudgetStopResponse(BaseModel):
+    scan_id: str
+    budget_status: str
+    status: str | None = None
+
+
+class ScanLaunchResponse(BaseModel):
+    """POST /api/v1/scans and legacy POST /api/scan success body."""
+
+    scan_id: str
+    status: str = Field(examples=["started"])
+    budget_override_ignored: bool | None = None
+    applied_cap_usd: float | None = None
+    reason: str | None = None
+
+
 @dataclass
 class ScanLaunchParams:
     """Normalized scan launch parameters used by app.py."""
@@ -157,6 +276,8 @@ class ScanLaunchParams:
     credentials_admin: dict = field(default_factory=dict)
     credentials_tenant_b: dict = field(default_factory=dict)
     model: str = ""
+    model_policy: str = "manual"
+    budget_cap_usd: float | None = None
     scan_mode: str = "both"
     auth_type: str = "auto"
     api_imports: dict = field(default_factory=dict)
@@ -193,6 +314,16 @@ def _merge_auth(body: dict[str, Any], params: ScanLaunchParams) -> None:
     if auth.get("api_key"):
         params.credentials_admin = dict(params.credentials_admin or {})
         params.credentials_admin["api_key"] = str(auth["api_key"]).strip()
+
+
+def _parse_budget_cap(raw: Any) -> float | None:
+    if raw is None or raw == "":
+        return None
+    try:
+        val = float(raw)
+    except (TypeError, ValueError):
+        return None
+    return val if val > 0 else None
 
 
 def _normalize_scan_mode(raw: str) -> str:
@@ -267,6 +398,8 @@ def parse_scan_launch_dict(body: dict[str, Any]) -> ScanLaunchParams:
         credentials_admin=body.get("credentials_admin") or {},
         credentials_tenant_b=body.get("credentials_tenant_b") or {},
         model=(body.get("model") or "").strip(),
+        model_policy=(body.get("model_policy") or "manual").strip().lower(),
+        budget_cap_usd=_parse_budget_cap(body.get("budget_cap_usd")),
         scan_mode=_normalize_scan_mode(scan_mode_raw),
         auth_type=(body.get("auth_type") or "auto").strip(),
         api_imports=dict(body.get("api_imports") or {}),
@@ -302,6 +435,8 @@ def validate_scan_launch_params(params: ScanLaunchParams) -> str | None:
         params.scan_profile = "vulnerability_scan"
     if params.scan_profile == "crawl_only":
         params.focus_areas = []
+    if params.model_policy not in ("manual", "auto"):
+        params.model_policy = "manual"
     return None
 
 

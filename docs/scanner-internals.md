@@ -600,6 +600,31 @@ async def _guarded(idx: int, phase: ScanPhase):
 
 ---
 
+## Intelligent model selection & budget (engineering)
+
+User-facing guide: **[intelligent-model-selection.md](intelligent-model-selection.md)** (examples, approval flow, API/MCP).
+
+### Extending the tier policy (`auto_router.py`)
+
+1. **Add a phase id to a tier set** — edit `_CHEAP_IDS`, `_BALANCED_IDS`, or `_PREMIUM_IDS` in `scanners/ai_agent/auto_router.py`, then call `_register_tiers()` (runs at import).
+2. **Substring rules** — extend `_PREMIUM_SUBSTRINGS` or the recon heuristics in `tier_for_phase()` for ids not in the explicit sets.
+3. **Per-call override** — pass `hint` into `ModelSelector.select(phase_id, hint=...)`:
+   - `{"retry": True}` or `{"tier": "premium"}` → PREMIUM (used on failed-phase retry)
+   - `{"large_context": True}` or `{"synthesis": True}` → PREMIUM
+
+`run_phases_parallel` and the sequential loop call `select()` before each phase; results land in `SCANS[id]["model_choices"]` and `phase_log[].model`.
+
+### BudgetGuard wiring (`budget.py` + `llm_config.py`)
+
+- **`AUTO_MODE_DEFAULT_BUDGET_USD`** — env-tunable default ($30) for Auto-mode scans when the caller is not SSO or did not pass a positive cap.
+- **`effective_budget_cap_usd(model_policy, requested_cap, caller_is_sso=...)`** — applied at scan create in `web/app.py`; non-SSO Auto launches always get the default; manual policy passes `requested_cap` through unchanged.
+- **`caller_auth_kind()` / `require_sso_user`** (`scanners/auth/rbac.py`) — distinguish SSO cookie vs Basic Auth; budget approve/stop require SSO.
+- **`estimate_scan_cost()`** — heuristic at launch; exposed as `POST /api/scans/estimate` (includes `default_cap_usd`).
+- **`BudgetGuard.on_cost(delta_usd)`** — registered on `LLMRouter` via `on_cost` callback; `LLMRouter._track` invokes it after each completion with the incremental USD for that call.
+- **Cap exceeded** — guard sets `budget_status` to `awaiting_approval`, sets `pause_flag`, and calls `on_exceeded` (appends progress). Approve path in `web/app.py` clears pause, updates `_cap`, and sets `budget_status` to `approved`.
+
+Manual `model_policy` skips `ModelSelector` and uses the operator-selected model for all phases.
+
 ## LLM Router Retry Contract (`LLMRouter.complete`)
 
 Originally the router only retried `RateLimitError`. Any other transient signature — `ConnectError`, 502/503/504, `ReadTimeout`, throttling — was terminal on first occurrence. In practice this shows up as 1–6 silently-failed phases per scan whenever Bedrock has a ~30 s blip.

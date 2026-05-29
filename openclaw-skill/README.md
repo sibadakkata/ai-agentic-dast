@@ -39,6 +39,8 @@ $env:SCANNER_PASS = "your-secret"         # must match server DAST_AUTH_PASS
 
 When the scanner runs with RBAC, all `/api/*` calls need Basic Auth — set `SCANNER_USER` / `SCANNER_PASS` to the same values as `DAST_AUTH_USER` / `DAST_AUTH_PASS` on the server. Browser SSO does not apply to this CLI; see [SSO & RBAC](../docs/SSO_RBAC.md).
 
+For scan IDs, polling, budget pause/resume after Web UI approval, see [automation-mcp-openclaw-api.md](../docs/automation-mcp-openclaw-api.md).
+
 ---
 
 ## All Commands & Examples
@@ -228,7 +230,10 @@ Report: http://localhost:80/api/reports/scan_bedrock_us_anthropic_claude_haiku_4
 ### 11. Start a New Scan
 
 ```powershell
-# Website scan (default)
+# Auto mode (server $30 default cap; customize budget in Web UI only)
+python openclaw-skill/test_skill.py scan --url https://staging.example.com --mode both --model-policy auto
+
+# Website scan (default manual / Haiku)
 python openclaw-skill/test_skill.py scan --url https://testphp.vulnweb.com
 
 # API scan

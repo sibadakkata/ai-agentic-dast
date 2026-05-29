@@ -162,9 +162,14 @@ DIRECT_PREFIXES = ("bedrock/", "vertex_ai/", "sagemaker/", "ollama/")
 
 
 class LLMRouter:
-    def __init__(self, models: list[str] | None = None):
+    def __init__(
+        self,
+        models: list[str] | None = None,
+        on_cost: callable | None = None,
+    ):
         self.models = models or MODELS
         self.usage: dict[str, ModelUsage] = {m: ModelUsage(model=m) for m in self.models}
+        self._on_cost = on_cost
 
         base_url = os.environ.get("LITELLM_BASE_URL")
         api_key = os.environ.get("LITELLM_API_KEY")
@@ -315,12 +320,19 @@ class LLMRouter:
             mu.cache_read_tokens += getattr(ptd, "cached_tokens", 0) or 0
         mu.cache_creation_tokens += getattr(u, "cache_creation_input_tokens", 0) or 0
 
+        delta = 0.0
         try:
             cost = litellm.completion_cost(completion_response=response)
             if cost is not None:
-                mu.total_cost_usd += cost
+                delta = float(cost)
+                mu.total_cost_usd += delta
         except Exception:
             pass
+        if delta > 0 and self._on_cost:
+            try:
+                self._on_cost(delta)
+            except Exception:
+                logger.debug("on_cost callback failed", exc_info=True)
 
     def get_cost_summary(self) -> list[dict]:
         return [

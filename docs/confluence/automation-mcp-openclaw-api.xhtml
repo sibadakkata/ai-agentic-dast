@@ -1,0 +1,62 @@
+<!--
+TO PASTE THIS PAGE INTO CONFLUENCE:
+1. Open the parent page: https://confluence.corp.nortonlifelock.com/spaces/CIP/pages/954017481/Red+Team+AI+Web+Scanner
+2. Click "+" (Create) -> "Page" -> child page.
+3. Title: Red Team AI Web Scanner — Automation: MCP, OpenClaw, REST API
+4. Switch to source / storage editor and paste everything BELOW this comment.
+5. Save. The page will appear nested under the main scanner page.
+-->
+
+<h2>When to use this page</h2>
+<p>If you drive the scanner from MCP, OpenClaw, or the REST API and need scan IDs, polling, and what happens after a Web UI user approves a paused scan.</p>
+
+<h2>Scan IDs — what they are and how to get one</h2>
+<p>Every launch returns one stable id for the whole job: <code>scan_YYYYMMDD_HHMMSS_abcdef</code> (six random hex chars). You get it from <code>POST /api/v1/scans</code> or <code>POST /api/scan</code> (<code>scan_id</code> in JSON), MCP <code>start_scan</code> / <code>launch_scan</code>, OpenClaw <code>test_skill.py scan</code> (printed as <code>Scan ID</code>), or the Web UI scan list (grey id on each row). Use that same id for all polling and results — approval does not mint a new scan.</p>
+
+<h2>After UI approval — your scan resumes automatically</h2>
+<ac:structured-macro ac:name="info" ac:schema-version="1"><ac:rich-text-body><p>When a Web UI user (SSO) approves a paused scan, the scan resumes on the <strong>same</strong> <code>scan_id</code> server-side. Automation does not need to call approve or resume — keep polling the existing <code>scan_id</code> for progress and findings.</p></ac:rich-text-body></ac:structured-macro>
+<ul>
+<li><strong>Approve</strong> raises <code>budget_cap_usd</code>, sets <code>budget_status</code> to <code>approved</code>, clears the pause flag, and sets scan <code>status</code> back to <code>running</code>.</li>
+<li><strong>How to tell it resumed:</strong> <code>GET /api/scans/{scan_id}/budget</code> — budget <code>status</code> leaves <code>awaiting_approval</code>; <code>GET /api/scan/{scan_id}</code> — <code>status</code> is <code>running</code> and <code>progress</code> grows again.</li>
+</ul>
+
+<h2>Triggering a new scan from automation</h2>
+<p>Auto-mode launches from API/MCP/OpenClaw always use the server default cap (<strong>$30 USD</strong> unless ops changes <code>AUTO_MODE_DEFAULT_BUDGET_USD</code>). Manual mode is unchanged. Custom caps require launching from the Web UI (SSO).</p>
+<p><strong>MCP (Cursor chat):</strong></p>
+<ac:structured-macro ac:name="code" ac:schema-version="1"><ac:parameter ac:name="language">text</ac:parameter><ac:plain-text-body><![CDATA[Use start_scan with target_url="https://staging.example.com",
+scan_mode="both", model_policy="auto"]]></ac:plain-text-body></ac:structured-macro>
+<p><strong>OpenClaw CLI:</strong></p>
+<ac:structured-macro ac:name="code" ac:schema-version="1"><ac:parameter ac:name="language">powershell</ac:parameter><ac:plain-text-body><![CDATA[python openclaw-skill/test_skill.py scan `
+  --url https://staging.example.com --model-policy auto]]></ac:plain-text-body></ac:structured-macro>
+<p><strong>REST:</strong></p>
+<ac:structured-macro ac:name="code" ac:schema-version="1"><ac:parameter ac:name="language">bash</ac:parameter><ac:plain-text-body><![CDATA[curl -s -u "$USER:$PASS" -H "Content-Type: application/json" \
+  -X POST "$SCANNER_URL/api/v1/scans" \
+  -d '{"target_url":"https://staging.example.com","model_policy":"auto"}']]></ac:plain-text-body></ac:structured-macro>
+
+<h2>Quick reference</h2>
+<table>
+<tbody>
+<tr><th>Action</th><th>REST</th><th>MCP</th><th>OpenClaw</th></tr>
+<tr><td>Start scan</td><td><code>POST /api/v1/scans</code></td><td><code>start_scan</code></td><td><code>test_skill.py scan --url …</code></td></tr>
+<tr><td>Get status</td><td><code>GET /api/scan/{id}</code></td><td><code>get_scan_status</code></td><td><code>test_skill.py status {id}</code></td></tr>
+<tr><td>Get budget state</td><td><code>GET /api/scans/{id}/budget</code></td><td><code>get_scan_budget</code></td><td>n/a</td></tr>
+<tr><td>Full results</td><td><code>GET /api/results/{id}</code></td><td><code>get_scan_results</code></td><td><code>test_skill.py results {id}</code></td></tr>
+<tr><td>Approve / change budget</td><td>Web UI only (SSO)</td><td>Web UI only</td><td>Web UI only</td></tr>
+<tr><td>Stop at budget gate</td><td>Web UI only (SSO)</td><td>Web UI only</td><td>Web UI only</td></tr>
+</tbody>
+</table>
+
+<h2>What is not possible from automation</h2>
+<ul>
+<li>Setting or changing a budget cap (Web UI / SSO launch only; automation Auto scans use the $30 default).</li>
+<li>Approving a paused scan (<code>POST .../budget/approve</code> returns 403 for Basic Auth).</li>
+<li>Stopping at the budget gate (<code>POST .../budget/stop</code> is SSO-only).</li>
+</ul>
+<p>General scan cancel via <code>POST /api/scan/{id}/stop</code> still works with Basic Auth — see the repo REST guide.</p>
+
+<h2>Where to go for more detail</h2>
+<ul>
+<li>Repo deep-dive: <code>docs/automation-mcp-openclaw-api.md</code> (Git companion on branch <code>feature/intelligent-model-selection</code>).</li>
+<li>Auto mode and budget gate: <code>docs/intelligent-model-selection.md</code>.</li>
+<li>Live Swagger: <a href="http://3.20.180.251/docs">http://3.20.180.251/docs</a>.</li>
+</ul>

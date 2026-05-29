@@ -133,24 +133,53 @@ Unless noted, tools return JSON dicts from the API, or an `{"error": "...", "mes
 | `extra_domains` | string | No | Comma-separated extra in-scope hosts |
 | `postman_file` | string | No | Filename from `upload_api_spec` |
 | `ai_instructions` | string | No | Operator guidance (see below) |
+| `model_policy` | string | No | `manual` (default) or `auto` — per-phase Haiku/Sonnet/Opus |
+
+> **Budget:** MCP cannot set `budget_cap_usd`. Auto-mode scans use the server default (**$30**). Custom caps require the Web UI (SSO).
 
 | | |
 |---|---|
 | **HTTP** | `POST /api/scan` |
 | **Returns** | `{"scan_id": "...", "status": "started"}` |
 
+**Auto mode example:**
+
 ```json
 {
-  "name": "launch_scan",
+  "name": "start_scan",
   "arguments": {
-    "target_url": "https://example.com",
+    "target_url": "https://staging.example.com",
     "scan_mode": "both",
-    "ai_instructions": "Focus on authentication and IDOR. Do not test /payments."
+    "model_policy": "auto"
   }
 }
 ```
 
-Typed launches with more fields (base64 imports, `scan_profile`) are available via [HTTP `POST /api/v1/scans`](api.md) — MCP currently wraps the legacy `/api/scan` body.
+Typed launches with more fields (base64 imports, `scan_profile`) are available via [HTTP `POST /api/v1/scans`](api.md) — MCP forwards `model_policy` only.
+
+Guide: [intelligent-model-selection.md](intelligent-model-selection.md). Full automation flow (scan IDs, polling after UI approval): [automation-mcp-openclaw-api.md](automation-mcp-openclaw-api.md).
+
+### estimate_scan_cost
+
+| | |
+|---|---|
+| **HTTP** | `POST /api/scans/estimate` |
+
+| Name | Type | Required | Description |
+|------|------|----------|-------------|
+| `scan_mode` | string | No | `website`, `api`, `both` |
+| `scan_intensity` | string | No | `light`, `standard`, `deep` |
+| `llm_scan_depth` | string | No | `standard`, `deep` |
+| `model_policy` | string | No | `manual` or `auto` |
+| `manual_model` | string | No | Model id when policy is `manual` |
+
+### get_scan_budget
+
+| | |
+|---|---|
+| **HTTP** | `GET /api/scans/{scan_id}/budget` |
+
+Returns `cap_usd`, `total_usd`, `status`, `model_choices`, `model_policy`, `approval_requires_sso`, `default_cap_usd`. Budget approval must be done in the Web UI (SSO); MCP tools for approve/stop were removed.
 
 ### get_scan_status
 

@@ -37,7 +37,7 @@ description: Builds and runs an LLM-powered agentic web security scanner using L
 │   ├── app.py                    # FastAPI backend (stop, pause, resume, retry, multi-identity, CVSS re-classify)
 │   ├── db.py                     # SQLite persistence
 │   └── static/index.html         # Single-page web UI (CVSS column, multi-identity inputs, grouping)
-├── mcp_server.py                 # MCP server — 17 tools for AI assistant integration
+├── mcp_server.py                 # MCP server — scan, budget, findings tools
 ├── imports/                      # API definition files (Postman/Burp/OpenAPI)
 ├── Dockerfile                    # Production container (Playwright + Chromium)
 ├── requirements.txt
@@ -649,12 +649,18 @@ imports/
 
 The scanner exposes all capabilities via an MCP (Model Context Protocol) server in `mcp_server.py`. This allows any MCP-compatible client (Cursor, Claude Desktop, Open Claw, custom agents) to operate the scanner.
 
-### 17 Available Tools
+### Auto mode & budget (MCP / API)
+
+When the user asks for an **auto-mode** scan, pass `model_policy='auto'` only. **Do NOT** pass `budget_cap_usd` from MCP / API / OpenClaw — it is ignored; the server applies a **$30** default (Auto mode). Direct users to the **Web UI** if they need a custom budget or to approve a paused scan. See [docs/intelligent-model-selection.md](../../docs/intelligent-model-selection.md).
+
+### MCP tools (budget + scan)
 
 | Tool | Purpose |
 |------|---------|
 | `health_check` | Verify scanner connectivity |
-| `start_scan` | Begin a new security scan |
+| `start_scan` | Begin a scan (`model_policy`; server-side budget for Auto) |
+| `estimate_scan_cost` | Pre-launch USD estimate |
+| `get_scan_budget` | Cap, spend, status, per-phase models |
 | `get_scan_status` | Poll current scan progress |
 | `wait_for_scan` | Block until scan completes |
 | `stop_scan` | Cancel a running scan |

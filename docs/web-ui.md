@@ -9,6 +9,9 @@ The scanner includes a single-page web UI for managing scans, viewing results, a
 | Feature | Description |
 |---------|-------------|
 | **New Scan** | Enter target URL, optional credentials, pick model and scan mode |
+| **Model selection mode** | **Manual model** (default) — existing model dropdown unchanged. **Auto (scanner picks best model)** — disables the dropdown and uses tiered Bedrock models per phase (Haiku → Sonnet → Opus). Yellow info banner warns that cost may be 3–10× higher than Haiku-only |
+| **Budget cap** | Optional USD cap on LLM spend for the scan; live estimate from `POST /api/scans/estimate` shown under the field. Blank cap defaults to ~2× the expected estimate at launch |
+| **Budget approval** | When spend hits the cap, the scan **pauses** (same mechanism as manual Pause). Owner (or admin) sees a yellow banner in the live scan view to raise the cap and resume, or stop the scan |
 | **AI Scan Planner** | Type natural-language instruction → LLM generates structured scan plan → review and confirm |
 | **Scan Profile** | `Vulnerability Scan` (default, full OWASP testing) or `Crawl Only` (discovery + passive checks, no attack payloads). A `CRAWL` badge appears next to crawl-only scans in the scan list and a "Profile: Crawl Only" stat in the scan detail header |
 | **Vulnerability Focus** | Select specific vuln types (XSS, SQLi, CMDI, etc.) or "Full Scan" for all. Disabled in `Crawl Only` mode |
@@ -35,6 +38,28 @@ The scanner includes a single-page web UI for managing scans, viewing results, a
 | **Error Details** | View error messages, scan mode, and progress log for failed scans |
 | **Platform access** | **SSO** (Entra SAML) for operators; HTTP Basic Auth for automation/API only |
 | **Cost Tracking** | Real-time and cumulative LLM cost display per scan and across all scans |
+
+### Model selection and budget (screenshot placeholder)
+
+> _Screenshot: New Scan form showing Selection mode radio, budget cap field, and cost estimate helper text._
+
+When **Auto** is selected, expand **Models used by phase** in the live scan header after phases start to see which model ran for each phase id.
+
+### When you'll see the approval banner
+
+<!-- SCREENSHOT: Budget approval banner with cap, spend, and three actions -->
+
+The **Budget cap (USD)** field on the launch form is the **only** way to set or change a cap (SSO session). Leave blank for the server default (**$30** for Auto mode). API, MCP, and OpenClaw automation always use that default for Auto mode.
+
+During a live scan, if LLM spend reaches `budget_cap_usd`, the scan **pauses** and a yellow **budget approval** banner appears above the progress log (only for the scan owner or an admin, SSO session):
+
+| Control | Action |
+|---------|--------|
+| **Increase budget and resume** | Enter a new cap (defaults to ~2× current spend) and approve — calls `POST /api/scans/{id}/budget/approve` |
+| **Stop scan** | Ends the scan at the gate — `POST /api/scans/{id}/budget/stop` |
+| **Models used by phase** | Expandable breakdown of phase id → model (auto mode audit) |
+
+Others see a note that only the scan owner can approve. Full flow: [intelligent-model-selection.md](intelligent-model-selection.md#the-approval-gate).
 
 ## Scan Configuration
 

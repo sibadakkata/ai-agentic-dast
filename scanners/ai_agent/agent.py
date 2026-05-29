@@ -1168,6 +1168,18 @@ async def _run_smart_retry_pass(
     return retry_new, retry_tool_calls
 
 
+def _resolve_phase_model(
+    phase: ScanPhase,
+    default_model: str,
+    model_selector=None,
+    *,
+    hint: dict | None = None,
+) -> str:
+    if model_selector is None:
+        return default_model
+    return model_selector.select(phase.id, hint=hint or {})
+
+
 async def _run_phase_worker(
     *,
     phase: ScanPhase,
@@ -1189,6 +1201,7 @@ async def _run_phase_worker(
     auth_headers: dict | None = None,
     crawled_urls: list[str] | None = None,
     shared_tested: set[str] | None = None,
+    model_selector=None,
 ) -> tuple[list[dict], dict]:
     """Run a single scan phase in an isolated browser context.
 
@@ -1397,6 +1410,9 @@ async def _run_phase_worker(
         )
         if should_retry:
             phase._retried_in_worker = True
+            retry_model = _resolve_phase_model(
+                phase, model, model_selector, hint={"retry": True},
+            )
             print(
                 f"  [W{worker_id}:{phase.id}] [RETRY] {phase.name}: "
                 f"{retry_reason}, retrying with tool calls...",
@@ -1411,7 +1427,7 @@ async def _run_phase_worker(
                     phase_findings_before=0,
                     tools=tools,
                     router=router,
-                    model=model,
+                    model=retry_model,
                     cancel_flag=cancel_flag,
                     on_progress=_cb,
                     metrics=None,  # worker doesn't accumulate global metrics
@@ -1467,6 +1483,7 @@ async def _run_phase_worker(
         phase_metrics = {
             "phase": phase.id, "name": phase.name,
             "tool_calls": phase_tool_calls, "findings_count": len(findings),
+            "model": model,
         }
         return findings, phase_metrics
 
@@ -1518,6 +1535,8 @@ async def run_phases_parallel(
     max_workers: int = MAX_PARALLEL_WORKERS,
     auth_headers: dict | None = None,
     crawled_urls: list[str] | None = None,
+    model_selector=None,
+    model_choices: dict | None = None,
 ) -> tuple[list[dict], list[dict]]:
     """Run multiple scan phases concurrently with a semaphore cap.
 
@@ -1545,11 +1564,14 @@ async def run_phases_parallel(
         # tests/test_parallel_phase_resilience.py for the regression
         # fixtures.
         async with sem:
+            phase_model = _resolve_phase_model(phase, model, model_selector)
+            if model_choices is not None:
+                model_choices[phase.id] = phase_model
             try:
                 f, m = await _run_phase_worker(
                     phase=phase,
                     system_prompt=system_prompt,
-                    model=model,
+                    model=phase_model,
                     router=router,
                     browser=browser,
                     auth_cookies=auth_cookies,
@@ -1565,6 +1587,7 @@ async def run_phases_parallel(
                     on_progress=on_progress,
                     auth_headers=auth_headers,
                     shared_tested=shared_tested,
+                    model_selector=model_selector,
                 )
             except ScanCancelled:
                 # Cooperative cancellation: propagate so the orchestrator
@@ -1584,6 +1607,7 @@ async def run_phases_parallel(
                     "findings_count": 0,
                     "error": err_repr[:500],
                     "worker": idx,
+                    "model": phase_model,
                 }
                 if on_progress:
                     try:
@@ -2406,9 +2430,12 @@ async def run_scan(
     start_from_phase: int = 0,
     initial_findings: list[dict] | None = None,
     interactive_session: dict | None = None,
+    model_selector=None,
+    model_choices: dict | None = None,
 ) -> tuple[list[dict], dict]:
     config_dir = config_dir or os.getcwd()
     _cb = on_progress or (lambda *a, **k: None)
+    _base_model = model
     findings: list[dict] = list(initial_findings) if initial_findings else []
     metrics = {
         "pages_crawled": 0,
@@ -3610,6 +3637,9 @@ async def run_scan(
         _cb("scan_start", {"total_phases": total_phases})
         for phase_idx, phase in enumerate(run_sequentially):
             _check_cancel()
+            model = _resolve_phase_model(phase, _base_model, model_selector)
+            if model_choices is not None:
+                model_choices[phase.id] = model
             phase_num = _next_phase()
             if start_from_phase > 0 and phase_idx < start_from_phase:
                 print(f"  [{phase_num}/{total_phases}] Phase: {phase.name} — skipped (already completed)")
@@ -4839,6 +4869,7 @@ async def run_scan(
                 "tool_calls": phase_tool_calls,
                 "findings_count": phase_new_findings,
                 "evidence_buffer": phase_evidence[:60],
+                "model": model,
             })
             print(f" {phase_tool_calls} tool calls, {phase_new_findings} findings")
             _cb("phase_end", {"phase": phase_num, "name": phase.name, "tool_calls": phase_tool_calls, "findings": phase_new_findings})
@@ -5083,7 +5114,7 @@ async def run_scan(
             par_findings, par_logs = await run_phases_parallel(
                 phases=run_in_parallel,
                 system_prompt=system_prompt,
-                model=model,
+                model=_base_model,
                 router=router,
                 browser=browser,
                 auth_cookies=auth_cookies,
@@ -5098,6 +5129,8 @@ async def run_scan(
                 on_progress=_cb,
                 max_workers=MAX_PARALLEL_WORKERS,
                 auth_headers=_par_auth_headers,
+                model_selector=model_selector,
+                model_choices=model_choices,
             )
             findings.extend(par_findings)
             for log in par_logs:
@@ -5124,7 +5157,7 @@ async def run_scan(
                 chain_findings, chain_logs = await run_phases_parallel(
                     phases=chain_phases,
                     system_prompt=system_prompt,
-                    model=model,
+                    model=_base_model,
                     router=router,
                     browser=browser,
                     auth_cookies=auth_cookies,
@@ -5139,6 +5172,8 @@ async def run_scan(
                     on_progress=_cb,
                     max_workers=MAX_PARALLEL_WORKERS,
                     auth_headers=_par_auth_headers,
+                    model_selector=model_selector,
+                    model_choices=model_choices,
                 )
                 findings.extend(chain_findings)
                 for log in chain_logs:

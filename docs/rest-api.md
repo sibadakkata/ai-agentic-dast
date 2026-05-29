@@ -2,7 +2,7 @@
 
 [← Back to README](../README.md)
 
-> **Quick start:** For launch, polling, results, and troubleshooting, see **[api.md](api.md)** first. This page keeps extended endpoint coverage (pause, retry, reports, crawl-only).
+> **Quick start:** For launch, polling, results, budget/estimate endpoints, and troubleshooting, see **[api.md](api.md)** (canonical). This page keeps extended endpoint coverage (pause, retry, reports, crawl-only). Auto mode & budget gate: [intelligent-model-selection.md](intelligent-model-selection.md).
 
 The scanner exposes a full REST API — the same one the Web UI uses. Any CI/CD pipeline, script, or external tool can invoke scans programmatically.
 
@@ -60,8 +60,25 @@ curl -s -u "$DAST_USER:$DAST_PASS" \
 | `exclude_urls` | No | `[]` | URLs/paths the scanner must skip entirely |
 | `extra_domains` | No | `[]` | Additional domains to include in scope |
 | `api_imports` | No | `{}` | Map of import type to filename |
+| `model_policy` | No | `manual` | `manual` or `auto` (per-phase Bedrock selection) |
+| `budget_cap_usd` | No | $30 default (Auto) | **SSO Web UI only** for Auto mode; ignored for Basic Auth automation. See [intelligent-model-selection.md](intelligent-model-selection.md). |
 
 **Response**: `{"scan_id": "scan_20260304_143022_a1b2c3", "status": "started"}`
+
+### Cost estimate and budget gate
+
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| POST | `/api/scans/estimate` | Basic / session | Rough `low_usd` / `expected_usd` / `high_usd` for launch form |
+| GET | `/api/scans/{id}/budget` | Read access | Cap, spend, status, `model_choices` |
+| POST | `/api/scans/{id}/budget/approve` | Owner or admin | Body `{ "new_cap_usd": float }` — resume scan |
+| POST | `/api/scans/{id}/budget/stop` | Owner or admin | Stop scan on budget gate |
+
+```bash
+curl -s -u "$DAST_USER:$DAST_PASS" -H "Content-Type: application/json" \
+  -X POST "$DAST_URL/api/scans/estimate" \
+  -d '{"target_url":"https://example.com","model_policy":"auto"}' | jq .
+```
 
 ### 3. Upload API Spec (Postman / OpenAPI)
 

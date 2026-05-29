@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from functools import wraps
-from typing import Callable, Optional
+from typing import Callable, Literal, Optional
 
 from fastapi import Depends, HTTPException, Request
 
@@ -94,3 +94,31 @@ def require_role(*roles: str):
 
 
 require_admin = require_role(UserRole.ADMIN.value)
+
+_SSO_REQUIRED_MSG = (
+    "This action requires an interactive Web UI session. "
+    "Automation (API/MCP/OpenClaw via Basic Auth) cannot modify budgets."
+)
+
+
+def caller_auth_kind(request: Request) -> Literal["sso", "basic", "none"]:
+    """Return how this request was authenticated: SSO cookie, Basic Auth, or none."""
+    cookie = request.cookies.get(SESSION_COOKIE)
+    if cookie:
+        su = resolve_session_user(cookie, get_user_repo())
+        if su:
+            return "sso"
+    if _basic_auth_user(request):
+        return "basic"
+    return "none"
+
+
+async def require_sso_user(request: Request) -> SessionUser:
+    """Require an interactive Web UI session (SSO cookie), not automation Basic Auth."""
+    if caller_auth_kind(request) != "sso":
+        raise HTTPException(status_code=403, detail=_SSO_REQUIRED_MSG)
+    cookie = request.cookies.get(SESSION_COOKIE)
+    su = resolve_session_user(cookie, get_user_repo()) if cookie else None
+    if not su:
+        raise HTTPException(status_code=403, detail=_SSO_REQUIRED_MSG)
+    return su
