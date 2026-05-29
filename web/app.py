@@ -1083,26 +1083,24 @@ async def _get_dashboard_inner(request: Request):
             errored_cost += scan_cost
         elif st in ("running", "paused", "pausing"):
             running_cost += scan_cost
-        findings = _ensure_triaged(sid, s)
-
-        if not findings:
-            total_findings += s.get("findings_count", 0) or 0
-        else:
-            for f in findings:
-                total_findings += 1
-                raw_sev_val = f.get("severity") or f.get("final_severity") or "Info"
-                raw_sev = (raw_sev_val if isinstance(raw_sev_val, str) else str(raw_sev_val)).strip()
-                sev = _normalize_severity(raw_sev)
-                if sev and sev not in ("Not Exploitable", "TBD", ""):
-                    severity_breakdown[sev] = severity_breakdown.get(sev, 0) + 1
-                raw_verdict = f.get("verdict", "NEEDS_VERIFICATION")
-                verdict = _normalize_verdict(raw_verdict)
-                verdict_breakdown[verdict] = verdict_breakdown.get(verdict, 0) + 1
+        total_findings += s.get("findings_count", 0) or 0
+        # Use only in-memory triage cache — never load/triage full result files here
+        # (265 scans × disk read × triage_classify made /api/dashboard very slow on cold start).
+        findings = s.get("triaged_findings") or []
+        for f in findings:
+            raw_sev_val = f.get("severity") or f.get("final_severity") or "Info"
+            raw_sev = (raw_sev_val if isinstance(raw_sev_val, str) else str(raw_sev_val)).strip()
+            sev = _normalize_severity(raw_sev)
+            if sev and sev not in ("Not Exploitable", "TBD", ""):
+                severity_breakdown[sev] = severity_breakdown.get(sev, 0) + 1
+            raw_verdict = f.get("verdict", "NEEDS_VERIFICATION")
+            verdict = _normalize_verdict(raw_verdict)
+            verdict_breakdown[verdict] = verdict_breakdown.get(verdict, 0) + 1
 
     recent = []
     sorted_scans = sorted(visible.items(), key=lambda x: x[1].get("started", ""), reverse=True)[:10]
     for sid, s in sorted_scans:
-        findings_list = _ensure_triaged(sid, s)
+        findings_list = s.get("triaged_findings") or []
         recent.append({
             "id": sid,
             "target": s.get("target_url", ""),
