@@ -564,7 +564,7 @@ Worker hooks: wrap `LLMRouter.complete` in `scanners/ai_agent/llm_config.py` wit
 | Bedrock / AWS | Task IAM role (no keys in env) |
 | Target passwords | Secrets Manager `dast/target/{target_id}` JSON |
 | SAML certs | Secrets Manager or SSM |
-| `DAST_AUTH_PASS` (legacy basic) | Deprecate in prod; SSO only |
+| `DAST_AUTH_PASS` (automation Basic Auth) | API/scripts/MCP only in prod; human operators use SSO only |
 
 Worker receives `TARGET_SECRET_ARN` in task env, fetches at startup, never logs values.
 

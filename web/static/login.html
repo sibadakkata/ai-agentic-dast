@@ -171,7 +171,9 @@ body {
 
   <div class="card">
     <h2>Sign In</h2>
-    <p>Enter your credentials to access the scanner.</p>
+    <p id="signin-lead">Interim local sign-in while SSO and HTTPS rollout completes. Production access is via Microsoft Entra ID (SAML 2.0).</p>
+
+    <div id="access-banner" style="display:none;margin-bottom:16px;padding:12px 14px;border-radius:8px;font-size:12px;line-height:1.5;"></div>
 
     <div class="error-msg" id="error-msg">Invalid username or password. Please try again.</div>
 
@@ -182,6 +184,9 @@ body {
       <p style="font-size:12px;color:var(--text2);text-align:center;margin-top:14px;">Use your Gen Digital corporate account</p>
     </div>
     <form id="local-login-form" method="POST" action="/login" autocomplete="on">
+      <p id="local-form-note" style="font-size:12px;color:var(--text2);margin-bottom:14px;line-height:1.5;">
+        Local admin (interim / emergency access). Not for general Red Team operators — use <strong>Sign in with Microsoft</strong> when SSO is enabled.
+      </p>
       <div class="form-group">
         <label for="username">Username</label>
         <input type="text" id="username" name="username" autocomplete="username" required autofocus placeholder="Enter username">
@@ -222,15 +227,34 @@ body {
 if (window.location.search.includes('error=1')) {
   document.getElementById('error-msg').classList.add('show');
 }
-fetch('/api/auth/config').then(function(r) { return r.json(); }).then(function(cfg) {
-  if (cfg && cfg.sso_enabled) {
-    document.getElementById('sso-section').style.display = 'block';
-    var form = document.getElementById('local-login-form');
-    if (form) form.style.display = 'none';
-    var cardP = document.querySelector('.card p');
-    if (cardP) cardP.textContent = 'Sign in with your corporate Microsoft account.';
+(function() {
+  var banner = document.getElementById('access-banner');
+  var lead = document.getElementById('signin-lead');
+  function showBanner(bg, border, color, html) {
+    if (!banner) return;
+    banner.style.display = 'block';
+    banner.style.background = bg;
+    banner.style.border = '1px solid ' + border;
+    banner.style.color = color;
+    banner.innerHTML = html;
   }
-}).catch(function() {});
+  fetch('/api/auth/config').then(function(r) { return r.json(); }).then(function(cfg) {
+    if (cfg && cfg.sso_enabled) {
+      document.getElementById('sso-section').style.display = 'block';
+      var form = document.getElementById('local-login-form');
+      if (form) form.style.display = 'none';
+      if (lead) lead.textContent = 'Sign in with your corporate Microsoft account (SAML 2.0).';
+      showBanner('#eff6ff', '#bfdbfe', '#1e3a8a',
+        '<strong>Platform access:</strong> Microsoft Entra ID SSO. Do not use shared Basic Auth credentials for the Web UI.');
+    } else {
+      showBanner('#fffbeb', '#fde68a', '#92400e',
+        '<strong>Interim sign-in</strong> — SSO rollout in progress. The username/password below is for local/emergency access only, not the long-term operator path.');
+    }
+  }).catch(function() {
+    showBanner('#fffbeb', '#fde68a', '#92400e',
+      '<strong>Interim sign-in</strong> — use SSO when available. Local form is emergency/interim access only.');
+  });
+})();
 </script>
 </body>
 </html>

@@ -1,6 +1,6 @@
 # MCP and OpenClaw integration
 
-The repo ships **`mcp_server.py`**, a thin [Model Context Protocol](https://modelcontextprotocol.io/) server that exposes scanner operations as tools. Each tool calls the same HTTP API as `web/app.py` (`POST /api/scan`, `GET /api/scan/{id}`, etc.) using `httpx` and Basic Auth.
+The repo ships **`mcp_server.py`**, a thin [Model Context Protocol](https://modelcontextprotocol.io/) server that exposes scanner operations as tools. Each tool calls the same HTTP API as `web/app.py` (`POST /api/scan`, `GET /api/scan/{id}`, etc.) using `httpx` and **HTTP Basic Auth** (`SCANNER_USER` / `SCANNER_PASS` — automation only; human operators use **SSO**, not Basic Auth, for the Web UI).
 
 Use MCP when an AI assistant (Cursor, Claude Desktop) should start scans, poll status, or summarize findings from chat. Use the [HTTP API guide](api.md) directly for CI/CD scripts.
 

@@ -1,12 +1,14 @@
 # SSO and RBAC
 
+> **This is the canonical user-access path for the platform.** Red Team operators sign in via **Microsoft Entra ID (SAML 2.0)**. HTTP Basic Auth (`DAST_AUTH_USER` / `DAST_AUTH_PASS`) is for **API, CI, and automation scripts only** — not for distributing credentials to end users.
+
 The AI DAST scanner supports **SAML 2.0** sign-in via **Microsoft Entra ID** (Azure AD) and **role-based access control** with two roles: `admin` (Red Team Admin) and `user` (Member).
 
 ## Environment variables
 
 | Variable | Required | Description |
 |----------|----------|-------------|
-| `SSO_ENABLED` | No | `true` to enable SAML; `false` (default) uses local username/password (`DAST_AUTH_USER` / `DAST_AUTH_PASS`). |
+| `SSO_ENABLED` | No | `true` = SAML (production). `false` (default) shows interim local form on `/login` for dev/rollout — not the long-term operator path. |
 | `INITIAL_ADMIN_EMAILS` | No | Comma-separated emails that become `admin` on first successful SAML login. **Leave empty in production config files committed to git.** |
 | `SAML_IDP_METADATA_URL` | When SSO on | Entra ID federation metadata URL. |
 | `SAML_SP_ENTITY_ID` | When SSO on | Application (client) ID URI — Entra **Identifier (Entity ID)**. |
@@ -18,7 +20,7 @@ The AI DAST scanner supports **SAML 2.0** sign-in via **Microsoft Entra ID** (Az
 | `SAML_IDP_CERT` | Alt to metadata | IdP signing certificate (PEM string). |
 | `PUBLIC_BASE_URL` | No | Base URL for invite links (defaults to request host). |
 | `DAST_SESSION_SECRET` | Recommended | HMAC secret for session cookies (set in production). |
-| `DAST_AUTH_USER` / `DAST_AUTH_PASS` | Local dev | Used when `SSO_ENABLED=false` and for Basic Auth API access. |
+| `DAST_AUTH_USER` / `DAST_AUTH_PASS` | Automation / API | HTTP Basic Auth for scripts, MCP, deploy checks — **not** end-user SSO login. Still required for `/api/*` from curl/CI when SSO is on. |
 | `SSO_ADMIN_GROUP_IDS` | Optional | Comma-separated Entra **group object IDs** (GUIDs) that grant app role `admin`. |
 | `SSO_USER_GROUP_IDS` | Optional | Comma-separated Entra group object IDs (GUIDs) that grant app role `user`. |
 | `SSO_GROUP_CLAIM_NAME` | Optional | SAML attribute name for group membership (default: Microsoft `groups` claim URI; also tries short name `groups`). |
@@ -95,7 +97,7 @@ Invites expire after **7 days** by default. Admins can revoke pending invites.
 - **Reply URL mismatch**: Entra Reply URL must exactly equal `SAML_SP_ACS_URL` (scheme, host, path).
 - **Not authorized after login**: Email not in `INITIAL_ADMIN_EMAILS`, no pending invite, no existing user, and (if group env is set) not in a configured Entra group — ask an admin to invite you or add you to the correct security group.
 - **Not in required group**: Group mapping is enabled but the SAML assertion contained no matching group object ID.
-- **Local development**: Set `SSO_ENABLED=false` and use `DAST_AUTH_USER` / `DAST_AUTH_PASS` on the login form.
+- **Local development**: Set `SSO_ENABLED=false` for interim local form access; prefer enabling SSO when testing the real operator flow. Use `DAST_AUTH_*` for API/script calls either way.
 
 ## Library choice
 

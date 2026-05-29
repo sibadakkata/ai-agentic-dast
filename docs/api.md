@@ -7,11 +7,13 @@ Local dev: `http://localhost:8080` (or `http://localhost:80` when `SCANNER_PORT`
 
 ## Authentication
 
-All `/api/*` routes require **HTTP Basic Auth** with the server's `DAST_AUTH_USER` and `DAST_AUTH_PASS` (local dev) or your platform credentials when SSO is enabled. There is no separate API-key scheme in OpenAPI today.
+> **Audience:** This guide is for **API clients, CI pipelines, MCP, and operator automation** — not for human operators opening the Web UI. End users access the platform via **SSO (Microsoft Entra ID, SAML 2.0)**. See [SSO & RBAC](SSO_RBAC.md).
 
-Production traffic sits behind **ALB + WAFv2**; you still send Basic Auth to the application. Unauthenticated calls return **401**. Browser SAML sessions do not apply to `curl` or CI scripts — see [SSO & RBAC](SSO_RBAC.md).
+All `/api/*` routes accept **HTTP Basic Auth** using the server's `DAST_AUTH_USER` and `DAST_AUTH_PASS`. There is no separate API-key scheme in OpenAPI today. Production traffic sits behind **ALB + WAFv2**; unauthenticated API calls return **401**.
 
-Set credentials for examples:
+**Browser SSO sessions** do not apply to `curl` or most CI scripts — use Basic Auth for those. Advanced integrations may reuse the `dast_session` cookie from a browser after SSO login; that path is not documented in OpenAPI.
+
+Set **automation** credentials for the examples below (not end-user SSO passwords):
 
 ```bash
 export SCANNER_URL="https://rt.ai.webscanner.gendigital.com"
@@ -252,7 +254,7 @@ Terminal statuses: `completed`, `cancelled`, `error`. While running you may also
 
 | Code | Meaning | What to do |
 |------|---------|------------|
-| **401** | Missing or wrong Basic Auth | Set `SCANNER_USER` / `SCANNER_PASS` to match server `DAST_AUTH_*` |
+| **401** | Missing or wrong automation Basic Auth | Set `SCANNER_USER` / `SCANNER_PASS` to match server `DAST_AUTH_*` (API/scripts — not SSO) |
 | **400** | Invalid JSON or launch validation | Check body against `/docs` schema; ensure `target_url` is present |
 | **404** | Unknown `scan_id` | Confirm id from launch response; list scans with `GET /api/scans` |
 | **500** | Server error loading results | Retry; check scan `error` field on `GET /api/scan/{id}` |

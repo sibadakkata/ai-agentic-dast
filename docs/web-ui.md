@@ -33,7 +33,7 @@ The scanner includes a single-page web UI for managing scans, viewing results, a
 | **Retry Failed** | One-click re-run for errored/cancelled scans (same ID) |
 | **Scan Mode Badge** | Each scan shows its mode (`api`, `website`, `both`) |
 | **Error Details** | View error messages, scan mode, and progress log for failed scans |
-| **Basic Auth** | Password-protected (configurable via env vars) |
+| **Platform access** | **SSO** (Entra SAML) for operators; HTTP Basic Auth for automation/API only |
 | **Cost Tracking** | Real-time and cumulative LLM cost display per scan and across all scans |
 
 ## Scan Configuration
@@ -89,11 +89,6 @@ Available in both Manual and AI modes:
 
 ## Authentication
 
-The Web UI is protected with HTTP Basic Auth:
+**Red Team operators** sign in via **Microsoft Entra ID (SAML 2.0)** — **Sign in with Microsoft** on `/login`. See [SSO & RBAC](SSO_RBAC.md).
 
-```bash
-DAST_AUTH_USER=dast-admin
-DAST_AUTH_PASS=YourStrongPassword
-```
-
-Set these in your `.env` file before deploying.
+**HTTP Basic Auth** (`DAST_AUTH_USER` / `DAST_AUTH_PASS` in `.env`) is for **API clients, CI, MCP, and deploy scripts** — not for distributing credentials to end users. While `SSO_ENABLED=false` during rollout, an interim username/password form may appear; that is temporary until SSO is live.

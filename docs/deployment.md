@@ -65,10 +65,10 @@ bash deploy.sh
 From your laptop (same network as allowed to reach the instance):
 
 ```bash
-# Read-only HTTP checks
+# Operator/automation curls — HTTP Basic Auth (not end-user SSO login)
 export DAST_BASE_URL=http://YOUR_HOST
 export DAST_AUTH_USER=dast-admin
-export DAST_AUTH_PASS=YourStrongPassword   # if ui-settings is protected
+export DAST_AUTH_PASS=YourStrongPassword
 python scripts/run_regression_ec2.py --pytest
 
 # Start a short scan against a public test app (OWASP Juice Shop demo by default)
@@ -92,17 +92,21 @@ The script is normally already on the host at `scripts/check_scan_active.py` and
 - Exit **0** → safe to proceed.
 - Exit **1** → **STOP** — a scan is active or paused; wait or stop the scan first.
 
-The script calls `GET /api/scans` with **HTTP Basic Auth** when **both** `DAST_AUTH_USER` and `DAST_AUTH_PASS` are set in the container environment. If you run it from the host shell without those vars exported, it falls back to unauthenticated requests and prints a **WARNING** (only acceptable on pre-RBAC images). Inside the container they are usually already set from `.env`.
+The script calls `GET /api/scans` with **operator automation** HTTP Basic Auth when **both** `DAST_AUTH_USER` and `DAST_AUTH_PASS` are set in the container environment (this is **not** the Red Team operator sign-in path — end users use SSO). If you run it from the host shell without those vars exported, it falls back to unauthenticated requests and prints a **WARNING** (only acceptable on pre-RBAC images). Inside the container they are usually already set from `.env`.
 
 **Why:** Scan state (LLM conversation, browser session, findings buffer) lives in process memory. A restart kills in-flight work; pause-deploy-resume does **not** work.
 
 ### Authentication
 
-Production uses **SAML 2.0** (Microsoft Entra ID) with invite-based onboarding and `admin` / `user` RBAC. Local dev and API scripts typically use **`SSO_ENABLED=false`** (default) plus `DAST_AUTH_USER` / `DAST_AUTH_PASS` for the login form and Basic Auth.
+**Platform access (human operators):** **SAML 2.0** via Microsoft Entra ID — see **[docs/SSO_RBAC.md](SSO_RBAC.md)**. This is the canonical production path.
+
+**Automation / API / deploy scripts:** HTTP Basic Auth via `DAST_AUTH_USER` / `DAST_AUTH_PASS` (examples below, `check_scan_active.py`, regression scripts). Do **not** distribute these credentials to Red Team operators as their primary login.
+
+While `SSO_ENABLED=false` during rollout, `/login` may show an interim username/password form — treat it as temporary until SSO and HTTPS are live.
 
 **First-boot bootstrap (SSO on):** set `INITIAL_ADMIN_EMAILS` to a comma-separated list of admin emails in the deploy environment (not in git). On the **first** successful SAML login for a listed address, that user is created with role `admin`. Once **any** admin user exists in the database, `INITIAL_ADMIN_EMAILS` is ignored.
 
-Full Entra app registration, SAML certificate layout, invites, and troubleshooting: **[docs/SSO_RBAC.md](SSO_RBAC.md)** — do not duplicate that walkthrough here.
+Full Entra app registration, SAML certificate layout, invites, group RBAC, and troubleshooting: **[docs/SSO_RBAC.md](SSO_RBAC.md)** — do not duplicate that walkthrough here.
 
 ### Environment Variables
 
@@ -113,12 +117,12 @@ AWS_SECRET_ACCESS_KEY=...
 AWS_DEFAULT_REGION=us-east-1
 ANTHROPIC_API_KEY=sk-ant-...       # Optional (if using Anthropic directly)
 
-# Platform auth (local admin / API Basic Auth — also used by scripts/check_scan_active.py)
+# Automation / API Basic Auth (scripts, MCP, check_scan_active.py — NOT end-user SSO login)
 DAST_AUTH_USER=dast-admin
 DAST_AUTH_PASS=YourStrongPassword
 
-# SSO / RBAC (see docs/SSO_RBAC.md for Entra setup)
-SSO_ENABLED=false                  # true = SAML sign-in; false = local login (default)
+# SSO / RBAC — canonical operator access (see docs/SSO_RBAC.md)
+SSO_ENABLED=false                  # true = SAML (production); false = interim local /login form
 INITIAL_ADMIN_EMAILS=              # First SSO bootstrap only; comma-separated admin emails
 SAML_IDP_METADATA_URL=
 SAML_SP_ENTITY_ID=
@@ -175,7 +179,7 @@ Install SAML system libraries first (same as the Dockerfile):
 sudo apt-get install -y xmlsec1 libxmlsec1-dev pkg-config libssl-dev libffi-dev
 pip install -r requirements.txt
 playwright install chromium
-cp .env.example .env && nano .env   # SSO_ENABLED=false, DAST_AUTH_USER, DAST_AUTH_PASS
+cp .env.example .env && nano .env   # SSO_ENABLED=false for local dev; DAST_AUTH_* for API/scripts
 uvicorn web.app:app --host 0.0.0.0 --port 80
 ```
 

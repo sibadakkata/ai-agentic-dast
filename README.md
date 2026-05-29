@@ -6,18 +6,27 @@ A **multi-agent architecture** deploys 13 specialist agents in parallel — each
 
 **Production architecture:** [Red Team AI Web Scanner (Confluence)](https://confluence.corp.nortonlifelock.com/spaces/CIP/pages/954017481/Red+Team+AI+Web+Scanner) · [Terraform / AWS](infra/terraform/README.md) · [Scalable platform design](docs/architecture/scalable-scanner-platform-proposal.md)
 
+> ## Access model
+>
+> | Who | How |
+> |-----|-----|
+> | **End users (Red Team operators)** | **SSO** — Microsoft Entra ID, SAML 2.0 ([setup guide](docs/SSO_RBAC.md)) |
+> | **API / CI / automation scripts** | HTTP Basic Auth (`DAST_AUTH_USER` / `DAST_AUTH_PASS`) |
+>
+> SSO is the canonical platform access path. Basic Auth exists for scripting and as an interim during the SSO/HTTPS rollout. **Do not share Basic Auth credentials with end users.**
+
 ## Production platform
 
 Production runs a **control plane** (FastAPI UI on EC2) and **scan workers** (Fargate tasks), with durable state migrating to PostgreSQL while SQLite remains the default read path during rollout.
 
 ```text
-Users ──► rt.ai.webscanner.gendigital.com (CNAME)
-            └── ALB + WAFv2 (us-east-2)
-                    └── EC2 3.20.180.251 : Docker dast-scanner :80 (FastAPI UI + API)
-                            ├── SCAN_LAUNCHER=fargate ──► ECS Fargate (1 task / scan)
-                            │         └── ECR dast-scanner-runner (scanners/runner/)
-                            ├── RDS PostgreSQL 16 Multi-AZ (dual-write via web/db_pg.py)
-                            └── ElastiCache Redis (live scan events → SSE in UI)
+Human operators ──► SSO (Entra SAML 2.0) ──┐
+Automation / CI  ──► HTTP Basic Auth     ──┼──► rt.ai.webscanner.gendigital.com (CNAME)
+                                             └── ALB + WAFv2 (us-east-2)
+                                                     └── EC2 3.20.180.251 : Docker dast-scanner :80
+                                                             ├── SCAN_LAUNCHER=fargate → ECS Fargate (1 task / scan)
+                                                             ├── RDS PostgreSQL 16 Multi-AZ (dual-write)
+                                                             └── ElastiCache Redis (live events → SSE)
 ```
 
 | Layer | Details |
@@ -132,7 +141,7 @@ This loop runs up to 50 steps per phase (20–50 depending on phase complexity).
 | **SPA Crawling & Coverage** | **SPA route walker** extracts routes from Angular, React, Vue, Next.js, Nuxt, and Remix framework globals, then navigates each to capture XHRs via the network listener. **Post-auth SPA re-crawl** runs after authentication with reduced budget to discover auth-gated endpoints. **Crawl coverage metric** tracks total/unique paths and warns when coverage is low (<5 pages). Passively harvests in-scope HTTPS sub-domains from browser XHR/fetch/navigation traffic. After every phase, newly discovered hosts get a **passive re-audit** (TLS + security headers). **Parallel worker dedup** prevents redundant fuzz requests across concurrent workers via shared tested-endpoint set | `spa_crawler.py` route walker, `agent.py` post-auth re-crawl + coverage metric + parallel dedup |
 | **WAF-Aware Fuzzing** | `fuzz_parameter` and `inject_payload` return a `waf_likely` flag when responses match WAF block signatures (Cloudflare, Sucuri, ModSecurity, Imperva, F5, etc.). WAF-blocked responses are excluded from anomaly counts, reducing false positives from WAF interference | `tools.py` `_detect_waf_block`, `_WAF_SIGNATURES` |
 | **Triage Engine** | 3-layer evidence-based classification (TP/FP/Manual Review) with CWE/CVSS, exploitation tiers (validated/informational), entropy-based secret filtering, SPA catch-all detection, deduplication by (host + CWE + parameter), step-by-step triage narrative separating AI actions from engine validation, and **Garak LLM bypass** — Garak probe failures are trusted as TRUE_POSITIVE with the exact chatbot payload and response shown in the exploit evidence and narrative | [Triage Engine](docs/triage-engine.md) |
-| **Platform Authentication** | SAML 2.0 via Microsoft Entra ID, invite-based onboarding, `admin` / `user` RBAC. Local dev: `SSO_ENABLED=false` + `DAST_AUTH_USER` / `DAST_AUTH_PASS` | [SSO & RBAC Guide](docs/SSO_RBAC.md) |
+| **Platform Authentication** | **SSO (canonical):** SAML 2.0 via Microsoft Entra ID, invite/group-based onboarding, `admin` / `user` RBAC. **Automation only:** HTTP Basic Auth (`DAST_AUTH_*`) for API/scripts — not end-user login | [SSO & RBAC Guide](docs/SSO_RBAC.md) |
 | **Scan Authentication** | Auto-detect form, SSO/OIDC, OAuth, API key, bearer — with session refresh. Multi-identity: User B, Admin, Tenant B (password, bearer, or API key) authenticated at scan start | Multi-step OIDC, self-healing sessions, fast-path static-token auth |
 | **Multi-Identity Testing** | Supply up to 3 extra identities (User B, Admin, Tenant B) via UI or API. All identities are authenticated at scan start; their credentials are injected into **all 8 authorization-class phases** (not just BOLA). Supports username/password, bearer tokens, and API keys — including fast-path static-token auth | Cross-user BOLA, cross-role BFLA, cross-tenant access, session/key revocation, license generation |
 | **Deterministic CVSS Severity** | AI Raw findings get a deterministic CVSS v3.1 score and severity bucket (`severity.py`) based on CWE profile + evidence keywords — independent of LLM mood. LLM's original severity preserved as `llm_severity` for comparison | Pre-triage classification, UI shows CVSS column + LLM-vs-deterministic tooltip |
@@ -150,7 +159,7 @@ This loop runs up to 50 steps per phase (20–50 depending on phase complexity).
 | **Hybrid Smart Retry** | For 20 high-impact phases the agent runs a second, tool-enabled pass with a phase-tailored retry prompt whenever the phase either finds 0 vulnerabilities **or** misses its core vulnerability class. Retry prompts include: **SQLi** (ORDER BY/GROUP BY column-injection, date_trunc/period parameter injection, export/report endpoint injection), **Injection** (14-engine SSTI payload sweep, YAML/Pickle/Java/PHP/.NET deserialization content-type sweep, verbose-error/stack-trace harness), **Access Control** (SaaS business-logic surface probing — /api/licenses, /api/sessions, /api/invoices, etc.; state-mutation invariants — cross-user session/key revocation, cross-tenant license generation, role-validation absence, org-switch impersonation), **Auth** (multi-role credential discovery, parameter-name permutation), **XSS/SSRF/File Upload** (existing) | `_ACTIVE_RETRY_PHASES`, `_PHASE_CORE_KEYWORDS`, `_RETRY_PROMPTS` in `agent.py` |
 | **Finding Deduplication** | Three-tier dedup: (1) multi-agent orchestrator dedup by `(host, vuln_type, path)` or `(host, title)` removes cross-agent duplicates before verification; (2) runtime dedup by `(title, url, parameter)` prevents double-counting across passes; (3) triage-level dedup by `(host, CWE, parameter)` merges equivalent findings keeping highest severity — reduces noise by ~40% on typical scans | `_deduplicate_findings` in `orchestrator.py`; `_finding_key`, `_dedupe_findings` in `web/app.py`; `deduplicate()` in `scripts/triage_engine.py` |
 | **Model ID Resolution** | UI/API callers can pass a display name ("Claude Haiku 4.5 (recommended)"), a short alias ("haiku", "sonnet"), or the full litellm id — the backend normalises all three to a valid litellm model id, preventing "LLM Provider NOT provided" errors | `_resolve_model_id` in `web/app.py`, applied at `/api/scan`, `/api/scan/{id}/retry`, `/api/scan/{id}/rescan` |
-| **Deploy Safety** | Pre-deployment check detects active/paused scans and aborts `deploy.sh` before overwriting a running scanner. `check_scan_active.py` calls `/api/scans` with Basic Auth when `DAST_AUTH_USER` and `DAST_AUTH_PASS` are set in the container (falls back to unauthenticated for older images) | `scripts/check_scan_active.py`, integrated in `deploy.sh` |
+| **Deploy Safety** | Pre-deployment check detects active/paused scans and aborts `deploy.sh` before overwriting a running scanner. `check_scan_active.py` uses operator **automation** Basic Auth (`DAST_AUTH_*` in-container) when calling `/api/scans` (falls back to unauthenticated on older images) | `scripts/check_scan_active.py`, integrated in `deploy.sh` |
 | **Parallel-Phase Failure Surfacing** | When phases run concurrently via `asyncio.gather`, worker exceptions used to be silently swallowed by `return_exceptions=True`, leaving missing phases with no trace. Now every worker is wrapped in a guard that logs the failure to `phase_log` with an `error` field and a `(FAILED)` suffix in the live UI, so a transient Bedrock 5xx, Playwright timeout, or LLM-context overflow no longer disappears a phase silently | `run_phases_parallel._guarded` in `agent.py`; UI shows `(FAILED)` + tooltip with error |
 | **LLM Transient-Error Retry** | `LLMRouter.complete` retries up to 5× with 2 / 4 / 8 / 16 / 32 s exponential back-off (~62 s total) on transient signatures: connection failures (`All connection attempts failed`), 502 / 503 / 504, read timeouts, throttling. Tunable at runtime via `LLM_RETRY_DELAYS` env var. Terminal errors (`ContextWindowExceeded`, `ContentFiltered`, `MalformedMessages`) bubble immediately so a single bad message doesn't burn 6× cost | `LLMRouter.complete` in `llm_config.py` |
 | **Partial-DB Cache Fallback** | The DB sometimes wrote a partial-checkpoint payload (`metadata.partial=True`) for a scan that later finished cleanly to disk, then served the stale partial blob to the API. The reader now prefers a complete on-disk result over a partial DB record and back-fills the DB on read so subsequent loads serve the full payload | `_load_raw_result_dict` in `web/app.py` |
@@ -169,14 +178,14 @@ This loop runs up to 50 steps per phase (20–50 depending on phase complexity).
 
 ### Production UI
 
-The hosted scanner is at **`https://rt.ai.webscanner.gendigital.com`** (ALB + WAF in front of the EC2 UI container). Use your platform credentials (SAML or local Basic Auth per environment).
+The hosted scanner is at **`https://rt.ai.webscanner.gendigital.com`** (ALB + WAF in front of the EC2 UI container). **Sign in via SSO** (Microsoft Entra ID) — see [docs/SSO_RBAC.md](docs/SSO_RBAC.md). HTTP Basic Auth is for API/automation only, not the operator UI path.
 
 ### Local development
 
 ```bash
 pip install -r requirements.txt
 playwright install chromium
-cp .env.example .env && nano .env   # SSO_ENABLED=false, DAST_AUTH_USER, DAST_AUTH_PASS
+cp .env.example .env && nano .env   # local dev: SSO_ENABLED=false; set DAST_AUTH_* for API/script auth only
 uvicorn web.app:app --host 0.0.0.0 --port 80
 # Or: docker compose up --build
 ```
@@ -286,7 +295,7 @@ Bump the image tag in the ECS task definition via Terraform or `aws ecs register
 
 ### Step 5: Verify
 
-1. Open `https://rt.ai.webscanner.gendigital.com` (or ALB URL); sign in with `DAST_AUTH_USER` / `DAST_AUTH_PASS` (or SAML per [docs/SSO_RBAC.md](docs/SSO_RBAC.md)).
+1. Open `https://rt.ai.webscanner.gendigital.com` (or ALB URL); **Sign in with Microsoft** (SSO per [docs/SSO_RBAC.md](docs/SSO_RBAC.md)). Use `DAST_AUTH_*` only for automation curls, not as the operator login path.
 2. Start a smoke scan against OWASP Juice Shop (or `python scripts/e2e_remote_scan.py --smoke` from your laptop — [docs/deployment.md](docs/deployment.md)).
 3. Confirm a Fargate task appears: ECS console → cluster `dast-scanner` → Tasks, or CloudWatch log group `/ecs/dast-scanner-runner`.
 
@@ -392,9 +401,11 @@ Rebuild and push to ECR (Step 4 above). ECS picks up the new image on the next `
 
 ## Authentication
 
-Platform sign-in uses **SAML 2.0** (Microsoft Entra ID) with invite-based user onboarding and two roles: **`admin`** (Red Team Admin) and **`user`** (Red Team Member). `SSO_ENABLED=false` (default) keeps the existing username/password login via `DAST_AUTH_USER` / `DAST_AUTH_PASS`. The REST API accepts the same Basic Auth credentials when SSO is enabled.
+**Human operators** sign in via **SAML 2.0** (Microsoft Entra ID) with invite- or group-based onboarding and two roles: **`admin`** (Red Team Admin) and **`user`** (Red Team Member). This is the production-grade, canonical access path.
 
-See **[docs/SSO_RBAC.md](docs/SSO_RBAC.md)** for Entra app registration, full environment variable reference, bootstrapping the first admin (`INITIAL_ADMIN_EMAILS`), invites, and troubleshooting — do not duplicate that guide here.
+**HTTP Basic Auth** (`DAST_AUTH_USER` / `DAST_AUTH_PASS`) is for **API clients, CI, deploy scripts, and MCP** — not for distributing credentials to Red Team operators. While `SSO_ENABLED=false` during rollout, a local username/password form may still appear on `/login`; treat it as **interim/emergency** only until SSO and HTTPS are live.
+
+See **[docs/SSO_RBAC.md](docs/SSO_RBAC.md)** for Entra app registration, full environment variable reference, bootstrapping the first admin (`INITIAL_ADMIN_EMAILS`), invites, group RBAC, and troubleshooting — do not duplicate that guide here.
 
 ### Roles & permissions
 
@@ -411,8 +422,8 @@ The in-app **Roles & Permissions** matrix on **User Management** and the **Your 
 
 | Variable | When | Purpose |
 |----------|------|---------|
-| `SSO_ENABLED` | Always | `true` = SAML; `false` = local login (default) |
-| `DAST_AUTH_USER` / `DAST_AUTH_PASS` | Local dev / API | Login and Basic Auth when SSO off (or API access with SSO on) |
+| `SSO_ENABLED` | Always | `true` = SAML (production); `false` = interim local form on `/login` (dev/rollout only) |
+| `DAST_AUTH_USER` / `DAST_AUTH_PASS` | Automation / API | HTTP Basic Auth for scripts, MCP, `check_scan_active.py` — **not** end-user platform login |
 | `INITIAL_ADMIN_EMAILS` | First SSO bootstrap | Comma-separated emails granted `admin` on first SAML login (set in deploy env only, not git) |
 | `SAML_IDP_METADATA_URL`, `SAML_SP_ENTITY_ID`, `SAML_SP_ACS_URL` | SSO on | Entra ID SP configuration |
 | `SAML_SP_CERT_PATH`, `SAML_SP_KEY_PATH` | Optional | SP signing cert/key (PEM paths) |
@@ -614,7 +625,7 @@ Select **"Multi-Agent"** in the Scan Profile dropdown or set `scan_profile: "mul
 
 ```bash
 export DAST_BASE_URL=https://your-dast-host
-export DAST_AUTH_USER=dast-admin    # required when RBAC protects /api/*
+export DAST_AUTH_USER=dast-admin    # automation Basic Auth (scripts/CI) — not operator SSO login
 export DAST_AUTH_PASS=your-secret   # same vars used by scripts/check_scan_active.py in-container
 python scripts/run_regression_ec2.py          # runs local regression + e2e smoke + API-only persistence checks
 python scripts/run_regression_ec2.py --pytest # same, plus pytest tests/
@@ -624,9 +635,10 @@ python scripts/run_regression_ec2.py --pytest # same, plus pytest tests/
 
 ## Using the API
 
-The scanner exposes a REST API behind HTTP Basic Auth (production: `https://rt.ai.webscanner.gendigital.com`; local: `http://localhost:8080` or port 80 per Docker). Launch a scan, poll status, then fetch triaged results — same flow as the Web UI.
+The scanner exposes a REST API for **automation** (CI, scripts, MCP). Calls use **HTTP Basic Auth** (`DAST_AUTH_*`). Browser operators use **SSO** instead — see [docs/SSO_RBAC.md](docs/SSO_RBAC.md). You may also call `/api/*` with a session cookie from an SSO login when building browser-based tools.
 
 ```bash
+# API / automation — not the operator sign-in path
 curl -s -u "YOUR_USER:YOUR_SECRET" \
   -H "Content-Type: application/json" \
   -X POST "https://rt.ai.webscanner.gendigital.com/api/v1/scans" \
