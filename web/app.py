@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import asynccontextmanager
 import glob
 import hashlib
 import logging
@@ -48,6 +49,15 @@ from scripts.triage_engine import classify as triage_classify
 
 from starlette.middleware.gzip import GZipMiddleware
 
+
+@asynccontextmanager
+async def _app_lifespan(application: FastAPI):
+    """Start Bedrock model discovery after the app is up (worker process ready)."""
+    del application
+    threading.Thread(target=_schedule_model_discovery, daemon=True, name="model-discovery-init").start()
+    yield
+
+
 app = FastAPI(
     title="AI DAST Scanner API",
     description=(
@@ -63,6 +73,7 @@ app = FastAPI(
         {"url": "https://rt.ai.webscanner.gendigital.com", "description": "Production"},
         {"url": "http://localhost:8080", "description": "Local dev"},
     ],
+    lifespan=_app_lifespan,
 )
 
 app.add_middleware(GZipMiddleware, minimum_size=1000)
@@ -956,10 +967,6 @@ def _schedule_model_discovery():
     t = threading.Thread(target=_periodic, daemon=True, name="model-discovery")
     t.start()
     logger.info("Model discovery scheduler started (interval=%dh)", _MODEL_DISCOVERY_INTERVAL // 3600)
-
-
-# Kick off discovery on import (runs in background thread so startup isn't blocked)
-threading.Thread(target=_schedule_model_discovery, daemon=True, name="model-discovery-init").start()
 
 
 @app.get("/health", tags=["System"])

@@ -56,5 +56,37 @@ def test_apply_overlay_recommended_and_premium():
 
 def test_bedrock_region_defaults_us_east_2(monkeypatch):
     monkeypatch.delenv("BEDROCK_REGION", raising=False)
-    monkeypatch.delenv("AWS_DEFAULT_REGION", raising=False)
+    monkeypatch.setenv("AWS_DEFAULT_REGION", "us-east-1")
     assert md._bedrock_region() == "us-east-2"
+
+
+def test_bedrock_region_explicit_override(monkeypatch):
+    monkeypatch.setenv("BEDROCK_REGION", "us-west-2")
+    assert md._bedrock_region() == "us-west-2"
+
+
+def test_discover_keeps_cache_when_all_canaries_fail(monkeypatch, tmp_path):
+    cache_path = tmp_path / "models_cache.json"
+    monkeypatch.setattr(md, "CACHE_FILE", cache_path)
+    cache_path.write_text(
+        '{"models":[{"id":"bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0","name":"Haiku"}],'
+        '"last_checked":"2026-01-01T00:00:00+00:00","tested":1,"passed":1,"failed":[]}',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        md,
+        "list_bedrock_models",
+        lambda: [
+            {
+                "modelId": "google.gemma-3-4b-it",
+                "modelLifecycle": {"status": "ACTIVE"},
+                "outputModalities": ["TEXT"],
+            }
+        ],
+    )
+    monkeypatch.setattr(md, "list_bedrock_inference_profiles", lambda: [])
+    monkeypatch.setattr(md, "canary_test", lambda _lid, timeout=15.0: (False, "fail"))
+
+    out = md.discover_models()
+    assert len(out.get("models", [])) == 1
+    assert out["models"][0]["name"] == "Haiku"

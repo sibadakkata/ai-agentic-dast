@@ -158,11 +158,12 @@ def _estimate_cost(model_id: str) -> tuple[float, str]:
 
 
 def _bedrock_region() -> str:
-    return (
-        os.environ.get("BEDROCK_REGION")
-        or os.environ.get("AWS_DEFAULT_REGION")
-        or "us-east-2"
-    ).strip()
+    """Bedrock control-plane region for model discovery (defaults to us-east-2)."""
+    explicit = os.environ.get("BEDROCK_REGION", "").strip()
+    if explicit:
+        return explicit
+    # Do not inherit AWS_DEFAULT_REGION — EC2 often sets us-east-1 while Bedrock catalog is us-east-2.
+    return "us-east-2"
 
 
 def _friendly_name(model_id: str) -> str:
@@ -349,6 +350,16 @@ def discover_models(force: bool = False) -> dict:
 
     results.sort(key=lambda m: m.get("input_cost_per_m", 999))
 
+    if not results:
+        prev = _load_cache()
+        if prev.get("models"):
+            logger.warning(
+                "Discovery passed 0/%d models; keeping previous cache (%d models)",
+                tested,
+                len(prev["models"]),
+            )
+            return prev
+
     cache = {
         "models": results,
         "last_checked": datetime.now(timezone.utc).isoformat(),
@@ -394,3 +405,19 @@ def get_cache_meta() -> dict:
         "failed_count": len(cache.get("failed", [])),
         "failed": cache.get("failed", []),
     }
+
+
+if __name__ == "__main__":
+    import sys
+
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
+    out = discover_models()
+    print(
+        f"passed {out.get('passed')}/{out.get('tested')} "
+        f"last_checked={out.get('last_checked')} "
+        f"cache={CACHE_FILE}",
+        file=sys.stderr,
+    )
+    for m in out.get("models", []):
+        print(f"  {m.get('id')}  {m.get('name')}")
+    sys.exit(0 if out.get("passed") else 1)

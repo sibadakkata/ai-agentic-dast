@@ -139,7 +139,9 @@ SSO_ADMIN_GROUP_IDS=               # Comma-separated Entra group object IDs → 
 SSO_USER_GROUP_IDS=                # Comma-separated Entra group object IDs → user role
 SSO_GROUP_CLAIM_NAME=              # Optional SAML groups claim name override
 MODEL_REFRESH_HOURS=24             # Re-discover Bedrock models (also MODEL_DISCOVERY_INTERVAL_H)
-BEDROCK_REGION=us-east-2           # Region for list_foundation_models / inference profiles
+BEDROCK_REGION=us-east-2           # Region for list_foundation_models / inference profiles (required if AWS_DEFAULT_REGION is not us-east-2)
+
+EC2 instance role also needs `bedrock:ListFoundationModels` and `bedrock:ListInferenceProfiles` (plus `bedrock:InvokeModel` / Converse) for automatic model refresh. Without List*, the UI still shows curated fallback models including Opus 4.7.
 DAST_SESSION_SECRET=               # Session cookie HMAC (set in production)
 PUBLIC_BASE_URL=                   # Base URL for invite links (e.g. https://scanner.example.com)
 ```
