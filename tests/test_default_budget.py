@@ -1,6 +1,5 @@
 """Unit tests for effective_budget_cap_usd."""
 from __future__ import annotations
-import importlib
 import sys
 from pathlib import Path
 import pytest
@@ -12,7 +11,7 @@ if str(REPO_ROOT) not in sys.path:
 def budget_mod(monkeypatch):
     monkeypatch.delenv("AUTO_MODE_DEFAULT_BUDGET_USD", raising=False)
     import scanners.ai_agent.budget as budget
-    importlib.reload(budget)
+
     return budget
 
 class TestEffectiveBudgetCapUsd:
@@ -31,5 +30,5 @@ class TestEffectiveBudgetCapUsd:
     def test_env_override(self, monkeypatch):
         monkeypatch.setenv("AUTO_MODE_DEFAULT_BUDGET_USD", "50")
         import scanners.ai_agent.budget as budget
-        importlib.reload(budget)
+
         assert budget.effective_budget_cap_usd("auto", None, caller_is_sso=False) == 50.0

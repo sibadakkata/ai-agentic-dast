@@ -43,10 +43,10 @@ from scanners.ai_agent.auth import load_targets_from_dict
 from scanners.ai_agent.llm_config import LLMRouter, check_connectivity
 from scanners.ai_agent.auto_router import ModelSelector
 from scanners.ai_agent.budget import (
-    AUTO_MODE_DEFAULT_BUDGET_USD,
     BudgetGuard,
     effective_budget_cap_usd,
     estimate_scan_cost,
+    get_default_budget_usd,
 )
 from scanners.ai_agent.model_discovery import (
     discover_models,
@@ -1968,7 +1968,7 @@ def _launch_scan_core(
         logger.warning(
             "Ignoring budget_cap_usd=%s from non-SSO caller; applying default $%.2f",
             requested_cap,
-            effective_cap or AUTO_MODE_DEFAULT_BUDGET_USD,
+            effective_cap or get_default_budget_usd(),
         )
     budget_cap = effective_cap
     budget_cap_was_overridden = budget_override_ignored
@@ -2865,7 +2865,7 @@ async def estimate_scan_cost_api(
         model if model_policy == "manual" else None,
         _get_models(),
     )
-    est["default_cap_usd"] = AUTO_MODE_DEFAULT_BUDGET_USD
+    est["default_cap_usd"] = get_default_budget_usd()
     return est
 
 
@@ -2893,7 +2893,7 @@ async def get_scan_budget(scan_id: str, request: Request, _auth=Depends(_verify)
         "model_policy": s.get("model_policy", "manual"),
         "estimated_cost_usd": s.get("estimated_cost_usd"),
         "approval_requires_sso": True,
-        "default_cap_usd": AUTO_MODE_DEFAULT_BUDGET_USD,
+        "default_cap_usd": get_default_budget_usd(),
         "budget_cap_was_overridden_by_caller": s.get("budget_cap_was_overridden_by_caller"),
     }
 

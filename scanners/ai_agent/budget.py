@@ -10,7 +10,13 @@ import math
 import os
 from typing import Any, Callable
 
-AUTO_MODE_DEFAULT_BUDGET_USD = float(os.environ.get("AUTO_MODE_DEFAULT_BUDGET_USD", "30.0"))
+def get_default_budget_usd() -> float:
+    """Read the live server default cap (env-tunable, default 30.0 USD)."""
+    return float(os.environ.get("AUTO_MODE_DEFAULT_BUDGET_USD", "30.0"))
+
+
+# Import-time snapshot for backward compatibility; prefer get_default_budget_usd() at runtime.
+AUTO_MODE_DEFAULT_BUDGET_USD = get_default_budget_usd()
 
 
 def effective_budget_cap_usd(
@@ -30,7 +36,7 @@ def effective_budget_cap_usd(
         return requested_cap
     if caller_is_sso and requested_cap is not None and requested_cap > 0:
         return float(requested_cap)
-    return AUTO_MODE_DEFAULT_BUDGET_USD
+    return get_default_budget_usd()
 
 _TIER_PHASE_COUNTS = {"cheap": 12, "balanced": 28, "premium": 6}
 _TOKENS_PER_PHASE_K = {"cheap": 8.0, "balanced": 45.0, "premium": 120.0}
