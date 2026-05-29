@@ -125,6 +125,9 @@ SAML_SP_ENTITY_ID=
 SAML_SP_ACS_URL=
 SAML_SP_CERT_PATH=                 # Optional PEM paths under config/saml/
 SAML_SP_KEY_PATH=
+SSO_ADMIN_GROUP_IDS=               # Comma-separated Entra group object IDs → admin role
+SSO_USER_GROUP_IDS=                # Comma-separated Entra group object IDs → user role
+SSO_GROUP_CLAIM_NAME=              # Optional SAML groups claim name override
 DAST_SESSION_SECRET=               # Session cookie HMAC (set in production)
 PUBLIC_BASE_URL=                   # Base URL for invite links (e.g. https://scanner.example.com)
 ```

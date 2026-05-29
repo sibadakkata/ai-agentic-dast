@@ -155,7 +155,15 @@ def process_acs(request, post_data: dict) -> dict:
         "http://schemas.xmlsoap.org/ws/2005/05/identity/claims/name",
         "http://schemas.microsoft.com/identity/claims/displayname",
     ) or (email.split("@")[0] if email else "")
-    return {"ok": True, "email": (email or "").strip().lower(), "name": str(name).strip()}
+    from scanners.auth.groups import extract_groups_from_saml_attributes
+
+    groups = extract_groups_from_saml_attributes(attrs)
+    return {
+        "ok": True,
+        "email": (email or "").strip().lower(),
+        "name": str(name).strip(),
+        "groups": groups,
+    }
 
 
 def _first_attr(attrs: dict, *keys: str) -> str:
