@@ -1,12 +1,12 @@
 # Copy to terraform.tfvars and fill in site-specific values.
 # Do NOT commit terraform.tfvars (gitignored).
 
-ec2_security_group_id = "sg-XXXXXXXX"
-ec2_private_ip        = "10.x.x.x"
-app_port              = 80
+ec2_security_group_id = "sg-01793a9e7f5b20d9e"
+ec2_private_ip        = "172.31.28.27"
+app_port              = 443
 
-# Optional — leave empty for HTTP-only ALB on port 80
-# domain_name = "scanner.example.com"
+domain_name = "rt.ai.webscanner.gendigital.com"
+# ui_acm_certificate_arn = "arn:aws:acm:us-east-2:ACCOUNT:certificate/UUID"
 
 # enable_alb = true
 # db_instance_class = "db.t4g.small"

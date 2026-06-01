@@ -51,9 +51,15 @@ variable "ec2_private_ip" {
 }
 
 variable "domain_name" {
-  description = "Optional domain for ACM + HTTPS; empty = HTTP only on port 80"
+  description = "Public hostname (documentation / outputs); TLS uses ui_acm_certificate_arn"
   type        = string
-  default     = ""
+  default     = "rt.ai.webscanner.gendigital.com"
+}
+
+variable "ui_acm_certificate_arn" {
+  description = "ACM certificate ARN for ALB HTTPS listener (imported cert; re-import on renewal)"
+  type        = string
+  default     = "arn:aws:acm:us-east-2:168551359048:certificate/0b5f6f37-2a42-48d0-b3a2-778288f5e380"
 }
 
 variable "enable_alb" {
@@ -63,9 +69,9 @@ variable "enable_alb" {
 }
 
 variable "app_port" {
-  description = "Scanner UI port on EC2"
+  description = "Scanner UI HTTPS port on EC2 (host nginx)"
   type        = number
-  default     = 80
+  default     = 443
 }
 
 variable "waf_rate_limit" {

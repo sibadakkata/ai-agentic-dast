@@ -6,14 +6,6 @@ resource "aws_security_group" "alb" {
   vpc_id      = data.aws_vpc.default.id
 
   ingress {
-    description = "HTTP"
-    from_port   = 80
-    to_port     = 80
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-
-  ingress {
     description = "HTTPS"
     from_port   = 443
     to_port     = 443
@@ -50,24 +42,26 @@ resource "aws_lb" "main" {
 resource "aws_lb_target_group" "ui" {
   count = var.enable_alb ? 1 : 0
 
-  name        = "dast-scanner-ui"
+  name        = "dast-scanner-ui-https"
   port        = var.app_port
-  protocol    = "HTTP"
+  protocol    = "HTTPS"
   vpc_id      = data.aws_vpc.default.id
   target_type = "ip"
 
   health_check {
     enabled             = true
+    protocol            = "HTTPS"
+    path                = "/health"
+    port                = "traffic-port"
     healthy_threshold   = 2
     unhealthy_threshold = 3
     timeout             = 5
     interval            = 30
-    path                = "/healthz"
     matcher             = "200"
   }
 
   tags = {
-    Name = "dast-scanner-ui"
+    Name = "dast-scanner-ui-https"
   }
 }
 
@@ -79,57 +73,17 @@ resource "aws_lb_target_group_attachment" "ec2" {
   port             = var.app_port
 }
 
-resource "aws_lb_listener" "http" {
-  count = var.enable_alb ? 1 : 0
-
-  load_balancer_arn = aws_lb.main[0].arn
-  port              = 80
-  protocol          = "HTTP"
-
-  default_action {
-    type = var.domain_name != "" ? "redirect" : "forward"
-
-    dynamic "redirect" {
-      for_each = var.domain_name != "" ? [1] : []
-      content {
-        port        = "443"
-        protocol    = "HTTPS"
-        status_code = "HTTP_301"
-      }
-    }
-
-    target_group_arn = var.domain_name == "" ? aws_lb_target_group.ui[0].arn : null
-  }
-}
-
-resource "aws_acm_certificate" "main" {
-  count = var.enable_alb && var.domain_name != "" ? 1 : 0
-
-  domain_name       = var.domain_name
-  validation_method = "DNS"
-
-  lifecycle {
-    create_before_destroy = true
-  }
-
-  tags = {
-    Name = "dast-scanner"
-  }
-}
-
 resource "aws_lb_listener" "https" {
-  count = var.enable_alb && var.domain_name != "" ? 1 : 0
+  count = var.enable_alb && var.ui_acm_certificate_arn != "" ? 1 : 0
 
   load_balancer_arn = aws_lb.main[0].arn
   port              = 443
   protocol          = "HTTPS"
-  ssl_policy        = "ELBSecurityPolicy-T13-1-2-2021-06"
-  certificate_arn   = aws_acm_certificate.main[0].arn
+  ssl_policy        = "ELBSecurityPolicy-TLS13-1-2-2021-06"
+  certificate_arn   = var.ui_acm_certificate_arn
 
   default_action {
     type             = "forward"
     target_group_arn = aws_lb_target_group.ui[0].arn
   }
-
-  depends_on = [aws_acm_certificate.main]
 }

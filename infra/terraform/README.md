@@ -55,7 +55,22 @@ terraform apply tfplan
 | `ec2_security_group_id` | SG of existing EC2 UI host (`3.20.180.251`) |
 | `ec2_private_ip` | Private IP of that host (ALB target) |
 
-Optional: `domain_name` — when set, creates ACM cert + HTTPS listener and HTTP→HTTPS redirect.
+Public UI: HTTPS-only ALB on port 443 (`ui_acm_certificate_arn` = imported ACM cert). No HTTP listener on port 80.
+
+### HTTPS cutover — state reconcile (one-time)
+
+After manual ACM/ALB changes, set `app_port = 443` in `terraform.tfvars` and run:
+
+```bash
+terraform state rm 'aws_lb_listener.http[0]'   # if HTTP listener was deleted in console
+terraform import -var="app_port=443" 'aws_lb_target_group.ui[0]' \
+  'arn:aws:elasticloadbalancing:us-east-2:168551359048:targetgroup/dast-scanner-ui-https/5afba9ae19377360'
+terraform import -var="app_port=443" 'aws_lb_listener.https[0]' \
+  'arn:aws:elasticloadbalancing:us-east-2:168551359048:listener/app/dast-scanner/2edcfb10989419bc/a744dc060cb6a4cd'
+terraform plan -var="app_port=443"
+```
+
+Corp IP rules on the EC2 SG (`147.161.0.0/16`, etc.) remain operator-managed outside this module.
 
 ## Outputs
 

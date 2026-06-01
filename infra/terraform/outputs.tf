@@ -24,8 +24,8 @@ output "db_security_group_id" {
 }
 
 output "acm_certificate_arn" {
-  description = "ACM certificate ARN when domain_name is set"
-  value       = var.domain_name != "" && var.enable_alb ? aws_acm_certificate.main[0].arn : null
+  description = "ACM certificate ARN for ALB HTTPS listener"
+  value       = var.enable_alb && var.ui_acm_certificate_arn != "" ? var.ui_acm_certificate_arn : null
 }
 
 output "waf_web_acl_arn" {
