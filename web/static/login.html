@@ -159,6 +159,52 @@ body {
   text-transform: uppercase;
   font-weight: 700;
 }
+.sso-hint {
+  font-size: 12px;
+  color: var(--text2);
+  text-align: center;
+  margin-top: 12px;
+}
+.backup-section {
+  margin-top: 28px;
+  padding-top: 24px;
+  border-top: 1px solid var(--border);
+}
+.backup-toggle {
+  width: 100%;
+  padding: 10px 14px;
+  background: transparent;
+  color: var(--text2);
+  border: 1px dashed var(--border);
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  font-family: inherit;
+  cursor: pointer;
+  transition: border-color 0.15s, color 0.15s, background 0.15s;
+}
+.backup-toggle:hover {
+  border-color: var(--accent2);
+  color: var(--accent);
+  background: rgba(4,0,245,0.04);
+}
+.backup-hint {
+  font-size: 11px;
+  color: var(--text2);
+  text-align: center;
+  margin-top: 8px;
+  line-height: 1.45;
+}
+#backup-panel {
+  margin-top: 18px;
+}
+.btn-login.disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+  pointer-events: none;
+  transform: none;
+  box-shadow: none;
+}
 </style>
 </head>
 <body>
@@ -171,32 +217,36 @@ body {
 
   <div class="card">
     <h2>Sign In</h2>
-    <p id="signin-lead">Interim local sign-in while SSO and HTTPS rollout completes. Production access is via Microsoft Entra ID (SAML 2.0).</p>
-
-    <div id="access-banner" style="display:none;margin-bottom:16px;padding:12px 14px;border-radius:8px;font-size:12px;line-height:1.5;"></div>
+    <p id="signin-lead">Sign in with your corporate account to access the AI DAST platform.</p>
 
     <div class="error-msg" id="error-msg">Invalid username or password. Please try again.</div>
 
-    <div id="sso-section" style="display:none;margin-bottom:20px;">
-      <a href="/sso/login" class="btn-login" style="display:block;text-align:center;text-decoration:none;line-height:1.2;">
-        Sign in with Microsoft
+    <div id="sso-section">
+      <a href="/sso/login" id="btn-sso" class="btn-login" style="display:block;text-align:center;text-decoration:none;line-height:1.2;">
+        Sign in with SSO
       </a>
-      <p style="font-size:12px;color:var(--text2);text-align:center;margin-top:14px;">Use your Gen Digital corporate account</p>
+      <p class="sso-hint">Microsoft Entra ID (SAML 2.0)</p>
     </div>
-    <form id="local-login-form" method="POST" action="/login" autocomplete="on">
-      <p id="local-form-note" style="font-size:12px;color:var(--text2);margin-bottom:14px;line-height:1.5;">
-        Local admin (interim / emergency access). Not for general Red Team operators — use <strong>Sign in with Microsoft</strong> when SSO is enabled.
-      </p>
-      <div class="form-group">
-        <label for="username">Username</label>
-        <input type="text" id="username" name="username" autocomplete="username" required autofocus placeholder="Enter username">
+
+    <div class="backup-section">
+      <button type="button" class="backup-toggle" id="backup-toggle" aria-expanded="false" aria-controls="backup-panel">
+        Use backup admin login
+      </button>
+      <p class="backup-hint">Backup admin login (use only if SSO is unavailable)</p>
+      <div id="backup-panel" hidden>
+        <form id="local-login-form" method="POST" action="/login" autocomplete="on">
+          <div class="form-group">
+            <label for="username">Username</label>
+            <input type="text" id="username" name="username" autocomplete="username" required placeholder="Enter username">
+          </div>
+          <div class="form-group">
+            <label for="password">Password</label>
+            <input type="password" id="password" name="password" autocomplete="current-password" required placeholder="Enter password">
+          </div>
+          <button type="submit" class="btn-login">Sign in with admin credentials</button>
+        </form>
       </div>
-      <div class="form-group">
-        <label for="password">Password</label>
-        <input type="password" id="password" name="password" autocomplete="current-password" required placeholder="Enter password">
-      </div>
-      <button type="submit" class="btn-login">Sign In</button>
-    </form>
+    </div>
   </div>
 
   <div class="redteam-banner">
@@ -208,10 +258,6 @@ body {
       <div>
         <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#dc2626" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
         <span>Restricted to <strong style="color:#b91c1c;">authorized penetration testers</strong> with written approval.</span>
-      </div>
-      <div>
-        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#ca8a04" stroke-width="2"><path d="M22 16.92v3a2 2 0 01-2.18 2 19.79 19.79 0 01-8.63-3.07 19.5 19.5 0 01-6-6A19.79 19.79 0 012.12 4.18 2 2 0 014.11 2h3a2 2 0 012 1.72c.127.96.362 1.903.7 2.81a2 2 0 01-.45 2.11L8.09 9.91a16 16 0 006 6l1.27-1.27a2 2 0 012.11-.45c.907.338 1.85.573 2.81.7A2 2 0 0122 16.92z"/></svg>
-        <span>Notify SOC via <a href="https://gendigital.enterprise.slack.com/archives/C0918P64R5Y" target="_blank" rel="noopener" style="color:#0400F5;font-weight:700;text-decoration:underline;">#t-gts-cybersecurity-deconfliction</a> before any engagement.</span>
       </div>
       <div>
         <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#6b7280" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
@@ -226,33 +272,49 @@ body {
 <script>
 if (window.location.search.includes('error=1')) {
   document.getElementById('error-msg').classList.add('show');
+  var panel = document.getElementById('backup-panel');
+  var toggle = document.getElementById('backup-toggle');
+  if (panel) panel.hidden = false;
+  if (toggle) toggle.setAttribute('aria-expanded', 'true');
 }
 (function() {
-  var banner = document.getElementById('access-banner');
   var lead = document.getElementById('signin-lead');
-  function showBanner(bg, border, color, html) {
-    if (!banner) return;
-    banner.style.display = 'block';
-    banner.style.background = bg;
-    banner.style.border = '1px solid ' + border;
-    banner.style.color = color;
-    banner.innerHTML = html;
+  var toggle = document.getElementById('backup-toggle');
+  var panel = document.getElementById('backup-panel');
+  var btnSso = document.getElementById('btn-sso');
+
+  if (toggle && panel) {
+    toggle.addEventListener('click', function() {
+      var open = panel.hidden;
+      panel.hidden = !open;
+      toggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+      toggle.textContent = open ? 'Hide backup admin login' : 'Use backup admin login';
+      if (open) {
+        var user = document.getElementById('username');
+        if (user) user.focus();
+      }
+    });
   }
+
   fetch('/api/auth/config').then(function(r) { return r.json(); }).then(function(cfg) {
     if (cfg && cfg.sso_enabled) {
-      document.getElementById('sso-section').style.display = 'block';
-      var form = document.getElementById('local-login-form');
-      if (form) form.style.display = 'none';
-      if (lead) lead.textContent = 'Sign in with your corporate Microsoft account (SAML 2.0).';
-      showBanner('#eff6ff', '#bfdbfe', '#1e3a8a',
-        '<strong>Platform access:</strong> Microsoft Entra ID SSO. Do not use shared Basic Auth credentials for the Web UI.');
+      if (lead) {
+        lead.textContent = 'Sign in with your corporate account (Microsoft Entra ID).';
+      }
     } else {
-      showBanner('#fffbeb', '#fde68a', '#92400e',
-        '<strong>Interim sign-in</strong> — SSO rollout in progress. The username/password below is for local/emergency access only, not the long-term operator path.');
+      if (lead) {
+        lead.textContent = 'SSO is not configured on this host. Expand backup admin login below if you have emergency credentials.';
+      }
+      if (btnSso) {
+        btnSso.classList.add('disabled');
+        btnSso.removeAttribute('href');
+        btnSso.setAttribute('aria-disabled', 'true');
+      }
     }
   }).catch(function() {
-    showBanner('#fffbeb', '#fde68a', '#92400e',
-      '<strong>Interim sign-in</strong> — use SSO when available. Local form is emergency/interim access only.');
+    if (lead) {
+      lead.textContent = 'Sign in with SSO when available, or use backup admin login below.';
+    }
   });
 })();
 </script>
