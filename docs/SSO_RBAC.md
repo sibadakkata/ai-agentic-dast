@@ -31,20 +31,20 @@ Other members cannot approve another user’s scan unless they are `admin`.
 | `PUBLIC_BASE_URL` | No | Base URL for invite links (defaults to request host). |
 | `DAST_SESSION_SECRET` | Recommended | HMAC secret for session cookies (set in production). |
 | `DAST_AUTH_USER` / `DAST_AUTH_PASS` | Automation / API | HTTP Basic Auth for scripts, MCP, deploy checks — **not** end-user SSO login. Still required for `/api/*` from curl/CI when SSO is on. |
-| `SSO_ADMIN_GROUP_IDS` | Optional | Comma-separated Entra **group object IDs** (GUIDs) that grant app role `admin`. |
-| `SSO_USER_GROUP_IDS` | Optional | Comma-separated Entra group object IDs (GUIDs) that grant app role `user`. |
+| `SSO_USER_GROUP_IDS` | Optional | Comma-separated Entra group object IDs (GUIDs) that grant app role `user` on login. |
+| `SSO_ADMIN_GROUP_IDS` | **Unused** | Ignored — admin is assigned only via invite or **Make admin** in the UI (not from AD groups). |
 | `SSO_GROUP_CLAIM_NAME` | Optional | SAML attribute name for group membership (default: Microsoft `groups` claim URI; also tries short name `groups`). |
 
 Store SAML certificates under `config/saml/` (gitignored). Do not commit real keys or production emails.
 
-If **neither** `SSO_ADMIN_GROUP_IDS` nor `SSO_USER_GROUP_IDS` is set, sign-in remains **invite-only** (legacy behavior). When either is set, users in those Entra groups may sign in **without a manual invite**, and their app role is **re-synced from group membership on every SAML login** (admin group wins if both match).
+If `SSO_USER_GROUP_IDS` is unset, sign-in remains **invite-only** (unless the user already exists or matches `INITIAL_ADMIN_EMAILS`). When set, users in those Entra groups may sign in **without a manual invite** and receive role `user`. **Manually assigned `admin` roles are not demoted** on subsequent SSO logins. AD groups never grant `admin`.
 
 ### Access precedence (SAML login)
 
 1. `INITIAL_ADMIN_EMAILS` — bootstrap admin on first login  
 2. **Existing active user** — already provisioned accounts  
 3. **Valid pending invite** — email matches invite  
-4. **Entra group match** — user is in `SSO_ADMIN_GROUP_IDS` and/or `SSO_USER_GROUP_IDS`  
+4. **Entra group match** — user is in `SSO_USER_GROUP_IDS` → role `user`  
 5. **Deny** — `not_in_required_group` when group env is configured but no match; otherwise `not_authorized`
 
 ### Entra ID: groups claim (required for group-based access)
@@ -54,12 +54,11 @@ In the enterprise application → **Single sign-on** → **Attributes & Claims**
 - **Claim name:** `http://schemas.microsoft.com/ws/2008/06/identity/claims/groups` (or set `SSO_GROUP_CLAIM_NAME` if you use a custom name)  
 - **Value:** **Security groups** — emit **group object IDs** (GUIDs), not display names  
 
-Provide the IdP team the two object IDs you place in `SSO_ADMIN_GROUP_IDS` and `SSO_USER_GROUP_IDS` on the scanner host.
+Provide the IdP team the object ID you place in `SSO_USER_GROUP_IDS` on the scanner host. See **[SSO.md](SSO.md)** for the IdP ticket template and cutover runbook.
 
 Example (`.env` on EC2, not committed):
 
 ```bash
-SSO_ADMIN_GROUP_IDS=a1b2c3d4-e5f6-7890-abcd-ef1234567890
 SSO_USER_GROUP_IDS=f0e1d2c3-b4a5-9678-0123-456789abcdef
 ```
 
@@ -70,7 +69,7 @@ SSO_USER_GROUP_IDS=f0e1d2c3-b4a5-9678-0123-456789abcdef
 3. **Identifier (Entity ID)**: same value as `SAML_SP_ENTITY_ID`.
 4. **Enterprise application** → Single sign-on → SAML → upload or note **App Federation Metadata Url** → set `SAML_IDP_METADATA_URL`.
 5. **Token configuration** → add optional claims: `email`, `name` (or use NameID = email).
-6. **Groups claim** → add **Groups** attribute with source **Security groups**, value = **Group ID** (object IDs). Required when using `SSO_ADMIN_GROUP_IDS` / `SSO_USER_GROUP_IDS`.
+6. **Groups claim** → add **Groups** attribute with source **Security groups**, value = **Group ID** (object IDs). Required when using `SSO_USER_GROUP_IDS`.
 7. Assign users/groups who may authenticate at Entra (scanner access is still invite-only unless group env vars or bootstrap/invite apply).
 
 ## Bootstrapping the first admin

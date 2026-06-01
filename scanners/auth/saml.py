@@ -25,6 +25,11 @@ def sso_enabled() -> bool:
     return os.environ.get("SSO_ENABLED", "false").lower() in ("1", "true", "yes")
 
 
+def sp_metadata_configured() -> bool:
+    """True when SP entity ID and ACS URL are set (metadata can be generated)."""
+    return bool(_env("SAML_SP_ENTITY_ID") and _env("SAML_SP_ACS_URL"))
+
+
 def _env(name: str, default: str = "") -> str:
     return os.environ.get(name, default).strip()
 

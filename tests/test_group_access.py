@@ -40,20 +40,20 @@ def group_env(monkeypatch):
 
 
 class TestResolveRoleFromGroups:
-    def test_admin_group(self, group_env):
+    def test_admin_group_does_not_grant_admin(self, group_env):
         from scanners.auth.groups import resolve_role_from_groups
 
-        assert resolve_role_from_groups([ADMIN_GID]) == "admin"
+        assert resolve_role_from_groups([ADMIN_GID]) is None
 
     def test_user_group(self, group_env):
         from scanners.auth.groups import resolve_role_from_groups
 
         assert resolve_role_from_groups([USER_GID]) == "user"
 
-    def test_admin_wins_over_user(self, group_env):
+    def test_user_group_wins_when_both_configured(self, group_env):
         from scanners.auth.groups import resolve_role_from_groups
 
-        assert resolve_role_from_groups([ADMIN_GID, USER_GID]) == "admin"
+        assert resolve_role_from_groups([ADMIN_GID, USER_GID]) == "user"
 
     def test_unknown_group(self, group_env):
         from scanners.auth.groups import resolve_role_from_groups
@@ -97,11 +97,11 @@ class TestResolveEmailAccessGroups:
         assert r.user.role == "admin"
         assert r.source == "bootstrap"
 
-    def test_existing_user_resyncs_role_from_groups(self, repo, group_env):
+    def test_existing_admin_not_demoted_by_user_group(self, repo, group_env):
         from scanners.auth.access import resolve_email_access
 
-        user = repo.create_user("existing@corp.com", role="admin")
+        repo.create_user("existing@corp.com", role="admin")
         r = resolve_email_access("existing@corp.com", "Ex", repo, groups=[USER_GID])
         assert r.allowed
-        assert r.user.role == "user"
+        assert r.user.role == "admin"
         assert r.source == "existing"

@@ -208,8 +208,8 @@ async def sso_acs(request: Request):
 
 @router.get("/sso/metadata")
 async def sso_metadata():
-    if not saml_mod.sso_enabled():
-        raise HTTPException(404, "SSO not enabled")
+    if not saml_mod.sso_enabled() and not saml_mod.sp_metadata_configured():
+        raise HTTPException(404, "SSO not configured")
     try:
         xml = saml_mod.get_metadata_xml()
     except Exception as exc:

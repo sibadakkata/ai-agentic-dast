@@ -27,10 +27,14 @@ class AccessResult:
 def _apply_group_role(
     repo: UserRepository, user: User, group_role: str | None
 ) -> User:
-    if group_role and user.role != group_role:
-        synced = repo.set_role(user.id, group_role)
-        if synced:
-            return synced
+    """Sync group-derived role without demoting manually assigned admins."""
+    if not group_role or group_role == user.role:
+        return user
+    if user.role == UserRole.ADMIN.value:
+        return user
+    synced = repo.set_role(user.id, group_role)
+    if synced:
+        return synced
     return user
 
 

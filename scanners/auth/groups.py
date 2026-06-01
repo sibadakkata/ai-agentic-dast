@@ -25,7 +25,7 @@ def user_group_ids() -> set[str]:
 
 
 def groups_mapping_enabled() -> bool:
-    return bool(admin_group_ids() or user_group_ids())
+    return bool(user_group_ids())
 
 
 def group_claim_keys() -> tuple[str, ...]:
@@ -55,14 +55,17 @@ def extract_groups_from_saml_attributes(attrs: dict) -> list[str]:
     return []
 
 
-def resolve_role_from_groups(group_ids: list[str]) -> Optional[Literal["admin", "user"]]:
-    if not groups_mapping_enabled():
+def resolve_role_from_groups(group_ids: list[str]) -> Optional[Literal["user"]]:
+    """Map Entra group membership to app role ``user`` only.
+
+    Admin role is never granted from AD groups (manual invite / role change only).
+    ``SSO_ADMIN_GROUP_IDS`` is ignored if set — kept for backward-compatible env files.
+    """
+    if not user_group_ids():
         return None
     normalized = {gid.strip().lower() for gid in group_ids if gid and str(gid).strip()}
     if not normalized:
         return None
-    if admin_group_ids() & normalized:
-        return "admin"
     if user_group_ids() & normalized:
         return "user"
     return None
