@@ -29,7 +29,10 @@ def openapi_client(tmp_path, monkeypatch):
 
 
 def test_openapi_metadata(openapi_client):
-    spec = openapi_client.get("/openapi.json").json()
+    spec = openapi_client.get(
+        "/openapi.json",
+        auth=(os.environ["DAST_AUTH_USER"], os.environ["DAST_AUTH_PASS"]),
+    ).json()
     assert spec["info"]["title"] == "AI DAST Scanner API"
     assert spec["info"]["version"] == "1.0.0"
     servers = {s["url"] for s in spec.get("servers", [])}
@@ -37,7 +40,10 @@ def test_openapi_metadata(openapi_client):
 
 
 def test_v1_scans_has_ai_instructions(openapi_client):
-    spec = openapi_client.get("/openapi.json").json()
+    spec = openapi_client.get(
+        "/openapi.json",
+        auth=(os.environ["DAST_AUTH_USER"], os.environ["DAST_AUTH_PASS"]),
+    ).json()
     post = spec["paths"]["/api/v1/scans"]["post"]
     schema = post["requestBody"]["content"]["application/json"]["schema"]
     props = schema.get("properties") or {}

@@ -14,9 +14,6 @@ _PUBLIC_PREFIXES = (
     "/sso/",
     "/api/auth/config",
     "/static/",
-    "/docs",
-    "/redoc",
-    "/openapi.json",
 )
 
 _PUBLIC_EXACT = {"/"}

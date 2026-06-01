@@ -1,6 +1,6 @@
 # HTTP API guide
 
-The scanner exposes a REST API for launching scans, polling progress, and fetching triaged results. The Web UI uses the same endpoints. Interactive schemas live at **`/docs`** (Swagger UI) and **`/openapi.json`** on your scanner host.
+The scanner exposes a REST API for launching scans, polling progress, and fetching triaged results. The Web UI uses the same endpoints. Interactive schemas live at **`/docs`** (Swagger UI) and **`/openapi.json`** on your scanner host — **authentication required** (same session cookie or `DAST_AUTH_*` Basic Auth as the API).
 
 Production: `https://rt.ai.webscanner.gendigital.com`  
 Local dev: `http://localhost:8080` (or `http://localhost:80` when `SCANNER_PORT` defaults to 80 in Docker Compose)

@@ -6,7 +6,7 @@
 
 The scanner exposes a full REST API — the same one the Web UI uses. Any CI/CD pipeline, script, or external tool can invoke scans programmatically.
 
-- **Interactive docs**: `http://<host>/docs` (Swagger UI) or `/redoc`
+- **Interactive docs** (auth required): `https://<host>/docs` (Swagger UI) or `/redoc` — use an authenticated browser session or Basic Auth
 - **Auth**: HTTP Basic Auth on all `/api/*` endpoints (**automation/API only** — operators use SSO; see [SSO_RBAC.md](SSO_RBAC.md))
 - **Health check**: `GET /health` (no auth — for load balancers)
 
