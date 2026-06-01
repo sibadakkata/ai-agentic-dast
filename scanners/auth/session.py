@@ -14,7 +14,22 @@ from scanners.users.repository import UserRepository
 
 SESSION_COOKIE = "dast_session"
 SESSION_MAX_AGE = 86400 * 7
-SESSION_SECRET = os.environ.get("DAST_SESSION_SECRET", secrets.token_hex(32))
+SESSION_SECRET = os.environ.get("DAST_SESSION_SECRET") or secrets.token_hex(32)
+
+
+def session_cookie_secure() -> bool:
+    """Secure cookies in production (HTTPS). Set DAST_COOKIE_SECURE=false for local HTTP dev."""
+    return os.environ.get("DAST_COOKIE_SECURE", "true").lower() in ("1", "true", "yes")
+
+
+def session_cookie_kwargs(*, max_age: int | None = None) -> dict:
+    """Shared Set-Cookie flags for session tokens."""
+    return {
+        "max_age": SESSION_MAX_AGE if max_age is None else max_age,
+        "httponly": True,
+        "samesite": "lax",
+        "secure": session_cookie_secure(),
+    }
 
 
 @dataclass

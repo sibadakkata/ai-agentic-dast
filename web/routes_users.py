@@ -13,9 +13,9 @@ from scanners.auth.access import resolve_email_access
 from scanners.auth.rbac import current_user, require_admin
 from scanners.auth.session import (
     SESSION_COOKIE,
-    SESSION_MAX_AGE,
     SessionUser,
     create_session_token,
+    session_cookie_kwargs,
 )
 from scanners.users.models import UserRole
 from scanners.users.repository import UserRepository
@@ -169,13 +169,7 @@ async def revoke_invite(invite_id: str, admin: SessionUser = Depends(require_adm
 
 def _set_session_cookie(response, user_id: str) -> None:
     token = create_session_token(user_id)
-    response.set_cookie(
-        key=SESSION_COOKIE,
-        value=token,
-        max_age=SESSION_MAX_AGE,
-        httponly=True,
-        samesite="lax",
-    )
+    response.set_cookie(key=SESSION_COOKIE, value=token, **session_cookie_kwargs())
 
 
 @router.get("/sso/login")

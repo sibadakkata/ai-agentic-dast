@@ -110,6 +110,7 @@ from scanners.auth.session import (
     create_legacy_session_token,
     create_session_token,
     resolve_session_user,
+    session_cookie_kwargs,
     verify_session_token,
 )
 from scanners.users.models import UserRole
@@ -1015,9 +1016,22 @@ def _schedule_model_discovery():
 
 @app.get("/health", tags=["System"])
 async def health_check():
-    """Health check with light runtime stats (no auth)."""
+    """Health check with runtime stats and optional Postgres ping (no auth)."""
     running = sum(1 for s in SCANS.values() if s.get("status") == "running")
-    return {"status": "ok", "scans_running": running, "total_scans": len(SCANS)}
+    body: dict = {
+        "status": "ok",
+        "scans_running": running,
+        "total_scans": len(SCANS),
+    }
+    if pgdb.is_configured():
+        pg = pgdb.health_check()
+        body["postgres"] = pg.get("status", "unknown")
+        if pg.get("error"):
+            body["postgres_error"] = pg.get("error")
+        if pg.get("status") == "degraded":
+            body["status"] = "degraded"
+            return JSONResponse(status_code=503, content=body)
+    return body
 
 
 @app.get("/healthz", tags=["System"], include_in_schema=False)
@@ -1073,10 +1087,7 @@ async def login_submit(request: Request):
             return RedirectResponse("/login?error=1", status_code=302)
         token = create_session_token(user.id)
         resp = RedirectResponse("/", status_code=302)
-        resp.set_cookie(
-            key=_SESSION_COOKIE, value=token,
-            max_age=_SESSION_MAX_AGE, httponly=True, samesite="lax",
-        )
+        resp.set_cookie(key=_SESSION_COOKIE, value=token, **session_cookie_kwargs())
         return resp
     return RedirectResponse("/login?error=1", status_code=302)
 

@@ -6,8 +6,12 @@ config/saml/
 *.pem
 *.crt
 *.key
+*.pfx
+*.p12
 !tests/fixtures/**
 tmp_ec2_creds.json
+aws-config*
+**/tmp-*-policy.json
 certs/_acm_tmp/
 
 # Results (generated at runtime)

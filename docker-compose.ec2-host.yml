@@ -4,10 +4,20 @@ services:
   dast-scanner:
     network_mode: host
     ports: []
-    cap_add:
-      - NET_BIND_SERVICE
-    sysctls:
-      net.ipv4.ip_unprivileged_port_start: 80
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    deploy:
+      resources:
+        limits:
+          cpus: "3.5"
+          memory: 12G
+        reservations:
+          memory: 1G
+    environment:
+      - DAST_COOKIE_SECURE=true
+      - DAST_SESSION_SECRET=${DAST_SESSION_SECRET:-}
     command:
       - uvicorn
       - web.app:app
