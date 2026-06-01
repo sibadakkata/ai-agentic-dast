@@ -12,6 +12,8 @@ CLASSIFY="$REPO_ROOT/scripts/deploy/classify_changes.py"
 CHECK_ACTIVE="$REPO_ROOT/scripts/check_scan_active.py"
 CHECK_ENCODING="$REPO_ROOT/scripts/checks/check_no_null_bytes.py"
 IMAGE_NAME="${IMAGE_NAME:-ai-dast-scanner}"
+UVICORN_HOST="${UVICORN_HOST:-127.0.0.1}"
+UVICORN_PORT="${UVICORN_PORT:-8000}"
 
 command -v docker >/dev/null 2>&1 || { echo "ERROR: docker not found"; exit 1; }
 command -v python3 >/dev/null 2>&1 || { echo "ERROR: python3 not found"; exit 1; }
@@ -57,12 +59,24 @@ if [ "$NEEDS_UI_REBUILD" = "1" ]; then
     docker stop "$CONTAINER_NAME" 2>/dev/null || true
     docker rm "$CONTAINER_NAME" 2>/dev/null || true
   fi
-  if [ -f docker-compose.yml ] && docker compose version >/dev/null 2>&1; then
-    docker compose up -d
-  elif [ -f docker-compose.yml ] && docker-compose version >/dev/null 2>&1; then
-    docker-compose up -d
+  set -a
+  # shellcheck source=/dev/null
+  [ -f "$REPO_ROOT/.env" ] && source "$REPO_ROOT/.env"
+  set +a
+  if [ -f "$REPO_ROOT/docker-compose.ec2-host.yml" ] && docker compose version >/dev/null 2>&1; then
+    docker compose -f "$REPO_ROOT/docker-compose.yml" -f "$REPO_ROOT/docker-compose.ec2-host.yml" up -d
+  elif [ -f "$REPO_ROOT/docker-compose.ec2-host.yml" ] && docker-compose version >/dev/null 2>&1; then
+    docker-compose -f "$REPO_ROOT/docker-compose.yml" -f "$REPO_ROOT/docker-compose.ec2-host.yml" up -d
   else
-    echo "    Image rebuilt. Start container with your usual run/compose command."
+    docker run -d \
+      --name "$CONTAINER_NAME" \
+      --network host \
+      --restart unless-stopped \
+      --env-file "$REPO_ROOT/.env" \
+      -v "$REPO_ROOT/dast-data/results:/app/results" \
+      -v "$REPO_ROOT/dast-data/imports:/app/imports" \
+      "$IMAGE_NAME" \
+      uvicorn web.app:app --host "$UVICORN_HOST" --port "$UVICORN_PORT"
   fi
 elif [ "$NEEDS_UI_HOTPATCH" = "1" ]; then
   echo "==> Hot-patching UI container files"

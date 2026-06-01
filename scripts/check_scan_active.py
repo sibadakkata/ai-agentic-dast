@@ -23,7 +23,16 @@ import sys
 import urllib.request
 
 ACTIVE_STATUSES = ("running", "paused", "pausing", "starting")
-BASE_URL = "http://localhost:80"
+# EC2: uvicorn on 127.0.0.1:8000 behind host nginx; legacy images used :80.
+_BASE_URL_CANDIDATES = [
+    u.strip()
+    for u in (
+        os.environ.get("DAST_HEALTH_URL", ""),
+        "http://127.0.0.1:8000",
+        "http://localhost:80",
+    )
+    if u.strip()
+]
 
 # Defaults documented for operators; auth is only sent when both vars are in the environment.
 DAST_AUTH_USER = os.environ.get("DAST_AUTH_USER", "dast-admin")
@@ -54,8 +63,25 @@ def _request(url):
     return urllib.request.urlopen(req)
 
 
-def get_scans(page=1, per_page=100):
-    url = f"{BASE_URL}/api/scans?page={page}&per_page={per_page}"
+def _resolve_base_url():
+    last_err = None
+    for base in _BASE_URL_CANDIDATES:
+        try:
+            _request(f"{base}/health")
+            return base.rstrip("/")
+        except Exception as e:
+            last_err = e
+    print("ERROR: Cannot reach scanner health on any of:")
+    for base in _BASE_URL_CANDIDATES:
+        print(f"  {base}/health")
+    if last_err:
+        print(f"  Last error: {last_err}")
+    print("  Is the container running?")
+    sys.exit(2)
+
+
+def get_scans(base_url, page=1, per_page=100):
+    url = f"{base_url}/api/scans?page={page}&per_page={per_page}"
     data = json.load(_request(url))
     if not isinstance(data, dict) or "items" not in data:
         print(f"ERROR: Unexpected API response format: {type(data).__name__}")
@@ -66,17 +92,17 @@ def get_scans(page=1, per_page=100):
 
 
 def main():
+    base_url = _resolve_base_url()
     try:
-        items, total, total_pages = get_scans(page=1)
+        items, total, total_pages = get_scans(base_url, page=1)
     except Exception as e:
-        print(f"ERROR: Cannot reach scanner API at {BASE_URL}")
+        print(f"ERROR: Cannot reach scanner API at {base_url}")
         print(f"  {e}")
-        print("  Is the container running? Is the app listening on port 80?")
         sys.exit(2)
 
     all_items = list(items)
     for page in range(2, total_pages + 1):
-        more, _, _ = get_scans(page=page)
+        more, _, _ = get_scans(base_url, page=page)
         all_items.extend(more)
 
     active = []

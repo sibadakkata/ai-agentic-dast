@@ -29,9 +29,10 @@ PY
 
 RUN mkdir -p results/raw results/reports results/cache imports
 
-EXPOSE 80
+EXPOSE 8000
 
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 
-CMD ["uvicorn", "web.app:app", "--host", "0.0.0.0", "--port", "80"]
+# EC2 production: host network + 127.0.0.1:8000 (TLS at nginx/ALB). Local dev may override.
+CMD ["uvicorn", "web.app:app", "--host", "127.0.0.1", "--port", "8000"]

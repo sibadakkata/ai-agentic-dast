@@ -25,7 +25,7 @@ Production runs a **control plane** (FastAPI UI on EC2) and **scan workers** (Fa
 Human operators ──► SSO (Entra SAML 2.0) ──┐
 Automation / CI  ──► HTTP Basic Auth     ──┼──► rt.ai.webscanner.gendigital.com (CNAME)
                                              └── ALB + WAFv2 (us-east-2)
-                                                     └── EC2 3.20.180.251 : Docker dast-scanner :80
+                                                     └── EC2 : Docker dast-scanner on 127.0.0.1:8000 (HTTPS via ALB)
                                                              ├── SCAN_LAUNCHER=fargate → ECS Fargate (1 task / scan)
                                                              ├── RDS PostgreSQL 16 Multi-AZ (dual-write)
                                                              └── ElastiCache Redis (live events → SSE)
@@ -34,7 +34,7 @@ Automation / CI  ──► HTTP Basic Auth     ──┼──► rt.ai.webscann
 | Layer | Details |
 |-------|---------|
 | **Public URL** | `https://rt.ai.webscanner.gendigital.com` — TLS on ALB; WAFv2 regional Web ACL (see [infra/terraform/README.md](infra/terraform/README.md)) |
-| **UI host** | EC2 `3.20.180.251`, container `dast-scanner`, app port **80**, health check `GET /healthz` |
+| **UI host** | EC2 `3.20.180.251`, container `dast-scanner`, app **127.0.0.1:8000**, public **HTTPS** `https://rt.ai.webscanner.gendigital.com`, health `GET /health` |
 | **Database** | **RDS** PostgreSQL 16, `db.t4g.small`, Multi-AZ, encrypted, deletion protection. **SQLite** (`results/scanner.db`) is still the default **read** source; set `DUAL_WRITE_PG=1` + `DATABASE_URL` to mirror writes to Postgres (`web/db_pg.py`). Set `READ_FROM_PG=1` to serve reads from Postgres via `web/db_router.py` (falls back to SQLite on error). |
 | **Scan workers** | Standalone image under `scanners/runner/`, pushed to **ECR** `dast-scanner-runner`. Production: `SCAN_LAUNCHER=fargate` (one Fargate task per scan). Dev: `docker compose` or `SCAN_LAUNCHER=local-docker`. |
 | **Live progress** | **SSE** in the UI; with `LIVE_EVENTS_REDIS=1` and `REDIS_URL`, Fargate workers publish via Redis pub/sub (`web/live_events.py`). Polling fallback when Redis is off. |
@@ -260,7 +260,7 @@ bash deploy.sh
 Smoke from your laptop (replace host with ALB DNS or public IP):
 
 ```bash
-curl -sf http://<ALB-DNS>/healthz && echo OK
+curl -sf https://<ALB-DNS>/health && echo OK
 # Or production URL:
 curl -sf https://rt.ai.webscanner.gendigital.com/healthz && echo OK
 ```

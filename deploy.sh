@@ -10,7 +10,7 @@
 #   - Ubuntu 22.04+ (or Amazon Linux 2023)
 #   - Docker installed (Docker Compose optional but recommended)
 #   - At least 4 GB RAM, 50 GB disk
-#   - Port 80 (web UI) open in Security Group
+#   - HTTPS (443) via ALB; app binds 127.0.0.1:8000 on the host (host nginx → ALB)
 #
 # Usage:
 #   1. Copy this entire project folder to the EC2 instance:
@@ -32,6 +32,9 @@ fi
 
 IMAGE_NAME="ai-dast-scanner"
 CONTAINER_NAME="dast-scanner"
+# Production EC2: host network, uvicorn localhost only (ALB/nginx terminate TLS on 443).
+UVICORN_HOST="${UVICORN_HOST:-127.0.0.1}"
+UVICORN_PORT="${UVICORN_PORT:-8000}"
 
 # ─── Preflight checks ───────────────────────────────────────────────
 command -v docker >/dev/null 2>&1 || { echo "ERROR: docker not found. Install Docker first."; exit 1; }
@@ -86,7 +89,11 @@ fi
 
 # ─── Build & start ──────────────────────────────────────────────────
 echo "==> Building image..."
-if [ "$HAS_COMPOSE" = true ]; then
+if [ "$HAS_COMPOSE" = true ] && [ -f docker-compose.ec2-host.yml ]; then
+    $COMPOSE_CMD -f docker-compose.yml -f docker-compose.ec2-host.yml build dast-scanner
+    echo "==> Starting services (EC2 host network + localhost bind)..."
+    $COMPOSE_CMD -f docker-compose.yml -f docker-compose.ec2-host.yml up -d
+elif [ "$HAS_COMPOSE" = true ]; then
     $COMPOSE_CMD build
     echo "==> Starting services..."
     $COMPOSE_CMD up -d
@@ -109,13 +116,14 @@ else
         -e "DATABASE_URL=${DATABASE_URL:-}" \
         -v "$(pwd)/dast-data/results:/app/results" \
         -v "$(pwd)/dast-data/imports:/app/imports" \
-        "$IMAGE_NAME"
+        "$IMAGE_NAME" \
+        uvicorn web.app:app --host "$UVICORN_HOST" --port "$UVICORN_PORT"
 fi
 
 # ─── Wait for services ──────────────────────────────────────────────
 echo "==> Waiting for dast-scanner to become healthy..."
 for i in $(seq 1 30); do
-    if curl -sf http://localhost:80/health >/dev/null 2>&1; then
+    if curl -sf "http://${UVICORN_HOST}:${UVICORN_PORT}/health" >/dev/null 2>&1; then
         echo "    dast-scanner is up."
         break
     fi
@@ -134,7 +142,8 @@ echo ""
 echo "========================================================"
 echo "  AI DAST Scanner deployed successfully!"
 echo ""
-echo "  Web UI:    http://$(curl -sf ifconfig.me 2>/dev/null || echo '<this-ip>'):80"
+echo "  Web UI:    https://rt.ai.webscanner.gendigital.com"
+echo "             (app on http://${UVICORN_HOST}:${UVICORN_PORT}; public HTTPS via ALB)"
 echo ""
 echo "  Credentials: see .env (DAST_AUTH_USER / DAST_AUTH_PASS)"
 echo ""

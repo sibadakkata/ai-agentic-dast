@@ -1,0 +1,17 @@
+# EC2 production: host network, localhost-only uvicorn (TLS at host nginx + ALB).
+# Usage: docker compose -f docker-compose.yml -f docker-compose.ec2-postgres.yml -f docker-compose.ec2-host.yml up -d
+services:
+  dast-scanner:
+    network_mode: host
+    ports: []
+    cap_add:
+      - NET_BIND_SERVICE
+    sysctls:
+      net.ipv4.ip_unprivileged_port_start: 80
+    command:
+      - uvicorn
+      - web.app:app
+      - --host
+      - "127.0.0.1"
+      - --port
+      - "8000"
