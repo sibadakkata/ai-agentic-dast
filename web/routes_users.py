@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field
 from scanners.auth import saml as saml_mod
 from scanners.auth.access import resolve_email_access
 from scanners.auth.rbac import current_user, require_admin
+from scanners.auth.sso_config import build_sso_config_snapshot
 from scanners.auth.session import (
     SESSION_COOKIE,
     SessionUser,
@@ -77,6 +78,12 @@ async def api_me(user: SessionUser = Depends(current_user)):
 @router.get("/api/auth/config")
 async def auth_config():
     return {"sso_enabled": saml_mod.sso_enabled()}
+
+
+@router.get("/api/sso/config")
+async def sso_config(admin: SessionUser = Depends(require_admin)):
+    """Admin-only SSO / IdP handoff snapshot (no secrets or group OIDs)."""
+    return build_sso_config_snapshot()
 
 
 @router.get("/api/users")

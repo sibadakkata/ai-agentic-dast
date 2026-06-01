@@ -1536,6 +1536,14 @@ input:focus-visible, select:focus-visible, textarea:focus-visible { outline:none
       </h2>
       <div id="settings-system" style="min-height:60px;">Loading...</div>
     </div>
+    <div class="card admin-only-ui" id="settings-sso-card" style="display:none;">
+      <h2>
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--accent2)" stroke-width="2"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
+        SSO / Single Sign-On
+      </h2>
+      <p style="font-size:13px;color:var(--text2);margin:0 0 16px;">IdP handoff details for your identity team. Group object IDs are configured server-side only.</p>
+      <div id="settings-sso" style="min-height:60px;">Loading SSO configuration...</div>
+    </div>
   </div>
 </div>
 
@@ -2223,6 +2231,88 @@ async function loadSettings() {
     document.getElementById('settings-system').innerHTML = html;
   } catch(e) {
     document.getElementById('settings-system').innerHTML = '<div class="empty" style="padding:20px;"><span style="color:#dc2626;">Failed to check system status</span></div>';
+  }
+
+  var ssoCard = document.getElementById('settings-sso-card');
+  var ssoEl = document.getElementById('settings-sso');
+  if (!isAdmin()) {
+    if (ssoCard) ssoCard.style.display = 'none';
+    return;
+  }
+  if (ssoCard) ssoCard.style.display = '';
+  if (!ssoEl) return;
+  try {
+    var sr = await fetch('/api/sso/config', { credentials: 'same-origin' });
+    if (!sr.ok) {
+      ssoEl.innerHTML = '<div class="empty" style="color:var(--red);">Could not load SSO config (HTTP ' + sr.status + ')</div>';
+      return;
+    }
+    var cfg = await sr.json();
+    var statusHtml = cfg.enabled
+      ? statusDot(true, 'SSO enabled', 'SSO disabled')
+      : statusDot(false, 'SSO enabled', 'SSO disabled (backup DAST_AUTH_* login available)');
+    var emailClaim = (cfg.expected_attributes && cfg.expected_attributes[0] && cfg.expected_attributes[0].claim_names[0]) || 'email';
+    var nameClaim = (cfg.expected_attributes && cfg.expected_attributes[1] && cfg.expected_attributes[1].claim_names[0]) || 'displayName';
+    var groupClaim = (cfg.expected_attributes && cfg.expected_attributes[2] && cfg.expected_attributes[2].claim_names[0]) || 'groups';
+    var idpSrc = cfg.idp_metadata_source || 'unset';
+    var ugNote = cfg.user_group_ids && cfg.user_group_ids.configured
+      ? ('User AD groups configured (' + cfg.user_group_ids.count + ' on server)')
+      : 'No user AD groups configured on server yet';
+    var ticket = [
+      'Application: DAST Scanner',
+      'Environment: Production',
+      'Public URL: https://rt.ai.webscanner.gendigital.com',
+      '',
+      'SAML SP details:',
+      '  Entity ID:   ' + (cfg.entity_id || ''),
+      '  ACS URL:     ' + (cfg.acs_url || ''),
+      '  Metadata:    ' + (cfg.metadata_url || ''),
+      '  NameID:      ' + (cfg.nameid_format || 'emailAddress'),
+      '  SLO:         Not supported (local session logout only)',
+      '',
+      'Required SAML attributes from IdP:',
+      '  email  — ' + emailClaim + ' (or NameID)',
+      '  name   — ' + nameClaim,
+      '  groups — ' + groupClaim + ' (multi-value group object IDs)',
+      '',
+      'Group provisioning:',
+      '  AD group membership → user (non-admin) role',
+      '  Admins are promoted manually inside the app (invite or Make admin)',
+      '  Admin AD groups are NOT used for auto-promotion',
+    ].join('\n');
+    var html = '<div style="margin-bottom:16px;">' + settingRow('SSO status', statusHtml) + '</div>';
+    html += '<div style="margin-bottom:12px;">' + settingRow('IdP metadata', '<span style="font-size:13px;">' + esc(idpSrc) + '</span>') + '</div>';
+    html += '<div style="margin-bottom:12px;">' + settingRow('User groups', '<span style="font-size:13px;">' + esc(ugNote) + '</span>') + '</div>';
+    html += '<div style="margin-bottom:12px;">' + settingRow('SP signing', statusDot(!!cfg.sp_signing_configured, 'Configured', 'Not configured (optional)')) + '</div>';
+    html += '<label style="font-size:12px;font-weight:600;color:var(--text2);display:block;margin-bottom:8px;">For IdP team (copy &amp; paste)</label>';
+    html += '<textarea id="settings-sso-ticket" readonly rows="16" style="width:100%;font-family:var(--font-mono);font-size:11px;padding:12px;border:1px solid var(--border);border-radius:8px;background:var(--surface);resize:vertical;">' + esc(ticket) + '</textarea>';
+    html += '<div style="display:flex;flex-wrap:wrap;gap:10px;margin-top:12px;">';
+    html += '<button type="button" class="btn btn-sm btn-primary" onclick="copySsoTicket()">Copy for ticket</button>';
+    html += '<a href="/sso/login" target="_blank" rel="noopener" class="btn btn-sm btn-outline">Test SSO</a>';
+    html += '<a href="' + esc(cfg.metadata_url || '/sso/metadata') + '" target="_blank" rel="noopener" class="btn btn-sm btn-outline">Open metadata</a>';
+    html += '</div>';
+    html += '<p style="font-size:12px;color:var(--text2);margin-top:14px;">Full setup guide: <code>docs/SSO.md</code> in the repository.</p>';
+    ssoEl.innerHTML = html;
+  } catch (e) {
+    ssoEl.innerHTML = '<div class="empty" style="color:#dc2626;">Failed to load SSO config</div>';
+  }
+}
+
+function copySsoTicket() {
+  var ta = document.getElementById('settings-sso-ticket');
+  if (!ta) return;
+  ta.select();
+  ta.setSelectionRange(0, 99999);
+  try {
+    navigator.clipboard.writeText(ta.value);
+  } catch (e) {
+    document.execCommand('copy');
+  }
+  var btn = event && event.target;
+  if (btn && btn.textContent) {
+    var prev = btn.textContent;
+    btn.textContent = 'Copied!';
+    setTimeout(function() { btn.textContent = prev; }, 2000);
   }
 }
 
