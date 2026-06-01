@@ -8,5 +8,4 @@ resource "aws_security_group_rule" "ec2_app_from_alb" {
   protocol                 = "tcp"
   security_group_id        = var.ec2_security_group_id
   source_security_group_id = aws_security_group.alb[0].id
-  description              = "App HTTPS from ALB"
 }

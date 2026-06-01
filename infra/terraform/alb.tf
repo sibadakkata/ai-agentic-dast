@@ -28,11 +28,19 @@ resource "aws_security_group" "alb" {
 resource "aws_lb" "main" {
   count = var.enable_alb ? 1 : 0
 
-  name               = "dast-scanner"
-  internal           = false
-  load_balancer_type = "application"
-  security_groups    = [aws_security_group.alb[0].id]
-  subnets            = data.aws_subnets.default.ids
+  name                       = "dast-scanner"
+  internal                   = false
+  load_balancer_type         = "application"
+  security_groups            = [aws_security_group.alb[0].id]
+  subnets                    = data.aws_subnets.default.ids
+  enable_deletion_protection = true
+  drop_invalid_header_fields = true
+
+  access_logs {
+    bucket  = aws_s3_bucket.alb_logs[0].id
+    prefix  = "dast-scanner"
+    enabled = true
+  }
 
   tags = {
     Name = "dast-scanner-alb"
@@ -60,18 +68,13 @@ resource "aws_lb_target_group" "ui" {
     matcher             = "200"
   }
 
-  tags = {
-    Name = "dast-scanner-ui-https"
+  lifecycle {
+    ignore_changes = [lambda_multi_value_headers_enabled, proxy_protocol_v2, tags, tags_all]
   }
 }
 
-resource "aws_lb_target_group_attachment" "ec2" {
-  count = var.enable_alb ? 1 : 0
-
-  target_group_arn = aws_lb_target_group.ui[0].arn
-  target_id        = var.ec2_private_ip
-  port             = var.app_port
-}
+# EC2 IP target attachment is live but aws_lb_target_group_attachment does not support
+# terraform import; managed outside state until provider adds import (see plan-after notes).
 
 resource "aws_lb_listener" "https" {
   count = var.enable_alb && var.ui_acm_certificate_arn != "" ? 1 : 0
@@ -83,7 +86,16 @@ resource "aws_lb_listener" "https" {
   certificate_arn   = var.ui_acm_certificate_arn
 
   default_action {
-    type             = "forward"
-    target_group_arn = aws_lb_target_group.ui[0].arn
+    type = "forward"
+    forward {
+      target_group {
+        arn    = aws_lb_target_group.ui[0].arn
+        weight = 1
+      }
+    }
+  }
+
+  lifecycle {
+    ignore_changes = [tags_all, default_action]
   }
 }

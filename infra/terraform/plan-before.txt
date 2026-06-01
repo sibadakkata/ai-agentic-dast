@@ -1,0 +1,303 @@
+random_password.db_master: Refreshing state... [id=none]
+aws_cloudwatch_event_rule.weekly_backup[0]: Refreshing state... [id=dast-scanner-weekly-db-backup]
+aws_secretsmanager_secret.rds_master: Refreshing state... [id=arn:aws:secretsmanager:us-east-2:168551359048:secret:dast/rds/master-QOiDsC]
+aws_ecs_cluster.scanner[0]: Refreshing state... [id=arn:aws:ecs:us-east-2:168551359048:cluster/dast-scanner]
+data.aws_region.current: Reading...
+aws_cloudwatch_log_group.ecs_runner[0]: Refreshing state... [id=/ecs/dast-scanner-runner]
+aws_cloudwatch_log_group.lambda_backup[0]: Refreshing state... [id=/aws/lambda/dast-scanner-db-backup]
+aws_iam_role.rds_monitoring: Refreshing state... [id=dast-scanner-rds-monitoring]
+aws_iam_role.ecs_execution[0]: Refreshing state... [id=dast-scanner-ecs-execution]
+aws_iam_role.lambda_backup[0]: Refreshing state... [id=dast-scanner-db-backup]
+data.aws_region.current: Read complete after 0s [id=us-east-2]
+data.aws_vpc.default: Reading...
+aws_wafv2_web_acl.main[0]: Refreshing state... [id=0b45a5ce-db57-45e5-9d96-45412633cb13]
+aws_cloudwatch_log_group.waf[0]: Refreshing state... [id=aws-waf-logs-dast-scanner]
+data.aws_caller_identity.current: Reading...
+aws_ecr_repository.scanner_runner[0]: Refreshing state... [id=dast-scanner-runner]
+aws_lambda_layer_version.psycopg[0]: Refreshing state... [id=arn:aws:lambda:us-east-2:168551359048:layer:dast-scanner-psycopg:2]
+aws_iam_role.ecs_task[0]: Refreshing state... [id=dast-scanner-ecs-task]
+data.aws_caller_identity.current: Read complete after 0s [id=168551359048]
+aws_ecs_cluster_capacity_providers.scanner[0]: Refreshing state... [id=dast-scanner]
+aws_s3_bucket.db_backups[0]: Refreshing state... [id=dast-scanner-db-backups-168551359048]
+aws_iam_role_policy_attachment.rds_monitoring: Refreshing state... [id=dast-scanner-rds-monitoring-20260527112220127500000001]
+aws_cloudwatch_log_resource_policy.waf[0]: Refreshing state... [id=waf-logs-dast-scanner]
+aws_iam_role_policy_attachment.ecs_execution[0]: Refreshing state... [id=dast-scanner-ecs-execution-20260527155427771200000001]
+aws_iam_role_policy.ecs_execution_secrets[0]: Refreshing state... [id=dast-scanner-ecs-execution:secrets-read]
+data.aws_vpc.default: Read complete after 2s [id=vpc-375ede5c]
+data.aws_subnets.default: Reading...
+data.aws_route_tables.default[0]: Reading...
+aws_security_group.rds: Refreshing state... [id=sg-0c85f8fdae319f36d]
+aws_security_group.alb[0]: Refreshing state... [id=sg-08e50e180df0a338b]
+aws_security_group.redis[0]: Refreshing state... [id=sg-073d3ba21d24db7e3]
+aws_lb_target_group.ui[0]: Refreshing state... [id=arn:aws:elasticloadbalancing:us-east-2:168551359048:targetgroup/dast-scanner-ui-https/5afba9ae19377360]
+aws_security_group.vpce_secretsmanager[0]: Refreshing state... [id=sg-0b3ef3b307b7a9e64]
+data.aws_route_tables.default[0]: Read complete after 0s [id=us-east-2]
+aws_iam_role_policy_attachment.lambda_backup_vpc[0]: Refreshing state... [id=dast-scanner-db-backup-20260527112221083400000004]
+aws_iam_role_policy.lambda_backup_secrets[0]: Refreshing state... [id=dast-scanner-db-backup:secrets-read]
+aws_iam_role_policy_attachment.lambda_backup_basic[0]: Refreshing state... [id=dast-scanner-db-backup-20260527112221048500000003]
+aws_iam_role_policy.ecs_task_secrets[0]: Refreshing state... [id=dast-scanner-ecs-task:task-secrets]
+data.aws_subnets.default: Read complete after 1s [id=us-east-2]
+aws_iam_policy.ec2_scan_launcher[0]: Refreshing state... [id=arn:aws:iam::168551359048:policy/dast-scanner-ec2-scan-launcher]
+aws_vpc_endpoint.s3[0]: Refreshing state... [id=vpce-0efde2515b3bcc701]
+aws_ecr_lifecycle_policy.scanner_runner[0]: Refreshing state... [id=dast-scanner-runner]
+aws_db_subnet_group.main: Refreshing state... [id=dast-scanner-poc]
+aws_elasticache_subnet_group.redis[0]: Refreshing state... [id=dast-scanner-redis]
+aws_security_group_rule.ec2_app_from_alb[0]: Refreshing state... [id=sgrule-2595437407]
+aws_security_group.lambda_backup[0]: Refreshing state... [id=sg-05e5c4bcfa8299b02]
+aws_lb.main[0]: Refreshing state... [id=arn:aws:elasticloadbalancing:us-east-2:168551359048:loadbalancer/app/dast-scanner/2edcfb10989419bc]
+aws_security_group.ecs_runner[0]: Refreshing state... [id=sg-06ce7e56674b00352]
+aws_security_group_rule.redis_ingress_ec2[0]: Refreshing state... [id=sgrule-4194453571]
+aws_vpc_endpoint.secretsmanager[0]: Refreshing state... [id=vpce-0afb88e66ee5038c3]
+aws_iam_role_policy_attachment.ec2_scan_launcher[0]: Refreshing state... [id=DAST-Scanner-EC2-Role-20260527155439329900000005]
+aws_security_group_rule.rds_ingress_from_lambda[0]: Refreshing state... [id=sgrule-285686854]
+aws_security_group_rule.vpce_secretsmanager_ingress_from_lambda[0]: Refreshing state... [id=sgrule-3592329710]
+aws_security_group_rule.redis_ingress_lambda[0]: Refreshing state... [id=sgrule-2782578194]
+aws_security_group.vpce_ecs[0]: Refreshing state... [id=sg-05b431ec08b4f4cc0]
+aws_security_group_rule.rds_ingress_from_ecs[0]: Refreshing state... [id=sgrule-95420524]
+aws_security_group_rule.redis_ingress_ecs[0]: Refreshing state... [id=sgrule-2976774712]
+aws_vpc_endpoint.ecr_dkr[0]: Refreshing state... [id=vpce-0d0300a60489096bb]
+aws_vpc_endpoint.ecr_api[0]: Refreshing state... [id=vpce-025ab0367f076365c]
+aws_vpc_endpoint.logs[0]: Refreshing state... [id=vpce-0b1983de76b0daf5c]
+aws_db_instance.main: Refreshing state... [id=db-UMKSOBECW6GXS2NC5NR4Q4NQJI]
+aws_elasticache_cluster.redis[0]: Refreshing state... [id=dast-scanner-redis]
+aws_lb_listener.https[0]: Refreshing state... [id=arn:aws:elasticloadbalancing:us-east-2:168551359048:listener/app/dast-scanner/2edcfb10989419bc/a744dc060cb6a4cd]
+aws_secretsmanager_secret_version.rds_master: Refreshing state... [id=arn:aws:secretsmanager:us-east-2:168551359048:secret:dast/rds/master-QOiDsC|1f663c6a-e098-4a5d-ba05-b8d2f3dcd33d]
+aws_ecs_task_definition.scanner_runner[0]: Refreshing state... [id=dast-scanner-runner]
+aws_s3_bucket_versioning.db_backups[0]: Refreshing state... [id=dast-scanner-db-backups-168551359048]
+aws_iam_role_policy.lambda_backup_s3[0]: Refreshing state... [id=dast-scanner-db-backup:s3-backup]
+aws_s3_bucket_public_access_block.db_backups[0]: Refreshing state... [id=dast-scanner-db-backups-168551359048]
+aws_s3_bucket_lifecycle_configuration.db_backups[0]: Refreshing state... [id=dast-scanner-db-backups-168551359048]
+aws_s3_bucket_server_side_encryption_configuration.db_backups[0]: Refreshing state... [id=dast-scanner-db-backups-168551359048]
+aws_lambda_function.db_backup[0]: Refreshing state... [id=dast-scanner-db-backup]
+aws_wafv2_web_acl_association.alb[0]: Refreshing state... [id=arn:aws:wafv2:us-east-2:168551359048:regional/webacl/dast-scanner/0b45a5ce-db57-45e5-9d96-45412633cb13,arn:aws:elasticloadbalancing:us-east-2:168551359048:loadbalancer/app/dast-scanner/2edcfb10989419bc]
+aws_wafv2_web_acl_logging_configuration.main[0]: Refreshing state... [id=arn:aws:wafv2:us-east-2:168551359048:regional/webacl/dast-scanner/0b45a5ce-db57-45e5-9d96-45412633cb13]
+aws_lambda_permission.eventbridge[0]: Refreshing state... [id=AllowExecutionFromEventBridge]
+aws_cloudwatch_event_target.weekly_backup[0]: Refreshing state... [id=dast-scanner-weekly-db-backup-db-backup-lambda]
+
+Terraform used the selected providers to generate the following execution
+plan. Resource actions are indicated with the following symbols:
+  + create
+  ~ update in-place
+  - destroy
+
+Terraform will perform the following actions:
+
+  # aws_iam_policy.ec2_scan_launcher[0] will be destroyed
+  # (because index [0] is out of range for count)
+  - resource "aws_iam_policy" "ec2_scan_launcher" {
+      - arn              = "arn:aws:iam::168551359048:policy/dast-scanner-ec2-scan-launcher" -> null
+      - attachment_count = 1 -> null
+      - description      = "Allow EC2 UI to launch Fargate scanner tasks" -> null
+      - id               = "arn:aws:iam::168551359048:policy/dast-scanner-ec2-scan-launcher" -> null
+      - name             = "dast-scanner-ec2-scan-launcher" -> null
+      - path             = "/" -> null
+      - policy           = jsonencode(
+            {
+              - Statement = [
+                  - {
+                      - Action    = [
+                          - "ecs:RunTask",
+                          - "ecs:DescribeTasks",
+                          - "ecs:StopTask",
+                        ]
+                      - Condition = {
+                          - ArnEquals = {
+                              - "ecs:cluster" = "arn:aws:ecs:us-east-2:168551359048:cluster/dast-scanner"
+                            }
+                        }
+                      - Effect    = "Allow"
+                      - Resource  = "*"
+                    },
+                  - {
+                      - Action   = [
+                          - "iam:PassRole",
+                        ]
+                      - Effect   = "Allow"
+                      - Resource = [
+                          - "arn:aws:iam::168551359048:role/dast-scanner-ecs-execution",
+                          - "arn:aws:iam::168551359048:role/dast-scanner-ecs-task",
+                        ]
+                    },
+                ]
+              - Version   = "2012-10-17"
+            }
+        ) -> null
+      - policy_id        = "ANPASOPTRUJEOIJD3NBL6" -> null
+      - tags             = {} -> null
+      - tags_all         = {
+          - "Env"       = "prod"
+          - "ManagedBy" = "terraform"
+          - "Project"   = "dast-scanner"
+        } -> null
+        # (1 unchanged attribute hidden)
+    }
+
+  # aws_iam_role_policy_attachment.ec2_scan_launcher[0] will be destroyed
+  # (because index [0] is out of range for count)
+  - resource "aws_iam_role_policy_attachment" "ec2_scan_launcher" {
+      - id         = "DAST-Scanner-EC2-Role-20260527155439329900000005" -> null
+      - policy_arn = "arn:aws:iam::168551359048:policy/dast-scanner-ec2-scan-launcher" -> null
+      - role       = "DAST-Scanner-EC2-Role" -> null
+    }
+
+  # aws_lb.main[0] will be updated in-place
+  ~ resource "aws_lb" "main" {
+      ~ drop_invalid_header_fields                                   = true -> false
+      ~ enable_deletion_protection                                   = true -> false
+        id                                                           = "arn:aws:elasticloadbalancing:us-east-2:168551359048:loadbalancer/app/dast-scanner/2edcfb10989419bc"
+        name                                                         = "dast-scanner"
+        tags                                                         = {
+            "Name" = "dast-scanner-alb"
+        }
+        # (25 unchanged attributes hidden)
+
+      ~ access_logs {
+          ~ enabled = true -> false
+            # (2 unchanged attributes hidden)
+        }
+
+        # (4 unchanged blocks hidden)
+    }
+
+  # aws_lb_listener.https[0] will be updated in-place
+  ~ resource "aws_lb_listener" "https" {
+        id                                                                    = "arn:aws:elasticloadbalancing:us-east-2:168551359048:listener/app/dast-scanner/2edcfb10989419bc/a744dc060cb6a4cd"
+        tags                                                                  = {}
+      ~ tags_all                                                              = {
+          + "Env"       = "prod"
+          + "ManagedBy" = "terraform"
+          + "Project"   = "dast-scanner"
+        }
+        # (25 unchanged attributes hidden)
+
+      ~ default_action {
+            # (3 unchanged attributes hidden)
+
+          - forward {
+              - stickiness {
+                  - duration = 0 -> null
+                  - enabled  = false -> null
+                }
+              - target_group {
+                  - arn    = "arn:aws:elasticloadbalancing:us-east-2:168551359048:targetgroup/dast-scanner-ui-https/5afba9ae19377360" -> null
+                  - weight = 1 -> null
+                }
+            }
+        }
+
+        # (1 unchanged block hidden)
+    }
+
+  # aws_lb_target_group.ui[0] will be updated in-place
+  ~ resource "aws_lb_target_group" "ui" {
+        id                                 = "arn:aws:elasticloadbalancing:us-east-2:168551359048:targetgroup/dast-scanner-ui-https/5afba9ae19377360"
+      + lambda_multi_value_headers_enabled = false
+        name                               = "dast-scanner-ui-https"
+      + proxy_protocol_v2                  = false
+      ~ tags                               = {
+          + "Name" = "dast-scanner-ui-https"
+        }
+      ~ tags_all                           = {
+          + "Env"       = "prod"
+          + "ManagedBy" = "terraform"
+          + "Name"      = "dast-scanner-ui-https"
+          + "Project"   = "dast-scanner"
+        }
+        # (15 unchanged attributes hidden)
+
+        # (5 unchanged blocks hidden)
+    }
+
+  # aws_lb_target_group_attachment.ec2[0] will be created
+  + resource "aws_lb_target_group_attachment" "ec2" {
+      + id               = (known after apply)
+      + port             = 443
+      + target_group_arn = "arn:aws:elasticloadbalancing:us-east-2:168551359048:targetgroup/dast-scanner-ui-https/5afba9ae19377360"
+      + target_id        = "172.31.28.27"
+    }
+
+  # aws_security_group.rds will be updated in-place
+  ~ resource "aws_security_group" "rds" {
+        id                     = "sg-0c85f8fdae319f36d"
+      ~ ingress                = [
+          - {
+              - cidr_blocks      = []
+              - description      = "PostgreSQL from Fargate scanner"
+              - from_port        = 5432
+              - ipv6_cidr_blocks = []
+              - prefix_list_ids  = []
+              - protocol         = "tcp"
+              - security_groups  = [
+                  - "sg-06ce7e56674b00352",
+                ]
+              - self             = false
+              - to_port          = 5432
+            },
+          - {
+              - cidr_blocks      = []
+              - description      = "PostgreSQL from weekly backup Lambda"
+              - from_port        = 5432
+              - ipv6_cidr_blocks = []
+              - prefix_list_ids  = []
+              - protocol         = "tcp"
+              - security_groups  = [
+                  - "sg-05e5c4bcfa8299b02",
+                ]
+              - self             = false
+              - to_port          = 5432
+            },
+            # (1 unchanged element hidden)
+        ]
+        name                   = "dast-scanner-rds"
+        tags                   = {
+            "Name" = "dast-scanner-rds"
+        }
+        # (8 unchanged attributes hidden)
+    }
+
+  # aws_security_group.vpce_ecs[0] will be updated in-place
+  ~ resource "aws_security_group" "vpce_ecs" {
+        id                     = "sg-05b431ec08b4f4cc0"
+      ~ ingress                = [
+          - {
+              - cidr_blocks      = []
+              - from_port        = 443
+              - ipv6_cidr_blocks = []
+              - prefix_list_ids  = []
+              - protocol         = "tcp"
+              - security_groups  = [
+                  - "sg-01793a9e7f5b20d9e",
+                ]
+              - self             = false
+              - to_port          = 443
+                # (1 unchanged attribute hidden)
+            },
+            # (1 unchanged element hidden)
+        ]
+        name                   = "dast-scanner-vpce-ecs"
+        tags                   = {
+            "Name" = "dast-scanner-vpce-ecs"
+        }
+        # (8 unchanged attributes hidden)
+    }
+
+  # aws_security_group_rule.ec2_app_from_alb[0] will be created
+  + resource "aws_security_group_rule" "ec2_app_from_alb" {
+      + description              = "App HTTPS from ALB"
+      + from_port                = 443
+      + id                       = (known after apply)
+      + protocol                 = "tcp"
+      + security_group_id        = "sg-01793a9e7f5b20d9e"
+      + security_group_rule_id   = (known after apply)
+      + self                     = false
+      + source_security_group_id = "sg-08e50e180df0a338b"
+      + to_port                  = 443
+      + type                     = "ingress"
+    }
+
+Plan: 2 to add, 5 to change, 2 to destroy.
+
+─────────────────────────────────────────────────────────────────────────────
+
+Note: You didn't use the -out option to save this plan, so Terraform can't
+guarantee to take exactly these actions if you run "terraform apply" now.
